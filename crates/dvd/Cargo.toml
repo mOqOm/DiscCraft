@@ -1,0 +1,26 @@
+[package]
+name = "disccraft-dvd"
+description = "プロジェクト → VIDEO_TS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+disccraft-transcode.workspace = true
+disccraft-nav.workspace = true
+disccraft-menu.workspace = true
+disccraft-mpeg2venc.workspace = true
+disccraft-spu.workspace = true
+disccraft-project.workspace = true
+disccraft-psmux.workspace = true
+disccraft-ifo.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+filmcraft-mpeg2v.workspace = true
+disccraft-vm.workspace = true

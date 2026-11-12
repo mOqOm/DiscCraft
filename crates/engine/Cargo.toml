@@ -1,0 +1,23 @@
+[package]
+name = "disccraft-engine"
+description = "Session、コマンドレジストリ、Undo、アセットプール"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+disccraft-check.workspace = true
+disccraft-build.workspace = true
+disccraft-project.workspace = true
+disccraft-vm.workspace = true
+disccraft-transcode.workspace = true
+disccraft-photo.workspace = true
+disccraft-menu.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+filmcraft-time.workspace = true
+
+[lints]
+workspace = true

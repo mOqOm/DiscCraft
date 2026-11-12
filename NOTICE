@@ -1,0 +1,40 @@
+DiscCraft, Copyright (c) DiscCraft contributors, licensed under MIT OR Apache-2.0.
+
+This product includes software from FilmCraft (https://github.com/storytold/filmcraft), Copyright (c) 2026 ArtCraft Team and the FilmCraft contributors, licensed under the MIT License or the Apache License 2.0, at your option.
+
+The following FilmCraft crates are used:
+filmcraft-time
+filmcraft-geom
+filmcraft-color
+filmcraft-bitstream
+filmcraft-mpeg2v
+filmcraft-mpegts
+filmcraft-ac3
+filmcraft-h264
+filmcraft-h264enc
+filmcraft-frame
+filmcraft-media
+filmcraft-text
+filmcraft-audio-dsp
+filmcraft-codecs
+
+Pinned revision: da535c18433dbe046553733b0ab08ce9bd736a51
+
+Source files ported from FilmCraft (same license and revision):
+crates/ui-egui/src/i18n.rs (from FilmCraft crates/ui-egui/src/i18n.rs)
+crates/ui-egui/src/i18n/catalog.rs (from FilmCraft crates/ui-egui/src/i18n/catalog.rs)
+
+This product includes software from PhotoCraft (https://github.com/storytold/photocraft), licensed under the MIT License or the Apache License 2.0, at your option.
+Crates used: photocraft-io, photocraft-doc, photocraft-compose, photocraft-geom, photocraft-raster (photocraft-psd in tests).
+Pinned revision: aae9b7ea61195eba0c43877d59654aefdc7c5576
+
+This product includes software from EffectCraft (https://github.com/storytold/effectcraft), licensed under the MIT License or the Apache License 2.0, at your option.
+Crates used: effectcraft-project, effectcraft-render, effectcraft-media, effectcraft-time, effectcraft-raster.
+Pinned revision: 3e0c77ca6860b94d13f73d96c2a5222e4e353102
+
+This product includes software from SoundCraft (https://github.com/storytold/soundcraft), licensed under the MIT License or the Apache License 2.0, at your option.
+Crates used: soundcraft-engine, soundcraft-dsp.
+Pinned revision: 76cc2aeac657aa971303ee522f36cafe86b3ef93
+
+PhotoCraft and EffectCraft pull in craft-libs (https://github.com/storytold/craft-libs, MIT OR Apache-2.0); its vendored
+Hayro crates are patched to revision c5a1cbfb5f9049f9270955caffb5bee5997aebf7 in Cargo.toml.

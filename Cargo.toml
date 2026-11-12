@@ -1,0 +1,104 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+# FilmCraft に合わせる
+rust-version = "1.95"
+repository = "https://gitlab.com/mysysgroup1/DiscCraft"
+publish = false
+
+[workspace.dependencies]
+disccraft-mpeg2venc = { path = "crates/mpeg2venc" }
+disccraft-ac3enc = { path = "crates/ac3enc" }
+disccraft-psmux = { path = "crates/psmux" }
+disccraft-spu = { path = "crates/spu" }
+disccraft-ifo = { path = "crates/ifo" }
+disccraft-m2tsmux = { path = "crates/m2tsmux" }
+disccraft-bdmv = { path = "crates/bdmv" }
+disccraft-pgs = { path = "crates/pgs" }
+disccraft-udf = { path = "crates/udf" }
+disccraft-project = { path = "crates/project" }
+disccraft-vm = { path = "crates/vm" }
+disccraft-menu = { path = "crates/menu" }
+disccraft-nav = { path = "crates/nav" }
+disccraft-transcode = { path = "crates/transcode" }
+disccraft-check = { path = "crates/check" }
+disccraft-dvd = { path = "crates/dvd" }
+disccraft-bd = { path = "crates/bd" }
+disccraft-photo = { path = "crates/photo" }
+disccraft-motion = { path = "crates/motion" }
+disccraft-sound = { path = "crates/sound" }
+disccraft-build = { path = "crates/build" }
+disccraft-engine = { path = "crates/engine" }
+disccraft-ui-egui = { path = "crates/ui-egui" }
+disccraft-automation = { path = "crates/automation" }
+disccraft-platform = { path = "crates/platform" }
+
+# 外部 crate（ライセンスは AGENTS.md の許可リストに従う）
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+png = "0.17"
+# Subtitle files in Shift_JIS / UTF-16 ((Apache-2.0 OR MIT) AND BSD-3-Clause; already in the tree).
+encoding_rs = "0.8"
+# SVG rendering (MPL-2.0, used unmodified as AGENTS.md rule 4 allows; already in the tree through PhotoCraft).
+resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts", "raster-images"] }
+egui = "0.37"
+eframe = "0.37"
+rfd = "0.18"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# FilmCraft（MIT OR Apache-2.0）。crates.io 未公開のため git 依存で rev を固定する。
+# 使い道は docs/architecture.md §5.3、帰属は NOTICE。
+filmcraft-time = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
+filmcraft-geom = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
+filmcraft-color = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
+filmcraft-bitstream = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
+filmcraft-mpeg2v = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
+filmcraft-mpegts = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
+filmcraft-ac3 = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
+filmcraft-h264 = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
+filmcraft-h264enc = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
+filmcraft-frame = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
+filmcraft-media = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
+filmcraft-text = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
+filmcraft-audio-dsp = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
+filmcraft-codecs = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
+photocraft-io = { git = "https://github.com/storytold/photocraft", rev = "aae9b7ea61195eba0c43877d59654aefdc7c5576" }
+photocraft-doc = { git = "https://github.com/storytold/photocraft", rev = "aae9b7ea61195eba0c43877d59654aefdc7c5576" }
+photocraft-compose = { git = "https://github.com/storytold/photocraft", rev = "aae9b7ea61195eba0c43877d59654aefdc7c5576" }
+photocraft-geom = { git = "https://github.com/storytold/photocraft", rev = "aae9b7ea61195eba0c43877d59654aefdc7c5576" }
+photocraft-raster = { git = "https://github.com/storytold/photocraft", rev = "aae9b7ea61195eba0c43877d59654aefdc7c5576" }
+photocraft-psd = { git = "https://github.com/storytold/photocraft", rev = "aae9b7ea61195eba0c43877d59654aefdc7c5576" }
+effectcraft-project = { git = "https://github.com/storytold/effectcraft", rev = "3e0c77ca6860b94d13f73d96c2a5222e4e353102" }
+effectcraft-render = { git = "https://github.com/storytold/effectcraft", rev = "3e0c77ca6860b94d13f73d96c2a5222e4e353102" }
+effectcraft-media = { git = "https://github.com/storytold/effectcraft", rev = "3e0c77ca6860b94d13f73d96c2a5222e4e353102" }
+effectcraft-time = { git = "https://github.com/storytold/effectcraft", rev = "3e0c77ca6860b94d13f73d96c2a5222e4e353102" }
+effectcraft-raster = { git = "https://github.com/storytold/effectcraft", rev = "3e0c77ca6860b94d13f73d96c2a5222e4e353102" }
+soundcraft-engine = { git = "https://github.com/storytold/soundcraft", rev = "76cc2aeac657aa971303ee522f36cafe86b3ef93" }
+soundcraft-dsp = { git = "https://github.com/storytold/soundcraft", rev = "76cc2aeac657aa971303ee522f36cafe86b3ef93" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+cognitive_complexity = "deny"
+too_many_arguments = "deny"
+wildcard_imports = "deny"
+dbg_macro = "warn"
+todo = "warn"
+needless_range_loop = "allow"
+type_complexity = "allow"
+
+# craft-pdf (pulled in by PhotoCraft and EffectCraft) uses craft-libs' vendored Hayro trees; consumers patch the same
+# craft-libs revision (craft-libs crates/pdf README). c5a1cbf contains the trees of both projects' pins.
+[patch.crates-io]
+hayro = { git = "https://github.com/storytold/craft-libs", rev = "c5a1cbfb5f9049f9270955caffb5bee5997aebf7" }
+hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "c5a1cbfb5f9049f9270955caffb5bee5997aebf7" }
+hayro-interpret = { git = "https://github.com/storytold/craft-libs", rev = "c5a1cbfb5f9049f9270955caffb5bee5997aebf7" }
+hayro-jbig2 = { git = "https://github.com/storytold/craft-libs", rev = "c5a1cbfb5f9049f9270955caffb5bee5997aebf7" }

@@ -1,0 +1,13 @@
+[package]
+name = "disccraft-udf"
+description = "UDF 1.02 / 2.50 と ISO 9660 のイメージ書き出しと読み戻し"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "disccraft-ac3enc"
+description = "AC-3 エンコーダ（2.0 / 5.1）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
