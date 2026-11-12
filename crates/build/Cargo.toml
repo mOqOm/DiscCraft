@@ -1,0 +1,18 @@
+[package]
+name = "disccraft-build"
+description = "ビルドのパイプライン、ジョブ、進捗、キャッシュ"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+disccraft-bd.workspace = true
+disccraft-ifo.workspace = true
+disccraft-udf.workspace = true
+disccraft-project.workspace = true
+disccraft-dvd.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "disccraft-platform"
+description = "ディスク書き込みの OS API（unsafe を許す唯一の crate）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

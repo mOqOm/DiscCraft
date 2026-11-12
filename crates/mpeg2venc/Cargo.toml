@@ -1,0 +1,16 @@
+[package]
+name = "disccraft-mpeg2venc"
+description = "MPEG-2 ビデオエンコーダ（MP@ML、DVD の制約に準拠）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+filmcraft-mpeg2v.workspace = true

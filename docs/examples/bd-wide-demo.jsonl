@@ -1,0 +1,17 @@
+# 16:9 の Blu-ray のデモ。素材の wide.mp4（1280x720、中央に白い正方形）を 16:9 の映像にして、正方形が正方形に見えるかで縦横比を確かめる。
+# リポジトリのルートで実行する。素材は scripts/build-demo.ps1 が target/fixtures に作る。
+{"command": "file.new", "params": {"kind": "bluRay", "standard": "ntsc"}}
+{"command": "disc.setAspect", "params": {"aspect": "16:9"}}
+{"command": "asset.import", "params": {"path": "target/fixtures/wide.mp4"}}
+{"command": "asset.import", "params": {"path": "docs/examples/demo-ja.srt"}}
+{"command": "timeline.create", "params": {"asset": 1, "name": "ワイド本編"}}
+{"command": "timeline.addSubtitleTrack", "params": {"timeline": 3, "asset": 2, "language": "ja"}}
+{"command": "timeline.addChapter", "params": {"timeline": 3, "timecode": "00:00:05;00", "name": "第2章"}}
+{"command": "timeline.addChapter", "params": {"timeline": 3, "timecode": "00:00:10;00", "name": "第3章"}}
+{"command": "menu.create", "params": {"name": "ワイドのトップメニュー"}}
+{"command": "menu.addButton", "params": {"menu": 4, "label": "16:9 を再生", "target": {"timeline": 3}}}
+{"command": "menu.addButton", "params": {"menu": 4, "label": "第2章から", "target": {"timeline": 3, "chapter": 1}}}
+{"command": "timeline.setEndAction", "params": {"timeline": 3, "target": "lastMenu"}}
+{"command": "nav.setFirstPlay", "params": {"target": {"menu": 4}}}
+{"command": "nav.setTitleRemote", "params": {"target": {"menu": 4}}}
+{"command": "project.check"}

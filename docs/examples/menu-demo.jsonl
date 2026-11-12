@@ -1,0 +1,14 @@
+# メニュー付き DVD のデモ。リポジトリのルートで実行する（素材は target/fixtures、作り方は README の「試し方」）。
+{"command": "file.new", "params": {"kind": "dvd", "standard": "ntsc"}}
+{"command": "asset.import", "params": {"path": "target/fixtures/ntsc.m2v"}}
+{"command": "asset.import", "params": {"path": "target/fixtures/ntsc.ac3"}}
+{"command": "timeline.create", "params": {"asset": 1, "name": "本編"}}
+{"command": "timeline.addAudioTrack", "params": {"timeline": 3, "asset": 2, "language": "ja"}}
+{"command": "timeline.addChapter", "params": {"timeline": 3, "timecode": "00:00:05;00", "name": "第2章"}}
+{"command": "timeline.addChapter", "params": {"timeline": 3, "timecode": "00:00:10;00", "name": "第3章"}}
+{"command": "menu.create", "params": {"name": "メインメニュー"}}
+{"command": "menu.addButton", "params": {"menu": 4, "label": "最初から再生", "target": {"timeline": 3}}}
+{"command": "menu.addButton", "params": {"menu": 4, "label": "第2章", "target": {"timeline": 3, "chapter": 1}}}
+{"command": "menu.addButton", "params": {"menu": 4, "label": "第3章", "target": {"timeline": 3, "chapter": 2}}}
+{"command": "timeline.setEndAction", "params": {"timeline": 3, "target": "lastMenu"}}
+{"command": "nav.setFirstPlay", "params": {"target": {"menu": 4}}}
