@@ -1,0 +1,23 @@
+[package]
+name = "disccraft-photo"
+description = "PhotoCraft 連携: PSD の読み込みと合成、メニューのレイヤー認識"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+photocraft-io.workspace = true
+photocraft-doc.workspace = true
+photocraft-compose.workspace = true
+photocraft-geom.workspace = true
+photocraft-raster.workspace = true
+resvg.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+photocraft-psd.workspace = true
+
+[lints]
+workspace = true

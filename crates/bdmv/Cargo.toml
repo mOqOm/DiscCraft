@@ -1,0 +1,13 @@
+[package]
+name = "disccraft-bdmv"
+description = "index.bdmv / MovieObject.bdmv / MPLS / CLPI の読み書き"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

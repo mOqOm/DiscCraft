@@ -1,0 +1,19 @@
+[package]
+name = "disccraft-menu"
+description = "メニューの描画とハイライト画像の生成"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+disccraft-project.workspace = true
+disccraft-photo.workspace = true
+encoding_rs.workspace = true
+filmcraft-text.workspace = true
+png.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
