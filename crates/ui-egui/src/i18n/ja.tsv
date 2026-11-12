@@ -1,0 +1,859 @@
+﻿# Japanese (ja) catalog for DiscCraft. Format: context 	 source 	 translation. A string without
+# an entry is shown in English, the language the strings in code are written in.
+#
+# Entries are written from the plain meaning of the English source. So that people who used Adobe
+# Encore feel at home, the *terms* (single words and short command names such as エンドアクション,
+# 再生リスト, 初期設定ボタン, チャプターポイント, プロジェクトをチェック) follow the wording of the
+# Japanese Encore CS6 UI (docs/ui-parity.md §3). Only individual terms are reused; sentences, tooltips
+# and messages are written for DiscCraft, and no string table is copied. Product and technology
+# names (DiscCraft, DVD-Video, Blu-ray, NTSC, PAL, UDF) keep their spelling.
+#
+# House style, so new entries read like the rest:
+#   - Menu commands and buttons are short noun phrases with no する/します ending (別名で保存…,
+#     ボタンを追加). Tooltips and status messages are です/ます sentences ending in 。
+#   - One half-width space between Japanese text and an adjacent Latin word, number or {placeholder}
+#     ({count} 個, DVD5 容量). Half-width ":" and "( )", full-width "？". Always "…", never "...".
+#   - The long vowel mark is kept (モニター, フォルダー, スライドショー). Terms: 初期設定 (not 既定/デフォルト),
+#     オーディオ, ビデオ, 字幕, チャプターポイント, エンドアクション, 再生リスト.
+#   - One English source means one Japanese word. Where two UI places need different Japanese
+#     (the Buttons heading and a Button label), write different English sources instead of a context.
+
+# File menu
+	New	新規
+	Open…	開く…
+	Save	保存
+	Save As…	別名で保存…
+	File	ファイル
+	DiscCraft project	DiscCraft プロジェクト
+	Media	メディア
+	Opened: {path}	開きました: {path}
+	Saved: {path}	保存しました: {path}
+	Save cancelled	保存をキャンセルしました
+	Import cancelled	読み込みをキャンセルしました
+	Created a new project	新規プロジェクトを作成しました
+	DiscCraft started	DiscCraft を開始しました
+
+# Edit menu
+	Edit	編集
+	Undo	取り消し
+	Redo	やり直し
+	Undone	取り消しました
+	Redone	やり直しました
+	Command succeeded	コマンド成功
+	The command parameters are invalid	コマンドパラメータが不正です
+	Cannot convert the ID to a number	ID を数値に変換できません
+
+# Window menu and workspaces
+	Window	ウィンドウ
+	Standard	標準
+	Menu	メニュー
+	Navigation	ナビゲーション
+	Build	ビルド
+	Workspace: {name}	ワークスペース: {name}
+	Workspace: {name} (save failed: {error})	ワークスペース: {name}（保存失敗: {error}）
+	Cannot find where to save settings	設定ファイルの場所が分かりません
+	Help	ヘルプ
+
+# Panels
+	Project	プロジェクト
+	Properties	プロパティ
+	Disc	ディスク
+	Assets	アセット
+	Menus	メニュー
+	Playlists	再生リスト
+	Slideshows	スライドショー
+	Timeline	タイムライン
+	Monitor	モニター
+	Flowchart	フローチャート
+	Checks	チェック
+	Status:	ステータス:
+	Nothing selected	選択中なし
+	Unknown	不明
+
+# Asset kinds
+	Video	ビデオ
+	Audio	オーディオ
+	Image	画像
+	Subtitle	字幕
+	Other	その他
+
+# Common buttons and labels
+	Add	追加
+	Remove	削除
+	Apply	適用
+	Refresh	更新
+	Close	閉じる
+	Choose…	選択…
+	Import…	読み込み…
+	Name	名前
+	Label	ラベル
+	Language	言語
+	Time	時間
+	Seconds	秒
+#	番号
+	Offline	オフライン
+	 [offline]	 [オフライン]
+	(unnamed)	（名称なし）
+	Kind: {kind}	種類: {kind}
+	Path: {path}	パス: {path}
+
+# Assets
+	Create from Selected Asset	選択中のアセットから作成
+	Asset not found	アセットが見つかりません
+
+# Timelines
+	Choose a timeline	タイムラインを選択してください
+	Chapters	チャプター
+	Chapter {n}	チャプター {n}
+	Chapters: {count}	チャプター: {count}
+	Audio tracks	オーディオトラック
+	Audio tracks: {count}	オーディオトラック: {count}
+	Subtitle tracks: {count}	字幕トラック: {count}
+	Image asset	画像アセット
+	Video: {name}	ビデオ: {name}
+	End action	エンドアクション
+
+# Menus
+	New Menu	新規メニュー
+	Menu not found	メニューが見つかりません
+	Choose a menu	メニューを選択してください
+	Buttons	ボタン
+	Button	ボタン
+	Button {n}	ボタン {n}
+	Buttons: {count}	ボタン: {count}
+	Add Button	ボタンを追加
+	Default	初期設定
+	Default button: {n}	初期設定ボタン: {n}
+	Colors	色
+	Background	背景
+	Highlight	ハイライト
+	The menu image has an invalid size	メニュー画像のサイズが不正です
+	Preview	プレビュー
+	Normal	標準
+	Selected	選択時
+	Activated	アクティベート時
+	Safe areas	セーフエリア
+	Routing	ボタンルート
+
+# Playlists and slideshows
+	New Playlist	新規再生リスト
+	New Slideshow	新規スライドショー
+	Playlist not found	再生リストが見つかりません
+	Slideshow not found	スライドショーが見つかりません
+	Items: {count}	項目: {count}
+	Add Item	項目を追加
+	Slides: {count}	スライド: {count}
+	Add Slide	スライドを追加
+	{n}: {seconds} s	{n}: {seconds} 秒
+	Choose an item to rename	名前を変更する項目を選択してください
+
+# Links
+	Not set	設定なし
+	Stop	停止
+	Last menu	前のメニューに戻る
+	Menu: {name}	メニュー: {name}
+	{name}: chapter 1	{name}: チャプター 1
+	Playlist {id}	再生リスト {id}
+	Chapter playlist {id}	チャプター再生リスト {id}
+	Slideshow {id}	スライドショー {id}
+
+# Disc settings
+	First play	ファーストプレイ
+	First play: {target}	ファーストプレイ: {target}
+	DVD-Video	DVD-Video
+	Blu-ray	Blu-ray
+	NTSC	NTSC
+	PAL	PAL
+	4:3	4:3
+	16:9	16:9
+	DVD5	DVD5
+	DVD9	DVD9
+	BD25	BD25
+	BD50	BD50
+	Custom ({size})	カスタム ({size})
+	Refresh Usage	容量を更新
+	Usage updated	容量を更新しました
+	No usage information	容量情報なし
+
+# Build
+	Output:	出力:
+	Folder	フォルダー
+	ISO	ISO
+	Enter an output path	出力パスを入力してください
+	Build started	ビルドを開始しました
+	Build finished: {path}	ビルド完了: {path}
+	The build thread ended	ビルドスレッドが終了しました
+	There is no build result	ビルド結果がありません
+	Titles {titles} / chapters {chapters} / {size}	タイトル {titles} / チャプター {chapters} / {size}
+	Simulate	シミュレート
+	Simulation finished	シミュレーション完了
+	Simulate is available after a folder build	フォルダーにビルドした後でシミュレートできます
+
+# Checks and simulation report
+	No problems	問題なし
+	Chapters reached: {count}	到達チャプター: {count}
+	Title {title} chapter {chapter}	タイトル {title} チャプター {chapter}
+	Dead ends	行き止まり
+	Loops	ループ
+
+# Monitor and remote
+	Open Build Output	ビルド結果を開く
+	Build first	先にビルドしてください
+	Preview opened: {path}	プレビューを開きました: {path}
+	Not previewing. Build first, then choose Open Build Output.	プレビューしていません。ビルド後に「ビルド結果を開く」を押してください。
+	Now: {state}	現在: {state}
+	Remote	リモコン
+	Enter	決定
+	Finish	終了
+	Stopped	停止
+	Menu {pgcn} (button {button})	メニュー {pgcn}（ボタン {button}）
+	This PGC is not a menu (hidden PGC).	この PGC はメニューではありません（隠し PGC）。
+
+# Flowchart placeholder
+	The flowchart is not implemented yet (M6.9). Showing the link list instead.	フローチャートは未実装です（M6.9）。リンク一覧を代わりに表示します。
+	Language: {name}	言語: {name}
+	Language: {name} (could not save: {error})	言語: {name}（保存失敗: {error}）
+	Check updated	チェックを更新しました
+	Number	番号
+	Timeline: {name} → end action: {target}	タイムライン: {name} → エンドアクション: {target}
+	First Play	ファーストプレイ
+	End Action	エンドアクション
+	Drag from a button or an end action to a menu, timeline, slideshow or playlist to link it.	ボタンかエンドアクションから、メニュー・タイムライン・スライドショー・再生リストへドラッグするとリンクします。
+	Timeline {id}	タイムライン {id}
+	Menu {id}	メニュー {id}
+	{label} → {target}	{label} → {target}
+	Link list	リンク一覧
+	No timeline selected	タイムラインが選択されていません
+	Zoom	ズーム
+	−	−
+	+	+
+	Fit	全体表示
+	Add Chapter at Playhead	再生ヘッドの位置にチャプターポイントを追加
+	First chapter is fixed	最初のチャプターは移動できません
+	Remove Chapter	チャプターポイントを削除
+	Timeline: {name}	タイムライン: {name}
+	Playhead: {time}	再生ヘッド: {time}
+	Duration: {time}	デュレーション: {time}
+	English	日本語
+	Drag onto a menu, timeline, slideshow or playlist in the Project panel to link it	プロジェクトパネルのメニュー、タイムライン、スライドショー、再生リストにドラッグするとリンクします
+	View	表示
+	New Timeline	新規タイムライン
+	Workspace	ワークスペース
+	Select a video asset in the Project panel first	先にプロジェクトパネルでビデオアセットを選択してください
+	Slideshow	スライドショー
+	Playlist	再生リスト
+	Open Project…	プロジェクトを開く…
+	Import as Asset…	アセットとして読み込み…
+	Check Project…	プロジェクトをチェック…
+	Folder…	フォルダー…
+	Image…	イメージ…
+	Exit	終了
+	Rename…	名前の変更…
+	Clear	消去
+	Add Chapter Point	チャプターポイントを追加
+	Zoom In	ズームイン
+	Zoom Out	ズームアウト
+	Fit in Window	ウィンドウに合わせる
+	Show Normal Subpicture	標準サブピクチャを表示
+	Show Selected Subpicture	選択時のサブピクチャを表示
+	Show Activated Subpicture	アクティベート時のサブピクチャを表示
+	Show Safe Areas	セーフエリアを表示
+	Show Button Routing	ボタンルートを表示
+	Timelines	タイムライン
+	Title Button	タイトルボタン
+	The menu that opens when the remote's Title (Top Menu) button is pressed. When not set, the first menu opens.	リモコンのタイトル（トップメニュー）ボタンを押したときに開くメニューです。未設定のときは最初のメニューが開きます。
+	Workspace:	ワークスペース:
+	(No menu)	(メニューなし)
+	(No timeline)	(タイムラインなし)
+	(No slideshow)	(スライドショーなし)
+	Layers	レイヤー
+	Library	ライブラリ
+	Choose a slideshow	スライドショーを選択してください
+	Open a menu to see its layers.	メニューを開くと、そのレイヤーが表示されます。
+	Button {n}: {name}	ボタン {n}: {name}
+	Type	種類
+	Duration	デュレーション
+	Default button	初期設定ボタン
+	Link	リンク
+	Menu Viewer	メニュービューア
+	Slideshow Viewer	スライドショービューア
+	Timeline Viewer	タイムラインビューア
+	Recent Projects	最近使用したプロジェクト
+	No recent projects	最近使用したプロジェクトはありません
+	New Project	新規プロジェクト
+	What's New	新機能
+	Menu bar and keyboard shortcuts that follow the classic authoring tools	従来のオーサリングツールと同じメニューバーとキーボードショートカット
+	Title Button in the disc properties and the flowchart	ディスクのプロパティとフローチャートのタイトルボタン
+	Flowchart with drag-to-link	ドラッグでリンクできるフローチャート
+	Timeline panel with chapter points	チャプターポイントを打てるタイムラインパネル
+	Pick whip linking	ピックウィップでリンク
+	Blu-ray authoring (folder and ISO)	Blu-ray オーサリング（フォルダーと ISO）
+	Name:	名前:
+	Location:	場所:
+	Browse…	参照…
+	Authoring mode:	オーサリングモード:
+	TV standard:	テレビ方式:
+	Leave the location empty to choose where to save later.	場所を空にすると、保存先は後で選べます。
+	OK	OK
+	Cancel	キャンセル
+	Panel layout and start screen that follow the classic authoring tools	従来のオーサリングツールと同じパネル配置と起動画面
+	Untitled	名称未設定
+	Basic	基本
+	Advanced	詳細設定
+	Name and Location	名前と場所
+	Project Settings	プロジェクト設定
+	Transcode settings:	トランスコード設定:
+	No recent folders	最近使ったフォルダーはありません
+	Aspect ratio:	縦横比:
+	Disc capacity:	ディスク容量:
+	You can change the authoring mode and TV standard later in the disc properties.	オーサリングモードとテレビ方式は、あとからディスクのプロパティで変えられます。
+	Video: MPEG-2, {width} x {height}, {rate} fps, progressive	ビデオ: MPEG-2、{width} x {height}、{rate} fps、プログレッシブ
+	Audio: LPCM 48 kHz stereo (AC-3 sources are kept)	オーディオ: LPCM 48 kHz ステレオ (AC-3 の素材はそのまま)
+	Bitrate: automatic, to fit the disc (video up to 9.8 Mbps)	ビットレート: ディスク容量に合わせて自動 (ビデオは最大 9.8 Mbps)
+	Blu-ray currently uses the same standard-definition video.	Blu-ray も今は同じ SD のビデオを使います。
+	Format:	形式:
+	{kind} Folder	{kind} フォルダー
+	{kind} Image	{kind} イメージ
+	Check Project	プロジェクトをチェック
+	{kind} Settings	{kind} 設定
+	Source	ソース
+	Source:	使用するソース:
+	Current project	現在のプロジェクト
+	Destination	保存先
+	Disc Info	ディスク情報
+	{used} used, {free} free	使用 {used} / 空き {free}
+	Size:	サイズ:
+	Region Code	リージョンコード
+	Valid:	有効:
+	All regions	すべてのリージョン
+	Custom	カスタム
+	Project Check	プロジェクトのチェック
+	Result	結果
+	Creates a disc folder (VIDEO_TS or BDMV) on the hard drive.	ハードドライブにディスクのフォルダー (VIDEO_TS / BDMV) を作ります。
+	Creates an ISO disc image on the hard drive.	ハードドライブにディスクの ISO イメージを作ります。
+	1 - United States, Canada	1 - 米国、カナダ
+	2 - Japan, Europe, South Africa, Middle East	2 - 日本、ヨーロッパ、南アフリカ、中東
+	3 - Southeast Asia, Korea, Hong Kong	3 - 東南アジア、韓国、香港
+	4 - Australia, Central and South America	4 - オーストラリア、中南米
+	5 - Russia, South Asia, Africa	5 - ロシア、南アジア、アフリカ
+	6 - China	6 - 中国
+	7 - Reserved	7 - 予約
+	8 - International venues (aircraft, ships)	8 - 国際線の機内や船内など
+	4.7 GB (DVD5)	4.7 GB (DVD5)
+	8.5 GB (DVD9)	8.5 GB (DVD9)
+	25 GB (BD25)	25 GB (BD25)
+	50 GB (BD50)	50 GB (BD50)
+	Aspect ratio	縦横比
+	First Play:	ファーストプレイ:
+	Title Button:	タイトルボタン:
+	Asset	アセット
+	Duration:	デュレーション:
+	Automatic	自動
+	End Action:	エンドアクション:
+	Video:	ビデオ:
+	Frame rate:	フレームレート:
+	Dimensions:	寸法:
+	Audio tracks:	オーディオトラック:
+	Subtitle tracks:	字幕トラック:
+	Chapters:	チャプター:
+	Buttons:	ボタン:
+	Default button:	初期設定ボタン:
+	Slides:	スライド:
+	Items:	項目:
+	Subtitle {n}: {language}	字幕 {n}: {language}
+	Close Project	プロジェクトを閉じる
+	Project Settings…	プロジェクト設定…
+	Set as First Play	ファーストプレイに設定
+	Import	読み込み
+	Unlinked items	リンクされていない項目
+	Slides	スライド
+	Slideshow Options	スライドショーオプション
+	Slide duration:	スライドのデュレーション:
+	 s	 秒
+	None	なし
+	Total duration: {time}	全体のデュレーション: {time}
+	Add images from the options on the right.	右のオプションから画像を足してください。
+	Now	現在の場所
+	Exit Preview	プレビューを終了
+	Check for	チェックする項目
+	Start	開始
+	Problem	問題
+	{count} items found.	{count} 項目見つかりました。
+	Error	エラー
+	Warning	警告
+	Info	情報
+	Button and link targets	ボタンとリンク先
+	End actions	エンドアクション
+	Unreachable items	孤立した項目
+	Media files	メディアファイル
+	Track and title limits	トラックとタイトルの数
+	Disc capacity	ディスク容量
+	Save changes to {name}?	「{name}」への変更を保存しますか？
+	Yes	はい
+	No	いいえ
+	Preferences…	環境設定…
+	Preferences	環境設定
+	General	一般
+	Interface	表示方法
+	Default TV standard:	テレビ方式の初期設定:
+	Used as the TV standard of new projects.	新規プロジェクトのテレビ方式として使われます。
+	Language:	言語:
+	Timeline:	タイムライン:
+	Video file	ビデオファイル
+	Audio file	オーディオファイル
+	Image file	画像ファイル
+	Subtitle file	字幕ファイル
+	Other file	その他のファイル
+	Button text	ボタンテキスト
+	Open	開く
+	Add Chapter Points at Interval	一定間隔でチャプターポイントを追加
+	Add Chapter Points at Interval…	一定間隔でチャプターポイントを追加…
+	Interval:	間隔:
+	 min	 分
+	Chapter points are added at every interval from the start.	先頭から間隔ごとにチャプターポイントを追加します。
+	{count} chapter points will be added.	{count} 個のチャプターポイントを追加します。
+	Add Chapter Point Here	ここにチャプターポイントを追加
+	Delete Chapter Point	チャプターポイントを削除
+	Previous Chapter	前のチャプター
+	Previous Frame	1 フレーム戻す
+	Next Frame	1 フレーム進める
+	Next Chapter	次のチャプター
+	Deleted	削除しました
+	Delete	削除
+	Delete the selected item. Links to it become not set. An asset that is in use cannot be deleted.	選択中の項目を削除します。その項目へのリンクは未設定になります。使用中のアセットは削除できません。
+	Cannot delete: {user} uses this asset.	削除できません。「{user}」がこのアセットを使っています。
+	N/A	N/A
+	Don't Transcode	トランスコードしない
+	Untranscoded	トランスコードされていません
+	Transcoded	トランスコード済み
+	DVD Transcode Status	DVD トランスコードステータス
+	DVD Transcode Settings	DVD トランスコード設定
+	Blu-ray Transcode Status	Blu-ray トランスコードステータス
+	Blu-ray Transcode Settings	Blu-ray トランスコード設定
+	DVD Transcode Status:	DVD トランスコードステータス:
+	DVD Transcode Settings:	DVD トランスコード設定:
+	Blu-ray Transcode Status:	Blu-ray トランスコードステータス:
+	Blu-ray Transcode Settings:	Blu-ray トランスコード設定:
+	Override	上書き
+	Encoded Size	エンコード後のサイズ
+	Remote Menu	リモートメニュー
+	Estimated size on the disc after the build	ビルドした後のディスク上のサイズの見積もりです。
+	Set:	セット:
+	Select a library set	ライブラリセットを選択
+	Backgrounds	背景
+	Toggle menu display	メニュー表示の切り替え
+	Toggle button display	ボタン表示の切り替え
+	Toggle background display	背景表示の切り替え
+	Place	配置
+	Place the selected button in the open menu	選択したボタンを、開いているメニューに配置します。
+	Create a new menu from the selected menu	選択したメニューから新しいメニューを作ります。
+	Set Background	背景を設定
+	Use the selected background in the open menu	選択した背景を、開いているメニューの背景にします。
+	Create New Menu	新規メニューを作成
+	Created menu {name}	メニュー「{name}」を作成しました
+	Open a menu first	先にメニューを開いてください
+	Plain Dark	シンプル（暗い背景）
+	Plain Light	シンプル（明るい背景）
+	Bottom Bar	下に横並び
+	Chapter Grid	チャプターの一覧（2 列）
+	Left List	左に縦並び
+	Wide Button	横長のボタン
+	Small Button	小さいボタン
+	Tile	タイル
+	Full-Width Bar	横幅いっぱいの帯
+	Black	黒
+	Charcoal	チャコール
+	Navy	紺
+	Forest	深緑
+	Wine	ワイン
+	Ivory	アイボリー
+	Play Movie	本編を再生
+	Play	再生
+	Chapter	チャプター
+	Extras	特典
+	Setup	設定
+	Main Menu	メインメニュー
+	Scene Selection	シーン選択
+	Subtitles	字幕
+	Show Chapter Names	チャプター名を表示
+	Chapter Number:	チャプター番号:
+	In:	イン:
+	Add Audio Track…	オーディオトラックを追加…
+	Add Subtitle Track…	字幕トラックを追加…
+	Delete Audio Track	オーディオトラックを削除
+	Delete Subtitle Track	字幕トラックを削除
+	About DiscCraft…	DiscCraft について…
+	Add Audio Track	オーディオトラックを追加
+	Add Subtitle Track	字幕トラックを追加
+	Asset:	アセット:
+	Import an audio file first.	先にオーディオファイルを読み込んでください。
+	Import a subtitle file (.srt) first.	先に字幕ファイル（.srt）を読み込んでください。
+	Version {version}	バージョン {version}
+	DVD and Blu-ray authoring.	DVD と Blu-ray のオーサリング。
+	License: {license}	ライセンス: {license}
+	Create Chapter Index	チャプターインデックスを作成
+	Create Multi-Page Chapter Index	複数ページのチャプターインデックスを作成
+	{name} Chapters	{name} チャプター
+	Previous	前へ
+	Next	次へ
+	Button text:	ボタンテキスト:
+	Number:	番号:
+	Link:	リンク:
+	Background:	背景:
+	Highlight:	ハイライト:
+	Cut	切り取り
+	Copy	コピー
+	Paste	貼り付け
+	Duplicate	複製
+	Select All	すべてを選択
+	Deselect All	すべての選択を解除
+	Object	オブジェクト
+	Align	整列
+	Distribute	均等配置
+	Left Edges	左端
+	Horizontal Centers	水平方向中央
+	Right Edges	右端
+	Top Edges	上端
+	Vertical Centers	垂直方向中央
+	Bottom Edges	下端
+	Align Relative to Safe Area	セーフエリアに相対的に整列
+	Vertically	垂直方向
+	Horizontally	水平方向
+	Distribute Relative to Safe Area	セーフエリアに相対的に均等配置
+	Select two or more buttons	ボタンを 2 つ以上選んでください
+	{n} buttons selected	{n} 個のボタンを選択中
+	There is no room for the buttons on this menu	このメニューにはボタンを置く場所がありません
+	Buttons cannot overlap	ボタンは重ねられません
+	Arrange	アレンジ
+	Bring to Front	最前面へ
+	Bring Forward	前面へ
+	Send Backward	背面へ
+	Send to Back	最背面へ
+	Slideshow: {name}	スライドショー: {name}
+	Playlist: {name}	再生リスト: {name}
+	Remote Menu:	リモートメニュー:
+	This timeline has no menu remote	このタイムラインにはリモートメニューがありません
+	Select a timeline first	先にタイムラインを選んでください
+	Cannot play: {message}	再生できません: {message}
+	{n} s (motion)	{n} 秒（モーション）
+	Still	静止
+	Set an end action to leave the menu when the time is up.	時間が来たらメニューから進むには、エンドアクションを設定してください。
+	Auto Activate	自動アクティベート
+	Title	タイトル
+	Import Subtitles…	字幕を読み込み…
+	Export Subtitles	字幕を書き出し
+	Exported: {path}	書き出しました: {path}
+	Read {n} subtitles	字幕を {n} 件読み込みました
+	Audio:	オーディオ:
+	Color	色
+	Image:	画像:
+	Loop:	ループ:
+	100 GB (BDXL, 3 layers)	100 GB（BDXL 3 層）
+	128 GB (BDXL, 4 layers)	128 GB（BDXL 片面 4 層）
+	BD100 (100 GB, BDXL 3 layers)	BD100（100 GB、BDXL 3 層）
+	BD128 (128 GB, BDXL 4 layers)	BD128（128 GB、BDXL 片面 4 層）
+	Magnification	拡大率
+	Source timecode:	ソース:
+	Audio {n}:	オーディオ {n}:
+	Subtitle {n}:	字幕 {n}:
+	Description:	説明:
+	Also the volume label of the ISO image (letters and digits only)	ISO イメージのボリュームラベルにもなります（英数字のみ）
+	Text: {text}	テキスト: {text}
+	Selection Tool	選択ツール
+	Text Tool	テキストツール
+	Zoom Tool	ズームツール
+	Text	テキスト
+	Text:	テキスト:
+	Color:	色:
+	Own color	個別の色
+	Position:	位置:
+	Play or search by time	時間を指定した再生 / 検索
+	Play or search by chapter	チャプターを指定した再生 / 検索
+	Play a title	タイトルの再生
+	Go up	上の階層に戻る
+	Time or chapter search in the title	タイトル内の時間 / チャプターの検索
+	Fast forward	早送り
+	Rewind	早戻し
+	Title button	タイトルボタン
+	Menu button	メニューボタン
+	Subtitle menu	字幕メニュー
+	Audio menu	オーディオメニュー
+	Angle menu	アングルメニュー
+	Chapter menu	チャプターメニュー
+	Resume	レジューム
+	Select and activate buttons	ボタンの選択と決定
+	Leave a still	静止画の解除
+	Pause	一時停止
+	Change audio	オーディオの切り替え
+	Change subtitles	字幕の切り替え
+	Change angle	アングルの切り替え
+	Change karaoke mix	カラオケのミックスの切り替え
+	Change display mode	画面の表示モードの切り替え
+	All allowed	すべて許可
+	User Operations:	ユーザー操作:
+	Set…	設定…
+	User Operations	ユーザー操作
+	Checked operations are allowed. Uncheck the ones the viewer may not use (DVD).	チェックした操作を許可します。視聴者に使わせない操作のチェックを外してください（DVD）。
+	Allow All	すべて許可
+	{n} prohibited	{n} 個を禁止
+	Font:	フォント:
+	(not on this computer)	（このコンピューターにありません）
+	The default font is used instead	代わりに既定のフォントを使います
+	Default font	既定のフォント
+	Search fonts	フォントを検索
+	Description	説明
+	Encoded Size:	エンコード後のサイズ:
+	Override:	上書き:
+	Set the end action to a timeline, slideshow or playlist first	先にエンドアクションをタイムライン・スライドショー・再生リストにしてください
+	Show in Explorer	エクスプローラーで表示
+	Clear First Play	ファーストプレイを解除
+	Asset…	アセット…
+	Import a video first	先にビデオを読み込んでください
+	Video for the timeline:	タイムラインのビデオ:
+	Edit Menu in PhotoCraft	メニューを PhotoCraft で編集
+	Opened in PhotoCraft. Save there to update the menu.	PhotoCraft で開きました。PhotoCraft で保存するとメニューに反映されます。
+	PhotoCraft was not found; the PSD opened in its default app. Save there to update the menu.	PhotoCraft が見つからないので、PSD を既定のアプリで開きました。保存するとメニューに反映されます。
+	Updated the menu from PhotoCraft.	PhotoCraft で保存した内容をメニューに反映しました。
+	Undo {action}	{action}の取り消し
+	Redo {action}	{action}のやり直し
+	Can't Undo	取り消しできません
+	Can't Redo	やり直しできません
+	Edit Original	オリジナルを編集
+	Create EffectCraft Composition…	EffectCraft コンポジションを作成…
+	EffectCraft was not found.	EffectCraft が見つかりません。
+	Opened the menu in EffectCraft. Render it there; the movie becomes the menu's background.	メニューを EffectCraft で開きました。EffectCraft でレンダーすると、そのムービーがメニューの背景になります。
+	Updated the menu's motion from EffectCraft.	EffectCraft でレンダーしたムービーをメニューの背景にしました。
+	{name} is offline.	{name} はオフラインです。
+	Opened {name} in {app}. Save there to update it here.	{name} を {app} で開きました。{app} で保存すると DiscCraft でも読み直します。
+	Opened {name} in its default app. Save there to update it here.	{name} を既定のアプリで開きました。保存すると DiscCraft でも読み直します。
+	Updated {name}.	{name} を読み直しました。
+	Set Disc User Operations…	ディスクのユーザー操作を設定…
+	No Change	変更なし
+	Set Audio:	オーディオを設定:
+	Set Subtitle:	字幕を設定:
+	Off	オフ
+	Set the link to a timeline, slideshow or playlist first	先にリンクをタイムライン・スライドショー・再生リストにしてください
+	Not available here.	ここでは選べません。
+	Media category:	メディアのカテゴリ:
+	Video and audio	ビデオとオーディオ
+	Still image	静止画
+	Toggle the kinds of items shown	異なる種類の項目の表示を切り替え
+	Show Guides	ガイドを表示
+	Snap to Guides	ガイドにスナップ
+	Lock Guides	ガイドをロック
+	Clear Guides	ガイドを消去
+	New Guide…	新規ガイド…
+	New Guide	新規ガイド
+	Orientation	方向
+	Horizontal Guide	水平ガイド
+	Vertical Guide	垂直ガイド
+	pixels	ピクセル
+	Guides	ガイド
+	Show / hide safe areas	セーフエリアの表示 / 非表示
+	Set button routing	ボタンのルートを設定
+	Show guides	ガイドを表示
+	New guide	新規ガイド
+	Show normal subpicture	標準サブピクチャを表示
+	Show selected subpicture highlight	選択時のサブピクチャハイライトを表示
+	Show activated subpicture highlight	アクティベート時のサブピクチャハイライトを表示
+	0 to {max}	0 〜 {max}
+	Poster Frame:	ポスターフレーム:
+	Set Poster Frame	ポスターフレームを設定
+	Preview from Here	ここからプレビューする
+	Hide	表示しない
+	Show / Hide Columns	列の表示 / 非表示
+	Media Category	メディアカテゴリ
+	File Path	ファイルパス
+	Dimensions	寸法
+	Size	サイズ
+	Slide	スライド
+	Match slideshow setting	スライドショーの設定と一致
+	In point:	インポイント:
+	Out point:	アウトポイント:
+	Total duration:	全体のデュレーション:
+	Show All Thumbnails	すべてのサムネールを表示
+	Specify Link	リンクの指定
+	{used} used. {free} free.	{used} が使用されています。{free} が空いています。
+	Default transition:	トランジションの初期設定:
+	Transition:	トランジション:
+	Transition duration:	トランジションのデュレーション:
+	Cross Dissolve	クロスディゾルブ
+	Dip to Black	黒にディップ
+	Wipe	ワイプ
+	Calibrate	校正
+	Correct menu pixels to the TV screen	テレビ画面に合わせてメニューピクセルを校正
+	Show Buttons	ボタンを表示
+	Replace Asset…	アセットを置き換え…
+	Locate Asset…	アセットを検索…
+	Locate Asset	アセットを検索
+	Manual advance	手動で進める
+	Each slide holds until the viewer presses Next or Enter (DVD)	各スライドは次へか決定を押すまで止まります（DVD）
+	Scale:	スケール:
+	Scale and Apply Matte	スケールしてマットを適用
+	Scale and Crop	スケールして切り抜き
+	Do Not Scale	スケールなし
+	Set the first play to a timeline, slideshow or playlist first	ファーストプレイをタイムライン・スライドショー・再生リストにしてください
+	Button Links	ボタンリンク
+	Orphans	孤立
+	Overrides	上書き
+	Remote Menus	リモートメニュー
+	Overlapping Buttons	重なったボタン
+	Menu Total Size	メニューの合計サイズ
+	Chapters and Trims	チャプターおよびトリム
+	Style:	スタイル:
+	Alignment:	行揃え:
+	Tracking:	トラッキング:
+	Leading:	行送り:
+	Faux bold	太字（疑似）
+	Faux italic	斜体（疑似）
+	Underline	下線
+	Strikethrough	打ち消し線
+	All caps	すべて大文字
+	Small caps	小型大文字
+	Align left	左揃え
+	Align center	中央揃え
+	Align right	右揃え
+	Highlight {n}:	ハイライト {n}:
+	Activated:	アクティベート時:
+	Group {n}	グループ {n}
+	Sync Button Text and Name	ボタンテキストと名前を同期
+	Set Name from Link	リンク先から名前を設定
+	Automatically Route Buttons	ボタンのルートを自動設定
+	Up:	上:
+	Down:	下:
+	Left:	左:
+	Right:	右:
+	Offset:	オフセット:
+	Move to Folder	フォルダーへ移動
+	Project root	プロジェクトのルート
+	Add audio…	オーディオを追加…
+	Fit Slideshow to Audio Duration	スライドショーをオーディオのデュレーションに合わせる
+	Loop Audio	オーディオをループ
+	Kerning:	カーニング:
+	Metrics	メトリクス
+	Baseline:	ベースライン:
+	Last Modified	最終変更日
+	Last modified:	最終変更日:
+	Chapter Playlist	チャプター再生リスト
+	Chapter Playlists	チャプター再生リスト
+	Chapter Playlist: {name}	チャプター再生リスト: {name}
+	{name}: Chapter Playlist	{name}: チャプター再生リスト
+	{name} Chapter Playlist	{name} チャプター再生リスト
+	Master Timeline: {name}	マスタータイムライン: {name}
+	Master timeline:	マスタータイムライン:
+	Chapter playlist not found	チャプター再生リストが見つかりません
+	The master timeline of this chapter playlist no longer exists.	このチャプター再生リストのマスタータイムラインはもうありません。
+	Choose a chapter playlist	チャプター再生リストを選んでください
+	Chapter #	チャプター番号
+	Chapter Name	チャプター名
+	In	イン
+	Entry #	エントリ番号
+	(missing chapter)	（ないチャプター）
+	Add →	追加 →
+	Add the selected chapter to the playlist (or double-click it)	選んだチャプターを再生リストに追加（ダブルクリックでも）
+	Remove the selected entry (or double-click it)	選んだエントリを削除（ダブルクリックでも）
+	Up	上へ
+	Down	下へ
+	Playback:	再生の種類:
+	Sequential	連続
+	Random	ランダム
+	Shuffle	シャッフル
+	New Chapter Playlist	新規チャプター再生リスト
+	Select a timeline in the Project panel first	先にプロジェクトパネルでタイムラインを選んでください
+	Create a timeline first	先にタイムラインを作ってください
+	Entries:	エントリ:
+	(missing)	（なし）
+	Timelines:	タイムライン:
+	Drag timelines, slideshows or chapter playlists here, or use ▶.	タイムライン / スライドショー / チャプター再生リストをここへドラッグするか、▶ から選びます。
+	Add an item or remove the selected one	項目を足す / 選んだ項目を外す
+	Add an item to the playlist first	先に再生リストに項目を足してください
+	Images	画像
+	Shapes	シェイプ
+	Toggle image display	画像の表示を切り替え
+	Toggle shape display	シェイプの表示を切り替え
+	Place the selected item in the open menu	選んだ項目を開いているメニューに配置
+	Shape	シェイプ
+	Rectangle	長方形
+	Rounded Rectangle	角丸長方形
+	Ellipse	楕円
+	Shape:	シェイプ:
+	Opacity:	不透明度:
+	X:	X:
+	Y:	Y:
+	Width:	幅:
+	Height:	高さ:
+	Order:	重なり:
+	Image: {name}	画像: {name}
+	Shape: {name}	シェイプ: {name}
+	Drop an image, a timeline, a slideshow or a playlist on the menu	メニューには画像、タイムライン、スライドショー、再生リストを落とせます
+	Playlist Name	再生リストの名前
+	Enter a name for the playlist:	再生リストの名前を入力
+	Untitled Playlist	名称未設定再生リスト
+	Convert to Button	ボタンに変換
+	Convert to Object	オブジェクトに変換
+	Specify Link…	リンクの指定…
+	Link of {n} buttons	{n} 個のボタンのリンク
+	Link of the button	ボタンのリンク
+	Select a button or an item with an end action first	先にボタンか、エンドアクションのある項目を選んでください
+	Subtitle:	字幕:
+	User	ユーザー
+	Save the open menu (or its selected button) to the User set of the library	開いているメニュー（ボタンを選んでいればそのボタン）をライブラリの ユーザー のセットに保存
+	Remove the selected item from the library	選んだ項目をライブラリから外す
+	Could not save the library: {error}	ライブラリを保存できません: {error}
+	Added {name} to the library	{name} をライブラリに追加しました
+	This link	このリンク
+	Drop Shadow…	ドロップシャドウ…
+	Drop Shadow	ドロップシャドウ
+	Shadow color:	カラー:
+	Angle:	角度:
+	Distance:	距離:
+	Spread:	スプレッド:
+	degrees	度
+	Select a text, button, image or shape first	先にテキスト、ボタン、画像、シェイプのどれかを選んでください
+	Flip Horizontal	水平方向に反転
+	Flip Vertical	垂直方向に反転
+	Rotate	回転
+	180°	180°
+	90° (Clockwise)	90° (時計回り)
+	90° (Counterclockwise)	90° (反時計回り)
+	Superscript	上付き文字
+	Subscript	下付き文字
+	Vertical scale:	垂直比率:
+	Horizontal scale:	水平比率:
+	Font style:	フォントスタイル:
+	Anti-aliasing	アンチエイリアス
+	Crisp	鮮明
+	Strong	強く
+	Smooth	滑らかに
+	Sharp	シャープ
+	Edit Menu Color Set…	メニューカラーセットを編集…
+	Menu Color Set	メニューカラーセット
+	Menu:	メニュー:
+	Color Set:	カラーセット:
+	Menu Default	メニューの初期設定
+	Normal Group	標準グループ
+	Highlight Group {n}	ハイライトグループ {n}
+	Selected Color	選択時のカラー
+	Activated Color	アクティベート時のカラー
+	Use Selected Colors as Activated Colors	選択時のカラーをアクティベート時のカラーとして使用
+	Opacity	不透明度
+	Set Menu User Operations…	メニューのユーザー操作を設定…
+	Save Menu as File…	メニューをファイルとして保存…
+	Save Menu as Template…	メニューをテンプレートとして保存…
+	Set End Action…	エンドアクションを設定…
+	Saved the menu as {path}	メニューを {path} に保存しました
+	History	ヒストリー
+	Button Routing	ボタンのルート
+	Route Buttons Up / Down	ボタンのルート方向設定（上 / 下）
+	Route Buttons Left / Right	ボタンのルート方向設定（左 / 右）
+	Wrap Up / Down	折り返し（上 / 下）
+	Wrap Left / Right	折り返し（左 / 右）
+	Wrap within Same Column	同じ列内で折り返し
+	Wrap to Next Column	次の列に折り返し
+	Wrap within Same Row	同じ行内で折り返し
+	Wrap to Next Row	次の行に折り返し
+	Button Sync Defaults	ボタン同期の初期設定
+	Saved with this project, so every computer builds the same routes.	このプロジェクトに保存されます（どのパソコンでビルドしても同じルートになります）。
+	Kind:	種類:
+	Main	メイン
+	Button Kind	ボタンの種類

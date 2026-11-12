@@ -1,0 +1,16 @@
+[package]
+name = "disccraft-psmux"
+description = "MPEG-2 プログラムストリーム（VOB）の多重化と NAV パック"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+disccraft-spu.workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "disccraft-nav"
+description = "ナビゲーションのコンパイラ（NavIR → DVD VM / HDMV コマンド）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+disccraft-project.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
