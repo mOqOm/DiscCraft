@@ -224,20 +224,160 @@ impl Encoder {
 
         let qs = u16::from(code).saturating_mul(2);
 
-        match picture_type {
-            PictureType::I => {
-                write_slices_intra(&mut writer, frame, &mut recon, code, qs);
-            }
-            PictureType::P => {
-                let reference = self
-                    .reference
+        let reference = match picture_type {
+            PictureType::I => None,
+            PictureType::P => Some(
+                self.reference
                     .as_ref()
-                    .ok_or_else(|| EncodeError("missing reference frame".to_string()))?;
-                write_slices_p(&mut writer, frame, reference, &mut recon, code, qs);
+                    .ok_or_else(|| EncodeError("missing reference frame".to_string()))?,
+            ),
+        };
+        let mut data = writer.finish();
+        let workers = slice_workers(usize::from(frame.height) / 16);
+        encode_slices(frame, reference, &mut recon, (code, qs, workers), &mut data)?;
+        Ok((data, recon))
+    }
+}
+
+/// Encodes the picture's slices (one per macroblock row) into `out` and `recon`, the rows in bands on several
+/// threads. Every slice is independent (its predictors start afresh; it reads the picture and the reference and
+/// writes only its own rows of the reconstruction), and a slice starts byte-aligned with a start code, so the
+/// bands' bytes joined in order are the same as encoding the rows one after another.
+fn encode_slices(
+    frame: &Frame420,
+    reference: Option<&Frame420>,
+    recon: &mut Frame420,
+    (code, qs, workers): (u8, u16, usize),
+    out: &mut Vec<u8>,
+) -> Result<(), EncodeError> {
+    let mb_rows = usize::from(frame.height) / 16;
+    let workers = workers.min(mb_rows).max(1);
+    if workers == 1 {
+        let mut writer = BitWriter::new();
+        for row in 0..mb_rows {
+            encode_row(&mut writer, frame, reference, recon, row, (code, qs));
+        }
+        out.extend_from_slice(&writer.finish());
+        return Ok(());
+    }
+    let per_band = mb_rows.div_ceil(workers);
+    let bands: Vec<std::ops::Range<usize>> = (0..workers)
+        .map(|band| (band * per_band).min(mb_rows)..((band + 1) * per_band).min(mb_rows))
+        .filter(|rows| !rows.is_empty())
+        .collect();
+    let encoded: Vec<Option<(Vec<u8>, Frame420)>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = bands
+            .iter()
+            .map(|rows| {
+                let rows = rows.clone();
+                scope.spawn(move || {
+                    let mut writer = BitWriter::new();
+                    let mut band_recon = empty_frame(frame.width, frame.height);
+                    for row in rows {
+                        encode_row(
+                            &mut writer,
+                            frame,
+                            reference,
+                            &mut band_recon,
+                            row,
+                            (code, qs),
+                        );
+                    }
+                    (writer.finish(), band_recon)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().ok())
+            .collect()
+    });
+    let (width, chroma_width) = (usize::from(frame.width), usize::from(frame.width) / 2);
+    for (rows, band) in bands.iter().zip(encoded) {
+        let (bytes, band_recon) =
+            band.ok_or_else(|| EncodeError("a slice thread failed".to_string()))?;
+        out.extend_from_slice(&bytes);
+        copy_rows(
+            &band_recon.y,
+            &mut recon.y,
+            width,
+            rows.start * 16..rows.end * 16,
+        );
+        copy_rows(
+            &band_recon.cb,
+            &mut recon.cb,
+            chroma_width,
+            rows.start * 8..rows.end * 8,
+        );
+        copy_rows(
+            &band_recon.cr,
+            &mut recon.cr,
+            chroma_width,
+            rows.start * 8..rows.end * 8,
+        );
+    }
+    Ok(())
+}
+
+/// Most threads one picture's slices use.
+const MAX_SLICE_THREADS: usize = 16;
+
+/// How many threads encode a picture of `mb_rows` macroblock rows: the CPU's cores, at most 16.
+fn slice_workers(mb_rows: usize) -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .min(MAX_SLICE_THREADS)
+        .min(mb_rows)
+        .max(1)
+}
+
+/// Copies lines `lines` of a plane `width` wide.
+fn copy_rows(from: &[u8], to: &mut [u8], width: usize, lines: std::ops::Range<usize>) {
+    let range = lines.start.saturating_mul(width)..lines.end.saturating_mul(width);
+    if let (Some(source), Some(target)) = (from.get(range.clone()), to.get_mut(range)) {
+        target.copy_from_slice(source);
+    }
+}
+
+/// Encodes macroblock row `row` as one slice: intra without a reference, else P.
+fn encode_row(
+    writer: &mut BitWriter,
+    frame: &Frame420,
+    reference: Option<&Frame420>,
+    recon: &mut Frame420,
+    row: usize,
+    (code, qs): (u8, u16),
+) {
+    let mb_cols = usize::from(frame.width) / 16;
+    write_slice_header(writer, row, code);
+    let mut predictors = Predictors::new();
+    let y = row * 16;
+    match reference {
+        None => {
+            for col in 0..mb_cols {
+                encode_intra_macroblock(writer, frame, recon, col * 16, y, qs, &mut predictors);
             }
         }
-
-        Ok((writer.finish(), recon))
+        Some(reference) => {
+            let mut prev_intra = false;
+            let mut pmv_x = 0i32;
+            let mut pmv_y = 0i32;
+            for col in 0..mb_cols {
+                encode_p_macroblock(
+                    writer,
+                    frame,
+                    reference,
+                    recon,
+                    col * 16,
+                    y,
+                    qs,
+                    &mut predictors,
+                    &mut prev_intra,
+                    &mut pmv_x,
+                    &mut pmv_y,
+                );
+            }
+        }
     }
 }
 
@@ -428,70 +568,6 @@ fn write_slice_header(writer: &mut BitWriter, row: usize, code: u8) {
     writer.write_start_code(slice_code);
     writer.write_bits(u32::from(code), 5);
     writer.write_bits(0, 1);
-}
-
-fn write_slices_intra(
-    writer: &mut BitWriter,
-    frame: &Frame420,
-    recon: &mut Frame420,
-    code: u8,
-    qs: u16,
-) {
-    let w = usize::from(frame.width);
-    let h = usize::from(frame.height);
-    let mb_rows = h / 16;
-    let mb_cols = w / 16;
-
-    for row in 0..mb_rows {
-        write_slice_header(writer, row, code);
-        let mut predictors = Predictors::new();
-
-        for col in 0..mb_cols {
-            let x = col * 16;
-            let y = row * 16;
-            encode_intra_macroblock(writer, frame, recon, x, y, qs, &mut predictors);
-        }
-    }
-}
-
-fn write_slices_p(
-    writer: &mut BitWriter,
-    cur: &Frame420,
-    reference: &Frame420,
-    recon: &mut Frame420,
-    code: u8,
-    qs: u16,
-) {
-    let w = usize::from(cur.width);
-    let h = usize::from(cur.height);
-    let mb_rows = h / 16;
-    let mb_cols = w / 16;
-
-    for row in 0..mb_rows {
-        write_slice_header(writer, row, code);
-        let mut predictors = Predictors::new();
-        let mut prev_intra = false;
-        let mut pmv_x = 0i32;
-        let mut pmv_y = 0i32;
-
-        for col in 0..mb_cols {
-            let x = col * 16;
-            let y = row * 16;
-            encode_p_macroblock(
-                writer,
-                cur,
-                reference,
-                recon,
-                x,
-                y,
-                qs,
-                &mut predictors,
-                &mut prev_intra,
-                &mut pmv_x,
-                &mut pmv_y,
-            );
-        }
-    }
 }
 
 fn encode_intra_macroblock(
@@ -1101,4 +1177,52 @@ fn forward_dct8x8_i16(samples: &[i16; 64]) -> [f64; 64] {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{empty_frame, encode_slices};
+    use crate::Frame420;
+
+    /// A picture with detail everywhere: a moving pattern of `phase`.
+    fn picture(phase: usize) -> Frame420 {
+        let mut frame = empty_frame(720, 480);
+        for (index, sample) in frame.y.iter_mut().enumerate() {
+            let (x, y) = (index % 720, index / 720);
+            *sample =
+                u8::try_from((x * 3 + y * 5 + phase * 7 + (x * y) % 31) % 220 + 16).unwrap_or(16);
+        }
+        for (index, sample) in frame.cb.iter_mut().enumerate() {
+            *sample = u8::try_from((index + phase) % 200 + 28).unwrap_or(128);
+        }
+        for (index, sample) in frame.cr.iter_mut().enumerate() {
+            *sample = u8::try_from((index * 3 + phase) % 200 + 28).unwrap_or(128);
+        }
+        frame
+    }
+
+    #[test]
+    fn slices_on_several_threads_are_the_same_as_on_one() -> Result<(), crate::EncodeError> {
+        let first = picture(0);
+        let second = picture(3);
+        let encode = |frame: &Frame420, reference: Option<&Frame420>, workers: usize| {
+            let mut recon = empty_frame(frame.width, frame.height);
+            let mut out = Vec::new();
+            encode_slices(frame, reference, &mut recon, (8, 16, workers), &mut out)
+                .map(|()| (out, recon))
+        };
+        let (intra, intra_recon) = encode(&first, None, 1)?;
+        for workers in [2, 7, 30] {
+            let (bytes, recon) = encode(&first, None, workers)?;
+            assert_eq!(bytes, intra, "intra, {workers} threads");
+            assert_eq!(recon, intra_recon, "intra recon, {workers} threads");
+        }
+        let (inter, inter_recon) = encode(&second, Some(&intra_recon), 1)?;
+        for workers in [2, 7, 30] {
+            let (bytes, recon) = encode(&second, Some(&intra_recon), workers)?;
+            assert_eq!(bytes, inter, "P, {workers} threads");
+            assert_eq!(recon, inter_recon, "P recon, {workers} threads");
+        }
+        Ok(())
+    }
 }

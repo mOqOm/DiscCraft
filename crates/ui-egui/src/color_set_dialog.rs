@@ -3,7 +3,7 @@
 
 use crate::app::{DiscCraftApp, rgb_from_f32, rgb_to_f32};
 use crate::i18n::{tl, tlf};
-use disccraft_project::{ColorSet, Menu, MenuId};
+use disccraft_project::{ColorSet, DEFAULT_NORMAL_MORE, Menu, MenuId};
 use egui::{Context, Id, Modal, Ui};
 use serde_json::json;
 
@@ -154,6 +154,17 @@ fn color_set_fields(ui: &mut Ui, set: &mut ColorSet) {
                 color_button(ui, &mut set.normal.color);
                 opacity_value(ui, &mut set.normal.opacity);
                 ui.end_row();
+                // Colours 2 and 3 (a subpicture's `(=2)` / `(=3)` layers).
+                let mut more = set.normal_more.unwrap_or(DEFAULT_NORMAL_MORE);
+                for (n, color) in (2..).zip(more.iter_mut()) {
+                    ui.label(format!("{n}:"));
+                    color_button(ui, &mut color.color);
+                    opacity_value(ui, &mut color.opacity);
+                    ui.end_row();
+                }
+                if more != set.normal_more.unwrap_or(DEFAULT_NORMAL_MORE) {
+                    set.normal_more = Some(more);
+                }
             });
     });
     for (index, group) in set.groups.iter_mut().enumerate() {
@@ -178,6 +189,24 @@ fn color_set_fields(ui: &mut Ui, set: &mut ColorSet) {
                         opacity_value(ui, &mut group.activated_opacity);
                     });
                     ui.end_row();
+                    // Colours 2 and 3 (a subpicture's `(=2)` / `(=3)` layers): tints of colour 1 until changed.
+                    let before = group.more_colors();
+                    let mut more = before;
+                    for (n, color) in (2..).zip(more.iter_mut()) {
+                        ui.label(format!("{n}:"));
+                        color_button(ui, &mut color.selected);
+                        opacity_value(ui, &mut color.selected_opacity);
+                        ui.add_enabled_ui(!group.same_activated, |ui| {
+                            color_button(ui, &mut color.activated);
+                        });
+                        ui.add_enabled_ui(!group.same_activated, |ui| {
+                            opacity_value(ui, &mut color.activated_opacity);
+                        });
+                        ui.end_row();
+                    }
+                    if more != before {
+                        group.more = Some(more);
+                    }
                 });
             ui.checkbox(
                 &mut group.same_activated,

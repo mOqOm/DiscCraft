@@ -99,6 +99,17 @@ impl DiscCraftApp {
         ui.separator();
         ui.menu_button(tl!("Import"), |ui| {
             push(clicked, ui, Action::ImportAsset, true);
+            push(clicked, ui, Action::ImportMenu, true);
+            push(clicked, ui, Action::ImportPopupMenu, true);
+            // メニューページはビューアに開いているメニューのページになる。
+            push(
+                clicked,
+                ui,
+                Action::ImportMenuPage,
+                self.viewer_menu().is_some(),
+            );
+            push(clicked, ui, Action::ImportTimeline, true);
+            push(clicked, ui, Action::ImportSlideshow, true);
         });
         ui.separator();
         push(clicked, ui, Action::ProjectSettings, true);
@@ -308,10 +319,29 @@ impl DiscCraftApp {
         if labeled(ui, tl!("New Menu"), Action::NewMenu, true) {
             clicked.push(Action::NewMenu);
         }
-        // DiscCraft はテンプレートのチャプターボタンを使わず、選択中のタイムラインからメニューを作る。
+        // ビューアのメニューにチャプターボタンがあれば Encore と同じくそれにリンクを入れ、なければ選択中のタイムラインから
+        // メニューを作る（DiscCraft 独自）。
         let timeline = self.selected_timeline().is_some();
-        push(clicked, ui, Action::CreateChapterIndex, timeline);
+        push(
+            clicked,
+            ui,
+            Action::CreateChapterIndex,
+            timeline || self.viewer_menu_has_chapter_buttons(),
+        );
         push(clicked, ui, Action::CreateMultiPageChapterIndex, timeline);
+        // Encore: メニューを置き換え…（ビューアのメニューを PSD のデザインに。リンクは番号で残す）。
+        push(
+            clicked,
+            ui,
+            Action::ReplaceMenu,
+            self.viewer_menu().is_some(),
+        );
+        push(
+            clicked,
+            ui,
+            Action::AddMenuPage,
+            self.viewer_menu().is_some(),
+        );
         ui.separator();
         let menu = matches!(self.selection, Selection::Menu(_));
         push(clicked, ui, Action::AddButton, menu);
@@ -560,6 +590,11 @@ impl DiscCraftApp {
             | Action::Save
             | Action::SaveAs
             | Action::ImportAsset
+            | Action::ImportMenu
+            | Action::ImportPopupMenu
+            | Action::ImportMenuPage
+            | Action::ImportTimeline
+            | Action::ImportSlideshow
             | Action::Exit => self.run_file_action(ui, action),
             Action::NewMenu
             | Action::NewTimeline
@@ -612,6 +647,8 @@ impl DiscCraftApp {
             Action::EditMenuColorSet => self.open_color_set_dialog(),
             Action::SetMenuUserOps => self.open_menu_user_ops(),
             Action::SaveMenuAsFile => self.save_menu_as_file(),
+            Action::ReplaceMenu => self.replace_menu_from_file(),
+            Action::AddMenuPage => self.add_menu_page(),
             Action::SaveMenuAsTemplate => self.save_menu_as_template(),
             Action::SetMenuEnd => self.open_menu_end_action(),
             Action::AlignLeft
@@ -687,6 +724,17 @@ impl DiscCraftApp {
             Action::Save => self.save_project(false),
             Action::SaveAs => self.save_project(true),
             Action::ImportAsset => self.import_assets(),
+            Action::ImportMenu => self.import_menu_file(crate::menu_commands::MenuImport::Menu),
+            Action::ImportPopupMenu => {
+                self.import_menu_file(crate::menu_commands::MenuImport::Popup);
+            }
+            Action::ImportMenuPage => {
+                if let Some(menu) = self.viewer_menu() {
+                    self.import_menu_file(crate::menu_commands::MenuImport::Page(menu));
+                }
+            }
+            Action::ImportTimeline => self.import_timeline_files(),
+            Action::ImportSlideshow => self.import_slideshow_files(),
             Action::Exit => self.confirm_or_run(ui.ctx(), crate::confirm::PendingAction::Exit),
             _ => {}
         }
@@ -992,8 +1040,8 @@ fn history_request_id() -> egui::Id {
 
 impl DiscCraftApp {
     /// 編集 ▸ ヒストリー ▸ (Encore): the steps that can be redone (the farthest first), then the ones that can be
-    /// undone (the newest first). As in Encore, choosing a step goes to the state just after it: a redo step is
-    /// redone, the undo steps above an undo step are taken back (the newest one changes nothing).
+    /// undone (the newest first). As in Encore, choosing "X の取り消し" takes X back too, with every step above it;
+    /// choosing "X のやり直し" redoes up to and including X.
     fn history_menu(&self, ui: &mut Ui) {
         let redo = self.session.redo_labels();
         let undo = self.session.undo_labels();
@@ -1010,7 +1058,7 @@ impl DiscCraftApp {
                         }
                         for (index, label) in undo.iter().rev().enumerate() {
                             if ui.button(tlf!("Undo {action}", action = *label)).clicked() {
-                                chosen = Some((true, index));
+                                chosen = Some((true, index.saturating_add(1)));
                             }
                         }
                         if let Some(jump) = chosen {

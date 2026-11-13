@@ -19,7 +19,8 @@ const FIRST_HEADER_LEN: usize =
 const CONTINUATION_HEADER_LEN: usize =
     VIDEO_DESCRIPTOR_LEN + COMPOSITION_DESCRIPTOR_LEN + SEQUENCE_DESCRIPTOR_LEN;
 
-const COMPOSITION_STATE: u8 = 0x80;
+const EPOCH_START: u8 = 0x80;
+const ACQUISITION_POINT: u8 = 0x40;
 const FIRST_IN_SEQUENCE: u8 = 0x80;
 const LAST_IN_SEQUENCE: u8 = 0x40;
 const USER_INTERFACE_POPUP: u8 = 0x40;
@@ -27,6 +28,25 @@ const AUTO_ACTION: u8 = 0x80;
 const BUTTON_OBJECT_COMPLETE: u8 = 0x40;
 const NONE_SOUND: u8 = 0xFF;
 const NONE_BUTTON: u16 = 0xFFFF;
+
+/// What a display set is to the IG decoder (the composition state of its ICS).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompositionState {
+    /// The start of an epoch: the decoder starts afresh (a menu's first display set).
+    EpochStart,
+    /// The current composition again, for a decoder that starts playing here (a motion menu's loop point). A
+    /// decoder already showing the composition ignores it, so the selected button stays.
+    AcquisitionPoint,
+}
+
+impl CompositionState {
+    fn byte(self) -> u8 {
+        match self {
+            Self::EpochStart => EPOCH_START,
+            Self::AcquisitionPoint => ACQUISITION_POINT,
+        }
+    }
+}
 
 /// One interactive graphics button.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,12 +164,17 @@ fn sequence_flags(first: bool, last: bool) -> u8 {
     flags
 }
 
-fn push_descriptors(out: &mut Vec<u8>, c: &InteractiveComposition, sequence: u8) {
+fn push_descriptors(
+    out: &mut Vec<u8>,
+    c: &InteractiveComposition,
+    state: CompositionState,
+    sequence: u8,
+) {
     out.extend_from_slice(&c.width.to_be_bytes());
     out.extend_from_slice(&c.height.to_be_bytes());
     out.push(frame_rate_byte(c.frame_rate_id));
     out.extend_from_slice(&c.number.to_be_bytes());
-    out.push(COMPOSITION_STATE);
+    out.push(state.byte());
     out.push(sequence);
 }
 
@@ -284,7 +309,11 @@ fn validate_composition(c: &InteractiveComposition) -> Result<(), PgsError> {
     Ok(())
 }
 
-fn fragment(data: &[u8], c: &InteractiveComposition) -> Result<Vec<Vec<u8>>, PgsError> {
+fn fragment(
+    data: &[u8],
+    c: &InteractiveComposition,
+    state: CompositionState,
+) -> Result<Vec<Vec<u8>>, PgsError> {
     let data_len = u32::try_from(data.len()).map_err(|_| err("composition data too large"))?;
     if data_len > MAX_U24 {
         return Err(err("composition data length exceeds 24 bits"));
@@ -329,7 +358,7 @@ fn fragment(data: &[u8], c: &InteractiveComposition) -> Result<Vec<Vec<u8>>, Pgs
             .checked_add(chunk_len)
             .ok_or_else(|| err("ICS fragment too large"))?;
         let mut body = Vec::with_capacity(capacity);
-        push_descriptors(&mut body, c, sequence);
+        push_descriptors(&mut body, c, state, sequence);
         if first {
             push_u24(&mut body, data_len);
         }
@@ -347,11 +376,19 @@ fn fragment(data: &[u8], c: &InteractiveComposition) -> Result<Vec<Vec<u8>>, Pgs
     Ok(segments)
 }
 
-/// Encode an interactive composition segment (ICS) as one or more segments.
+/// Encode an interactive composition segment (ICS) as one or more segments, starting an epoch.
 pub fn ics(c: &InteractiveComposition) -> Result<Vec<Vec<u8>>, PgsError> {
+    ics_as(c, CompositionState::EpochStart)
+}
+
+/// Encode an interactive composition segment (ICS) with the given composition state.
+pub fn ics_as(
+    c: &InteractiveComposition,
+    state: CompositionState,
+) -> Result<Vec<Vec<u8>>, PgsError> {
     validate_composition(c)?;
     let data = composition_data(c)?;
-    fragment(&data, c)
+    fragment(&data, c, state)
 }
 
 fn validate_object_ids(objects: &[IgObject]) -> Result<(), PgsError> {
@@ -369,7 +406,7 @@ fn validate_object_ids(objects: &[IgObject]) -> Result<(), PgsError> {
     Ok(())
 }
 
-/// Encode a complete IG display set at `pts`.
+/// Encode a complete IG display set at `pts` that starts an epoch.
 ///
 /// The order is ICS fragments, PDS, every ODS, then END. ICS and END use `dts = pts`.
 /// PDS and ODS keep the display-set `pts` but use `dts = pts - 1`, saturating at zero,
@@ -380,12 +417,23 @@ pub fn display_set(
     objects: &[IgObject],
     pts: u64,
 ) -> Result<Vec<TimedSegment>, PgsError> {
+    display_set_as(c, palette, objects, pts, CompositionState::EpochStart)
+}
+
+/// Encode a complete IG display set at `pts` with the given composition state (see [`display_set`]).
+pub fn display_set_as(
+    c: &InteractiveComposition,
+    palette: &[PaletteEntry],
+    objects: &[IgObject],
+    pts: u64,
+    state: CompositionState,
+) -> Result<Vec<TimedSegment>, PgsError> {
     validate_object_ids(objects)?;
 
     let mut output = Vec::new();
     let pre_dts = pts.saturating_sub(1);
 
-    for data in ics(c)? {
+    for data in ics_as(c, state)? {
         output.push(TimedSegment {
             pts,
             dts: pts,
@@ -521,6 +569,30 @@ mod tests {
 
         assert_eq!(segments.len(), 1);
         assert_eq!(segments.first().cloned(), Some(expected));
+    }
+
+    #[test]
+    fn an_acquisition_point_repeats_the_composition_with_its_state() {
+        let state_of = |segments: &[crate::TimedSegment]| {
+            segments
+                .first()
+                .and_then(|segment| segment.data.get(10).copied())
+        };
+        let start = display_set(&make_composition(), &palette(), &[make_object(0)], 1000)
+            .unwrap_or_default();
+        let again = super::display_set_as(
+            &make_composition(),
+            &palette(),
+            &[make_object(0)],
+            5000,
+            super::CompositionState::AcquisitionPoint,
+        )
+        .unwrap_or_default();
+        // Segment header (3) + width, height, frame rate, number (7): the composition state.
+        assert_eq!(state_of(&start), Some(0x80));
+        assert_eq!(state_of(&again), Some(0x40));
+        assert_eq!(start.len(), again.len());
+        assert!(again.iter().all(|segment| segment.pts == 5000));
     }
 
     #[test]

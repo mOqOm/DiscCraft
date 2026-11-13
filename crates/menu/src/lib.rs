@@ -44,6 +44,59 @@ pub enum MenuError {
     Png(#[from] Box<png::DecodingError>),
 }
 
+/// A picture for a button's video thumbnail (Encore's `(%)` layer): RGB24 of `width` x `height`, stretched over the
+/// thumbnail's whole area as Encore does (no bars, nothing cut off).
+#[derive(Clone, Copy, Debug)]
+pub struct ThumbnailPicture<'a> {
+    /// The button's index.
+    pub button: usize,
+    /// The pixels.
+    pub rgb: &'a [u8],
+    /// Width in pixels.
+    pub width: usize,
+    /// Height in pixels.
+    pub height: usize,
+}
+
+/// What a menu picture is drawn with besides the menu itself.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MenuPictures<'a> {
+    /// A picture of the whole screen under the menu (a motion menu's video frame, already 4:3 as `asset.frame` and
+    /// the build give it), stretched to the frame instead of the menu's background.
+    pub background: Option<(&'a [u8], usize, usize)>,
+    /// Pictures for the buttons' video thumbnails.
+    pub thumbnails: &'a [ThumbnailPicture<'a>],
+}
+
+/// A still picture (an image asset, such as a slideshow's slide shown in a video thumbnail) as RGB24 of its own
+/// size, any transparency over black; `None` when it cannot be read.
+pub fn image_rgb(
+    project: &Project,
+    asset: disccraft_project::AssetId,
+) -> Option<(Vec<u8>, usize, usize)> {
+    let (width, height) = frame_size(&project.settings);
+    let image = draw::load_image(project, asset, width, height).ok()?;
+    let pixels = image.width.checked_mul(image.height)?;
+    let rgb: Vec<u8> = match image.channels {
+        3 => image.data,
+        4 => image
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|[r, g, b, a]| {
+                // At most 255 x 255 / 255: fits u8.
+                let over = |value: u8| {
+                    u8::try_from(u16::from(value) * u16::from(*a) / 255).unwrap_or(value)
+                };
+                [over(*r), over(*g), over(*b)]
+            })
+            .collect(),
+        _ => return None,
+    };
+    (rgb.len() == pixels.checked_mul(3)?).then_some((rgb, image.width, image.height))
+}
+
 /// Navigation geometry for one rendered button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ButtonGeometry {
@@ -80,9 +133,11 @@ pub struct RenderedMenu {
     pub palette: [u32; 16],
     /// The DVD color sets of highlight groups 1 to 3.
     pub color_sets: [[u8; 8]; 3],
-    /// Contrast (0 to 15) of the highlight frame in the normal state, drawn with palette entry
-    /// [`NORMAL_PALETTE_ENTRY`] (Encore's 標準グループ); 0 hides it.
-    pub normal_alpha: u8,
+    /// The palette entry of each highlight pixel value (0 to 3) in the normal state (Encore's 標準グループ colours 1
+    /// to 3; colour 1 is [`NORMAL_PALETTE_ENTRY`]).
+    pub normal_entries: [u8; 4],
+    /// The contrast (0 to 15) of each highlight pixel value in the normal state; 0 hides it.
+    pub normal_contrasts: [u8; 4],
     /// Button geometry and navigation.
     pub buttons: Vec<ButtonGeometry>,
 }
@@ -95,10 +150,37 @@ pub struct RenderedMenu {
 /// image background cannot be used. Returns I/O or PNG errors when an image
 /// background cannot be read.
 pub fn render_menu(project: &Project, menu: &Menu) -> Result<RenderedMenu, MenuError> {
+    render_disc_menu(project, menu, MenuPictures::default())
+}
+
+/// Renders a menu for a disc like [`render_menu`], with `pictures` (a motion menu's frame, the buttons' video
+/// thumbnails).
+///
+/// # Errors
+///
+/// As [`render_menu`]; also when the background picture does not match its size.
+pub fn render_disc_menu(
+    project: &Project,
+    menu: &Menu,
+    pictures: MenuPictures<'_>,
+) -> Result<RenderedMenu, MenuError> {
     if menu.buttons.is_empty() {
         return Err(MenuError::Invalid("menu has no buttons".to_string()));
     }
-    render(project, menu)
+    render(project, menu, pictures)
+}
+
+/// Renders a menu for an editor like [`render_menu_preview`], with `pictures`.
+///
+/// # Errors
+///
+/// As [`render_menu_preview`]; also when the background picture does not match its size.
+pub fn render_menu_with(
+    project: &Project,
+    menu: &Menu,
+    pictures: MenuPictures<'_>,
+) -> Result<RenderedMenu, MenuError> {
+    render(project, menu, pictures)
 }
 
 /// Renders a menu for an editor: like [`render_menu`], but a menu without buttons (a new, blank menu) is shown too,
@@ -108,32 +190,61 @@ pub fn render_menu(project: &Project, menu: &Menu) -> Result<RenderedMenu, MenuE
 ///
 /// As [`render_menu`], except for a menu without buttons.
 pub fn render_menu_preview(project: &Project, menu: &Menu) -> Result<RenderedMenu, MenuError> {
-    render(project, menu)
+    render(project, menu, MenuPictures::default())
 }
 
-fn render(project: &Project, menu: &Menu) -> Result<RenderedMenu, MenuError> {
+/// Draws the menu: the background (or the picture under it), the pictures and shapes, the texts, the buttons'
+/// video thumbnails and the button texts, bottom to top.
+fn render(
+    project: &Project,
+    menu: &Menu,
+    pictures: MenuPictures<'_>,
+) -> Result<RenderedMenu, MenuError> {
     let (width, height) = frame_size(&project.settings);
     let mut rgb = draw::new_frame(width, height)?;
 
-    draw::draw_background(project, menu, width, height, &mut rgb)?;
+    match pictures.background {
+        // A frame of the menu's own size is used as it is (every frame of a motion menu).
+        Some((pixels, picture_width, picture_height))
+            if (picture_width, picture_height) == (usize::from(width), usize::from(height))
+                && pixels.len() == rgb.len() =>
+        {
+            rgb.copy_from_slice(pixels);
+        }
+        Some((pixels, picture_width, picture_height)) => {
+            if !draw::scale_rgb_into(
+                pixels,
+                picture_width,
+                picture_height,
+                width,
+                height,
+                &mut rgb,
+            ) {
+                return Err(MenuError::Invalid(
+                    "the background picture does not match its size".to_string(),
+                ));
+            }
+        }
+        None => draw::draw_background(project, menu, width, height, &mut rgb)?,
+    }
     draw_graphics_rgb(project, menu, width, height, &mut rgb);
     draw::draw_texts(menu, width, height, &mut rgb);
+    draw::draw_thumbnails(menu, width, height, &mut rgb, pictures.thumbnails);
     draw::draw_labels(menu, width, height, &mut rgb);
 
     let highlight = highlight::build(menu, width, height)?;
     let buttons = button_geometry(menu, &project.settings.routing);
-    let palette = palette::build(menu);
-    let color_sets = palette::color_sets(menu);
-    let normal_alpha = palette::normal_alpha(menu);
+    let colors = palette::dvd_colors(menu, &highlight);
 
     Ok(RenderedMenu {
         width,
         height,
         rgb,
         highlight,
-        palette,
-        color_sets,
-        normal_alpha,
+        palette: colors.palette,
+        color_sets: colors.color_sets,
+        normal_entries: colors.normal_entries,
+        normal_contrasts: colors.normal_contrasts,
         buttons,
     })
 }
@@ -151,30 +262,24 @@ pub fn render_menu_over_picture(
     width: usize,
     height: usize,
 ) -> Result<RenderedMenu, MenuError> {
-    let mut rendered = render_menu_preview(project, menu)?;
-    let mut frame = vec![0u8; rendered.rgb.len()];
-    if !draw::scale_rgb_into(
-        rgb,
-        width,
-        height,
-        rendered.width,
-        rendered.height,
-        &mut frame,
-    ) {
-        return Err(MenuError::Invalid(
-            "the background picture does not match its size".to_string(),
-        ));
-    }
-    draw_graphics_rgb(project, menu, rendered.width, rendered.height, &mut frame);
-    draw::draw_texts(menu, rendered.width, rendered.height, &mut frame);
-    draw::draw_labels(menu, rendered.width, rendered.height, &mut frame);
-    rendered.rgb = frame;
-    Ok(rendered)
+    render(
+        project,
+        menu,
+        MenuPictures {
+            background: Some((rgb, width, height)),
+            thumbnails: &[],
+        },
+    )
 }
 
 /// The layers of `menu` for editing it in an image editor (Encore's "Edit Menu in Photoshop"), bottom to top: the
-/// background ("背景"), one layer per text object, and one `(+)` group per button with its text and a hidden
-/// `(=1)` highlight filled in the highlight colour. `picture` replaces the background (a motion menu's first frame).
+/// background ("背景"), one layer per text object, and one `(+)` group per button with its text and its highlight as
+/// hidden `(=1)` / `(=2)` / `(=3)` layers (the frame, the text or the button's subpicture, each colour in its group's
+/// selected colour). The text layer marks the button's corners faintly (alpha 1), so the group keeps the button's
+/// rectangle. Button 1 is the lowest group, as Encore numbers a PSD menu's
+/// buttons from the bottom of the layer stack (and [`disccraft_photo::load_psd_menu`] reads them back in that
+/// order). `picture` replaces the
+/// background (a motion menu's first frame).
 ///
 /// # Errors
 ///
@@ -227,40 +332,102 @@ pub fn menu_psd_layers(
         });
     }
     for (index, button) in menu.buttons.iter().enumerate() {
-        let [r, g, b] = menu.highlight_group(button.highlight_group).selected;
+        let group = menu.highlight_group(button.highlight_group);
         let title = if button.label.trim().is_empty() {
             format!("ボタン {}", index.saturating_add(1))
         } else {
             button.label.clone()
         };
-        let mut highlight = vec![0u8; usize::from(width) * usize::from(height) * 4];
         let rect = button.rect;
-        for y in rect.y..rect.y.saturating_add(rect.h).min(height) {
-            for x in rect.x..rect.x.saturating_add(rect.w).min(width) {
-                let i = (usize::from(y) * usize::from(width) + usize::from(x)) * 4;
-                if let Some(pixel) = highlight.get_mut(i..i + 4) {
-                    pixel.copy_from_slice(&[r, g, b, 255]);
+        let values = highlight::button_values(menu, index).unwrap_or_default();
+        let mut highlights = Vec::new();
+        for n in 1..=3_u8 {
+            if !values.contains(&n) {
+                continue;
+            }
+            let [r, g, b] = group.selected_color(n).0;
+            let mut rgba = vec![0u8; usize::from(width) * usize::from(height) * 4];
+            for (row, line) in values.chunks(usize::from(rect.w).max(1)).enumerate() {
+                for (col, value) in line.iter().enumerate() {
+                    let x = usize::from(rect.x) + col;
+                    let y = usize::from(rect.y) + row;
+                    if *value != n || x >= usize::from(width) || y >= usize::from(height) {
+                        continue;
+                    }
+                    let i = (y * usize::from(width) + x) * 4;
+                    if let Some(pixel) = rgba.get_mut(i..i + 4) {
+                        pixel.copy_from_slice(&[r, g, b, 255]);
+                    }
                 }
             }
+            highlights.push(PsdLayer::Raster {
+                name: format!("(={n}) ハイライト"),
+                rgba,
+                visible: false,
+            });
+        }
+        let mut label = draw::label_rgba(menu, button, width, height);
+        // The button's corners, faintly, so the group covers the whole button.
+        let right = rect
+            .x
+            .saturating_add(rect.w)
+            .saturating_sub(1)
+            .min(width.saturating_sub(1));
+        let bottom = rect
+            .y
+            .saturating_add(rect.h)
+            .saturating_sub(1)
+            .min(height.saturating_sub(1));
+        for (x, y) in [
+            (rect.x, rect.y),
+            (right, rect.y),
+            (rect.x, bottom),
+            (right, bottom),
+        ] {
+            let i = (usize::from(y) * usize::from(width) + usize::from(x)) * 4;
+            if let Some(alpha) = label.get_mut(i + 3)
+                && *alpha == 0
+            {
+                *alpha = 1;
+            }
+        }
+        let mut children = Vec::new();
+        if let Some(area) = button.thumbnail_rect() {
+            // Encore's video thumbnail layer: a grey placeholder where the video goes.
+            let mut placeholder = vec![0u8; usize::from(width) * usize::from(height) * 4];
+            for y in area.y..area.y.saturating_add(area.h).min(height) {
+                for x in area.x..area.x.saturating_add(area.w).min(width) {
+                    let i = (usize::from(y) * usize::from(width) + usize::from(x)) * 4;
+                    if let Some(pixel) = placeholder.get_mut(i..i + 4) {
+                        pixel.copy_from_slice(&THUMBNAIL_PLACEHOLDER);
+                    }
+                }
+            }
+            children.push(PsdLayer::Raster {
+                name: "(%) ビデオ".to_owned(),
+                rgba: placeholder,
+                visible: true,
+            });
         }
         layers.push(PsdLayer::Group {
             name: format!("(+) {title}"),
-            children: vec![
-                PsdLayer::Raster {
+            children: [
+                children,
+                vec![PsdLayer::Raster {
                     name: title,
-                    rgba: draw::label_rgba(menu, button, width, height),
+                    rgba: label,
                     visible: true,
-                },
-                PsdLayer::Raster {
-                    name: "(=1) ハイライト".to_owned(),
-                    rgba: highlight,
-                    visible: false,
-                },
-            ],
+                }],
+                highlights,
+            ]
+            .concat(),
         });
     }
     Ok((width, height, layers))
 }
+
+/// The grey of a video thumbnail's placeholder layer in a written PSD.
+const THUMBNAIL_PLACEHOLDER: [u8; 4] = [128, 128, 128, 255];
 
 /// Write `menu` as a layered PSD (see [`menu_psd_layers`]) for editing in PhotoCraft or another PSD editor.
 ///
@@ -310,18 +477,21 @@ pub fn render_menu_over(
     menu: &Menu,
     background: &[u8],
 ) -> Result<RenderedMenu, MenuError> {
-    let mut rendered = render_menu(project, menu)?;
-    if background.len() != rendered.rgb.len() {
+    let (width, height) = frame_size(&project.settings);
+    let (width, height) = (usize::from(width), usize::from(height));
+    if Some(background.len()) != width.checked_mul(height).and_then(|n| n.checked_mul(3)) {
         return Err(MenuError::Invalid(
             "background frame size does not match the menu".to_string(),
         ));
     }
-    let mut rgb = background.to_vec();
-    draw_graphics_rgb(project, menu, rendered.width, rendered.height, &mut rgb);
-    draw::draw_texts(menu, rendered.width, rendered.height, &mut rgb);
-    draw::draw_labels(menu, rendered.width, rendered.height, &mut rgb);
-    rendered.rgb = rgb;
-    Ok(rendered)
+    render_disc_menu(
+        project,
+        menu,
+        MenuPictures {
+            background: Some((background, width, height)),
+            thumbnails: &[],
+        },
+    )
 }
 
 /// Blends the menu's graphic layers (images and shapes) into an RGB24 frame.
@@ -384,6 +554,63 @@ mod tests {
     use super::{auto_route, render_menu, ycrcb_entry};
     use disccraft_project::{Link, MenuBackground, Project, Rect};
     use std::error::Error;
+
+    #[test]
+    fn a_buttons_subpicture_is_its_highlight_and_goes_through_a_psd() -> Result<(), Box<dyn Error>>
+    {
+        let mut project = Project::default();
+        let menu_id = project.add_menu(None)?;
+        let rect = Rect {
+            x: 100,
+            y: 100,
+            w: 8,
+            h: 4,
+        };
+        let _ = project.add_button(menu_id, String::new(), Some(rect), Link::NotSet)?;
+        // A 4 x 2 subpicture (colours 1, 2, 3 and none) stretched over the 8 x 4 button.
+        let sub = disccraft_project::Subpicture::from_values(4, 2, &[1, 1, 2, 3, 0, 0, 2, 3])
+            .ok_or("subpicture")?;
+        let menu = project.menu_mut(menu_id).ok_or("menu")?;
+        menu.buttons.first_mut().ok_or("button")?.subpicture = Some(sub);
+        let menu = menu.clone();
+        let expected = [
+            [1, 1, 1, 1, 2, 2, 3, 3],
+            [1, 1, 1, 1, 2, 2, 3, 3],
+            [0, 0, 0, 0, 2, 2, 3, 3],
+            [0, 0, 0, 0, 2, 2, 3, 3],
+        ]
+        .concat();
+        let highlight = render_menu(&project, &menu)?.highlight;
+        assert_eq!(
+            (highlight.x, highlight.y, highlight.width, highlight.height),
+            (100, 100, 8, 4)
+        );
+        assert_eq!(highlight.pixels, expected);
+        assert!(
+            highlight
+                .coverage
+                .iter()
+                .zip(&expected)
+                .all(|(cover, value)| (*cover == 255) == (*value != 0))
+        );
+
+        // Written to a PSD as (=1) to (=3) layers, it reads back the same, over the same rectangle.
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-psd-sub-menu-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("menu.psd");
+        super::export_menu_psd(&project, &menu, None, &path)?;
+        let read = disccraft_photo::load_psd_menu(&path)?;
+        let button = read.buttons.first().ok_or("button")?;
+        assert_eq!(
+            (button.x, button.y, button.width, button.height),
+            (100, 100, 8, 4)
+        );
+        let values = button.subpicture.as_ref().map(|sub| sub.values.clone());
+        assert_eq!(values, Some(expected));
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
 
     #[test]
     fn a_menu_without_buttons_is_shown_in_an_editor_but_not_built() -> Result<(), Box<dyn Error>> {
@@ -473,6 +700,137 @@ mod tests {
 
         let (_, _, layers) = super::menu_psd_layers(&project, &menu, None)?;
         assert_eq!(layers.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn a_thumbnail_picture_fills_the_area_and_the_text_goes_below() -> Result<(), Box<dyn Error>> {
+        let mut project = Project::default();
+        let menu_id = project.add_menu(None)?;
+        let rect = Rect {
+            x: 100,
+            y: 100,
+            w: 200,
+            h: 160,
+        };
+        let _ = project.add_button(
+            menu_id,
+            "Scene".to_owned(),
+            Some(rect),
+            disccraft_project::Link::NotSet,
+        )?;
+        if let Some(menu) = project.menu_mut(menu_id) {
+            menu.background = disccraft_project::MenuBackground::Color { color: [0, 0, 0] };
+            menu.text_color = [255, 255, 255];
+            if let Some(button) = menu.buttons.first_mut() {
+                button.thumbnail = Some(disccraft_project::ThumbnailArea {
+                    x: 0,
+                    y: 0,
+                    w: 10_000,
+                    h: 7_500,
+                });
+            }
+        }
+        let menu = project.menu(menu_id).ok_or("menu")?.clone();
+        let button = menu.buttons.first().ok_or("button")?;
+        assert_eq!(
+            button.thumbnail_rect(),
+            Some(Rect {
+                x: 100,
+                y: 100,
+                w: 200,
+                h: 120
+            })
+        );
+        assert_eq!(
+            button.label_rect(),
+            Rect {
+                x: 100,
+                y: 220,
+                w: 200,
+                h: 40
+            }
+        );
+
+        // A 4 x 2 red picture covers the whole area (stretched, no bars).
+        let red = [200u8, 0, 0].repeat(8);
+        let pictures = [super::ThumbnailPicture {
+            button: 0,
+            rgb: &red,
+            width: 4,
+            height: 2,
+        }];
+        let rendered = super::render_disc_menu(
+            &project,
+            &menu,
+            super::MenuPictures {
+                background: None,
+                thumbnails: &pictures,
+            },
+        )?;
+        let at = |x: usize, y: usize| {
+            let i = (y * usize::from(rendered.width) + x) * 3;
+            rendered.rgb.get(i..i + 3).map(<[u8]>::to_vec)
+        };
+        for (x, y) in [(101, 101), (298, 101), (101, 218), (298, 218), (200, 160)] {
+            assert_eq!(at(x, y), Some(vec![200, 0, 0]), "({x}, {y})");
+        }
+        // Outside the area the background stays, and the text is drawn in the strip below.
+        assert_eq!(at(99, 99), Some(vec![0, 0, 0]));
+        let strip_has_text =
+            (100..300).any(|x| (222..258).any(|y| at(x, y) != Some(vec![0, 0, 0])));
+        assert!(strip_has_text);
+        // Without a picture the area keeps what is under it.
+        let plain = super::render_menu(&project, &menu)?;
+        let i = (160 * usize::from(plain.width) + 200) * 3;
+        assert_eq!(plain.rgb.get(i..i + 3), Some(&[0u8, 0, 0][..]));
+
+        // Written to a PSD, the area comes back as a (%) layer.
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-psd-thumb-menu-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("menu.psd");
+        super::export_menu_psd(&project, &menu, None, &path)?;
+        let read = disccraft_photo::load_psd_menu(&path)?;
+        let thumbnail = read.buttons.first().and_then(|button| button.thumbnail);
+        assert_eq!(thumbnail, Some([100, 100, 200, 120]));
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn a_saved_psd_reads_back_with_the_same_button_numbers() -> Result<(), Box<dyn Error>> {
+        let mut project = Project::default();
+        let menu_id = project.add_menu(None)?;
+        for (index, label) in ["One", "Two", "Three"].into_iter().enumerate() {
+            let y = 100 + u16::try_from(index)? * 80;
+            let _ = project.add_button(
+                menu_id,
+                label.to_owned(),
+                Some(Rect {
+                    x: 100,
+                    y,
+                    w: 200,
+                    h: 50,
+                }),
+                disccraft_project::Link::NotSet,
+            )?;
+        }
+        let menu = project.menu(menu_id).ok_or("menu")?.clone();
+        let dir = std::env::temp_dir().join(format!("disccraft-psd-order-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("menu.psd");
+        super::export_menu_psd(&project, &menu, None, &path)?;
+        let read = disccraft_photo::load_psd_menu(&path)?;
+        let names: Vec<&str> = read
+            .buttons
+            .iter()
+            .map(|button| button.name.as_str())
+            .collect();
+        assert_eq!(names, ["One", "Two", "Three"]);
+        let tops: Vec<u32> = read.buttons.iter().map(|button| button.y).collect();
+        assert!(tops.windows(2).all(|pair| pair[0] < pair[1]), "{tops:?}");
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 
@@ -679,6 +1037,51 @@ mod tests {
     }
 
     #[test]
+    fn a_button_text_takes_its_own_formatting() -> Result<(), Box<dyn Error>> {
+        if filmcraft_text::families().is_empty() {
+            return Ok(());
+        }
+        let mut project = Project::default();
+        let menu_id = project.add_menu(None)?;
+        project.add_button(
+            menu_id,
+            "Play".to_string(),
+            Some(Rect {
+                x: 100,
+                y: 100,
+                w: 400,
+                h: 80,
+            }),
+            Link::Stop,
+        )?;
+        let mut menu = project.menu(menu_id).ok_or("menu")?.clone();
+        menu.background = MenuBackground::Color { color: [0, 0, 0] };
+        let ink = |menu: &disccraft_project::Menu| -> Result<(f64, usize), Box<dyn Error>> {
+            let rendered = super::render_menu_preview(&project, menu)?;
+            let light = rendered.rgb.iter().map(|v| f64::from(*v)).sum();
+            let partial = rendered
+                .rgb
+                .chunks(3)
+                .filter(|p| p[0] > 10 && p[0] < 245)
+                .count();
+            Ok((light, partial))
+        };
+        let (plain, _) = ink(&menu)?;
+        if let Some(button) = menu.buttons.first_mut() {
+            button.label_format.bold = true;
+            button.label_format.horizontal_scale = 150;
+        }
+        let (heavy, _) = ink(&menu)?;
+        assert!(heavy > plain * 1.2, "{plain} {heavy}");
+        if let Some(button) = menu.buttons.first_mut() {
+            button.label_format.antialias = disccraft_project::TextAntialias::None;
+        }
+        let (_, partial) = ink(&menu)?;
+        assert_eq!(partial, 0, "no anti-aliasing on the button text either");
+        Ok(())
+    }
+
+    #[test]
     fn a_bold_style_draws_heavier_text() -> Result<(), Box<dyn Error>> {
         let styles = super::font_styles(None);
         let Some(bold) = styles
@@ -845,6 +1248,55 @@ mod tests {
         assert!(
             inside > 50 && outside == 0,
             "{inside} inside, {outside} outside"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_text_subpicture_highlights_the_text_not_a_frame() -> Result<(), Box<dyn Error>> {
+        if filmcraft_text::families().is_empty() {
+            return Ok(());
+        }
+        let mut project = Project::default();
+        let menu_id = project.add_menu(None)?;
+        project.add_button(
+            menu_id,
+            "PLAY".to_string(),
+            Some(Rect {
+                x: 100,
+                y: 100,
+                w: 300,
+                h: 80,
+            }),
+            Link::Stop,
+        )?;
+        let mut menu = project.menu(menu_id).ok_or("menu")?.clone();
+        assert!(
+            menu.buttons
+                .first()
+                .is_some_and(|button| button.text_subpicture)
+        );
+        let lit = |menu: &disccraft_project::Menu| -> Result<(bool, usize), Box<dyn Error>> {
+            let layer = super::render_menu(&project, menu)?.highlight;
+            let at = |x: u16, y: u16| {
+                let i =
+                    usize::from(y - layer.y) * usize::from(layer.width) + usize::from(x - layer.x);
+                layer.pixels.get(i).copied().unwrap_or(0)
+            };
+            // The top-left corner of the button: on the frame, away from the text.
+            let corner = at(101, 101) == 1;
+            let count = layer.pixels.iter().filter(|pixel| **pixel == 1).count();
+            Ok((corner, count))
+        };
+        let (corner, text_pixels) = lit(&menu)?;
+        assert!(!corner && text_pixels > 50, "{corner} {text_pixels}");
+        if let Some(button) = menu.buttons.first_mut() {
+            button.text_subpicture = false;
+        }
+        let (corner, _) = lit(&menu)?;
+        assert!(
+            corner,
+            "without a text subpicture the frame is the highlight"
         );
         Ok(())
     }
@@ -1025,6 +1477,10 @@ mod tests {
         project.add_button(menu_id, "Play".to_string(), None, Link::Stop)?;
         project.add_button(menu_id, "第2章".to_string(), None, Link::Stop)?;
         project.add_button(menu_id, "Chapter 3".to_string(), None, Link::Stop)?;
+        // This test is about the frame highlight (buttons without a text subpicture).
+        for button in &mut project.menu_mut(menu_id).ok_or("missing menu")?.buttons {
+            button.text_subpicture = false;
+        }
 
         let menu = project.menu(menu_id).ok_or("missing menu")?;
         let rendered = render_menu(&project, menu)?;

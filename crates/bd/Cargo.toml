@@ -16,6 +16,7 @@ disccraft-mpeg2venc.workspace = true
 disccraft-pgs.workspace = true
 disccraft-project.workspace = true
 disccraft-psmux.workspace = true
+disccraft-transcode.workspace = true
 thiserror.workspace = true
 
 [lints]

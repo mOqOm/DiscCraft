@@ -686,8 +686,10 @@ impl<'a> Vm<'a> {
             (0x20, 0xA4) => self.exec_cond_link_pgcn(&cmd),
             (0x00, 0xA1) => self.exec_goto_line(&cmd),
             (0x71, 0x00) => self.exec_mov_imm(&cmd),
+            (0x73, 0x00) => self.exec_add_imm(&cmd),
             (0x61, 0x00) => self.exec_mov_reg(&cmd),
             (0x56, 0x00) => self.exec_set_hl(&cmd),
+            (0x46, 0x00) => self.exec_set_hl_gprm(&cmd),
             (0x51, 0x01) => self.exec_set_stn(&cmd),
             _ => Err(unsupported(&cmd)),
         }
@@ -762,6 +764,11 @@ impl<'a> Vm<'a> {
     }
 
     fn exec_link_pgn(&mut self, cmd: &Cmd) -> Result<Exec, VmError> {
+        // Inside a menu PGC (a motion menu looping from its loop point): playback goes on at that program and
+        // the menu stays on screen, without its pre commands.
+        if matches!(self.context, Context::Menu { .. }) {
+            return Ok(Exec::Stop);
+        }
         let title = self.require_title_pre()?;
         let chapter = u16::from(byte(cmd, 7)?);
         self.link_pgn(title, chapter)?;
@@ -834,6 +841,19 @@ impl<'a> Vm<'a> {
         Ok(Exec::Continue)
     }
 
+    /// `GPRM r += v` (wrapping, as 16-bit registers do).
+    fn exec_add_imm(&mut self, cmd: &Cmd) -> Result<Exec, VmError> {
+        let r_byte = byte(cmd, 3)?;
+        if r_byte & 0xF0 != 0 {
+            return Err(invalid("GPRM destination out of range"));
+        }
+        let value = self
+            .gprm_value(r_byte & 0x0F)?
+            .wrapping_add(u16_be(cmd, 4)?);
+        self.set_gprm(r_byte & 0x0F, value)?;
+        Ok(Exec::Continue)
+    }
+
     fn exec_mov_reg(&mut self, cmd: &Cmd) -> Result<Exec, VmError> {
         let d_byte = byte(cmd, 3)?;
         let s = byte(cmd, 5)?;
@@ -853,7 +873,21 @@ impl<'a> Vm<'a> {
             return Err(invalid("bad SetHL_BTNN encoding"));
         }
 
-        let button = raw >> 2;
+        self.highlight_button(raw >> 2)
+    }
+
+    /// `SetHL_BTNN GPRM r`: the register holds the button as SPRM8 does (button number × 1024).
+    fn exec_set_hl_gprm(&mut self, cmd: &Cmd) -> Result<Exec, VmError> {
+        let register = byte(cmd, 5)?;
+        if register >= 16 {
+            return Err(invalid("GPRM out of range"));
+        }
+        let value = self.gprm_value(register)?;
+        let button = u8::try_from(value >> 10).map_err(|_| invalid("bad SetHL_BTNN value"))?;
+        self.highlight_button(button)
+    }
+
+    fn highlight_button(&mut self, button: u8) -> Result<Exec, VmError> {
         let pgcn = self.require_menu()?;
 
         if button != 0 {
@@ -997,6 +1031,61 @@ mod tests {
     }
 
     #[test]
+    fn a_counted_motion_loop_plays_three_times_then_ends() -> Result<(), VmError> {
+        // Menu 1 plays three times, then jumps to title 1 (the commands `disccraft-nav` writes).
+        let pre: Vec<Cmd> = vec![
+            [0x00, 0xA1, 0x00, 0x09, 0x00, 0x01, 0x00, 0x03],
+            [0x71, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00],
+            [0x71, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00],
+        ];
+        let post: Vec<Cmd> = vec![
+            [0x73, 0x00, 0x00, 0x08, 0x00, 0x01, 0x00, 0x00],
+            [0x00, 0xA1, 0x00, 0x08, 0x00, 0x03, 0x00, 0x05],
+            [0x71, 0x00, 0x00, 0x09, 0x00, 0x01, 0x00, 0x00],
+            [0x20, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01],
+            [0x71, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00],
+            [0x30, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00],
+        ];
+        let mut model = test_model();
+        if let Some(menu) = model.vmgm.get_mut(0) {
+            menu.pre = pre;
+            menu.post = post;
+        }
+        let mut vm = Vm::start(&model)?;
+        assert!(matches!(vm.location(), Location::Menu { pgcn: 1, .. }));
+        vm.time_out_menu()?;
+        vm.time_out_menu()?;
+        assert!(matches!(vm.location(), Location::Menu { pgcn: 1, .. }));
+        vm.time_out_menu()?;
+        assert!(matches!(vm.location(), Location::Title { title: 1, .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn a_menu_loops_back_to_its_loop_point_twice_then_ends() -> Result<(), VmError> {
+        let pre: Vec<Cmd> = vec![[0x71, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00]];
+        let post: Vec<Cmd> = vec![
+            [0x73, 0x00, 0x00, 0x08, 0x00, 0x01, 0x00, 0x00],
+            [0x00, 0xA1, 0x00, 0x08, 0x00, 0x03, 0x00, 0x04],
+            [0x20, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02],
+            [0x71, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00],
+            [0x30, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00],
+        ];
+        let mut model = test_model();
+        if let Some(menu) = model.vmgm.get_mut(0) {
+            menu.pre = pre;
+            menu.post = post;
+        }
+        let mut vm = Vm::start(&model)?;
+        vm.time_out_menu()?;
+        vm.time_out_menu()?;
+        assert!(matches!(vm.location(), Location::Menu { pgcn: 1, .. }));
+        vm.time_out_menu()?;
+        assert!(matches!(vm.location(), Location::Title { title: 1, .. }));
+        Ok(())
+    }
+
+    #[test]
     fn an_auto_action_button_runs_when_highlighted() -> Result<(), VmError> {
         let mut model = test_model();
         // Button 2 of menu 1 activates on highlight (its command is LinkPGCN 3, which plays title 1).
@@ -1036,6 +1125,50 @@ mod tests {
         };
         let mut vm = Vm::restore(&plain, playing)?;
         assert_eq!(*vm.title_key()?, playing);
+        Ok(())
+    }
+
+    #[test]
+    fn a_link_can_ask_a_menu_to_highlight_one_of_its_buttons() -> Result<(), VmError> {
+        let mut model = test_model();
+        // Menu 1 highlights button 1, or the one GPRM10 asks for (as SPRM8 holds it), then clears GPRM10.
+        let highlight = vec![
+            [0x56, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00],
+            [0x00, 0xA1, 0x00, 0x0A, 0x00, 0x00, 0x00, 0x04],
+            [0x46, 0x00, 0x00, 0x00, 0x00, 0x0A, 0x00, 0x00],
+            [0x71, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00, 0x00],
+        ];
+        if let Some(menu) = model.vmgm.first_mut() {
+            menu.pre = highlight;
+            // Button 2 goes through PGC 2, which asks for button 3 and comes back.
+            if let Some(button) = menu.buttons.get_mut(1) {
+                button.command = [0x20, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02];
+            }
+        }
+        if let Some(hidden) = model.vmgm.get_mut(1) {
+            hidden.pre = vec![
+                [0x71, 0x00, 0x00, 0x0A, 0x0C, 0x00, 0x00, 0x00],
+                [0x20, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01],
+            ];
+        }
+        let mut vm = Vm::restore(&model, Location::Menu { pgcn: 1, button: 2 })?;
+        assert_eq!(
+            *vm.press(Key::Enter)?,
+            Location::Menu { pgcn: 1, button: 3 }
+        );
+        // Linked straight back (GPRM10 is 0 again): the menu's own button.
+        if let Some(button) = model
+            .vmgm
+            .first_mut()
+            .and_then(|menu| menu.buttons.get_mut(1))
+        {
+            button.command = [0x20, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01];
+        }
+        let mut vm = Vm::restore(&model, Location::Menu { pgcn: 1, button: 2 })?;
+        assert_eq!(
+            *vm.press(Key::Enter)?,
+            Location::Menu { pgcn: 1, button: 1 }
+        );
         Ok(())
     }
 

@@ -18,6 +18,16 @@ const MAX_PLAYLIST_ITEMS: usize = 99;
 /// Slideshow and playlist commands.
 pub(crate) const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
+        id: "slideshow.import",
+        label: "スライドショーとして読み込み",
+        menu: &["ファイル", "読み込み"],
+        shortcut: None,
+        params: r#"{"paths": [string]}"#,
+        enabled: always_enabled,
+        run: run_import_slideshow,
+        journal: true,
+    },
+    CommandSpec {
         id: "slideshow.create",
         label: "スライドショーを作成",
         menu: &["スライドショー"],
@@ -228,6 +238,54 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: false,
     },
 ];
+
+/// Encore's 読み込み ▸ スライドショー…: the images become assets and the slides of one new slideshow, in the order
+/// of their file names; the slideshow is named after the first one.
+fn run_import_slideshow(session: &mut Session, params: &Value) -> CommandResult {
+    let paths = super::timeline::req_paths(params)?;
+    let mut assets = Vec::with_capacity(paths.len());
+    for path in &paths {
+        let file = std::path::Path::new(path);
+        if !file.is_file() {
+            return Err(format!("slideshow.import: file does not exist: {path}"));
+        }
+        let asset = session
+            .project
+            .add_asset(file)
+            .map_err(|error| error.to_string())?;
+        let kind = session.project.assets.get(&asset).map(|asset| asset.kind);
+        if kind != Some(disccraft_project::AssetKind::Image) {
+            return Err(format!("slideshow.import: not an image: {path}"));
+        }
+        assets.push(asset);
+    }
+    let name = assets
+        .first()
+        .and_then(|asset| session.project.assets.get(asset))
+        .map(|asset| asset.name.clone());
+    let id = session
+        .project
+        .add_slideshow(name)
+        .map_err(|error| error.to_string())?;
+    let duration = session
+        .project
+        .slideshow(id)
+        .map(|slideshow| slideshow.slide_duration)
+        .ok_or_else(|| format!("slideshow {id} does not exist"))?;
+    for asset in &assets {
+        let _ = session
+            .project
+            .add_slide(id, *asset, duration)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(object(&[
+        ("slideshow", Value::from(id)),
+        (
+            "assets",
+            Value::Array(assets.iter().map(|asset| Value::from(asset.0)).collect()),
+        ),
+    ]))
+}
 
 fn run_create_slideshow(session: &mut Session, params: &Value) -> CommandResult {
     let name = opt_str(params, "name")?;
@@ -900,11 +958,16 @@ mod tests {
                 ("kind", Value::from("wipe")),
             ]),
         )?;
+        let show_length = session
+            .project
+            .slideshow(slideshow)
+            .map(|show| show.transition_duration)
+            .ok_or("slideshow")?;
         assert_eq!(
             own(&session),
             Some(SlideTransition {
                 kind: TransitionKind::Wipe,
-                duration: disccraft_project::DEFAULT_TRANSITION_DURATION,
+                duration: show_length,
             })
         );
         session.execute(

@@ -92,6 +92,8 @@ pub fn load_title_streams(
     progress: &mut dyn FnMut(&str, f32),
 ) -> Result<Vec<TitleStreams>, DvdError> {
     let budget = prepare::budget(project)?;
+    // Transcode the titles in parallel first; the titles below then come from the cache.
+    prepare::prepare_all(project, cache_dir, &budget, progress)?;
     let mut titles = Vec::new();
     for timeline in project.timelines.values() {
         let prepared = prepare::prepare_title(project, timeline, cache_dir, &budget, progress)?;
@@ -138,6 +140,20 @@ fn subtitle_tracks(
     } else {
         576
     };
+    subtitle_tracks_sized(project, timeline, first_pts, (720, height))
+}
+
+/// [`subtitle_tracks`] drawn for a frame of `width` x `height` (a Blu-ray disc's HD titles).
+///
+/// # Errors
+///
+/// When a subtitle file cannot be read or a cue cannot be drawn.
+pub fn subtitle_tracks_sized(
+    project: &Project,
+    timeline: &Timeline,
+    first_pts: i64,
+    (width, height): (u16, u16),
+) -> Result<Vec<SubtitleTrack>, DvdError> {
     let mut tracks = Vec::with_capacity(timeline.subtitles.len());
     for track in &timeline.subtitles {
         let asset = project
@@ -148,7 +164,7 @@ fn subtitle_tracks(
             .map_err(|e| DvdError::Invalid(e.to_string()))?;
         let mut rendered = Vec::with_capacity(cues.len());
         for cue in cues {
-            let bitmap = render_cue(&cue.text, 720, height)
+            let bitmap = render_cue(&cue.text, width, height)
                 .map_err(|e| DvdError::Invalid(format!("subtitle: {e}")))?;
             rendered.push(SubtitleCue {
                 start: offset(first_pts, cue.start)?,

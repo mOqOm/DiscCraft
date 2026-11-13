@@ -4,13 +4,19 @@ use std::slice;
 use disccraft_bdmv::mobj::NavCommand;
 use disccraft_bdmv::mpls;
 use disccraft_bdmv::{Stream, StreamCoding};
-use disccraft_m2tsmux::{EsInput, EsUnit, IG_PID, M2tsLayout, StreamKind, VIDEO_PID};
-use disccraft_menu::{ButtonGeometry, HighlightLayer, RenderedMenu, render_menu};
+use disccraft_m2tsmux::{
+    AUDIO_PID, EsInput, EsUnit, IG_PID, M2tsLayout, StreamKind, VIDEO_PID, bd_lpcm_units,
+};
+use disccraft_menu::{
+    ButtonGeometry, HighlightLayer, MenuPictures, RenderedMenu, render_disc_menu,
+};
 use disccraft_mpeg2venc::{Standard, StillOptions, encode_still, rgb_to_frame420};
-use disccraft_pgs::ig::{IgButton, IgObject, IgPage, InteractiveComposition, display_set};
+use disccraft_pgs::ig::{
+    CompositionState, IgButton, IgObject, IgPage, InteractiveComposition, display_set_as,
+};
 use disccraft_pgs::{PaletteEntry, TimedSegment, rgba_to_entry};
-use disccraft_project::{Menu, Project, VideoStandard, opacity_to_alpha};
-use disccraft_psmux::es::parse_video;
+use disccraft_project::{Link, Menu, MenuLoops, Project, VideoStandard, opacity_to_alpha};
+use disccraft_psmux::es::{PictureType, VideoStream, parse_video};
 
 use crate::clip;
 use crate::{BdError, frame_rate, invalid, io_error};
@@ -19,7 +25,11 @@ const QUANTISER_SCALE_CODE: u8 = 4;
 const MAX_STILL_BYTES: usize = 1024 * 1024;
 const START_DTS_27MHZ: i64 = 8_100_000;
 const SEQUENCE_END: [u8; 4] = [0x00, 0x00, 0x01, 0xB7];
+/// PlayItem still mode: none (the playlist ends after its last picture).
+const STILL_MODE_NONE: u8 = 0;
 const STILL_MODE_HOLD: u8 = 2;
+/// PlayItem still mode: hold for `still_time` seconds, then end.
+const STILL_MODE_TIME: u8 = 1;
 
 /// Directories used while writing one menu clip.
 pub(crate) struct MenuDirs<'a> {
@@ -53,13 +63,21 @@ pub(crate) fn write_menu_clip(
     project: &Project,
     menu_clip: &MenuClip<'_>,
     dirs: &MenuDirs<'_>,
+    cache_dir: &Path,
 ) -> Result<u64, BdError> {
-    let rendered = render_menu(project, menu_clip.menu).map_err(menu_error)?;
+    if menu_clip.menu.is_motion() {
+        return write_motion_menu_clip(project, menu_clip, dirs, cache_dir);
+    }
+    let rendered = render_with_thumbnails(project, menu_clip.menu)?;
     let video = prepare_video(project, &rendered)?;
     let ig_units = build_ig_units(project, &rendered, menu_clip, video.pts_90k)?;
     let streams = menu_streams(project);
 
-    let inputs = mux_inputs(video.data, video.pts_90k, video.dts_90k, ig_units);
+    let inputs = mux_inputs(
+        project.settings.bd_video.hd().is_some(),
+        (video.data, video.pts_90k, video.dts_90k),
+        ig_units,
+    );
     let m2ts_path = stream_path(dirs, menu_clip.number);
     let (layout, m2ts_bytes) = clip::write_m2ts(&m2ts_path, &inputs)?;
 
@@ -71,15 +89,252 @@ pub(crate) fn write_menu_clip(
         video.presentation_start,
         video.presentation_end,
     )?;
-    let playlist_bytes = write_menu_playlist(
-        dirs,
-        menu_clip.number,
-        streams,
-        video.presentation_start,
-        video.presentation_end,
-    )?;
+    let (still_mode, still_time) = still_play(menu_clip.menu.hold_seconds());
+    let play = MenuPlay {
+        in_time: video.presentation_start,
+        out_time: video.presentation_end,
+        still_mode,
+        still_time,
+        loop_mark: None,
+        uo_mask: menu_uo_mask(project, menu_clip.menu),
+    };
+    let playlist_bytes = write_menu_playlist(dirs, menu_clip.number, streams, &play)?;
 
     add_bytes(add_bytes(m2ts_bytes, clpi_bytes)?, playlist_bytes)
+}
+
+/// Write a motion menu clip (a video background, menu audio or motion buttons): one play of the menu with its
+/// audio, the IG display set at its start and again at its loop point (for a player that starts playing there),
+/// and a playlist with a mark at the loop point. The menu's movie object plays it again (`nav::MenuMotion`).
+fn write_motion_menu_clip(
+    project: &Project,
+    menu_clip: &MenuClip<'_>,
+    dirs: &MenuDirs<'_>,
+    cache_dir: &Path,
+) -> Result<u64, BdError> {
+    let menu = menu_clip.menu;
+    if let Some((width, height, fps_num, fps_den)) = project.settings.bd_video.hd() {
+        let options = disccraft_transcode::hd::HdOptions {
+            width,
+            height,
+            fps_num,
+            fps_den,
+            target_kbps: 15_000,
+            max_kbps: 30_000,
+        };
+        return write_hd_motion_menu_clip(project, menu_clip, (dirs, cache_dir), &options);
+    }
+    let motion = disccraft_dvd::encode_motion_menu(project, menu, cache_dir)
+        .map_err(|error| BdError::Prepare(error.to_string()))?;
+    let parsed = parse_video(&motion.video, START_DTS_27MHZ).map_err(video_error)?;
+    let start = parsed
+        .pictures
+        .iter()
+        .map(|picture| picture.pts)
+        .min()
+        .ok_or_else(|| invalid("motion menu has no pictures"))?;
+    let end = clip::video_end(&parsed)?;
+    let start_90k = clip::to_90k(start)?;
+    let loop_pts = loop_picture(menu, &parsed, start);
+
+    let mut ig_units = build_ig_units(project, &motion.first, menu_clip, start_90k)?;
+    if let Some(pts) = loop_pts {
+        ig_units.extend(build_ig_units_as(
+            project,
+            &motion.first,
+            menu_clip,
+            clip::to_90k(pts)?,
+            CompositionState::AcquisitionPoint,
+        )?);
+    }
+
+    let mut streams = menu_streams(project);
+    let mut inputs = vec![EsInput {
+        pid: VIDEO_PID,
+        kind: StreamKind::Mpeg2Video,
+        units: clip::picture_units(&parsed, &motion.video)?,
+    }];
+    if let Some(audio) = &motion.audio {
+        let units = bd_lpcm_units(&audio.data, audio.channels, start_90k).map_err(video_error)?;
+        inputs.push(EsInput {
+            pid: AUDIO_PID,
+            kind: StreamKind::Lpcm,
+            units,
+        });
+        streams.audio = Some(Stream {
+            pid: AUDIO_PID,
+            coding: clip::lpcm_coding(audio, None)?,
+        });
+    }
+    inputs.push(EsInput {
+        pid: IG_PID,
+        kind: StreamKind::Igs,
+        units: ig_units,
+    });
+
+    let m2ts_path = stream_path(dirs, menu_clip.number);
+    let (layout, m2ts_bytes) = clip::write_m2ts(&m2ts_path, &inputs)?;
+    let in_time = clip::to_45k(start)?;
+    let out_time = clip::to_45k(end)?;
+    let clpi_bytes = write_menu_clpi(dirs, menu_clip.number, &layout, &streams, in_time, out_time)?;
+    // Played once without an end action, the last picture stays (as on DVD).
+    let hold = menu.effective_loops() == MenuLoops::Once && menu.end_action == Link::NotSet;
+    let play = MenuPlay {
+        in_time,
+        out_time,
+        still_mode: if hold {
+            STILL_MODE_HOLD
+        } else {
+            STILL_MODE_NONE
+        },
+        still_time: 0,
+        loop_mark: loop_pts.map(clip::to_45k).transpose()?,
+        uo_mask: menu_uo_mask(project, menu),
+    };
+    let playlist_bytes = write_menu_playlist(dirs, menu_clip.number, streams, &play)?;
+
+    add_bytes(add_bytes(m2ts_bytes, clpi_bytes)?, playlist_bytes)
+}
+
+/// An HD Blu-ray disc's motion menu: one play as H.264 of the disc's HD format (each frame drawn at the HD size),
+/// laid out as the SD one: the IG display set at its start and again at the IDR picture at or before its loop point,
+/// its audio, and a playlist with a mark there.
+fn write_hd_motion_menu_clip(
+    project: &Project,
+    menu_clip: &MenuClip<'_>,
+    (dirs, cache_dir): (&MenuDirs<'_>, &Path),
+    options: &disccraft_transcode::hd::HdOptions,
+) -> Result<u64, BdError> {
+    let menu = menu_clip.menu;
+    let motion = disccraft_dvd::encode_hd_motion_menu(project, menu, cache_dir, options)
+        .map_err(|error| BdError::Prepare(error.to_string()))?;
+    let start_90k = clip::to_90k(START_DTS_27MHZ)?;
+    let start = i64::try_from(start_90k).map_err(|_| invalid("start too large"))?;
+    let at = |time: i64| {
+        start
+            .checked_add(time)
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| invalid("motion menu time stamp out of range"))
+    };
+    let mut units = Vec::with_capacity(motion.units.len());
+    for unit in &motion.units {
+        let begin = usize::try_from(unit.offset).map_err(|_| invalid("unit offset too large"))?;
+        let end = begin
+            .checked_add(usize::try_from(unit.len).map_err(|_| invalid("unit too large"))?)
+            .ok_or_else(|| invalid("unit range overflow"))?;
+        units.push(EsUnit {
+            pts: at(unit.pts)?,
+            dts: at(unit.dts)?,
+            data: motion
+                .data
+                .get(begin..end)
+                .ok_or_else(|| invalid("unit outside its stream"))?
+                .to_vec(),
+            random_access: unit.keyframe,
+        });
+    }
+    let frame = i64::from(options.fps_den)
+        .saturating_mul(90_000)
+        .checked_div(i64::from(options.fps_num.max(1)))
+        .unwrap_or(3003);
+    let last = motion
+        .units
+        .iter()
+        .map(|unit| unit.pts)
+        .max()
+        .ok_or_else(|| invalid("motion menu has no pictures"))?;
+    let end_90k = at(last.saturating_add(frame))?;
+    // The IDR picture at or before the loop point: where a player can start decoding the later plays.
+    let loop_90k = match menu.effective_loop_point() {
+        Some(point) => {
+            // Loop points are seconds into a short menu; the product fits i64.
+            let target = (point.seconds() * 90_000.0).round() as i64;
+            motion
+                .units
+                .iter()
+                .filter(|unit| unit.keyframe && unit.pts <= target)
+                .map(|unit| unit.pts)
+                .max()
+                .map(at)
+                .transpose()?
+        }
+        None => None,
+    };
+
+    let mut ig_units = build_ig_units(project, &motion.first, menu_clip, start_90k)?;
+    if let Some(pts) = loop_90k {
+        ig_units.extend(build_ig_units_as(
+            project,
+            &motion.first,
+            menu_clip,
+            pts,
+            CompositionState::AcquisitionPoint,
+        )?);
+    }
+    let mut streams = menu_streams(project);
+    let mut inputs = vec![EsInput {
+        pid: VIDEO_PID,
+        kind: StreamKind::H264Video,
+        units,
+    }];
+    if let Some(audio) = &motion.audio {
+        let units = bd_lpcm_units(&audio.data, audio.channels, start_90k).map_err(video_error)?;
+        inputs.push(EsInput {
+            pid: AUDIO_PID,
+            kind: StreamKind::Lpcm,
+            units,
+        });
+        streams.audio = Some(Stream {
+            pid: AUDIO_PID,
+            coding: clip::lpcm_coding(audio, None)?,
+        });
+    }
+    inputs.push(EsInput {
+        pid: IG_PID,
+        kind: StreamKind::Igs,
+        units: ig_units,
+    });
+
+    let m2ts_path = stream_path(dirs, menu_clip.number);
+    let (layout, m2ts_bytes) = clip::write_m2ts(&m2ts_path, &inputs)?;
+    let to_45k = |time: u64| u32::try_from(time / 2).map_err(|_| invalid("time too large"));
+    let in_time = to_45k(start_90k)?;
+    let out_time = to_45k(end_90k)?;
+    let clpi_bytes = write_menu_clpi(dirs, menu_clip.number, &layout, &streams, in_time, out_time)?;
+    // Played once without an end action, the last picture stays (as on DVD).
+    let hold = menu.effective_loops() == MenuLoops::Once && menu.end_action == Link::NotSet;
+    let play = MenuPlay {
+        in_time,
+        out_time,
+        still_mode: if hold {
+            STILL_MODE_HOLD
+        } else {
+            STILL_MODE_NONE
+        },
+        still_time: 0,
+        loop_mark: loop_90k.map(to_45k).transpose()?,
+        uo_mask: menu_uo_mask(project, menu),
+    };
+    let playlist_bytes = write_menu_playlist(dirs, menu_clip.number, streams, &play)?;
+
+    add_bytes(add_bytes(m2ts_bytes, clpi_bytes)?, playlist_bytes)
+}
+
+/// Where a motion menu's later plays start (27 MHz): the GOP start at or before its loop point, where a player can
+/// start decoding (DVD starts the loop cell at that VOBU too). `None` without a loop point.
+fn loop_picture(menu: &Menu, video: &VideoStream, start: i64) -> Option<i64> {
+    let point = menu.effective_loop_point()?;
+    // Loop points are seconds into a short menu; the product fits i64.
+    let target = start.checked_add((point.seconds() * 27_000_000.0).round() as i64)?;
+    video
+        .pictures
+        .iter()
+        .filter(|picture| {
+            matches!(picture.kind, PictureType::I) && picture.gop_start && picture.pts <= target
+        })
+        .map(|picture| picture.pts)
+        .max()
+        .filter(|pts| *pts > start)
 }
 
 struct VideoPrepared {
@@ -92,7 +347,21 @@ struct VideoPrepared {
 
 struct MenuStreams {
     video: Stream,
+    /// The menu audio of a motion menu.
+    audio: Option<Stream>,
     ig: Stream,
+}
+
+/// How a menu's playlist plays its clip.
+struct MenuPlay {
+    in_time: u32,
+    out_time: u32,
+    still_mode: u8,
+    still_time: u16,
+    /// A motion menu's loop point (45 kHz): the playlist's mark 1, where its later plays start.
+    loop_mark: Option<u32>,
+    /// The user operations prohibited while the menu is shown (the menu's and the disc's).
+    uo_mask: u64,
 }
 
 struct ObjectIds {
@@ -101,6 +370,9 @@ struct ObjectIds {
 }
 
 fn prepare_video(project: &Project, rendered: &RenderedMenu) -> Result<VideoPrepared, BdError> {
+    if let Some((_, _, fps_num, fps_den)) = project.settings.bd_video.hd() {
+        return prepare_hd_video(rendered, (fps_num, fps_den));
+    }
     let frame =
         rgb_to_frame420(rendered.width, rendered.height, &rendered.rgb).map_err(video_error)?;
     let options = StillOptions {
@@ -126,6 +398,41 @@ fn prepare_video(project: &Project, rendered: &RenderedMenu) -> Result<VideoPrep
         presentation_end,
     })
 }
+
+/// An HD menu's still: one H.264 IDR picture at the menu clip's start, lasting one frame (the play item holds it).
+fn prepare_hd_video(
+    rendered: &RenderedMenu,
+    (fps_num, fps_den): (u32, u32),
+) -> Result<VideoPrepared, BdError> {
+    let options = disccraft_transcode::hd::HdOptions {
+        width: u32::from(rendered.width),
+        height: u32::from(rendered.height),
+        fps_num,
+        fps_den,
+        target_kbps: 20_000,
+        max_kbps: 40_000,
+    };
+    let mut data = disccraft_transcode::hd::encode_h264_still(&rendered.rgb, &options)
+        .map_err(|error| BdError::Unsupported(format!("HD menu: {error}")))?;
+    // End of sequence (NAL unit type 10): the still is shown at once instead of waiting for more pictures, as an
+    // MPEG-2 still ends with a sequence end code.
+    data.extend_from_slice(&H264_END_OF_SEQUENCE);
+    let start = START_DTS_27MHZ;
+    let frame = i64::from(fps_den)
+        .saturating_mul(27_000_000)
+        .checked_div(i64::from(fps_num.max(1)))
+        .unwrap_or(1_126_125);
+    Ok(VideoPrepared {
+        data,
+        pts_90k: clip::to_90k(start)?,
+        dts_90k: clip::to_90k(start)?,
+        presentation_start: clip::to_45k(start)?,
+        presentation_end: clip::to_45k(checked_add_i64(start, frame)?)?,
+    })
+}
+
+/// An H.264 end-of-sequence NAL unit.
+const H264_END_OF_SEQUENCE: [u8; 4] = [0, 0, 1, 0x0A];
 
 fn parse_timestamps(data: &[u8]) -> Result<(i64, i64, i64), BdError> {
     let parsed = parse_video(data, START_DTS_27MHZ).map_err(video_error)?;
@@ -154,8 +461,9 @@ fn menu_streams(project: &Project) -> MenuStreams {
     MenuStreams {
         video: Stream {
             pid: VIDEO_PID,
-            coding: clip::video_coding(&project.settings, project.menus_wide()),
+            coding: menu_video_coding(project),
         },
+        audio: None,
         ig: Stream {
             pid: IG_PID,
             coding: StreamCoding::Igs { language: *b"und" },
@@ -163,11 +471,38 @@ fn menu_streams(project: &Project) -> MenuStreams {
     }
 }
 
-fn mux_inputs(video_data: Vec<u8>, pts: u64, dts: u64, ig_units: Vec<EsUnit>) -> Vec<EsInput> {
+/// A menu clip's video coding: SD MPEG-2, or H.264 at the disc's HD format.
+fn menu_video_coding(project: &Project) -> StreamCoding {
+    match project.settings.bd_video.hd() {
+        Some((_, height, fps_num, fps_den)) => StreamCoding::H264Video {
+            video_format: if height >= 1080 { 6 } else { 5 },
+            frame_rate: match (fps_num, fps_den) {
+                (24_000, 1001) => 1,
+                (24, 1) => 2,
+                (25, 1) => 3,
+                (50, 1) => 6,
+                (60_000, 1001) => 7,
+                _ => 4,
+            },
+            aspect: 3,
+        },
+        None => clip::video_coding(&project.settings, project.menus_wide()),
+    }
+}
+
+fn mux_inputs(
+    hd: bool,
+    (video_data, pts, dts): (Vec<u8>, u64, u64),
+    ig_units: Vec<EsUnit>,
+) -> Vec<EsInput> {
     vec![
         EsInput {
             pid: VIDEO_PID,
-            kind: StreamKind::Mpeg2Video,
+            kind: if hd {
+                StreamKind::H264Video
+            } else {
+                StreamKind::Mpeg2Video
+            },
             units: vec![EsUnit {
                 pts,
                 dts,
@@ -192,25 +527,48 @@ fn write_menu_clpi(
     presentation_end: u32,
 ) -> Result<u64, BdError> {
     let path = clipinf_path(dirs, number);
+    let others: Vec<Stream> = streams
+        .audio
+        .iter()
+        .chain(slice::from_ref(&streams.ig))
+        .copied()
+        .collect();
     let info = clip::build_clip_info(
         layout,
         &streams.video,
-        slice::from_ref(&streams.ig),
+        &others,
         presentation_start,
         presentation_end,
     )?;
     clip::write_clpi(&path, &info)
 }
 
+/// The UO mask of a menu's playlist: the menu's and the disc's prohibited operations.
+fn menu_uo_mask(project: &Project, menu: &Menu) -> u64 {
+    crate::uo::uo_mask(&[&menu.prohibited_ops, &project.settings.prohibited_ops])
+}
+
+/// A still menu's still mode: `hold` is how long the still stays before the playlist ends (the menu's end action
+/// follows); `None` holds it.
+fn still_play(hold: Option<u32>) -> (u8, u16) {
+    match hold {
+        Some(seconds) => (
+            STILL_MODE_TIME,
+            u16::try_from(seconds.max(1)).unwrap_or(u16::MAX),
+        ),
+        None => (STILL_MODE_HOLD, 0),
+    }
+}
+
 fn write_menu_playlist(
     dirs: &MenuDirs<'_>,
     number: u16,
     streams: MenuStreams,
-    in_time: u32,
-    out_time: u32,
+    play: &MenuPlay,
 ) -> Result<u64, BdError> {
     let path = playlist_path(dirs, number);
-    let playlist = menu_playlist(number, streams, in_time, out_time)?;
+    let mut playlist = menu_playlist(number, streams, play)?;
+    playlist.uo_mask = play.uo_mask;
     let bytes = mpls::write_mpls(&playlist).map_err(bdmv_error)?;
     write_bytes(&path, &bytes)
 }
@@ -218,29 +576,31 @@ fn write_menu_playlist(
 fn menu_playlist(
     number: u16,
     streams: MenuStreams,
-    in_time: u32,
-    out_time: u32,
+    play: &MenuPlay,
 ) -> Result<mpls::PlayList, BdError> {
     let play_item = mpls::PlayItem {
         clip: clip::clip_name(number)?,
-        in_time,
-        out_time,
+        in_time: play.in_time,
+        out_time: play.out_time,
         streams: mpls::StnTable {
             video: vec![streams.video],
-            audio: Vec::new(),
+            audio: streams.audio.into_iter().collect(),
             pg: Vec::new(),
             ig: vec![streams.ig],
         },
-        still_mode: STILL_MODE_HOLD,
-        still_time: 0,
+        still_mode: play.still_mode,
+        still_time: play.still_time,
     };
+    let marks = std::iter::once(play.in_time)
+        .chain(play.loop_mark)
+        .map(|time| mpls::PlayListMark { play_item: 0, time })
+        .collect();
 
     Ok(mpls::PlayList {
         items: vec![play_item],
-        marks: vec![mpls::PlayListMark {
-            play_item: 0,
-            time: in_time,
-        }],
+        marks,
+        uo_mask: 0,
+        playback: mpls::Playback::Sequential,
     })
 }
 
@@ -262,16 +622,57 @@ pub(crate) fn build_ig_units(
     menu_clip: &MenuClip<'_>,
     pts: u64,
 ) -> Result<Vec<EsUnit>, BdError> {
-    let palette = build_palette(menu_clip.menu);
-    let mut objects = build_objects(rendered, menu_clip.menu, menu_clip.commands.len())?;
+    build_ig_units_as(
+        project,
+        rendered,
+        menu_clip,
+        pts,
+        CompositionState::EpochStart,
+    )
+}
+
+/// The menu's IG display set at `pts` with the given composition state.
+fn build_ig_units_as(
+    project: &Project,
+    rendered: &RenderedMenu,
+    menu_clip: &MenuClip<'_>,
+    pts: u64,
+    state: CompositionState,
+) -> Result<Vec<EsUnit>, BdError> {
+    let colours = IgColours::new(menu_clip.menu, &rendered.highlight);
+    let palette = colours.palette(menu_clip.menu);
+    let mut objects = build_objects(rendered, menu_clip.menu, menu_clip.commands.len(), &colours)?;
     if menu_clip.popup {
-        objects.extend(build_label_objects(rendered, menu_clip)?);
+        objects.extend(build_label_objects(rendered, menu_clip, &colours)?);
     } else if normal_shown(menu_clip.menu) {
-        objects.extend(build_normal_objects(rendered, menu_clip.commands.len())?);
+        objects.extend(build_normal_objects(
+            rendered,
+            menu_clip.commands.len(),
+            &colours,
+        )?);
     }
     let composition = build_composition(project, rendered, menu_clip)?;
-    let segments = display_set(&composition, &palette, &objects, pts).map_err(video_error)?;
+    let segments =
+        display_set_as(&composition, &palette, &objects, pts, state).map_err(video_error)?;
     segments.into_iter().map(segment_unit).collect()
+}
+
+/// The menu's picture with its video thumbnails' still pictures (Encore's `(%)` layers).
+fn render_with_thumbnails(project: &Project, menu: &Menu) -> Result<RenderedMenu, BdError> {
+    let frames = disccraft_dvd::still_thumbnails(project, menu);
+    let thumbnails: Vec<_> = frames
+        .iter()
+        .map(disccraft_dvd::ThumbnailFrame::picture)
+        .collect();
+    render_disc_menu(
+        project,
+        menu,
+        MenuPictures {
+            background: None,
+            thumbnails: &thumbnails,
+        },
+    )
+    .map_err(menu_error)
 }
 
 /// The IG stream of `menu` as a pop-up over a title, and its stream entry.
@@ -281,7 +682,7 @@ pub(crate) fn popup_ig_units(
     commands: &[Vec<NavCommand>],
     pts: u64,
 ) -> Result<(Vec<EsUnit>, Stream), BdError> {
-    let rendered = render_menu(project, menu).map_err(menu_error)?;
+    let rendered = render_with_thumbnails(project, menu)?;
     let menu_clip = MenuClip {
         menu,
         number: 0,
@@ -296,6 +697,7 @@ pub(crate) fn popup_ig_units(
 fn build_label_objects(
     rendered: &RenderedMenu,
     menu_clip: &MenuClip<'_>,
+    colours: &IgColours,
 ) -> Result<Vec<IgObject>, BdError> {
     let count = menu_clip.commands.len();
     let mut objects = Vec::with_capacity(count);
@@ -315,7 +717,13 @@ fn build_label_objects(
             disccraft_menu::label_rgba(menu_clip.menu, button, rendered.width, rendered.height);
         // The normal frame (when it is seen) under the text.
         let mut pixels = if normal_shown(menu_clip.menu) {
-            crop_highlight(&rendered.highlight, geometry, width, height, NORMAL_PALETTE)?
+            crop_highlight(
+                &rendered.highlight,
+                geometry,
+                (width, height),
+                colours.slots(State::Normal, 0),
+                colours,
+            )?
         } else {
             vec![0_u8; pixel_count(width, height)?]
         };
@@ -330,10 +738,10 @@ fn build_label_objects(
                     .and_then(|n| n.checked_add(3))
                     .and_then(|n| rgba.get(n).copied())
                     .unwrap_or(0);
-                if alpha > 127 {
+                if let Some(id) = colours.shade(LABEL_PALETTE, alpha) {
                     let i = pixel_index(width, row, col)?;
                     if let Some(pixel) = pixels.get_mut(i) {
-                        *pixel = LABEL_PALETTE;
+                        *pixel = id;
                     }
                 }
             }
@@ -367,71 +775,213 @@ fn segment_unit(segment: TimedSegment) -> Result<EsUnit, BdError> {
     })
 }
 
-/// Palette id of the normal frame (Encore's 標準グループ).
+/// An IG page's default selected button when it names none (the player keeps its selected button).
+const NO_DEFAULT_BUTTON: u16 = 0xFFFF;
+
+/// Colour slot of the normal frame (Encore's 標準グループ colour 1).
 const NORMAL_PALETTE: u8 = 7;
-/// Palette id of a pop-up button's text in its normal state.
+/// Colour slot of a pop-up button's text in its normal state.
 const LABEL_PALETTE: u8 = 8;
 
-/// The palette ids of highlight group `index` (0 to 2): selected 1 / 3 / 5, activated 2 / 4 / 6.
+/// Alpha steps of a rich-colour highlight (Encore's ハイライトをリッチカラーで書き出し): each colour has up to this many
+/// palette entries, from faint to its own opacity, so the highlight keeps the smooth edges of its shape.
+const RICH_STEPS: u8 = 15;
+
+/// A button state, for its colours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum State {
+    Selected,
+    Activated,
+    Normal,
+}
+
+/// How a menu's highlight colours become IG palette ids. Every colour has a slot: 1 to 6 colour 1 of each highlight
+/// group's selected / activated state, 7 the normal colour 1, 8 a pop-up's text, then colours 2 and 3 (Encore's
+/// カラー 2・3, a subpicture's `(=2)` / `(=3)` layers) of the highlight groups the buttons use and of the normal
+/// state, when the highlight has them. A plain highlight's palette id is its slot; a rich one gives every slot
+/// `steps` alpha steps, as many as fit the 255 ids.
+struct IgColours {
+    rich: bool,
+    steps: u8,
+    /// The slots of colours 2 and 3, by state, highlight group (0 to 2; 0 for the normal state) and colour.
+    more: Vec<((State, usize, u8), u8)>,
+}
+
+impl IgColours {
+    fn new(menu: &Menu, layer: &HighlightLayer) -> Self {
+        let mut used_groups = [false; 3];
+        for index in 0..menu.buttons.len() {
+            if let Some(used) = used_groups.get_mut(button_group(menu, index)) {
+                *used = true;
+            }
+        }
+        let mut more = Vec::new();
+        let mut last = LABEL_PALETTE;
+        for n in [2_u8, 3] {
+            if !layer.pixels.contains(&n) {
+                continue;
+            }
+            for (group, used) in used_groups.iter().enumerate() {
+                if !used {
+                    continue;
+                }
+                for state in [State::Selected, State::Activated] {
+                    last = last.saturating_add(1);
+                    more.push(((state, group, n), last));
+                }
+            }
+            last = last.saturating_add(1);
+            more.push(((State::Normal, 0, n), last));
+        }
+        let steps = if menu.rich_highlights {
+            RICH_STEPS.min(u8::MAX / last.max(1))
+        } else {
+            1
+        };
+        Self {
+            rich: menu.rich_highlights,
+            steps,
+            more,
+        }
+    }
+
+    /// The slot of colour `n` (1 to 3) in `state` of highlight group `group` (0 to 2); 0 when it has none.
+    fn slot(&self, state: State, group: usize, n: u8) -> u8 {
+        if n <= 1 {
+            let (selected, activated) = group_palette(group);
+            return match state {
+                State::Selected => selected,
+                State::Activated => activated,
+                State::Normal => NORMAL_PALETTE,
+            };
+        }
+        let group = if state == State::Normal {
+            0
+        } else {
+            group.min(2)
+        };
+        self.more
+            .iter()
+            .find(|(key, _)| *key == (state, group, n))
+            .map_or(0, |(_, slot)| *slot)
+    }
+
+    /// The slots of the highlight's pixel values (0 to 3) in `state` of highlight group `group`.
+    fn slots(&self, state: State, group: usize) -> [u8; 4] {
+        [
+            0,
+            self.slot(state, group, 1),
+            self.slot(state, group, 2),
+            self.slot(state, group, 3),
+        ]
+    }
+
+    /// The palette id that draws slot `slot` where a highlight covers `coverage` (0 to 255) of a pixel; `None` where
+    /// nothing is drawn. A plain highlight draws its slot on pixels covered by half or more; a rich one picks the
+    /// alpha step of the coverage.
+    fn shade(&self, slot: u8, coverage: u8) -> Option<u8> {
+        if slot == 0 {
+            return None;
+        }
+        if !self.rich {
+            return (coverage > 127).then_some(slot);
+        }
+        let level = (u16::from(coverage) * u16::from(self.steps) + 127) / 255;
+        let level = u8::try_from(level).ok().filter(|level| *level > 0)?;
+        self.rich_id(slot, level)
+    }
+
+    /// The palette id of alpha step `level` (1 to `steps`) of slot `slot`.
+    fn rich_id(&self, slot: u8, level: u8) -> Option<u8> {
+        slot.checked_sub(1)?
+            .checked_mul(self.steps)?
+            .checked_add(level)
+    }
+
+    /// The IG palette: clear, then every slot's colour with its opacity (in alpha steps for a rich highlight).
+    fn palette(&self, menu: &Menu) -> Vec<PaletteEntry> {
+        let set = menu.color_set_or_default();
+        // (slot, colour, alpha) of each colour.
+        let mut colours: Vec<(u8, [u8; 3], u8)> = Vec::new();
+        for (index, group) in set.groups.iter().enumerate() {
+            let (selected_id, activated_id) = group_palette(index);
+            let (colour, opacity) = group.selected_color(1);
+            colours.push((selected_id, colour, opacity_to_alpha(opacity)));
+            let (colour, opacity) = group.activated_color(1);
+            colours.push((activated_id, colour, opacity_to_alpha(opacity)));
+        }
+        colours.push((
+            NORMAL_PALETTE,
+            set.normal.color,
+            opacity_to_alpha(set.normal.opacity),
+        ));
+        colours.push((LABEL_PALETTE, [255, 255, 255], 255));
+        for &((state, group, n), slot) in &self.more {
+            let (colour, opacity) = match state {
+                State::Selected => set
+                    .groups
+                    .get(group)
+                    .map_or(([0; 3], 0), |group| group.selected_color(n)),
+                State::Activated => set
+                    .groups
+                    .get(group)
+                    .map_or(([0; 3], 0), |group| group.activated_color(n)),
+                State::Normal => {
+                    let normal = set.normal_color(n);
+                    (normal.color, normal.opacity)
+                }
+            };
+            colours.push((slot, colour, opacity_to_alpha(opacity)));
+        }
+
+        let mut entries = vec![rgba_to_entry(0, 0, 0, 0, 0)];
+        for (slot, [red, green, blue], alpha) in colours {
+            if !self.rich {
+                entries.push(rgba_to_entry(slot, red, green, blue, alpha));
+                continue;
+            }
+            for level in 1..=self.steps {
+                let Some(id) = self.rich_id(slot, level) else {
+                    continue;
+                };
+                // At most 255 × 15: well inside u16, and the quotient fits u8.
+                let step = u16::from(alpha) * u16::from(level) / u16::from(self.steps.max(1));
+                let step = u8::try_from(step).unwrap_or(alpha);
+                entries.push(rgba_to_entry(id, red, green, blue, step));
+            }
+        }
+        entries
+    }
+}
+
+/// The colour-1 slots of highlight group `index` (0 to 2): selected 1 / 3 / 5, activated 2 / 4 / 6.
 fn group_palette(index: usize) -> (u8, u8) {
     let group = u8::try_from(index.min(2)).unwrap_or(0);
     (1 + group * 2, 2 + group * 2)
 }
 
-/// The palette ids of button `index`'s highlight group.
-fn button_palette(menu: &Menu, index: usize) -> (u8, u8) {
+/// Button `index`'s highlight group (0 to 2).
+fn button_group(menu: &Menu, index: usize) -> usize {
     let group = menu
         .buttons
         .get(index)
         .map_or(1, |button| button.highlight_group.clamp(1, 3));
-    group_palette(usize::from(group.saturating_sub(1)))
+    usize::from(group.saturating_sub(1))
 }
 
-/// Whether the menu's normal colour can be seen.
+/// Whether one of the menu's normal colours can be seen.
 fn normal_shown(menu: &Menu) -> bool {
-    menu.color_set_or_default().normal.opacity > 0
-}
-
-/// The IG palette: clear, each highlight group's selected / activated colour with its opacity, the normal colour
-/// and white for a pop-up's text.
-fn build_palette(menu: &Menu) -> Vec<PaletteEntry> {
-    let set = menu.color_set_or_default();
-    let mut entries = vec![rgba_to_entry(0, 0, 0, 0, 0)];
-    for (index, group) in set.groups.iter().enumerate() {
-        let (selected_id, activated_id) = group_palette(index);
-        let [red, green, blue] = group.selected;
-        entries.push(rgba_to_entry(
-            selected_id,
-            red,
-            green,
-            blue,
-            opacity_to_alpha(group.selected_opacity),
-        ));
-        let ([red, green, blue], opacity) = group.activated_look();
-        entries.push(rgba_to_entry(
-            activated_id,
-            red,
-            green,
-            blue,
-            opacity_to_alpha(opacity),
-        ));
-    }
-    let [red, green, blue] = set.normal.color;
-    entries.push(rgba_to_entry(
-        NORMAL_PALETTE,
-        red,
-        green,
-        blue,
-        opacity_to_alpha(set.normal.opacity),
-    ));
-    entries.push(rgba_to_entry(LABEL_PALETTE, 255, 255, 255, 255));
-    entries
+    menu.color_set_or_default()
+        .normal_colors()
+        .iter()
+        .any(|color| color.opacity > 0)
 }
 
 /// The normal-state objects of an always-on menu whose normal colour is seen: each button's frame.
 fn build_normal_objects(
     rendered: &RenderedMenu,
     button_count: usize,
+    colours: &IgColours,
 ) -> Result<Vec<IgObject>, BdError> {
     let mut objects = Vec::with_capacity(button_count);
     for index in 0..button_count {
@@ -445,7 +995,13 @@ fn build_normal_objects(
             id: normal_object_id(index, button_count)?,
             width,
             height,
-            pixels: crop_highlight(&rendered.highlight, geometry, width, height, NORMAL_PALETTE)?,
+            pixels: crop_highlight(
+                &rendered.highlight,
+                geometry,
+                (width, height),
+                colours.slots(State::Normal, 0),
+                colours,
+            )?,
         });
     }
     Ok(objects)
@@ -455,6 +1011,7 @@ fn build_objects(
     rendered: &RenderedMenu,
     menu: &Menu,
     button_count: usize,
+    colours: &IgColours,
 ) -> Result<Vec<IgObject>, BdError> {
     let mut objects = Vec::new();
 
@@ -466,16 +1023,21 @@ fn build_objects(
         let ids = object_ids(index)?;
         let width = rect_width(geometry.x1, geometry.x2)?;
         let height = rect_height(geometry.y1, geometry.y2)?;
-        let (selected_value, activated_value) = button_palette(menu, index);
+        let group = button_group(menu, index);
 
-        let selected_pixels =
-            crop_highlight(&rendered.highlight, geometry, width, height, selected_value)?;
+        let selected_pixels = crop_highlight(
+            &rendered.highlight,
+            geometry,
+            (width, height),
+            colours.slots(State::Selected, group),
+            colours,
+        )?;
         let activated_pixels = crop_highlight(
             &rendered.highlight,
             geometry,
-            width,
-            height,
-            activated_value,
+            (width, height),
+            colours.slots(State::Activated, group),
+            colours,
         )?;
 
         objects.push(IgObject {
@@ -511,18 +1073,20 @@ fn object_ids(index: usize) -> Result<ObjectIds, BdError> {
     })
 }
 
+/// The button's part of the highlight layer as an IG object, each pixel value (1 to 3) in its slot of `slots`:
+/// plain, or (rich) with the alpha steps of its coverage.
 fn crop_highlight(
     layer: &HighlightLayer,
     geometry: &ButtonGeometry,
-    width: u16,
-    height: u16,
-    value: u8,
+    (width, height): (u16, u16),
+    slots: [u8; 4],
+    colours: &IgColours,
 ) -> Result<Vec<u8>, BdError> {
     let size = pixel_count(width, height)?;
     let mut pixels = vec![0_u8; size];
 
     for row in 0..usize::from(height) {
-        crop_row(layer, geometry, width, row, value, &mut pixels)?;
+        crop_row(layer, geometry, (width, row), (slots, colours), &mut pixels)?;
     }
 
     Ok(pixels)
@@ -531,19 +1095,31 @@ fn crop_highlight(
 fn crop_row(
     layer: &HighlightLayer,
     geometry: &ButtonGeometry,
-    width: u16,
-    row: usize,
-    value: u8,
+    (width, row): (u16, usize),
+    (slots, colours): ([u8; 4], &IgColours),
     pixels: &mut [u8],
 ) -> Result<(), BdError> {
     let object_y = add_u16_usize(geometry.y1, row)?;
 
     for col in 0..usize::from(width) {
         let object_x = add_u16_usize(geometry.x1, col)?;
-        if highlight_at(layer, object_x, object_y)? {
+        let (value, coverage) = pixel_at(layer, object_x, object_y)?;
+        let id = if colours.rich {
+            // The faint edge of a text highlight (value 0) is in colour 1.
+            let slot = slots.get(usize::from(value.max(1))).copied().unwrap_or(0);
+            colours.shade(slot, coverage)
+        } else if value > 0 {
+            slots
+                .get(usize::from(value))
+                .copied()
+                .filter(|slot| *slot != 0)
+        } else {
+            None
+        };
+        if let Some(id) = id {
             let index = pixel_index(width, row, col)?;
             if let Some(pixel) = pixels.get_mut(index) {
-                *pixel = value;
+                *pixel = id;
             }
         }
     }
@@ -551,11 +1127,15 @@ fn crop_row(
     Ok(())
 }
 
-fn highlight_at(layer: &HighlightLayer, x: u16, y: u16) -> Result<bool, BdError> {
-    match layer_index(layer, x, y)? {
-        Some(index) => Ok(layer.pixels.get(index).copied() == Some(1)),
-        None => Ok(false),
-    }
+/// The highlight's pixel value (0 to 3) at (`x`, `y`) and how much of the pixel it covers (0 to 255).
+fn pixel_at(layer: &HighlightLayer, x: u16, y: u16) -> Result<(u8, u8), BdError> {
+    Ok(match layer_index(layer, x, y)? {
+        Some(index) => (
+            layer.pixels.get(index).copied().unwrap_or(0),
+            layer.coverage.get(index).copied().unwrap_or(0),
+        ),
+        None => (0, 0),
+    })
 }
 
 fn layer_index(layer: &HighlightLayer, x: u16, y: u16) -> Result<Option<usize>, BdError> {
@@ -624,7 +1204,14 @@ fn build_composition(
     menu_clip: &MenuClip<'_>,
 ) -> Result<InteractiveComposition, BdError> {
     let buttons = build_buttons(rendered, menu_clip)?;
-    let default_selected = default_selected(menu_clip.menu.default_button, buttons.len())?;
+    // A menu's movie object selects its button (its default, or the one a link asks for), and a motion menu's later
+    // plays keep the button the viewer is on: no default (the player's selected button register). A pop-up menu
+    // over a title has no movie object of its own: it names its default.
+    let default_selected = if !menu_clip.popup {
+        NO_DEFAULT_BUTTON
+    } else {
+        default_selected(menu_clip.menu.default_button, buttons.len())?
+    };
     let page = IgPage {
         id: 0,
         default_selected,
@@ -761,8 +1348,57 @@ fn bdmv_error(error: impl std::fmt::Display) -> BdError {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_objects, build_palette, normal_shown};
-    use disccraft_project::{ColorSet, HighlightGroup, Link, NormalColor, Project};
+    use super::{IgColours, State, build_objects, normal_shown};
+    use disccraft_menu::HighlightLayer;
+    use disccraft_project::{ColorSet, GroupColor, HighlightGroup, Link, NormalColor, Project};
+
+    #[test]
+    fn a_rich_highlight_keeps_the_smooth_edges_of_its_text()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::default();
+        let menu_id = project.add_menu(None)?;
+        project.add_button(menu_id, "Play".to_owned(), None, Link::Stop)?;
+        let plain = project.menu(menu_id).ok_or("menu")?.clone();
+        let mut rich = plain.clone();
+        rich.rich_highlights = true;
+        let ids = |menu: &disccraft_project::Menu| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+            let rendered = disccraft_menu::render_menu(&project, menu)?;
+            let colours = IgColours::new(menu, &rendered.highlight);
+            let objects = build_objects(&rendered, menu, 1, &colours)?;
+            let selected = objects.first().ok_or("selected object")?;
+            let mut ids: Vec<u8> = selected
+                .pixels
+                .iter()
+                .copied()
+                .filter(|id| *id != 0)
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            Ok(ids)
+        };
+        // Plain: the one colour of group 1's selected state.
+        assert_eq!(ids(&plain)?, vec![1]);
+        // Rich: its alpha steps (palette 1 to 15), the faint ones at the text's edges.
+        let steps = ids(&rich)?;
+        assert!(steps.len() > 3, "{steps:?}");
+        assert!(steps.iter().all(|id| (1..=15).contains(id)), "{steps:?}");
+        assert!(steps.contains(&15));
+        // 15 steps for each of the 8 colours, after the clear entry; the full step has the colour's own alpha.
+        let rendered = disccraft_menu::render_menu(&project, &rich)?;
+        let palette = IgColours::new(&rich, &rendered.highlight).palette(&rich);
+        assert_eq!(palette.len(), 1 + 8 * 15);
+        let full = palette
+            .iter()
+            .find(|entry| entry.id == 15)
+            .ok_or("entry 15")?;
+        let plain_palette = IgColours::new(&plain, &rendered.highlight).palette(&plain);
+        let one = plain_palette
+            .iter()
+            .find(|entry| entry.id == 1)
+            .ok_or("entry 1")?;
+        assert_eq!(full.alpha, one.alpha);
+        Ok(())
+    }
 
     #[test]
     fn each_button_uses_its_groups_colours_and_opacities() -> Result<(), Box<dyn std::error::Error>>
@@ -780,16 +1416,18 @@ mod tests {
         menu.color_set = Some(ColorSet {
             groups: [group; 3],
             normal: NormalColor::default(),
+            normal_more: None,
         });
         let menu = menu.clone();
-        let palette = build_palette(&menu);
+        let rendered = disccraft_menu::render_menu(&project, &menu)?;
+        let colours = IgColours::new(&menu, &rendered.highlight);
+        let palette = colours.palette(&menu);
         let selected = palette
             .iter()
             .find(|entry| entry.id == 1)
             .ok_or("entry 1")?;
         assert_eq!(selected.alpha, 128);
-        let rendered = disccraft_menu::render_menu(&project, &menu)?;
-        let objects = build_objects(&rendered, &menu, 2)?;
+        let objects = build_objects(&rendered, &menu, 2, &colours)?;
         let used = |id: u16| {
             objects
                 .iter()
@@ -800,6 +1438,66 @@ mod tests {
         assert_eq!((used(0), used(1)), (Some(1), Some(2)));
         assert_eq!((used(2), used(3)), (Some(3), Some(4)));
         assert!(!normal_shown(&menu));
+        Ok(())
+    }
+
+    #[test]
+    fn colours_two_and_three_get_slots_of_their_own() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::default();
+        let menu_id = project.add_menu(None)?;
+        project.add_button(menu_id, "One".to_owned(), None, Link::Stop)?;
+        let menu = project.menu_mut(menu_id).ok_or("menu")?;
+        let mut group = HighlightGroup::new([255, 0, 0], [0, 0, 255]);
+        let more = GroupColor {
+            selected: [0, 255, 0],
+            selected_opacity: 50,
+            activated: [9, 9, 9],
+            activated_opacity: 100,
+        };
+        group.more = Some([more, more]);
+        menu.color_set = Some(ColorSet {
+            groups: [group; 3],
+            normal: NormalColor::default(),
+            normal_more: None,
+        });
+        let mut menu = menu.clone();
+        // A one-row highlight with colours 1 to 3 (as a subpicture's layers make).
+        let layer = HighlightLayer {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 1,
+            pixels: vec![0, 1, 2, 3],
+            coverage: vec![0, 255, 255, 255],
+        };
+        let colours = IgColours::new(&menu, &layer);
+        // Group 1 (the only one used): colour 2 in slots 9 / 10, the normal colour 2 in 11, colour 3 in 12 to 14.
+        assert_eq!(colours.slots(State::Selected, 0), [0, 1, 9, 12]);
+        assert_eq!(colours.slots(State::Activated, 0), [0, 2, 10, 13]);
+        assert_eq!(colours.slots(State::Normal, 0), [0, 7, 11, 14]);
+        assert_eq!(colours.slots(State::Selected, 1), [0, 3, 0, 0]);
+        let palette = colours.palette(&menu);
+        assert_eq!(palette.len(), 1 + 14);
+        let green = palette
+            .iter()
+            .find(|entry| entry.id == 9)
+            .ok_or("entry 9")?;
+        assert_eq!(green.alpha, 128);
+
+        // Rich: 14 slots of 15 steps fit (210 ids).
+        menu.rich_highlights = true;
+        let rich = IgColours::new(&menu, &layer);
+        assert_eq!(rich.steps, 15);
+        assert_eq!(rich.palette(&menu).len(), 1 + 14 * 15);
+        // Three groups used: 22 slots, 11 steps each.
+        menu.buttons.push(menu.buttons[0].clone());
+        menu.buttons.push(menu.buttons[0].clone());
+        menu.buttons[1].highlight_group = 2;
+        menu.buttons[2].highlight_group = 3;
+        let crowded = IgColours::new(&menu, &layer);
+        assert_eq!(crowded.steps, 11);
+        let ids = crowded.palette(&menu);
+        assert!(ids.iter().all(|entry| entry.id <= 22 * 11));
         Ok(())
     }
 }

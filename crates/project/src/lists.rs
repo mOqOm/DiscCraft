@@ -28,6 +28,19 @@ fn default_transition_duration() -> Tick {
     DEFAULT_TRANSITION_DURATION
 }
 
+/// `seconds` of timecode at the disc's frame rate, as Encore counts a new slideshow's slide and transition lengths:
+/// NTSC's 00;00;06;00 is 180 frames (6.006 s), so three slides make 00;00;18;00.
+fn timecode_seconds(settings: &crate::DiscSettings, seconds: u64) -> Tick {
+    let per_second: i64 = match settings.standard {
+        crate::VideoStandard::Ntsc => 30,
+        crate::VideoStandard::Pal => 25,
+    };
+    let seconds = i64::try_from(seconds).unwrap_or(0);
+    settings
+        .frame_rate()
+        .tick_of(seconds.saturating_mul(per_second))
+}
+
 /// The transition between consecutive slides (Encore's slideshow transitions).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -359,9 +372,10 @@ impl Project {
                 audio: None,
                 end_action: Link::NotSet,
                 description: String::new(),
-                slide_duration: DEFAULT_SLIDE_DURATION,
+                // Encore counts them in timecode: 00;00;06;00 and 00;00;02;00 at the disc's rate.
+                slide_duration: timecode_seconds(&self.settings, DEFAULT_SLIDE_SECONDS),
                 transition: TransitionKind::None,
-                transition_duration: DEFAULT_TRANSITION_DURATION,
+                transition_duration: timecode_seconds(&self.settings, 2),
                 manual_advance: false,
                 audio_clips: Vec::new(),
                 loop_audio: false,
@@ -762,6 +776,35 @@ mod tests {
     use super::{Link, Playlist, PlaylistItem};
     use std::error::Error;
     use std::path::Path;
+
+    #[test]
+    fn a_new_slideshow_counts_its_lengths_in_timecode() -> Result<(), Box<dyn Error>> {
+        // NTSC: 00;00;06;00 is 180 frames, so three slides make 00;00;18;00 (as in Encore), not 00;00;17;29.
+        let mut project = Project::default();
+        let image = project.add_asset(Path::new("slide.png"))?;
+        let id = project.add_slideshow(None)?;
+        let duration = project.slideshow(id).ok_or("slideshow")?.slide_duration;
+        for _ in 0..3 {
+            let _ = project.add_slide(id, image, duration)?;
+        }
+        let show = project.slideshow(id).ok_or("slideshow")?;
+        let total = Tick(show.slides.iter().map(|slide| slide.duration.0).sum());
+        assert_eq!(
+            crate::format_time(show.slide_duration, &project.settings),
+            "00;00;06;00"
+        );
+        assert_eq!(
+            crate::format_time(show.transition_duration, &project.settings),
+            "00;00;02;00"
+        );
+        assert_eq!(crate::format_time(total, &project.settings), "00;00;18;00");
+        // PAL: whole seconds.
+        project.settings.standard = crate::VideoStandard::Pal;
+        let pal = project.add_slideshow(None)?;
+        let pal_length = project.slideshow(pal).ok_or("slideshow")?.slide_duration;
+        assert_eq!(pal_length, super::DEFAULT_SLIDE_DURATION);
+        Ok(())
+    }
 
     #[test]
     fn add_and_remove_slides() -> Result<(), Box<dyn Error>> {

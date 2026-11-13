@@ -35,8 +35,7 @@ fn check_menu(project: &Project, menu: &Menu, problems: &mut Vec<Problem>) {
     check_audio(project, menu, problems);
 }
 
-/// Menu audio must be an audio asset. Blu-ray menus are still pictures for now, so their video and audio are
-/// left out (a warning).
+/// Menu audio must be an audio asset.
 fn check_audio(project: &Project, menu: &Menu, problems: &mut Vec<Problem>) {
     if let Some(asset) = menu.audio {
         let valid = project
@@ -49,16 +48,6 @@ fn check_audio(project: &Project, menu: &Menu, problems: &mut Vec<Problem>) {
                 format!("menu {} audio needs an audio asset", menu.id.0),
             ));
         }
-    }
-    let media = menu.audio.is_some() || matches!(menu.background, MenuBackground::Video { .. });
-    if media && project.settings.kind == crate::model::DiscKind::BluRay {
-        problems.push(warning(
-            "bluRayMenuMedia",
-            format!(
-                "menu {}: Blu-ray menus do not play a video background or audio yet (they show a still picture)",
-                menu.id.0
-            ),
-        ));
     }
 }
 
@@ -444,8 +433,14 @@ mod tests {
                     audio: None,
                     subtitle: crate::model::SubtitleDefault::NoChange,
                     kind: Default::default(),
+                    text_subpicture: false,
+                    transition: None,
+                    label_format: Default::default(),
+                    label_font_style: None,
                     shadow: None,
                     orientation: Default::default(),
+                    thumbnail: None,
+                    subpicture: None,
                 });
             }
         }

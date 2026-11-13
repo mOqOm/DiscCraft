@@ -521,9 +521,9 @@ impl DiscCraftApp {
     /// 表の本体。
     fn project_table(&mut self, ui: &mut Ui, rows: &[ProjectRow]) {
         let kind = self.session.project.settings.kind;
-        let selected = rows
-            .iter()
-            .position(|row| row.selection != Selection::None && row.selection == self.selection);
+        let selected = rows.iter().position(|row| {
+            row.selection != Selection::None && row.selection == self.listed_selection()
+        });
         let fill = crate::theme::TableFill::new(ui, "project_grid");
         let mut sort = self.table_sort("project_grid");
         let columns: Vec<ProjectColumn> = ProjectColumn::ALL
@@ -900,7 +900,12 @@ impl DiscCraftApp {
         let project = &self.session.project;
         let (frame_w, frame_h) = disccraft_project::frame_size(&project.settings);
         let frame = (u32::from(frame_w), u32::from(frame_h));
-        for (id, menu) in &project.menus {
+        // Encore と同じく、ページのあるメニューは 1 行（後のページは出さない）。
+        for (id, menu) in project
+            .menus
+            .iter()
+            .filter(|(id, _)| !project.is_menu_page(**id))
+        {
             rows.push(ProjectRow {
                 selection: Selection::Menu(*id),
                 node: Some(NodeId::Menu(*id)),
@@ -1079,9 +1084,17 @@ impl DiscCraftApp {
         }
     }
 
+    /// 表の行としての選択: メニューの後のページを開いているときは、そのメニュー（最初のページ）の行。
+    fn listed_selection(&self) -> Selection {
+        match self.selection {
+            Selection::Menu(menu) => Selection::Menu(self.session.project.menu_root(menu)),
+            other => other,
+        }
+    }
+
     /// 選択中の項目の行。
     fn selected_row(&mut self) -> Option<ProjectRow> {
-        let selection = self.selection;
+        let selection = self.listed_selection();
         if selection == Selection::None {
             return None;
         }
@@ -1131,7 +1144,7 @@ impl DiscCraftApp {
     /// メニューの絵のサムネール（メニューが変わったときだけ描き直す）。ボタンのないメニューは `None`。
     fn menu_thumbnail(&mut self, ctx: &egui::Context, id: MenuId) -> Option<egui::TextureHandle> {
         let menu = self.session.project.menu(id)?.clone();
-        let hash = crate::menu_editor::menu_hash(&menu);
+        let hash = self.picture_hash(&menu);
         if let Some((cached_hash, texture)) = self.menu_thumbnails.get(&id.0)
             && *cached_hash == hash
         {
@@ -1250,6 +1263,7 @@ impl DiscCraftApp {
         let menus: Vec<MenuRow> = project
             .menus
             .iter()
+            .filter(|(id, _)| !project.is_menu_page(**id))
             .map(|(id, menu)| MenuRow {
                 id: *id,
                 name: menu.name.clone(),
@@ -1272,9 +1286,10 @@ impl DiscCraftApp {
             3 => crate::theme::SortKey::Text(row.aspect.to_owned()),
             _ => crate::theme::SortKey::Text(row.description.clone()),
         });
-        let selected = menus
-            .iter()
-            .position(|row| self.selection == Selection::Menu(row.id));
+        let selected = menus.iter().position(|row| match self.selection {
+            Selection::Menu(menu) => self.session.project.menu_root(menu) == row.id,
+            _ => false,
+        });
         // Encore と同じく、上にメニューの表、下に選んだメニューのボタンの表（境目はドラッグで動かせる）。
         let half = ui.available_height() * 0.5;
         let _ = egui::Panel::top("menus_split")
@@ -1392,11 +1407,11 @@ impl DiscCraftApp {
             });
         crate::theme::sort_rows(&mut rows, sort, |row, column| match column {
             0 => crate::theme::SortKey::Text(row.name.clone()),
-            2 => crate::theme::SortKey::Text(row.kind.to_owned()),
-            3 => crate::theme::SortKey::Text(menu.name.clone()),
-            4 => crate::theme::SortKey::Text(row.link.clone()),
-            5 => crate::theme::SortKey::Text(row.override_link.clone()),
-            6 => crate::theme::SortKey::Text(row.label.clone()),
+            3 => crate::theme::SortKey::Text(row.kind.to_owned()),
+            4 => crate::theme::SortKey::Text(menu.name.clone()),
+            5 => crate::theme::SortKey::Text(row.link.clone()),
+            6 => crate::theme::SortKey::Text(row.override_link.clone()),
+            7 => crate::theme::SortKey::Text(row.label.clone()),
             // Small integers are exact.
             _ => crate::theme::SortKey::Number(row.index as f64),
         });
@@ -1404,12 +1419,18 @@ impl DiscCraftApp {
             .iter()
             .position(|row| Some(row.index) == self.primary_button());
         // Encore の 名前 / 番号 / … / メニュー / リンク / 上書き / … / ボタンテキスト のうち DiscCraft にある列。
+        let page = self.session.project.menu_page_number(id);
+        let menu_name = crate::menu_editor::menu_title(
+            &self.session.project,
+            self.session.project.menu_root(id),
+        );
         let table = crate::theme::table_selecting("menu_buttons_grid", selected_row)
-            .num_columns(8)
+            .num_columns(9)
             .show(ui, |ui| {
                 for (column, label) in [
                     tl!("Name"),
                     tl!("Number"),
+                    tl!("Page Number"),
                     tl!("Button Kind"),
                     tl!("Menu"),
                     tl!("Link"),
@@ -1431,8 +1452,9 @@ impl DiscCraftApp {
                     // 名前の欄は選択の表示だけ（いくつも選んだときも分かるように）。押すのは行全体。
                     let first = ui.selectable_label(selected, row.name.as_str()).rect;
                     ui.label(index.saturating_add(1).to_string());
+                    ui.label(page.to_string());
                     ui.label(row.kind);
-                    ui.label(menu.name.as_str());
+                    ui.label(menu_name.as_str());
                     ui.label(row.link.as_str());
                     ui.label(row.override_link.as_str());
                     let last = ui.label(row.label.as_str()).rect;

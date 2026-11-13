@@ -11,6 +11,7 @@
 )]
 
 mod clip;
+mod hd;
 mod menus;
 mod nav;
 
@@ -19,11 +20,14 @@ use std::path::{Path, PathBuf};
 
 use disccraft_bdmv::{index, mobj, mpls};
 use disccraft_dvd::{TitleSource, TitleStreams, load_title_streams};
-use disccraft_project::{DiscKind, Link, Menu, PlaylistItem, Project, TimelineId, VideoStandard};
+use disccraft_project::{
+    DiscKind, Link, Menu, MenuLoops, PlaylistItem, Project, TimelineId, VideoStandard,
+};
 
 use clip::BuiltClip;
 use menus::{MenuClip, MenuDirs};
-use nav::{MenuNav, TitleMap, TitleNav};
+mod uo;
+use nav::{MenuMotion, MenuNav, TitleMap, TitleNav};
 
 /// Errors produced while building a BDMV folder.
 #[derive(Debug, thiserror::Error)]
@@ -118,8 +122,13 @@ pub fn build_bdmv_with(
     let titles = load_title_streams(project, cache_dir, progress)
         .map_err(|error| BdError::Prepare(error.to_string()))?;
 
+    let mut hd_titles = Vec::with_capacity(titles.len());
+    for title in &titles {
+        hd_titles.push(hd::hd_title(project, title, cache_dir, progress)?);
+    }
+
     let mut output = BuildOutput::default();
-    let pending = write_title_clips(project, &titles, &dirs, &mut output)?;
+    let pending = write_title_clips(project, (&titles, &hd_titles), &dirs, &mut output)?;
     let next_playlist = write_project_playlists(project, &dirs, &mut output)?;
     let next_playlist = write_chapter_playlists(project, &dirs, &mut output, next_playlist)?;
     let menu_navs = build_menu_navs(project, next_playlist)?;
@@ -130,8 +139,22 @@ pub fn build_bdmv_with(
         playlists: output.playlist_titles.clone(),
         chapter_playlists: output.chapter_playlist_titles.clone(),
     };
-    let navigation = nav::build_navigation_with_top(
+    let first_streams: Vec<disccraft_bdmv::mobj::NavCommand> = stream_command(
+        project.settings.audio_default,
+        project.settings.subtitle_default,
+    )
+    .into_iter()
+    .collect();
+    let first_override = effective_override(
         &project.settings.first_play,
+        project.settings.first_play_override.as_ref(),
+    );
+    let navigation = nav::build_navigation_with_top(
+        (
+            &project.settings.first_play,
+            &first_streams,
+            first_override.as_ref(),
+        ),
         &project.settings.title_remote,
         &output.navs,
         &menu_navs,
@@ -139,7 +162,13 @@ pub fn build_bdmv_with(
     )?;
 
     write_popup_titles(project, &dirs, &mut output, &navigation, pending)?;
-    write_menus(project, &dirs, &mut output, &navigation, next_playlist)?;
+    write_menus(
+        project,
+        &dirs,
+        &mut output,
+        &navigation,
+        (next_playlist, cache_dir),
+    )?;
     write_navigation(project, &dirs, &mut output, navigation)?;
     copy_backups(&dirs, &mut output)?;
 
@@ -167,6 +196,10 @@ struct BuildOutput {
     slideshow_titles: BTreeMap<u64, u16>,
     playlist_titles: BTreeMap<u64, u16>,
     chapter_playlist_titles: BTreeMap<u64, u16>,
+    /// Each title's UO mask (its timeline's and the disc's prohibited operations), by title number.
+    title_uo: BTreeMap<u16, u64>,
+    /// The titles that are slideshows advanced by hand (Encore's 手動で進める): a still after every slide.
+    manual_titles: std::collections::BTreeSet<u16>,
     backup_files: Vec<(PathBuf, PathBuf, u64)>,
     total_bytes: u64,
 }
@@ -235,22 +268,42 @@ struct PendingPopup {
 /// button commands) exists.
 fn write_title_clips(
     project: &Project,
-    titles: &[TitleStreams],
+    (titles, hd_titles): (&[TitleStreams], &[Option<hd::HdTitle>]),
     dirs: &Directories,
     output: &mut BuildOutput,
 ) -> Result<Vec<PendingPopup>, BdError> {
     let mut pending = Vec::new();
     for (index, title) in titles.iter().enumerate() {
+        let hd = hd_titles.get(index).and_then(Option::as_ref);
         let number = u16_from_usize(
             index
                 .checked_add(1)
                 .ok_or_else(|| invalid("too many titles"))?,
             "title number",
         )?;
+        if let TitleSource::Slideshow(id) = title.source
+            && project
+                .slideshows
+                .get(&id)
+                .is_some_and(|slideshow| slideshow.manual_advance)
+        {
+            let _ = output.manual_titles.insert(number);
+        }
+        let own: &[disccraft_project::UserOp] = match title.source {
+            TitleSource::Timeline(id) => project
+                .timelines
+                .get(&TimelineId(id))
+                .map_or(&[], |timeline| timeline.prohibited_ops.as_slice()),
+            TitleSource::Slideshow(_) => &[],
+        };
+        let _ = output.title_uo.insert(
+            number,
+            uo::uo_mask(&[own, &project.settings.prohibited_ops]),
+        );
         let popup = popup_menu_of(project, title);
         let built = match popup {
             Some((menu_index, menu)) => {
-                let prepared = clip::prepare_clip(title, number, &project.settings)?;
+                let prepared = clip::prepare_clip(title, hd, number, &project.settings)?;
                 let planned = prepared.planned()?;
                 pending.push(PendingPopup {
                     clip: prepared,
@@ -262,10 +315,10 @@ fn write_title_clips(
             None => {
                 let built = clip::write_clip(
                     title,
+                    hd,
                     number,
                     &project.settings,
-                    &dirs.stream,
-                    &dirs.clipinf,
+                    (&dirs.stream, &dirs.clipinf),
                 )?;
                 add_total(output, built.bytes)?;
                 record_title_files(dirs, output, number, &built)?;
@@ -298,7 +351,8 @@ fn popup_menu_of(project: &Project, title: &TitleStreams) -> Option<(usize, Menu
     };
     let index = project.menus.keys().position(|key| *key == menu_id)?;
     let menu = project.menus.get(&menu_id)?;
-    (!menu.buttons.is_empty()).then(|| (index, menu.clone()))
+    // Encore's "Set as Blu-ray Pop-up Menu": only flagged menus pop up over the title.
+    (menu.popup && !menu.buttons.is_empty()).then(|| (index, menu.clone()))
 }
 
 /// Records a written title clip's CLPI backup and writes its single-item playlist.
@@ -317,7 +371,12 @@ fn record_title_files(
 
     let playlist_name = format!("{number:05}.mpls");
     let playlist_path = dirs.playlist.join(&playlist_name);
-    let playlist = single_title_playlist(built)?;
+    let mut playlist = if output.manual_titles.contains(&number) {
+        manual_slides_playlist(built)?
+    } else {
+        single_title_playlist(built)?
+    };
+    playlist.uo_mask = output.title_uo.get(&number).copied().unwrap_or(0);
     let playlist_bytes =
         mpls::write_mpls(&playlist).map_err(|error| BdError::Bdmv(error.to_string()))?;
     let playlist_size = write_bytes(&playlist_path, &playlist_bytes)?;
@@ -363,6 +422,31 @@ fn write_popup_titles(
     Ok(())
 }
 
+/// PlayItem still mode: hold the last picture until the viewer moves on.
+const STILL_UNTIL_USER: u8 = 2;
+
+/// A slideshow advanced by hand (Encore's 手動で進める): one PlayItem per slide (the spans between its marks), each
+/// holding its last picture until the viewer moves on, as DVD holds each slide's cell.
+fn manual_slides_playlist(built: &BuiltClip) -> Result<mpls::PlayList, BdError> {
+    let slides: Vec<u32> = (0..built.marks.len())
+        .map(|index| u32::try_from(index).map_err(|_| invalid("too many slides")))
+        .collect::<Result<_, _>>()?;
+    let mut items = Vec::with_capacity(slides.len());
+    let mut marks = Vec::with_capacity(slides.len());
+    let mut duration_90k = 0_u64;
+    for mut item in chapter_span_items(built, &slides)? {
+        item.still_mode = STILL_UNTIL_USER;
+        item.still_time = 0;
+        push_play_item(&mut items, &mut marks, &mut duration_90k, item)?;
+    }
+    Ok(mpls::PlayList {
+        items,
+        marks,
+        uo_mask: 0,
+        playback: mpls::Playback::Sequential,
+    })
+}
+
 fn single_title_playlist(built: &BuiltClip) -> Result<mpls::PlayList, BdError> {
     let marks = built
         .marks
@@ -376,6 +460,8 @@ fn single_title_playlist(built: &BuiltClip) -> Result<mpls::PlayList, BdError> {
     Ok(mpls::PlayList {
         items: vec![built.play_item.clone()],
         marks,
+        uo_mask: 0,
+        playback: mpls::Playback::Sequential,
     })
 }
 
@@ -395,6 +481,10 @@ fn push_title_nav(
             output.navs.push(TitleNav {
                 playlist: u32::from(number),
                 end_action: timeline.end_action.clone(),
+                end_override: effective_override(
+                    &timeline.end_action,
+                    timeline.override_link.as_ref(),
+                ),
             });
         }
         TitleSource::Slideshow(id) => {
@@ -406,6 +496,7 @@ fn push_title_nav(
             output.navs.push(TitleNav {
                 playlist: u32::from(number),
                 end_action: slideshow.end_action.clone(),
+                end_override: None,
             });
         }
     }
@@ -441,8 +532,13 @@ fn write_project_playlists(
         let playlist_number = next_playlist;
         let playlist_name = format!("{playlist_number:05}.mpls");
         let playlist_path = dirs.playlist.join(&playlist_name);
-        let playlist_bytes = mpls::write_mpls(&mpls::PlayList { items, marks })
-            .map_err(|error| BdError::Bdmv(error.to_string()))?;
+        let playlist_bytes = mpls::write_mpls(&mpls::PlayList {
+            items,
+            marks,
+            uo_mask: uo::uo_mask(&[&project.settings.prohibited_ops]),
+            playback: mpls::Playback::Sequential,
+        })
+        .map_err(|error| BdError::Bdmv(error.to_string()))?;
         let playlist_size = write_bytes(&playlist_path, &playlist_bytes)?;
         add_total(output, playlist_size)?;
         output.backup_files.push((
@@ -461,6 +557,7 @@ fn write_project_playlists(
         output.navs.push(TitleNav {
             playlist: u32::from(playlist_number),
             end_action: playlist.end_action.clone(),
+            end_override: None,
         });
         output.playlist_titles.insert(playlist.id, title_number);
 
@@ -507,8 +604,13 @@ fn write_chapter_playlists(
         let playlist_name = format!("{number:05}.mpls");
         let playlist_path = dirs.playlist.join(&playlist_name);
         let chapters = marks.len();
-        let playlist_bytes = mpls::write_mpls(&mpls::PlayList { items, marks })
-            .map_err(|error| BdError::Bdmv(error.to_string()))?;
+        let playlist_bytes = mpls::write_mpls(&mpls::PlayList {
+            items,
+            marks,
+            uo_mask: uo::uo_mask(&[&playlist.prohibited_ops, &project.settings.prohibited_ops]),
+            playback: chapter_playback(playlist.order, chapters),
+        })
+        .map_err(|error| BdError::Bdmv(error.to_string()))?;
         let playlist_size = write_bytes(&playlist_path, &playlist_bytes)?;
         add_total(output, playlist_size)?;
         output.backup_files.push((
@@ -526,6 +628,7 @@ fn write_chapter_playlists(
         output.navs.push(TitleNav {
             playlist: u32::from(number),
             end_action: playlist.end_action.clone(),
+            end_override: effective_override(&playlist.end_action, playlist.override_link.as_ref()),
         });
         output.chapter_playlist_titles.insert(playlist.id, number);
 
@@ -672,10 +775,39 @@ fn build_menu_navs(project: &Project, start: u16) -> Result<Vec<MenuNav>, BdErro
             .iter()
             .map(|button| button.link.clone())
             .collect();
+        let motion = menu.is_motion().then(|| menu_motion(menu));
+        // Only a menu that is shown for a time (a timed still, or a motion menu that plays so many times) moves on
+        // by itself.
+        let timed = match motion {
+            Some(motion) => motion.plays.is_some() && menu.end_action != Link::NotSet,
+            None => menu.hold_seconds().is_some(),
+        };
         navs.push(MenuNav {
             id: menu.id.0,
             playlist: u32::from(number),
             buttons,
+            end_action: if timed {
+                menu.end_action.clone()
+            } else {
+                Link::NotSet
+            },
+            motion,
+            end_override: effective_override(&menu.end_action, menu.override_link.as_ref()),
+            button_overrides: menu
+                .buttons
+                .iter()
+                .map(|button| effective_override(&button.link, button.override_link.as_ref()))
+                .collect(),
+            button_prefix: menu
+                .buttons
+                .iter()
+                .map(|button| {
+                    stream_command(button.audio, button.subtitle)
+                        .into_iter()
+                        .collect()
+                })
+                .collect(),
+            select: default_select(menu),
         });
         number = number
             .checked_add(1)
@@ -685,12 +817,84 @@ fn build_menu_navs(project: &Project, start: u16) -> Result<Vec<MenuNav>, BdErro
     Ok(navs)
 }
 
+/// How a motion menu plays (Encore's ループ回数 and ループポイント, as on DVD): so many times then the end action, or
+/// forever (a count without an end action loops forever too). Once without an end action holds the last picture.
+fn menu_motion(menu: &Menu) -> MenuMotion {
+    let plays = match (menu.effective_loops(), menu.end_action == Link::NotSet) {
+        (MenuLoops::Once, _) => Some(1),
+        (MenuLoops::Times(times), false) => Some(times),
+        _ => None,
+    };
+    MenuMotion {
+        plays,
+        loop_mark: menu.effective_loop_point().is_some(),
+    }
+}
+
+/// How a chapter playlist plays its entries (`count` play items): in order, or (Encore's random / shuffle) that
+/// many picked at random or shuffled, as on DVD.
+fn chapter_playback(order: disccraft_project::PlaybackOrder, count: usize) -> mpls::Playback {
+    let count = u16::try_from(count).unwrap_or(u16::MAX);
+    match order {
+        disccraft_project::PlaybackOrder::Sequential => mpls::Playback::Sequential,
+        disccraft_project::PlaybackOrder::Random => mpls::Playback::Random { count },
+        disccraft_project::PlaybackOrder::Shuffle => mpls::Playback::Shuffle { count },
+    }
+}
+
+/// The override of a link (Encore's 上書き), when it applies: the link plays a title, and the override is set.
+fn effective_override(link: &Link, override_link: Option<&Link>) -> Option<Link> {
+    let leads_to_title = matches!(
+        link,
+        Link::Timeline { .. }
+            | Link::Slideshow { .. }
+            | Link::Playlist { .. }
+            | Link::ChapterPlaylist { .. }
+    );
+    override_link
+        .filter(|target| leads_to_title && !matches!(target, Link::NotSet))
+        .cloned()
+}
+
+/// The SetStream command that selects audio track `audio` (1 to 32) and the subtitle choice (Encore's Set Audio /
+/// Set Subtitle, and a button's Audio / Subtitle); `None` when it changes nothing.
+fn stream_command(
+    audio: Option<u8>,
+    subtitle: disccraft_project::SubtitleDefault,
+) -> Option<disccraft_bdmv::mobj::NavCommand> {
+    use disccraft_project::SubtitleDefault;
+    let audio = audio
+        .filter(|track| (1..=32).contains(track))
+        .map(u16::from);
+    let pg = match subtitle {
+        SubtitleDefault::NoChange => None,
+        // Hidden: the first stream, not shown.
+        SubtitleDefault::Off => Some((false, 1)),
+        SubtitleDefault::Stream(track) if (1..=32).contains(&track) => {
+            Some((true, u16::from(track)))
+        }
+        SubtitleDefault::Stream(_) => None,
+    };
+    (audio.is_some() || pg.is_some())
+        .then(|| disccraft_bdmv::mobj::NavCommand::set_stream(audio, pg))
+}
+
+/// The button a menu selects when it is entered without one: its default (the last button when the default is
+/// out of range).
+fn default_select(menu: &Menu) -> u16 {
+    let last = menu.buttons.len().saturating_sub(1);
+    let index = usize::try_from(menu.default_button)
+        .unwrap_or(last)
+        .min(last);
+    u16::try_from(index).unwrap_or(0)
+}
+
 fn write_menus(
     project: &Project,
     dirs: &Directories,
     output: &mut BuildOutput,
     navigation: &nav::Navigation,
-    start: u16,
+    (start, cache_dir): (u16, &Path),
 ) -> Result<(), BdError> {
     let mut number = start;
     let menu_dirs = MenuDirs {
@@ -710,7 +914,7 @@ fn write_menus(
             commands: commands.as_slice(),
             popup: false,
         };
-        let bytes = menus::write_menu_clip(project, &menu_clip, &menu_dirs)?;
+        let bytes = menus::write_menu_clip(project, &menu_clip, &menu_dirs, cache_dir)?;
         add_total(output, bytes)?;
         add_menu_backups(dirs, output, number)?;
 

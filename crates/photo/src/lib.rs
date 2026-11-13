@@ -65,6 +65,27 @@ pub struct PsdButton {
     pub height: u32,
     /// Optional cropped highlight subpicture.
     pub highlight: Option<Image8>,
+    /// The button's video thumbnail (Encore's `(%)` layer in the set): x, y, width and height on the canvas of
+    /// what the layer covers.
+    pub thumbnail: Option<[u32; 4]>,
+    /// The button's subpicture (its `(=1)` / `(=2)` / `(=3)` layers) over the button's area.
+    pub subpicture: Option<PsdSubpicture>,
+}
+
+/// A PSD button's subpicture (Encore's `(=1)` / `(=2)` / `(=3)` layers): which colour of the colour set each pixel
+/// of the button's area is drawn in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PsdSubpicture {
+    /// Width in pixels (the button's).
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Each pixel the number of the topmost subpicture layer drawn there (half opaque or more; the layer's own
+    /// colour does not matter), 0 where none is.
+    pub values: Vec<u8>,
+    /// The colour of each subpicture layer (`(=1)` to `(=3)`): its first opaque pixel. Encore's automatic colour
+    /// set uses them.
+    pub colors: [Option<[u8; 3]>; 3],
 }
 
 /// A menu read from a PSD.
@@ -76,7 +97,8 @@ pub struct PsdMenu {
     pub height: u32,
     /// Background composite with highlight layers hidden.
     pub background: Image8,
-    /// Buttons in Photoshop top-to-bottom order.
+    /// Buttons in Encore's numbering: from the bottom of the layer stack up (the lowest `(+)` group is button 1,
+    /// wherever it lies on the screen).
     pub buttons: Vec<PsdButton>,
 }
 
@@ -233,7 +255,8 @@ fn render_background(doc: &Document, canvas: Rect) -> Result<Image8, PhotoError>
 fn collect_button_layers(layers: &[Layer]) -> Vec<Layer> {
     let mut out = Vec::new();
 
-    for layer in layers.iter().rev() {
+    // Bottom to top (the document keeps its layers that way), as Encore numbers the buttons.
+    for layer in layers {
         if let LayerContent::Group(group) = &layer.content {
             if is_button_name(&layer.name) {
                 out.push(layer.clone());
@@ -311,6 +334,15 @@ fn build_button(layer: Layer, canvas: Rect) -> Option<PsdButton> {
         (a, b) => a.or(b)?,
     };
     let highlight = build_highlight_image(&highlight_buffers, highlight_bbox, rect, canvas);
+    let subpicture = build_subpicture(&highlights, rect, canvas);
+    let thumbnail = thumbnail_bbox(&layer, canvas).and_then(|area| {
+        Some([
+            u32::try_from(area.x0).ok()?,
+            u32::try_from(area.y0).ok()?,
+            rect_width_u32(area)?,
+            rect_height_u32(area)?,
+        ])
+    });
 
     Some(PsdButton {
         name,
@@ -319,6 +351,76 @@ fn build_button(layer: Layer, canvas: Rect) -> Option<PsdButton> {
         width: rect_width_u32(rect)?,
         height: rect_height_u32(rect)?,
         highlight,
+        thumbnail,
+        subpicture,
+    })
+}
+
+/// The button's subpicture over `rect`: each `(=n)` layer, bottom to top, marks the pixels it draws half opaque
+/// or more with `n` (the top layer wins where they overlap, as Encore flattens them). `None` when nothing is drawn.
+fn build_subpicture(layers: &[Layer], rect: Rect, canvas: Rect) -> Option<PsdSubpicture> {
+    let width = rect_width_u32(rect)?;
+    let height = rect_height_u32(rect)?;
+    let len = usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?;
+    let mut values = vec![0_u8; len];
+    let mut colors = [None; 3];
+    for layer in layers {
+        let Some(value) = highlight_value(&layer.name) else {
+            continue;
+        };
+        let mut clone = layer.clone();
+        force_visible(&mut clone);
+        let buffer = render_layer(&clone, canvas);
+        let Some(image) = crop_buffer_to_image(&buffer, rect, canvas) else {
+            continue;
+        };
+        let pixels = image.rgba.as_chunks::<4>().0;
+        for (slot, pixel) in values.iter_mut().zip(pixels) {
+            if pixel[3] >= 128 {
+                *slot = value;
+            }
+        }
+        if let Some(color) = colors.get_mut(usize::from(value - 1))
+            && color.is_none()
+        {
+            *color = pixels
+                .iter()
+                .find(|pixel| pixel[3] == u8::MAX)
+                .or_else(|| pixels.iter().find(|pixel| pixel[3] >= 128))
+                .map(|pixel| [pixel[0], pixel[1], pixel[2]]);
+        }
+    }
+    values
+        .iter()
+        .any(|value| *value != 0)
+        .then_some(PsdSubpicture {
+            width,
+            height,
+            values,
+            colors,
+        })
+}
+
+/// What the first `(%)` layer of a button set covers (shown or not: it is where the video goes).
+fn thumbnail_bbox(layer: &Layer, canvas: Rect) -> Option<Rect> {
+    let mut found = find_thumbnail_layer(layer)?.clone();
+    force_visible(&mut found);
+    let buffer = render_layer(&found, canvas);
+    alpha_bbox(&buffer, canvas)
+}
+
+fn find_thumbnail_layer(layer: &Layer) -> Option<&Layer> {
+    let LayerContent::Group(group) = &layer.content else {
+        return None;
+    };
+    group.children.iter().find_map(|child| {
+        if is_thumbnail_name(&child.name) {
+            Some(child)
+        } else {
+            find_thumbnail_layer(child)
+        }
     })
 }
 
@@ -789,8 +891,19 @@ fn button_name(name: &str) -> Option<String> {
         .map(|rest| rest.trim().to_string())
 }
 
+fn is_thumbnail_name(name: &str) -> bool {
+    name.trim_start().starts_with("(%)")
+}
+
 fn is_highlight_name(name: &str) -> bool {
-    name.starts_with("(=1)") || name.starts_with("(=2)") || name.starts_with("(=3)")
+    highlight_value(name).is_some()
+}
+
+/// The colour number of a subpicture layer's name (`(=1)` to `(=3)`).
+fn highlight_value(name: &str) -> Option<u8> {
+    [1_u8, 2, 3]
+        .into_iter()
+        .find(|value| name.starts_with(&format!("(={value})")))
 }
 
 #[cfg(test)]

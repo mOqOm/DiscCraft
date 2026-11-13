@@ -92,6 +92,16 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "disc.setBlurayVideo",
+        label: "Blu-ray の映像を設定",
+        menu: &["ディスク"],
+        shortcut: None,
+        params: r#"{"video": "sd"|"1080p23.976"|"1080p24"|"1080p25"|"1080p29.97"|"1080p50"|"1080p59.94"|"720p59.94"|"720p50"|"720p23.976"|"720p24"}"#,
+        enabled: always_enabled,
+        run: run_set_bluray_video,
+        journal: true,
+    },
+    CommandSpec {
         id: "disc.setCapacity",
         label: "容量を設定",
         menu: &["ディスク"],
@@ -181,6 +191,7 @@ fn run_set_kind(session: &mut Session, params: &Value) -> CommandResult {
     let kind: DiscKind = serde_json::from_value(value.clone())
         .map_err(|error| format!("parameter \"kind\" must be \"dvd\" or \"bluRay\": {error}"))?;
 
+    let before = session.project.settings.clone();
     if session.project.settings.kind != kind {
         session.project.settings.kind = kind;
         session.project.settings.capacity = match kind {
@@ -190,6 +201,8 @@ fn run_set_kind(session: &mut Session, params: &Value) -> CommandResult {
     } else {
         session.project.settings.kind = kind;
     }
+    // Blu-ray with HD titles has HD menus.
+    session.project.retarget_menus(&before);
 
     Ok(empty_object())
 }
@@ -199,7 +212,9 @@ fn run_set_standard(session: &mut Session, params: &Value) -> CommandResult {
     let standard: VideoStandard = serde_json::from_value(value.clone())
         .map_err(|error| format!("parameter \"standard\" must be \"ntsc\" or \"pal\": {error}"))?;
 
+    let before = session.project.settings.clone();
     session.project.settings.standard = standard;
+    session.project.retarget_menus(&before);
     Ok(empty_object())
 }
 
@@ -210,6 +225,26 @@ fn run_set_aspect(session: &mut Session, params: &Value) -> CommandResult {
         "16:9" => true,
         _ => return Err("parameter \"aspect\" must be \"4:3\" or \"16:9\"".to_string()),
     };
+    Ok(empty_object())
+}
+
+/// The video of a Blu-ray disc's titles: SD MPEG-2, or an HD H.264 format.
+fn run_set_bluray_video(session: &mut Session, params: &Value) -> CommandResult {
+    let id = crate::params::req_str(params, "video")?;
+    let video = disccraft_project::BdVideo::from_id(&id).ok_or_else(|| {
+        format!(
+            "parameter \"video\" must be one of {}",
+            disccraft_project::BdVideo::ALL
+                .iter()
+                .map(|video| video.id())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    let before = session.project.settings.clone();
+    session.project.settings.bd_video = video;
+    // The menus move onto the HD frame (or back).
+    session.project.retarget_menus(&before);
     Ok(empty_object())
 }
 
@@ -255,6 +290,38 @@ mod tests {
     use crate::Session;
     use serde_json::json;
     use std::error::Error;
+
+    #[test]
+    fn the_blu_ray_video_is_set_and_undone() -> Result<(), Box<dyn Error>> {
+        let mut session = Session::new();
+        assert_eq!(
+            session.project.settings.bd_video,
+            disccraft_project::BdVideo::Sd
+        );
+        session.execute("disc.setBlurayVideo", &json!({"video": "1080p23.976"}))?;
+        assert_eq!(
+            session.project.settings.bd_video,
+            disccraft_project::BdVideo::Hd1080p23
+        );
+        assert_eq!(
+            session.project.settings.bd_video.hd(),
+            Some((1920, 1080, 24_000, 1001))
+        );
+        // Kept in the project file.
+        let text = serde_json::to_string(&session.project.settings)?;
+        assert!(text.contains("\"bdVideo\":\"1080p23.976\""), "{text}");
+        assert!(
+            session
+                .execute("disc.setBlurayVideo", &json!({"video": "1080i"}))
+                .is_err()
+        );
+        session.execute("edit.undo", &json!({}))?;
+        assert_eq!(
+            session.project.settings.bd_video,
+            disccraft_project::BdVideo::Sd
+        );
+        Ok(())
+    }
 
     #[test]
     fn name_and_description_are_set_and_undone() -> Result<(), Box<dyn Error>> {

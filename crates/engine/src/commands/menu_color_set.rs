@@ -12,7 +12,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[CommandSpec {
     label: "メニューカラーセットを設定",
     menu: &["メニュー"],
     shortcut: None,
-    params: r##"{"menu": id, "colorSet": {"groups": [{"selected": [r, g, b], "activated": [r, g, b], "selectedOpacity"?: 0..100, "activatedOpacity"?: 0..100, "sameActivated"?: bool} x 3], "normal"?: {"color": [r, g, b], "opacity": 0..100}} | null}"##,
+    params: r##"{"menu": id, "colorSet": {"groups": [{"selected": [r, g, b], "activated": [r, g, b], "selectedOpacity"?: 0..100, "activatedOpacity"?: 0..100, "sameActivated"?: bool, "more"?: [{"selected": [r, g, b], "selectedOpacity"?: 0..100, "activated": [r, g, b], "activatedOpacity"?: 0..100} x 2]} x 3], "normal"?: {"color": [r, g, b], "opacity": 0..100}, "normalMore"?: [{"color": [r, g, b], "opacity": 0..100} x 2]} | null}"##,
     enabled: always_enabled,
     run: run_replace_color_set,
     journal: true,
@@ -70,6 +70,12 @@ mod tests {
                 color: [1, 2, 3],
                 opacity: 20,
             },
+            normal_more: Some(
+                [NormalColor {
+                    color: [4, 5, 6],
+                    opacity: 30,
+                }; 2],
+            ),
         };
         session.execute(
             "menu.replaceColorSet",
@@ -95,10 +101,13 @@ mod tests {
         // Bad sets change nothing.
         let mut bad = serde_json::to_value(set)?;
         bad["normal"]["opacity"] = json!(101);
+        let mut bad_more = serde_json::to_value(set)?;
+        bad_more["normalMore"][1]["opacity"] = json!(101);
         for params in [
             json!({"menu": menu}),
             json!({"menu": menu, "colorSet": {"groups": []}}),
             json!({"menu": menu, "colorSet": bad}),
+            json!({"menu": menu, "colorSet": bad_more}),
             json!({"menu": 999, "colorSet": null}),
         ] {
             assert!(

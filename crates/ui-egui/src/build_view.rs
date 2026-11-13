@@ -1,4 +1,4 @@
-//! ビルドパネル（Encore と同じ形。docs/ui-parity.md §3.4）。ローカル LLM が生成し、リードが修正した。
+//! ビルドパネル（Encore と同じ形。docs/ui-parity.md §3.4）。
 
 use crate::app::DiscCraftApp;
 use crate::build_panel::{format_bytes, problem_color, usage_fraction};

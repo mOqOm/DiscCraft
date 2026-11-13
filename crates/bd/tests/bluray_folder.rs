@@ -4,7 +4,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use disccraft_bd::build_bdmv;
-use disccraft_project::{AudioTrack, DiscKind, Link, Project, SubtitleTrack, Tick};
+use disccraft_bdmv::mobj::NavCommand;
+use disccraft_project::{
+    AudioTrack, DiscKind, Link, MenuBackground, MenuLoops, Project, SubtitleTrack, Tick, UserOp,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -94,6 +97,8 @@ Subtitle test
         .unwrap();
     p.add_chapter_playlist_entry(highlights, 2, None).unwrap();
     p.add_chapter_playlist_entry(highlights, 0, None).unwrap();
+    // M6.166: shuffled, as Encore's chapter playlist Shuffle.
+    p.chapter_playlist_mut(highlights).unwrap().order = disccraft_project::PlaybackOrder::Shuffle;
     // A pop-up menu over the title: the timeline's remote menu.
     let popup = p.add_menu(Some("Popup".to_string())).unwrap();
     p.add_button(
@@ -103,11 +108,15 @@ Subtitle test
         Link::Timeline { id: t, chapter: 1 },
     )
     .unwrap();
+    p.menu_mut(popup).unwrap().popup = true;
     p.timeline_mut(t).unwrap().menu_remote = Link::Menu {
         id: popup,
         button: None,
     };
     p.settings.first_play = Link::Timeline { id: t, chapter: 0 };
+    // M6.162: the timeline prohibits the next chapter key and the disc the Top Menu key.
+    p.timeline_mut(t).unwrap().prohibited_ops = vec![UserOp::NextChapter];
+    p.settings.prohibited_ops = vec![UserOp::TitleMenu];
     p
 }
 
@@ -150,6 +159,16 @@ fn project_becomes_a_bdmv_folder_that_libbluray_plays() {
     )
     .unwrap();
     let main_item = main.items.first().unwrap();
+    // The title's UO mask: menu call (the disc's) and skip to the next point (the timeline's).
+    assert_eq!(main.uo_mask, (1 << 63) | (1 << 59));
+    // A chapter playlist keeps the disc's.
+    assert_eq!(highlights.uo_mask, 1 << 63);
+    // It plays its two entries shuffled.
+    assert_eq!(
+        highlights.playback,
+        disccraft_bdmv::mpls::Playback::Shuffle { count: 2 }
+    );
+    assert_eq!(main.playback, disccraft_bdmv::mpls::Playback::Sequential);
     // The pop-up menu rides in the title clip as an IG stream the playlist lists.
     assert_eq!(main_item.streams.ig.len(), 1);
     let first = highlights.items.first().unwrap();
@@ -196,4 +215,143 @@ fn project_becomes_a_bdmv_folder_that_libbluray_plays() {
     let stderr = String::from_utf8_lossy(&decode.stderr);
     assert!(decode.status.success(), "{stderr}");
     assert!(stderr.trim().is_empty(), "decode errors: {stderr}");
+}
+
+/// A 16-bit stereo 48 kHz WAV of `frames` silent sample frames.
+fn silent_wav(frames: u32) -> Vec<u8> {
+    let data = frames * 4;
+    let mut out = Vec::new();
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&48_000u32.to_le_bytes());
+    out.extend_from_slice(&192_000u32.to_le_bytes());
+    out.extend_from_slice(&4u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data.to_le_bytes());
+    out.resize(out.len() + data as usize, 0);
+    out
+}
+
+/// M6.153: a motion menu (a video background with audio and a loop point, played twice before its end action)
+/// becomes a clip of MPEG-2 video and LPCM audio that ffmpeg decodes cleanly, a playlist that lists the audio and
+/// marks the loop point, and a movie object that plays it again from that mark.
+#[test]
+fn a_motion_menu_becomes_a_clip_that_loops_with_its_sound() {
+    let (Some(ffmpeg), Some(ffprobe)) = (
+        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
+        tool("DISCCRAFT_FFPROBE", "ffprobe"),
+    ) else {
+        eprintln!("ffmpeg / ffprobe not found; skipping");
+        return;
+    };
+    let (video, _) = long_fixture(&ffmpeg);
+    let mut p = Project::default();
+    p.settings.kind = DiscKind::BluRay;
+    let v = p.add_asset(&video).unwrap();
+    let t = p.add_timeline(v, Some("Main".to_string())).unwrap();
+    // One second of silence: the menu audio is padded to the two-second background.
+    let wav = fixtures().join("bd_menu_song.wav");
+    std::fs::create_dir_all(fixtures()).unwrap();
+    std::fs::write(&wav, silent_wav(48_000)).unwrap();
+    let song = p.add_asset(&wav).unwrap();
+    let menu = p.add_menu(Some("Motion".to_string())).unwrap();
+    p.add_button(
+        menu,
+        "Play".to_string(),
+        None,
+        Link::Timeline { id: t, chapter: 0 },
+    )
+    .unwrap();
+    let m = p.menu_mut(menu).unwrap();
+    m.background = MenuBackground::Video {
+        asset: v,
+        seconds: 2,
+    };
+    m.audio = Some(song);
+    m.loop_point = Some(Tick(TICKS_PER_SECOND));
+    m.loops = Some(MenuLoops::Times(2));
+    m.end_action = Link::Timeline { id: t, chapter: 0 };
+    p.settings.first_play = Link::Menu {
+        id: menu,
+        button: None,
+    };
+    let out = fixtures().join("bd_motion_out");
+    build_bdmv(&p, &out).unwrap();
+
+    // The menu's playlist: the audio stream, no still, and a mark at the loop point (the GOP start at 1 s).
+    let bdmv = out.join("BDMV");
+    let playlist =
+        disccraft_bdmv::mpls::read_mpls(&std::fs::read(bdmv.join("PLAYLIST/00002.mpls")).unwrap())
+            .unwrap();
+    let item = playlist.items.first().unwrap();
+    assert_eq!(item.streams.audio.len(), 1);
+    assert_eq!(item.streams.ig.len(), 1);
+    assert_eq!(item.still_mode, 0);
+    assert_eq!(playlist.marks.len(), 2);
+    let loop_at = playlist.marks.get(1).unwrap().time - item.in_time;
+    assert!((22_500..=45_100).contains(&loop_at), "loop mark {loop_at}");
+    // Two seconds of pictures.
+    let length = item.out_time - item.in_time;
+    assert!((88_000..=92_000).contains(&length), "menu length {length}");
+
+    // Its movie object plays it, counts one more play from the loop point's mark, then the title.
+    let objects = disccraft_bdmv::mobj::read_movie_objects(
+        &std::fs::read(bdmv.join("MovieObject.bdmv")).unwrap(),
+    )
+    .unwrap();
+    let again = NavCommand::play_pl_mark(2, 1);
+    let looping = objects
+        .iter()
+        .find(|object| object.commands.contains(&again))
+        .expect("a movie object plays the menu again from its loop point");
+    assert!(looping.commands.contains(&NavCommand::sub_reg(1, 1)));
+    // It selects the menu's first button itself (the IG names none, so a later play keeps the viewer's button).
+    assert!(
+        looping
+            .commands
+            .contains(&NavCommand::set_button_page(0, 0))
+    );
+    assert!(looping.commands.contains(&NavCommand::play_pl(2)));
+
+    // The clip's video and audio decode without errors.
+    let clip = bdmv.join("STREAM/00002.m2ts");
+    let probe = Command::new(&ffprobe)
+        .args(["-v", "error", "-show_entries", "stream=codec_name"])
+        .args(["-of", "compact"])
+        .arg(&clip)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&probe.stdout);
+    assert!(text.contains("codec_name=mpeg2video"), "{text}");
+    assert!(text.contains("codec_name=pcm_bluray"), "{text}");
+    let decode = Command::new(&ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(&clip)
+        // By PID: ffmpeg takes the IG stream (0x1400) for mp3.
+        .args([
+            "-map",
+            "0:i:0x1011",
+            "-map",
+            "0:i:0x1100",
+            "-f",
+            "null",
+            "-",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&decode.stderr);
+    assert!(decode.status.success(), "{stderr}");
+    // Probing the IG stream as mp3 complains; the decoded streams must not.
+    let errors: Vec<&str> = stderr
+        .lines()
+        .filter(|line| {
+            !line.contains("mp3") && !line.trim_start().starts_with("Last message repeated")
+        })
+        .collect();
+    assert!(errors.is_empty(), "decode errors: {stderr}");
 }

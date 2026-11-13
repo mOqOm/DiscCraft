@@ -11,6 +11,16 @@ const DVD_MAX_AUDIO_TRACKS: usize = 8;
 
 pub(crate) const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
+        id: "timeline.import",
+        label: "タイムラインとして読み込み",
+        menu: &["ファイル", "読み込み"],
+        shortcut: None,
+        params: r#"{"paths": [string]}"#,
+        enabled: always_enabled,
+        run: run_import,
+        journal: true,
+    },
+    CommandSpec {
         id: "timeline.create",
         label: "タイムラインを作成",
         menu: &["タイムライン"],
@@ -181,6 +191,65 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
 ];
+
+/// Encore's 読み込み ▸ タイムライン…: each video file becomes an asset and a timeline of its own, named after the
+/// file, in the order of the file names (one undo step for all of them).
+fn run_import(session: &mut Session, params: &Value) -> CommandResult {
+    let paths = req_paths(params)?;
+    let mut assets = Vec::with_capacity(paths.len());
+    let mut timelines = Vec::with_capacity(paths.len());
+    for path in &paths {
+        let file = std::path::Path::new(path);
+        if !file.is_file() {
+            return Err(format!("timeline.import: file does not exist: {path}"));
+        }
+        let asset = session
+            .project
+            .add_asset(file)
+            .map_err(|error| error.to_string())?;
+        let kind = session.project.assets.get(&asset).map(|asset| asset.kind);
+        if kind != Some(disccraft_project::AssetKind::Video) {
+            return Err(format!("timeline.import: not a video file: {path}"));
+        }
+        let timeline = session
+            .project
+            .add_timeline(asset, None)
+            .map_err(|error| error.to_string())?;
+        assets.push(Value::from(asset.0));
+        timelines.push(Value::from(timeline.0));
+    }
+    Ok(object(&[
+        ("assets", Value::Array(assets)),
+        ("timelines", Value::Array(timelines)),
+    ]))
+}
+
+/// The "paths" parameter: one or more file paths, in the order of their file names (as Encore takes the files of
+/// one import).
+pub(crate) fn req_paths(params: &Value) -> Result<Vec<String>, String> {
+    let paths: Vec<String> = params
+        .get("paths")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "parameter \"paths\" must be a list of file paths".to_string())?
+        .iter()
+        .map(|path| {
+            path.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "parameter \"paths\" must be a list of file paths".to_string())
+        })
+        .collect::<Result<_, _>>()?;
+    if paths.is_empty() {
+        return Err("parameter \"paths\" is empty".to_string());
+    }
+    let mut paths = paths;
+    paths.sort_by_key(|path| {
+        std::path::Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+    });
+    Ok(paths)
+}
 
 fn run_create(session: &mut Session, params: &Value) -> CommandResult {
     let asset = AssetId(req_u64(params, "asset")?);
@@ -525,6 +594,80 @@ mod tests {
             .get(key)
             .and_then(Value::as_u64)
             .ok_or_else(|| format!("missing {key}").into())
+    }
+
+    #[test]
+    fn video_files_import_as_timelines_and_images_as_one_slideshow() -> Result<(), Box<dyn Error>> {
+        let dir = temp_dir("import-as")?;
+        let file = |name: &str| -> Result<Value, Box<dyn Error>> {
+            let path = dir.join(name);
+            fs::write(&path, b"fake")?;
+            Ok(string_value(&path))
+        };
+        let mut session = Session::new();
+        // Two videos: an asset and a timeline each, named after the file, in file name order; one undo step.
+        let imported = session.execute(
+            "timeline.import",
+            &obj(&[(
+                "paths",
+                Value::Array(vec![file("clipB.mp4")?, file("clipA.mp4")?]),
+            )]),
+        )?;
+        let timelines = imported
+            .get("timelines")
+            .and_then(Value::as_array)
+            .ok_or("timelines")?;
+        assert_eq!(timelines.len(), 2);
+        let names: Vec<&str> = session
+            .project
+            .timelines
+            .values()
+            .map(|timeline| timeline.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["clipA", "clipB"]);
+        assert_eq!(session.project.assets.len(), 2);
+        assert_eq!(session.undo_label(), Some("タイムラインとして読み込み"));
+        session.undo()?;
+        assert!(session.project.timelines.is_empty() && session.project.assets.is_empty());
+        // An image is not a timeline: nothing is imported.
+        assert!(
+            session
+                .execute(
+                    "timeline.import",
+                    &obj(&[(
+                        "paths",
+                        Value::Array(vec![file("clip.mp4")?, file("still.png")?])
+                    )]),
+                )
+                .is_err()
+        );
+        assert!(session.project.assets.is_empty());
+
+        // Three images: one slideshow, the slides in file name order, named after the first.
+        let imported = session.execute(
+            "slideshow.import",
+            &obj(&[(
+                "paths",
+                Value::Array(vec![
+                    file("pic2.png")?,
+                    file("pic1.png")?,
+                    file("pic3.png")?,
+                ]),
+            )]),
+        )?;
+        let id = value_u64(&imported, "slideshow")?;
+        let slideshow = session.project.slideshow(id).ok_or("slideshow")?;
+        assert_eq!(slideshow.name, "pic1");
+        let slides: Vec<String> = slideshow
+            .slides
+            .iter()
+            .filter_map(|slide| session.project.assets.get(&slide.asset))
+            .map(|asset| asset.name.clone())
+            .collect();
+        assert_eq!(slides, vec!["pic1", "pic2", "pic3"]);
+        assert_eq!(session.undo_label(), Some("スライドショーとして読み込み"));
+        let _ = fs::remove_dir_all(&dir);
+        Ok(())
     }
 
     #[test]

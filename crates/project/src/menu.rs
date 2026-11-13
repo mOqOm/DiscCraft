@@ -12,6 +12,10 @@ pub const MAX_BUTTONS: usize = 36;
 /// Longest time a still menu can stay before its end action, in seconds (a DVD cell's still time).
 pub const MAX_MENU_SECONDS: u32 = 254;
 
+/// The length of a menu whose motion buttons play over a still background without audio, when it has no
+/// duration of its own (Encore sets デュレーション to 15 seconds when モーションボタン is ticked).
+pub const MOTION_BUTTONS_SECONDS: u32 = 15;
+
 /// Longest loop of a still menu with audio, in seconds (the audio is cut there). A motion menu loops its video's
 /// length (1 to 30 seconds) and the audio follows it.
 pub const MAX_MENU_AUDIO_SECONDS: u32 = 120;
@@ -116,9 +120,31 @@ pub struct Button {
     /// What the button is for (Encore's button 種類: normal / chapter / next / previous / main).
     #[serde(default, skip_serializing_if = "ButtonKind::is_normal")]
     pub kind: ButtonKind,
+    /// Encore's "Create Text Subpicture": the highlight takes the shape of the button's text (off: a frame around
+    /// the button). New buttons have it on, as in Encore; a button without text keeps the frame.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub text_subpicture: bool,
+    /// A video played after the button is activated, before its link (Encore's button Transition tab). A build
+    /// turns it into a hidden title whose end action is the link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition: Option<AssetId>,
+    /// Character formatting of the button's text (Encore's Character panel on the button's text layer).
+    #[serde(default, skip_serializing_if = "TextFormat::is_default")]
+    pub label_format: TextFormat,
+    /// Font style of the button's text ("Bold", ...); `None` is the regular face of the menu's label font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_font_style: Option<String>,
     /// Mirrored or turned (Encore's Object ▸ Flip / Rotate).
     #[serde(default, skip_serializing_if = "Orientation::is_identity")]
     pub orientation: Orientation,
+    /// The button's video thumbnail (Encore's `(%)` layer): the part of the button that shows the video its link
+    /// plays (see [`crate::ThumbnailArea`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<crate::thumbnail::ThumbnailArea>,
+    /// The button's own subpicture (a PSD button's `(=1)` / `(=2)` / `(=3)` layers): its highlight, before a text
+    /// subpicture or the frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subpicture: Option<crate::subpicture::Subpicture>,
 }
 
 impl Button {
@@ -200,6 +226,62 @@ pub struct Menu {
     /// page of chapters can start at 7). 0 to [`MAX_BUTTON_OFFSET`].
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub button_offset: u8,
+    /// Encore's "Set as Blu-ray Pop-up Menu": on a Blu-ray disc, a timeline whose remote menu is this menu shows it
+    /// as a pop-up over the video. Off (and on DVD), the remote menu goes to the menu.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub popup: bool,
+    /// Encore's 背景タイムライン / 背景フレーム: the editor shows the pop-up menu over this timeline's picture at
+    /// this time (the disc does not use it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub popup_background: Option<PopupBackground>,
+    /// How many times a motion menu plays before its end action (Encore's ループ回数). `None` keeps the earlier
+    /// rule: once when there is an end action, forever when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loops: Option<MenuLoops>,
+    /// Encore's ループポイント: a motion menu plays from the start once, then loops from here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_point: Option<crate::Tick>,
+    /// Encore's モーションボタン: the buttons' video thumbnails play (all of them; Encore cannot choose per button),
+    /// which makes the menu a motion menu.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub animate_buttons: bool,
+    /// Encore's ハイライトをリッチカラーで書き出し: a Blu-ray menu's highlights are 8-bit images (256 colours) that keep
+    /// the smooth edges of their shapes, instead of two-bit subpicture colours. DVD highlights stay two-bit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rich_highlights: bool,
+    /// The colours of a PSD menu's subpicture layers (`(=1)` to `(=3)`): Encore's automatic colour set draws
+    /// highlight group 1 in them (see [`Menu::color_set_or_default`]).
+    #[serde(default, skip_serializing_if = "no_colors")]
+    pub subpicture_colors: [Option<[u8; 3]>; 3],
+    /// Encore's menu pages: the first page this menu is a later page of (`None` for a menu of its own).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_of: Option<MenuId>,
+}
+
+/// The most times a motion menu can be set to play (Encore's list goes to 1024; any number can be typed).
+pub const MAX_MENU_LOOPS: u16 = 9999;
+
+/// How many times a motion menu plays (Encore's ループ回数).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MenuLoops {
+    /// Once (Encore's なし: no repeat).
+    Once,
+    /// This many times in all (2 to [`MAX_MENU_LOOPS`]), then the end action.
+    Times(u16),
+    /// Forever (Encore's 無限): the end action is never reached.
+    Forever,
+}
+
+/// Where the editor shows a pop-up menu (Encore's 背景タイムライン and 背景フレーム).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PopupBackground {
+    /// The timeline whose picture is under the menu.
+    pub timeline: crate::ids::TimelineId,
+    /// The time of the picture in the timeline.
+    #[serde(default)]
+    pub time: crate::Tick,
 }
 
 /// The largest button number offset (36 button numbers on a DVD menu).
@@ -658,6 +740,40 @@ pub struct HighlightGroup {
     /// Encore's "Use Selected Colors as Activated Colors": an activated button looks as it does when selected.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub same_activated: bool,
+    /// Colours 2 and 3 (Encore's カラー 2・3: the parts of a subpicture on its `(=2)` / `(=3)` layers); `None` for
+    /// tints of colour 1 (half and four fifths of the way to white) at its opacities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub more: Option<[GroupColor; 2]>,
+}
+
+/// Colour 2 or 3 of a highlight group (Encore's カラー 2・3): while selected and while activated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupColor {
+    /// While selected.
+    pub selected: [u8; 3],
+    /// Opacity of the selected colour in per cent (0 to 100).
+    #[serde(default = "full_percent", skip_serializing_if = "is_full_percent")]
+    pub selected_opacity: u8,
+    /// While activated.
+    pub activated: [u8; 3],
+    /// Opacity of the activated colour in per cent (0 to 100).
+    #[serde(default = "full_percent", skip_serializing_if = "is_full_percent")]
+    pub activated_opacity: u8,
+}
+
+/// Colour `n` of a set whose colour 1 is `color`: itself for 1, half way to white for 2 and four fifths of the way
+/// for 3 (the colours 2 and 3 of a set made before they existed).
+pub fn tint(color: [u8; 3], n: u8) -> [u8; 3] {
+    let (part, whole) = match n {
+        2 => (1_u16, 2_u16),
+        3 => (4, 5),
+        _ => return color,
+    };
+    color.map(|channel| {
+        let rest = u16::from(u8::MAX - channel);
+        channel.saturating_add(u8::try_from(rest * part / whole).unwrap_or(u8::MAX))
+    })
 }
 
 fn full_percent() -> u8 {
@@ -677,16 +793,48 @@ impl HighlightGroup {
             selected_opacity: 100,
             activated_opacity: 100,
             same_activated: false,
+            more: None,
         }
     }
 
     /// The activated colour and opacity as they are drawn (the selected ones when `same_activated`).
     pub fn activated_look(&self) -> ([u8; 3], u8) {
-        if self.same_activated {
-            (self.selected, self.selected_opacity)
-        } else {
-            (self.activated, self.activated_opacity)
+        self.activated_color(1)
+    }
+
+    /// Colour `n` (1 to 3) and its opacity while selected.
+    pub fn selected_color(&self, n: u8) -> ([u8; 3], u8) {
+        if n <= 1 {
+            return (self.selected, self.selected_opacity);
         }
+        let more = self.more_colors();
+        let color = if n == 2 { more[0] } else { more[1] };
+        (color.selected, color.selected_opacity)
+    }
+
+    /// Colour `n` (1 to 3) and its opacity while activated, as drawn (the selected ones when `same_activated`).
+    pub fn activated_color(&self, n: u8) -> ([u8; 3], u8) {
+        if self.same_activated {
+            return self.selected_color(n);
+        }
+        if n <= 1 {
+            return (self.activated, self.activated_opacity);
+        }
+        let more = self.more_colors();
+        let color = if n == 2 { more[0] } else { more[1] };
+        (color.activated, color.activated_opacity)
+    }
+
+    /// Colours 2 and 3: the group's own, or tints of colour 1.
+    pub fn more_colors(&self) -> [GroupColor; 2] {
+        self.more.unwrap_or_else(|| {
+            [2, 3].map(|n| GroupColor {
+                selected: tint(self.selected, n),
+                selected_opacity: self.selected_opacity,
+                activated: tint(self.activated, n),
+                activated_opacity: self.activated_opacity,
+            })
+        })
     }
 }
 
@@ -718,16 +866,52 @@ pub struct ColorSet {
     /// The normal state (Encore's 標準グループ).
     #[serde(default, skip_serializing_if = "NormalColor::is_default")]
     pub normal: NormalColor,
+    /// Normal colours 2 and 3 (Encore's 標準グループ 2・3); `None` for [`DEFAULT_NORMAL_MORE`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal_more: Option<[NormalColor; 2]>,
 }
+
+/// Normal colours 2 and 3 of a set without its own: Encore's dark and mid grey, not seen (opacity 0).
+pub const DEFAULT_NORMAL_MORE: [NormalColor; 2] = [
+    NormalColor {
+        color: [64, 64, 64],
+        opacity: 0,
+    },
+    NormalColor {
+        color: [128, 128, 128],
+        opacity: 0,
+    },
+];
 
 impl ColorSet {
     /// Whether every opacity is 0 to 100.
     pub fn is_valid(&self) -> bool {
-        self.normal.opacity <= 100
-            && self
-                .groups
-                .iter()
-                .all(|group| group.selected_opacity <= 100 && group.activated_opacity <= 100)
+        self.normal_colors()
+            .iter()
+            .all(|color| color.opacity <= 100)
+            && self.groups.iter().all(|group| {
+                group.selected_opacity <= 100
+                    && group.activated_opacity <= 100
+                    && group.more_colors().iter().all(|color| {
+                        color.selected_opacity <= 100 && color.activated_opacity <= 100
+                    })
+            })
+    }
+
+    /// Normal colours 1 to 3.
+    pub fn normal_colors(&self) -> [NormalColor; 3] {
+        let [second, third] = self.normal_more.unwrap_or(DEFAULT_NORMAL_MORE);
+        [self.normal, second, third]
+    }
+
+    /// Normal colour `n` (1 to 3).
+    pub fn normal_color(&self, n: u8) -> NormalColor {
+        let [first, second, third] = self.normal_colors();
+        match n {
+            2 => second,
+            3 => third,
+            _ => first,
+        }
     }
 }
 
@@ -742,12 +926,110 @@ pub fn opacity_to_alpha(opacity: u8) -> u8 {
 }
 
 impl Menu {
-    /// The menu's colour set: its own, or one made of the highlight colour (selected) and white (activated) for
-    /// all three groups.
+    /// How long the menu is shown before its end action: a still menu's duration, or a motion menu's length plus
+    /// its later plays (from the loop point). `None` when it stays (no end action, a still menu without a duration,
+    /// or a motion menu that loops forever).
+    pub fn hold_seconds(&self) -> Option<u32> {
+        if self.end_action == Link::NotSet {
+            return None;
+        }
+        match self.motion_seconds() {
+            Some(seconds) => {
+                let later = self
+                    .effective_loop_point()
+                    .map_or(f64::from(seconds), |point| {
+                        f64::from(seconds) - point.seconds()
+                    });
+                let total = match self.effective_loops() {
+                    MenuLoops::Once => f64::from(seconds),
+                    MenuLoops::Times(times) => {
+                        f64::from(seconds) + later * f64::from(times.saturating_sub(1))
+                    }
+                    MenuLoops::Forever => return None,
+                };
+                // Whole seconds, rounded up; well inside u32.
+                Some(total.ceil().clamp(1.0, f64::from(u32::MAX)) as u32)
+            }
+            None => self.duration_seconds,
+        }
+    }
+
+    /// Whether the menu's motion buttons play (Encore's モーションボタン with at least one video thumbnail button):
+    /// the menu is a motion menu then.
+    pub fn plays_buttons(&self) -> bool {
+        self.animate_buttons && self.buttons.iter().any(|button| button.thumbnail.is_some())
+    }
+
+    /// Whether the menu moves on a disc (a motion menu): a video background, menu audio (a still picture with sound
+    /// loops like a motion menu) or motion buttons.
+    pub fn is_motion(&self) -> bool {
+        matches!(self.background, MenuBackground::Video { .. })
+            || self.audio.is_some()
+            || self.plays_buttons()
+    }
+
+    /// The length of a menu whose motion buttons play over a still background: its duration, 15 seconds by default.
+    pub fn motion_buttons_seconds(&self) -> u32 {
+        self.duration_seconds.unwrap_or(MOTION_BUTTONS_SECONDS)
+    }
+
+    /// The length of one play of a motion menu, when the project knows it: its video background's, or for motion
+    /// buttons over a still background without audio, [`Self::motion_buttons_seconds`]. (Audio sets the length of a
+    /// menu with audio; the build measures it.)
+    pub fn motion_seconds(&self) -> Option<u32> {
+        match self.background {
+            MenuBackground::Video { seconds, .. } => Some(seconds),
+            _ if self.plays_buttons() && self.audio.is_none() => {
+                Some(self.motion_buttons_seconds())
+            }
+            _ => None,
+        }
+    }
+
+    /// The loop point of a motion menu, when it falls inside the motion (Encore's ループポイント).
+    pub fn effective_loop_point(&self) -> Option<crate::Tick> {
+        let seconds = self.motion_seconds()?;
+        self.loop_point
+            .filter(|point| point.0 > 0 && point.seconds() < f64::from(seconds))
+    }
+
+    /// How many times the motion menu plays: its own setting, or once with an end action and forever without.
+    pub fn effective_loops(&self) -> MenuLoops {
+        match self.loops {
+            Some(MenuLoops::Times(n)) if n <= 1 => MenuLoops::Once,
+            Some(loops) => loops,
+            None if self.end_action == Link::NotSet => MenuLoops::Forever,
+            None => MenuLoops::Once,
+        }
+    }
+
+    /// The menu's colour set: its own, or the automatic one: the highlight colour (selected) and white (activated)
+    /// for all three groups, except that a PSD menu's group 1 is in the colours of its subpicture layers, selected
+    /// and activated, fully opaque (Encore's 自動).
     pub fn color_set_or_default(&self) -> ColorSet {
-        self.color_set.unwrap_or(ColorSet {
-            groups: [HighlightGroup::new(self.highlight_color, DEFAULT_ACTIVATED_COLOR); 3],
-            normal: NormalColor::default(),
+        self.color_set.unwrap_or_else(|| {
+            let mut groups =
+                [HighlightGroup::new(self.highlight_color, DEFAULT_ACTIVATED_COLOR); 3];
+            if !no_colors(&self.subpicture_colors) {
+                let [first, second, third] = self.subpicture_colors;
+                let base = groups[0];
+                let mut group = HighlightGroup::new(
+                    first.unwrap_or(base.selected),
+                    first.unwrap_or(base.activated),
+                );
+                group.more = Some([(2, second), (3, third)].map(|(n, own)| GroupColor {
+                    selected: own.unwrap_or_else(|| tint(group.selected, n)),
+                    selected_opacity: 100,
+                    activated: own.unwrap_or_else(|| tint(group.activated, n)),
+                    activated_opacity: 100,
+                }));
+                groups[0] = group;
+            }
+            ColorSet {
+                groups,
+                normal: NormalColor::default(),
+                normal_more: None,
+            }
         })
     }
 
@@ -880,6 +1162,9 @@ pub struct RouteOptions {
     pub horizontal_wrap: bool,
     /// Where left / right wraps to.
     pub horizontal_wrap_mode: WrapMode,
+    /// Encore's "Exclude Next and Previous Buttons": next / previous buttons stay out of the other buttons'
+    /// routing and sit at its two ends.
+    pub exclude_next_previous: bool,
 }
 
 impl Default for RouteOptions {
@@ -892,6 +1177,7 @@ impl Default for RouteOptions {
             horizontal: true,
             horizontal_wrap: true,
             horizontal_wrap_mode: WrapMode::SameLine,
+            exclude_next_previous: true,
         }
     }
 }
@@ -981,6 +1267,14 @@ impl Default for Menu {
             color_set: None,
             auto_route: true,
             button_offset: 0,
+            popup: false,
+            popup_background: None,
+            loops: None,
+            loop_point: None,
+            animate_buttons: false,
+            rich_highlights: false,
+            subpicture_colors: [None; 3],
+            page_of: None,
         }
     }
 }
@@ -989,12 +1283,25 @@ fn default_text_color() -> [u8; 3] {
     [255, 255, 255]
 }
 
+fn no_colors(colors: &[Option<[u8; 3]>; 3]) -> bool {
+    colors.iter().all(Option::is_none)
+}
+
 fn default_highlight_color() -> [u8; 3] {
     [255, 208, 0]
 }
 
 /// Returns the menu frame size for disc settings.
 pub fn frame_size(settings: &DiscSettings) -> (u16, u16) {
+    // A Blu-ray disc with HD titles has HD menus (Encore's Blu-ray menus are 1920 x 1080).
+    if settings.kind == crate::model::DiscKind::BluRay
+        && let Some((width, height, _, _)) = settings.bd_video.hd()
+    {
+        return (
+            u16::try_from(width).unwrap_or(1920),
+            u16::try_from(height).unwrap_or(1080),
+        );
+    }
     match settings.standard {
         VideoStandard::Ntsc => (720, 480),
         VideoStandard::Pal => (720, 576),
@@ -1003,6 +1310,15 @@ pub fn frame_size(settings: &DiscSettings) -> (u16, u16) {
 
 /// Returns an auto-placed button rectangle.
 pub fn auto_button_rect(index: usize, settings: &DiscSettings) -> Rect {
+    if crate::hd_frame::hd_frame(settings) {
+        // The SD layout, in the middle of the HD frame.
+        let sd = DiscSettings {
+            kind: crate::model::DiscKind::Dvd,
+            standard: VideoStandard::Ntsc,
+            ..DiscSettings::default()
+        };
+        return crate::hd_frame::design_rect(settings, auto_button_rect(index, &sd));
+    }
     let (_, frame_h) = frame_size(settings);
     let h: u16 = 48;
     let y = auto_button_y(index, frame_h, h);
@@ -1110,8 +1426,14 @@ impl Project {
             audio: None,
             subtitle: crate::model::SubtitleDefault::NoChange,
             kind: Default::default(),
+            text_subpicture: true,
+            transition: None,
+            label_format: Default::default(),
+            label_font_style: None,
             shadow: None,
             orientation: Default::default(),
+            thumbnail: None,
+            subpicture: None,
         });
 
         Ok(index)
@@ -1142,7 +1464,10 @@ impl Project {
 
 #[cfg(test)]
 mod color_set_tests {
-    use super::{ColorSet, HighlightGroup, NormalColor, opacity_to_alpha, opacity_to_contrast};
+    use super::{
+        ColorSet, DEFAULT_NORMAL_MORE, GroupColor, HighlightGroup, NormalColor, opacity_to_alpha,
+        opacity_to_contrast, tint,
+    };
 
     #[test]
     fn an_older_colour_set_reads_as_fully_opaque() -> Result<(), serde_json::Error> {
@@ -1176,6 +1501,78 @@ mod color_set_tests {
         assert_eq!(group.activated_look(), ([2, 2, 2], 100));
         group.same_activated = true;
         assert_eq!(group.activated_look(), ([1, 1, 1], 40));
+    }
+
+    #[test]
+    fn a_psd_menus_automatic_set_uses_its_layer_colours() {
+        let mut menu = crate::Menu {
+            highlight_color: [1, 1, 1],
+            ..crate::Menu::default()
+        };
+        let plain = menu.color_set_or_default();
+        assert_eq!(
+            plain.groups[0],
+            HighlightGroup::new([1, 1, 1], [255, 255, 255])
+        );
+        menu.subpicture_colors = [Some([255, 255, 0]), None, Some([255, 0, 255])];
+        let set = menu.color_set_or_default();
+        let group = set.groups[0];
+        assert_eq!(group.selected_color(1), ([255, 255, 0], 100));
+        assert_eq!(group.activated_color(1), ([255, 255, 0], 100));
+        // Colour 2 has no layer: a tint of colour 1.
+        assert_eq!(group.selected_color(2), (tint([255, 255, 0], 2), 100));
+        assert_eq!(group.activated_color(3), ([255, 0, 255], 100));
+        // The other groups stay as they were.
+        assert_eq!(set.groups[1], plain.groups[1]);
+        // A set of the menu's own wins.
+        menu.color_set = Some(plain);
+        assert_eq!(menu.color_set_or_default(), plain);
+    }
+
+    #[test]
+    fn colours_two_and_three_are_tints_until_set() -> Result<(), serde_json::Error> {
+        assert_eq!(tint([255, 0, 100], 1), [255, 0, 100]);
+        assert_eq!(tint([255, 0, 100], 2), [255, 127, 177]);
+        assert_eq!(tint([255, 0, 100], 3), [255, 204, 224]);
+        let mut group = HighlightGroup::new([0, 0, 0], [255, 0, 0]);
+        group.selected_opacity = 47;
+        assert_eq!(group.selected_color(2), ([127, 127, 127], 47));
+        assert_eq!(group.activated_color(3), ([255, 204, 204], 100));
+        let own = GroupColor {
+            selected: [1, 2, 3],
+            selected_opacity: 10,
+            activated: [4, 5, 6],
+            activated_opacity: 20,
+        };
+        group.more = Some([own, own]);
+        assert_eq!(group.selected_color(3), ([1, 2, 3], 10));
+        assert_eq!(group.activated_color(2), ([4, 5, 6], 20));
+        group.same_activated = true;
+        assert_eq!(group.activated_color(2), ([1, 2, 3], 10));
+        // Written and read back.
+        let text = serde_json::to_string(&group)?;
+        assert_eq!(serde_json::from_str::<HighlightGroup>(&text)?, group);
+
+        let mut set = ColorSet {
+            groups: [group; 3],
+            normal: NormalColor::default(),
+            normal_more: None,
+        };
+        assert_eq!(set.normal_color(2), DEFAULT_NORMAL_MORE[0]);
+        assert!(set.is_valid());
+        set.normal_more = Some([
+            NormalColor {
+                color: [9, 9, 9],
+                opacity: 30,
+            },
+            NormalColor {
+                color: [9, 9, 9],
+                opacity: 101,
+            },
+        ]);
+        assert_eq!(set.normal_color(2).opacity, 30);
+        assert!(!set.is_valid());
+        Ok(())
     }
 }
 

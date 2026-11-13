@@ -150,6 +150,15 @@ pub struct DiscCraftApp {
     pub(crate) table_sorts: std::collections::HashMap<&'static str, crate::theme::TableSort>,
     pub(crate) first_frames:
         std::collections::HashMap<u64, Option<(std::sync::Arc<Vec<u8>>, usize, usize)>>,
+    /// Frames of videos at a time (asset, ticks, for a video thumbnail: whether the first bright frame from there),
+    /// for a pop-up menu's background and the video thumbnails in the editor.
+    pub(crate) timed_frames: std::collections::HashMap<
+        (u64, i64, Option<bool>),
+        Option<(std::sync::Arc<Vec<u8>>, usize, usize)>,
+    >,
+    /// モニターに出す字幕トラック（タイムラインごと）。Encore の字幕トラックの見出しの切り替えと同じく 0 本か 1 本で、
+    /// 表示の状態なので保存も取り消しもしない。ないときは 1 本目。
+    pub(crate) shown_subtitles: std::collections::HashMap<TimelineId, Option<usize>>,
     /// タイムラインの再生（タイムライン ▸ 再生、Space）。
     pub(crate) playback: Option<crate::playback::Playback>,
     pub(crate) menu_texture: Option<MenuTexture>,
@@ -283,6 +292,8 @@ impl DiscCraftApp {
             color_set_dialog: None,
             menu_thumbnails: std::collections::HashMap::new(),
             first_frames: std::collections::HashMap::new(),
+            timed_frames: std::collections::HashMap::new(),
+            shown_subtitles: std::collections::HashMap::new(),
             font_families: None,
             external_edits: Vec::new(),
             external_check: 0.0,
@@ -876,6 +887,90 @@ impl DiscCraftApp {
         for path in paths {
             self.import_asset(&path);
         }
+    }
+
+    /// File ▸ Import ▸ Timeline… (Encore's タイムラインとして読み込み): each chosen video becomes an asset and a
+    /// timeline named after it, in one undo step. The last one opens in the Timeline panel; the first becomes First
+    /// Play when nothing plays first yet (as a new timeline does).
+    pub(crate) fn import_timeline_files(&mut self) {
+        let Some(paths) = FileDialog::new()
+            .set_title(tl!("Import as Timeline"))
+            .add_filter(
+                tl!("Video files"),
+                &[
+                    "mp4", "mov", "m4v", "avi", "mkv", "mxf", "m2v", "mpg", "mpeg", "vob", "m2ts",
+                    "ts",
+                ],
+            )
+            .pick_files()
+        else {
+            return;
+        };
+        let paths: Vec<Value> = paths
+            .iter()
+            .map(|path| Value::from(path.to_string_lossy().into_owned()))
+            .collect();
+        let Some(imported) = self.run_command("timeline.import", json!({ "paths": paths })) else {
+            return;
+        };
+        let ids = |key: &str| -> Vec<u64> {
+            imported
+                .get(key)
+                .and_then(Value::as_array)
+                .map(|ids| ids.iter().filter_map(Value::as_u64).collect())
+                .unwrap_or_default()
+        };
+        let (assets, timelines) = (ids("assets"), ids("timelines"));
+        for id in assets.iter().chain(&timelines) {
+            self.place_new_item(*id);
+        }
+        if let Some(first) = timelines.first()
+            && self.session.project.settings.first_play == Link::NotSet
+        {
+            self.set_first_play(&Link::Timeline {
+                id: TimelineId(*first),
+                chapter: 0,
+            });
+        }
+        if let Some(last) = timelines.last() {
+            self.select(Selection::Timeline(TimelineId(*last)));
+        }
+        self.status = tl!("Imported as timelines").to_owned();
+    }
+
+    /// File ▸ Import ▸ Slideshow… (Encore's スライドショーとして読み込み): the chosen images become the slides of one
+    /// new slideshow (in file name order, named after the first), which opens in the Slideshow panel.
+    pub(crate) fn import_slideshow_files(&mut self) {
+        let Some(paths) = FileDialog::new()
+            .set_title(tl!("Import as Slideshow"))
+            .add_filter(
+                tl!("Image files"),
+                &["png", "jpg", "jpeg", "bmp", "tif", "tiff", "psd", "svg"],
+            )
+            .pick_files()
+        else {
+            return;
+        };
+        let paths: Vec<Value> = paths
+            .iter()
+            .map(|path| Value::from(path.to_string_lossy().into_owned()))
+            .collect();
+        let Some(imported) = self.run_command("slideshow.import", json!({ "paths": paths })) else {
+            return;
+        };
+        let assets: Vec<u64> = imported
+            .get("assets")
+            .and_then(Value::as_array)
+            .map(|ids| ids.iter().filter_map(Value::as_u64).collect())
+            .unwrap_or_default();
+        for id in &assets {
+            self.place_new_item(*id);
+        }
+        if let Some(id) = imported.get("slideshow").and_then(Value::as_u64) {
+            self.place_new_item(id);
+            self.select(Selection::Slideshow(id));
+        }
+        self.status = tl!("Imported as a slideshow").to_owned();
     }
 
     fn import_asset(&mut self, path: &Path) {

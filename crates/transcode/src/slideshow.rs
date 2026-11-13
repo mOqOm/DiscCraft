@@ -135,7 +135,8 @@ pub fn render_slideshow(
         options.max_bitrate.max(options.video_bitrate)
     };
 
-    let (frame_counts, total_frames, total_seconds) = validate_slides(slides, options.standard)?;
+    let (frame_counts, total_frames, total_seconds) =
+        validate_slides(slides, fps(options.standard))?;
 
     let frames = encode_slideshow_video(
         slides,
@@ -157,9 +158,47 @@ pub fn render_slideshow(
     })
 }
 
+/// Render a slideshow's pictures for an HD Blu-ray disc: H.264 of `options`' size and rate on a 16:9 frame
+/// (square pixels) to `es_out`, its access-unit index in `index_out` (as [`crate::hd::transcode_h264`] writes
+/// them). The slides are placed, held and mixed as [`render_slideshow`] does; the audio is the SD render's.
+/// Returns the number of frames.
+///
+/// # Errors
+///
+/// When a slide cannot be read or the pictures cannot be encoded.
+pub fn render_slideshow_hd(
+    slides: &[SlideInput],
+    transition: Transition,
+    (es_out, index_out): (&Path, &Path),
+    options: &crate::hd::HdOptions,
+    progress: &mut dyn FnMut(f32),
+) -> Result<u64, TranscodeError> {
+    let rate = (u64::from(options.fps_num), u64::from(options.fps_den));
+    let (frame_counts, total_frames, _) = validate_slides(slides, rate)?;
+    let canvas = Canvas {
+        width: options.width,
+        height: options.height,
+        target: SIXTEEN_NINE,
+        fps: rate,
+    };
+    let mut encoder = crate::hd::H264Frames::new(options)?;
+    let mut written = 0u64;
+    for_each_frame(slides, &frame_counts, transition, canvas, &mut |rgb, _| {
+        encoder.push_rgb(rgb)?;
+        written = written.saturating_add(1);
+        report_progress(progress, written, total_frames);
+        Ok(())
+    })?;
+    let (data, units) = encoder.finish()?;
+    std::fs::write(es_out, &data).map_err(|error| io_error(es_out, error))?;
+    crate::hd::write_index(index_out, &units)?;
+    progress(1.0);
+    Ok(written)
+}
+
 fn validate_slides(
     slides: &[SlideInput],
-    standard: Standard,
+    fps: (u64, u64),
 ) -> Result<(Vec<u64>, u64, f64), TranscodeError> {
     if slides.is_empty() {
         return Err(unsupported("slideshow has no slides"));
@@ -170,7 +209,7 @@ fn validate_slides(
     let mut total_seconds = 0f64;
 
     for slide in slides {
-        let frames = frames_for_seconds(slide.seconds, standard)
+        let frames = frames_for_seconds(slide.seconds, fps)
             .ok_or_else(|| unsupported("slide duration out of range"))?;
 
         if frames == 0 {
@@ -195,6 +234,15 @@ fn validate_slides(
     Ok((frame_counts, total_frames, total_seconds))
 }
 
+/// The frames a slideshow is drawn on: their size, the shape they are shown at, and their rate.
+#[derive(Clone, Copy)]
+struct Canvas {
+    width: u32,
+    height: u32,
+    target: Target,
+    fps: (u64, u64),
+}
+
 #[allow(clippy::too_many_arguments)]
 fn encode_slideshow_video(
     slides: &[SlideInput],
@@ -212,100 +260,61 @@ fn encode_slideshow_video(
         .map_err(|error| TranscodeError::Encode(error.to_string()))?;
 
     let standard = options.standard;
-    let target = if options.wide {
-        SIXTEEN_NINE
-    } else {
-        FOUR_THREE
+    let canvas = Canvas {
+        width: OUTPUT_WIDTH,
+        height: output_height(standard),
+        target: if options.wide {
+            SIXTEEN_NINE
+        } else {
+            FOUR_THREE
+        },
+        fps: fps(standard),
     };
-
-    let output_height = output_height(standard);
     let out_width =
-        u16::try_from(OUTPUT_WIDTH).map_err(|_| unsupported("output width too large"))?;
+        u16::try_from(canvas.width).map_err(|_| unsupported("output width too large"))?;
     let out_height =
-        u16::try_from(output_height).map_err(|_| unsupported("output height too large"))?;
+        u16::try_from(canvas.height).map_err(|_| unsupported("output height too large"))?;
 
-    // The transition into each slide (the show's unless the slide has its own), and half of it on each side of
-    // the cut, never more than half a slide.
-    let cuts: Vec<Transition> = slides
-        .iter()
-        .map(|slide| slide.transition.unwrap_or(transition))
-        .collect();
-    let wanted: Vec<u64> = cuts
-        .iter()
-        .map(|cut| transition_half_frames(*cut, standard))
-        .collect();
-    let halves = cut_halves(frame_counts, &wanted);
-
+    // A slide's own picture is converted once, not for every frame it is held.
+    let mut held: Option<(usize, disccraft_mpeg2venc::Frame420)> = None;
     let mut written_frames = 0u64;
-    // The previous slide's picture, kept while the cut into the current slide is still blending.
-    let mut previous_rgb: Option<Vec<u8>> = None;
-    let mut next_rgb: Option<Vec<u8>> = None;
-
-    for (index, (slide, frames)) in slides.iter().zip(frame_counts).enumerate() {
-        let rgb = match next_rgb.take() {
-            Some(rgb) => rgb,
-            None => slide_rgb(&slide.image, output_height, target, slide.fit)?,
-        };
-        let frame420 = rgb_to_frame420(out_width, out_height, &rgb)
-            .map_err(|error| TranscodeError::Encode(error.to_string()))?;
-        let half_in = halves.get(index).copied().unwrap_or(0);
-        let half_out = halves.get(index.saturating_add(1)).copied().unwrap_or(0);
-        if half_out > 0
-            && let Some(next) = slides.get(index.saturating_add(1))
-        {
-            next_rgb = Some(slide_rgb(&next.image, output_height, target, next.fit)?);
-        }
-
-        for frame in 0..*frames {
-            // Position within the transition at the cut before this slide (second half) or after it (first half).
-            let blend = if frame < half_in {
-                previous_rgb.as_deref().map(|prev| {
-                    (
-                        prev,
-                        rgb.as_slice(),
-                        half_in.saturating_add(frame),
-                        half_in,
-                        cuts.get(index).map_or(transition.kind, |cut| cut.kind),
-                    )
-                })
-            } else if frames.saturating_sub(frame) <= half_out {
-                next_rgb.as_deref().map(|next| {
-                    (
-                        rgb.as_slice(),
-                        next,
-                        frame.saturating_sub(frames.saturating_sub(half_out)),
-                        half_out,
-                        cuts.get(index.saturating_add(1))
-                            .map_or(transition.kind, |cut| cut.kind),
-                    )
-                })
-            } else {
-                None
-            };
-            let access_unit = match blend {
-                Some((from, to, position, half, kind)) => {
-                    let alpha = transition_alpha(position, half);
-                    let mixed = transition_frame(kind, from, to, alpha, OUTPUT_WIDTH as usize);
-                    let mixed420 = rgb_to_frame420(out_width, out_height, &mixed)
+    for_each_frame(
+        slides,
+        frame_counts,
+        transition,
+        canvas,
+        &mut |rgb, still| {
+            let fresh;
+            let frame420 = match (still, &held) {
+                (Some(index), Some((at, frame))) if *at == index => frame,
+                _ => {
+                    let converted = rgb_to_frame420(out_width, out_height, rgb)
                         .map_err(|error| TranscodeError::Encode(error.to_string()))?;
-                    encoder.encode_frame(&mixed420)
+                    match still {
+                        Some(index) => {
+                            held = Some((index, converted));
+                            &held.as_ref().ok_or_else(|| unsupported("no picture"))?.1
+                        }
+                        None => {
+                            fresh = converted;
+                            &fresh
+                        }
+                    }
                 }
-                None => encoder.encode_frame(&frame420),
-            }
-            .map_err(|error| TranscodeError::Encode(error.to_string()))?;
-
+            };
+            let access_unit = encoder
+                .encode_frame(frame420)
+                .map_err(|error| TranscodeError::Encode(error.to_string()))?;
             writer
                 .write_all(&access_unit)
                 .map_err(|error| io_error(video_out, error))?;
-
             written_frames = written_frames
                 .checked_add(1)
                 .ok_or_else(|| unsupported("frame count overflow"))?;
-
             report_progress(progress, written_frames, total_frames);
-        }
-        previous_rgb = Some(rgb);
-    }
+            Ok(())
+        },
+    )?;
 
     let tail = encoder.finish();
     writer
@@ -317,19 +326,101 @@ fn encode_slideshow_video(
     Ok(written_frames)
 }
 
+/// Calls `frame` with every picture of a slideshow on `canvas`, in order: each slide held for its frames, the
+/// transitions mixed in at the cuts. `frame(rgb, still)` gets `still` = the slide's index when the picture is the
+/// slide itself (the same picture as the frame before, unless the slide just started), `None` for a mixed one.
+fn for_each_frame(
+    slides: &[SlideInput],
+    frame_counts: &[u64],
+    transition: Transition,
+    canvas: Canvas,
+    frame: &mut dyn FnMut(&[u8], Option<usize>) -> Result<(), TranscodeError>,
+) -> Result<(), TranscodeError> {
+    // The transition into each slide (the show's unless the slide has its own), and half of it on each side of
+    // the cut, never more than half a slide.
+    let cuts: Vec<Transition> = slides
+        .iter()
+        .map(|slide| slide.transition.unwrap_or(transition))
+        .collect();
+    let wanted: Vec<u64> = cuts
+        .iter()
+        .map(|cut| transition_half_frames(*cut, canvas.fps))
+        .collect();
+    let halves = cut_halves(frame_counts, &wanted);
+    let size = (canvas.width, canvas.height);
+
+    // The previous slide's picture, kept while the cut into the current slide is still blending.
+    let mut previous_rgb: Option<Vec<u8>> = None;
+    let mut next_rgb: Option<Vec<u8>> = None;
+
+    for (index, (slide, frames)) in slides.iter().zip(frame_counts).enumerate() {
+        let rgb = match next_rgb.take() {
+            Some(rgb) => rgb,
+            None => slide_rgb(&slide.image, size, canvas.target, slide.fit)?,
+        };
+        let half_in = halves.get(index).copied().unwrap_or(0);
+        let half_out = halves.get(index.saturating_add(1)).copied().unwrap_or(0);
+        if half_out > 0
+            && let Some(next) = slides.get(index.saturating_add(1))
+        {
+            next_rgb = Some(slide_rgb(&next.image, size, canvas.target, next.fit)?);
+        }
+
+        for position in 0..*frames {
+            // Position within the transition at the cut before this slide (second half) or after it (first half).
+            let blend = if position < half_in {
+                previous_rgb.as_deref().map(|prev| {
+                    (
+                        prev,
+                        rgb.as_slice(),
+                        half_in.saturating_add(position),
+                        half_in,
+                        cuts.get(index).map_or(transition.kind, |cut| cut.kind),
+                    )
+                })
+            } else if frames.saturating_sub(position) <= half_out {
+                next_rgb.as_deref().map(|next| {
+                    (
+                        rgb.as_slice(),
+                        next,
+                        position.saturating_sub(frames.saturating_sub(half_out)),
+                        half_out,
+                        cuts.get(index.saturating_add(1))
+                            .map_or(transition.kind, |cut| cut.kind),
+                    )
+                })
+            } else {
+                None
+            };
+            match blend {
+                Some((from, to, at, half, kind)) => {
+                    let alpha = transition_alpha(at, half);
+                    let width = usize::try_from(canvas.width).unwrap_or(0);
+                    let mixed = transition_frame(kind, from, to, alpha, width);
+                    frame(&mixed, None)?;
+                }
+                None => frame(&rgb, Some(index))?,
+            }
+        }
+        previous_rgb = Some(rgb);
+    }
+    Ok(())
+}
+
 /// One slide as a letterboxed RGB frame. A vector drawing (SVG) is rendered at the output size so it stays sharp;
 /// a PSD is composited by PhotoCraft; other images are decoded as one-frame video.
 fn slide_rgb(
     path: &Path,
-    output_height: u32,
+    output: (u32, u32),
     target: Target,
     fit: SlideFit,
 ) -> Result<Vec<u8>, TranscodeError> {
+    let (output_width, output_height) = output;
     let still = if disccraft_photo::is_svg(path) {
         // Render generously (twice the frame) and let the letterbox scale it down.
         Some(disccraft_photo::render_svg_fit(
             path,
-            OUTPUT_WIDTH.saturating_mul(2),
+            output_width.saturating_mul(2),
             output_height.saturating_mul(2),
         ))
     } else if disccraft_photo::is_psd(path) {
@@ -340,30 +431,17 @@ fn slide_rgb(
     let Some(still) = still else {
         let source = Source::open(path)?;
         let frame = source.video_frame(Tick(0))?;
-        return render_source_frame(&frame, output_height, target, fit);
+        return render_source_frame(&frame, output, target, fit);
     };
     let image = still.map_err(|error| TranscodeError::Decode(error.to_string()))?;
-    let placement = placement(
-        image.width,
-        image.height,
-        (1, 1),
-        output_height,
-        target,
-        fit,
-    )
-    .ok_or_else(|| unsupported("invalid image geometry"))?;
-    render_rgb(
-        &image.rgba,
-        image.width,
-        image.height,
-        placement,
-        output_height,
-    )
-    .ok_or_else(|| unsupported("failed to render slide"))
+    let placement = placement(image.width, image.height, (1, 1), output, target, fit)
+        .ok_or_else(|| unsupported("invalid image geometry"))?;
+    render_rgb(&image.rgba, image.width, image.height, placement, output)
+        .ok_or_else(|| unsupported("failed to render slide"))
 }
 
 /// Frames on each side of a cut for `transition` (half its length), 0 for a hard cut.
-fn transition_half_frames(transition: Transition, standard: Standard) -> u64 {
+fn transition_half_frames(transition: Transition, fps: (u64, u64)) -> u64 {
     if transition.kind == SlideTransition::None {
         return 0;
     }
@@ -372,7 +450,7 @@ fn transition_half_frames(transition: Transition, standard: Standard) -> u64 {
     } else {
         0.0
     };
-    frames_for_seconds(seconds / 2.0, standard).unwrap_or(0)
+    frames_for_seconds(seconds / 2.0, fps).unwrap_or(0)
 }
 
 /// For each slide, the frames at its start that belong to the cut before it (0 for the first slide): the wanted
@@ -469,12 +547,12 @@ fn write_slideshow_audio(
     Ok(())
 }
 
-fn frames_for_seconds(seconds: f64, standard: Standard) -> Option<u64> {
+fn frames_for_seconds(seconds: f64, fps: (u64, u64)) -> Option<u64> {
     if !seconds.is_finite() || seconds < 0.0 {
         return None;
     }
 
-    let (fps_num, fps_den) = fps(standard);
+    let (fps_num, fps_den) = fps;
     let value = seconds * fps_num as f64 / fps_den as f64;
 
     if !value.is_finite() || value < 0.0 {
@@ -531,41 +609,35 @@ fn unsupported(message: &str) -> TranscodeError {
 
 fn render_source_frame(
     frame: &VideoFrame,
-    output_height: u32,
+    output: (u32, u32),
     target: Target,
     fit: SlideFit,
 ) -> Result<Vec<u8>, TranscodeError> {
-    let placement = placement(
-        frame.width,
-        frame.height,
-        frame.par,
-        output_height,
-        target,
-        fit,
-    )
-    .ok_or_else(|| unsupported("invalid frame geometry"))?;
+    let placement = placement(frame.width, frame.height, frame.par, output, target, fit)
+        .ok_or_else(|| unsupported("invalid frame geometry"))?;
     let rgba = frame.to_rgba8();
 
-    render_rgb(&rgba, frame.width, frame.height, placement, output_height)
+    render_rgb(&rgba, frame.width, frame.height, placement, output)
         .ok_or_else(|| unsupported("failed to render frame"))
 }
 
-/// Where a `source_width` x `source_height` picture (pixel aspect `par`) goes for `fit`.
+/// Where a `source_width` x `source_height` picture (pixel aspect `par`) goes for `fit` on an `output` frame
+/// shown at the shape `target`.
 fn placement(
     source_width: u32,
     source_height: u32,
     par: (u32, u32),
-    output_height: u32,
+    output: (u32, u32),
     target: Target,
     fit: SlideFit,
 ) -> Option<Placement> {
-    if source_width == 0 || source_height == 0 || output_height == 0 {
+    let (output_width, output_height) = output;
+    if source_width == 0 || source_height == 0 || output_height == 0 || output_width == 0 {
         return None;
     }
     match fit {
         SlideFit::ScaleAndMatte => {
-            let geometry =
-                target_geometry(source_width, source_height, par, output_height, target)?;
+            let geometry = target_geometry(source_width, source_height, par, output, target)?;
             Some(Placement {
                 x: i64::from(geometry.x),
                 y: i64::from(geometry.y),
@@ -585,27 +657,27 @@ fn placement(
             }
             // Wider than the frame: as tall as the frame and wider; taller: as wide and taller.
             let (width, height) = if left >= right {
-                let width = u128::from(OUTPUT_WIDTH).checked_mul(left)? / right;
+                let width = u128::from(output_width).checked_mul(left)? / right;
                 (
-                    clamp_u128(width, OUTPUT_WIDTH.saturating_mul(64)),
+                    clamp_u128(width, output_width.saturating_mul(64)),
                     output_height,
                 )
             } else {
                 let height = u128::from(output_height).checked_mul(right)? / left;
                 (
-                    OUTPUT_WIDTH,
+                    output_width,
                     clamp_u128(height, output_height.saturating_mul(64)),
                 )
             };
             Some(Placement {
-                x: (i64::from(OUTPUT_WIDTH) - i64::from(width)) / 2,
+                x: (i64::from(output_width) - i64::from(width)) / 2,
                 y: (i64::from(output_height) - i64::from(height)) / 2,
                 width: width.max(1),
                 height: height.max(1),
             })
         }
         SlideFit::NoScale => Some(Placement {
-            x: (i64::from(OUTPUT_WIDTH) - i64::from(source_width)) / 2,
+            x: (i64::from(output_width) - i64::from(source_width)) / 2,
             y: (i64::from(output_height) - i64::from(source_height)) / 2,
             width: source_width,
             height: source_height,
@@ -617,9 +689,10 @@ fn target_geometry(
     source_width: u32,
     source_height: u32,
     par: (u32, u32),
-    output_height: u32,
+    output: (u32, u32),
     target: Target,
 ) -> Option<Geometry> {
+    let (output_width, output_height) = output;
     if source_width == 0 || source_height == 0 || output_height == 0 {
         return None;
     }
@@ -637,18 +710,18 @@ fn target_geometry(
     let right = target.num.checked_mul(aspect_den)?;
 
     let (width, height) = if left == right {
-        (OUTPUT_WIDTH, output_height)
+        (output_width, output_height)
     } else if left > right {
         let height = scaled_height(output_height, aspect_num, aspect_den, target)?;
-        (OUTPUT_WIDTH, height)
+        (output_width, height)
     } else {
-        let width = scaled_width(output_height, aspect_num, aspect_den, target)?;
+        let width = scaled_width(output_width, aspect_num, aspect_den, target)?;
         (width, output_height)
     };
 
-    let width = width.clamp(1, OUTPUT_WIDTH.max(1));
+    let width = width.clamp(1, output_width.max(1));
     let height = height.clamp(1, output_height.max(1));
-    let x = OUTPUT_WIDTH.saturating_sub(width) / 2;
+    let x = output_width.saturating_sub(width) / 2;
     let y = output_height.saturating_sub(height) / 2;
 
     Some(Geometry {
@@ -676,21 +749,23 @@ fn scaled_height(
     Some(clamp_u128(numerator / denominator, output_height))
 }
 
+/// The width of a picture as tall as the frame: its share of the frame's width is its shape over the frame's
+/// shown shape (`target`), whatever the frame's pixels are.
 fn scaled_width(
-    output_height: u32,
+    output_width: u32,
     aspect_num: u128,
     aspect_den: u128,
     target: Target,
 ) -> Option<u32> {
-    let numerator = u128::from(output_height)
+    let numerator = u128::from(output_width)
         .checked_mul(aspect_num)?
         .checked_mul(target.den)?;
     let denominator = aspect_den.checked_mul(target.num)?;
     if denominator == 0 {
-        return Some(OUTPUT_WIDTH);
+        return Some(output_width);
     }
 
-    Some(clamp_u128(numerator / denominator, OUTPUT_WIDTH))
+    Some(clamp_u128(numerator / denominator, output_width))
 }
 
 fn clamp_u128(value: u128, max: u32) -> u32 {
@@ -701,17 +776,18 @@ fn clamp_u128(value: u128, max: u32) -> u32 {
     }
 }
 
-/// Draws the picture into a black frame at `placement`, cut to the frame.
+/// Draws the picture into a black frame of `output` at `placement`, cut to the frame.
 fn render_rgb(
     rgba: &[u8],
     source_width: u32,
     source_height: u32,
     placement: Placement,
-    output_height: u32,
+    output: (u32, u32),
 ) -> Option<Vec<u8>> {
-    let output_width = OUTPUT_WIDTH as usize;
+    let (output_width, output_height) = output;
+    let width_px = output_width as usize;
     let height = output_height as usize;
-    let size = output_width.checked_mul(height)?.checked_mul(3)?;
+    let size = width_px.checked_mul(height)?.checked_mul(3)?;
     let mut rgb = vec![0u8; size];
 
     let start_x = placement.x.max(0);
@@ -719,7 +795,7 @@ fn render_rgb(
     let end_x = placement
         .x
         .checked_add(i64::from(placement.width))?
-        .min(i64::from(OUTPUT_WIDTH));
+        .min(i64::from(output_width));
     let end_y = placement
         .y
         .checked_add(i64::from(placement.height))?
@@ -735,7 +811,7 @@ fn render_rgb(
             let pixel = sample_bilinear(rgba, source_width, source_height, sx, sy)?;
             write_rgb(
                 &mut rgb,
-                output_width,
+                width_px,
                 u32::try_from(y).ok()?,
                 u32::try_from(x).ok()?,
                 pixel,
@@ -951,9 +1027,9 @@ fn write_u16_le<W: Write>(path: &Path, writer: &mut W, value: u16) -> Result<(),
 
 #[cfg(test)]
 mod tests {
-    use super::{FOUR_THREE, Placement, SlideFit, placement, slide_rgb};
+    use super::{FOUR_THREE, Placement, SIXTEEN_NINE, SlideFit, placement, slide_rgb};
     use super::{
-        SlideTransition, Standard, Transition, cut_halves, transition_alpha, transition_frame,
+        SlideTransition, Transition, cut_halves, transition_alpha, transition_frame,
         transition_half_frames,
     };
     use std::error::Error;
@@ -963,7 +1039,14 @@ mod tests {
     fn slides_are_matted_cropped_or_left_alone() {
         // A 2:1 picture in the 4:3 frame (720 anamorphic pixels wide, so 2:1 is 320 of the 480 lines).
         assert_eq!(
-            placement(1440, 720, (1, 1), 480, FOUR_THREE, SlideFit::ScaleAndMatte),
+            placement(
+                1440,
+                720,
+                (1, 1),
+                (720, 480),
+                FOUR_THREE,
+                SlideFit::ScaleAndMatte
+            ),
             Some(Placement {
                 x: 0,
                 y: 80,
@@ -973,7 +1056,14 @@ mod tests {
         );
         // Cropped: as tall as the frame, wider than it, centred (sticks out on both sides).
         assert_eq!(
-            placement(1440, 720, (1, 1), 480, FOUR_THREE, SlideFit::ScaleAndCrop),
+            placement(
+                1440,
+                720,
+                (1, 1),
+                (720, 480),
+                FOUR_THREE,
+                SlideFit::ScaleAndCrop
+            ),
             Some(Placement {
                 x: -180,
                 y: 0,
@@ -983,7 +1073,7 @@ mod tests {
         );
         // Not scaled: pixel for pixel, centred.
         assert_eq!(
-            placement(360, 240, (1, 1), 480, FOUR_THREE, SlideFit::NoScale),
+            placement(360, 240, (1, 1), (720, 480), FOUR_THREE, SlideFit::NoScale),
             Some(Placement {
                 x: 180,
                 y: 120,
@@ -992,8 +1082,63 @@ mod tests {
             })
         );
         assert_eq!(
-            placement(0, 240, (1, 1), 480, FOUR_THREE, SlideFit::NoScale),
+            placement(0, 240, (1, 1), (720, 480), FOUR_THREE, SlideFit::NoScale),
             None
+        );
+    }
+
+    /// A square picture fills three quarters of a 4:3 frame's width (540 of the 720 anamorphic pixels), and
+    /// 1080 of an HD frame's 1920 square ones. (Up to M10.6 the width came from the frame's height: 360.)
+    #[test]
+    fn a_tall_slide_is_pillarboxed_at_its_shape() {
+        assert_eq!(
+            placement(
+                600,
+                600,
+                (1, 1),
+                (720, 480),
+                FOUR_THREE,
+                SlideFit::ScaleAndMatte
+            ),
+            Some(Placement {
+                x: 90,
+                y: 0,
+                width: 540,
+                height: 480
+            })
+        );
+        assert_eq!(
+            placement(
+                600,
+                600,
+                (1, 1),
+                (1920, 1080),
+                SIXTEEN_NINE,
+                SlideFit::ScaleAndMatte
+            ),
+            Some(Placement {
+                x: 420,
+                y: 0,
+                width: 1080,
+                height: 1080
+            })
+        );
+        // A 4:3 SD frame's own anamorphic picture (8:9 pixels) fills it.
+        assert_eq!(
+            placement(
+                720,
+                480,
+                (8, 9),
+                (720, 480),
+                FOUR_THREE,
+                SlideFit::ScaleAndMatte
+            ),
+            Some(Placement {
+                x: 0,
+                y: 0,
+                width: 720,
+                height: 480
+            })
         );
     }
 
@@ -1028,16 +1173,27 @@ mod tests {
         // Each cut has its own wanted half (a slide with its own transition).
         assert_eq!(cut_halves(&[30, 30, 30], &[20, 4, 0]), vec![0, 4, 0]);
         assert_eq!(cut_halves(&[30], &[20]), vec![0]);
-        assert_eq!(transition_half_frames(Transition::NONE, Standard::Ntsc), 0);
+        assert_eq!(transition_half_frames(Transition::NONE, (30_000, 1001)), 0);
         assert_eq!(
             transition_half_frames(
                 Transition {
                     kind: SlideTransition::CrossDissolve,
                     seconds: 2.0
                 },
-                Standard::Pal
+                (25, 1)
             ),
             25
+        );
+        // 23.976 for an HD Blu-ray disc: a one-second half is 24 frames.
+        assert_eq!(
+            transition_half_frames(
+                Transition {
+                    kind: SlideTransition::CrossDissolve,
+                    seconds: 2.0
+                },
+                (24_000, 1001)
+            ),
+            24
         );
         assert!(transition_alpha(0, 15) > 0.0);
         assert!(transition_alpha(29, 15) < 1.0);
@@ -1052,7 +1208,7 @@ mod tests {
             &svg,
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="20" height="10" fill="#0f0"/></svg>"##,
         )?;
-        let rgb = slide_rgb(&svg, 480, FOUR_THREE, SlideFit::ScaleAndMatte)?;
+        let rgb = slide_rgb(&svg, (720, 480), FOUR_THREE, SlideFit::ScaleAndMatte)?;
         assert_eq!(rgb.len(), 720 * 480 * 3);
         let at = |x: usize, y: usize| {
             rgb.get((y * 720 + x) * 3..(y * 720 + x) * 3 + 3)

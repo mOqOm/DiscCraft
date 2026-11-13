@@ -336,7 +336,10 @@ fn menu_node(project: &Project, menu: &Menu) -> Node {
 
     Node {
         id: NodeId::Menu(menu.id),
-        title: object_title(&menu.name, tlf!("Menu {id}", id = menu.id.0)),
+        title: object_title(
+            &crate::menu_editor::menu_title(project, menu.id),
+            tlf!("Menu {id}", id = menu.id.0),
+        ),
         ports,
         media: menu_media(menu),
     }

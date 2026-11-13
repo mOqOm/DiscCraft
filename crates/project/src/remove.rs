@@ -53,6 +53,15 @@ impl Project {
         }
         self.clear_links(Target::Timeline(id));
         let _ = self.placements.remove(&id.0);
+        // A pop-up menu shown over this timeline in the editor loses its background.
+        for menu in self.menus.values_mut() {
+            if menu
+                .popup_background
+                .is_some_and(|background| background.timeline == id)
+            {
+                menu.popup_background = None;
+            }
+        }
         Ok(())
     }
 
@@ -75,11 +84,20 @@ impl Project {
 
     /// Remove a menu and clear links to it.
     pub fn remove_menu(&mut self, id: MenuId) -> Result<(), ProjectError> {
-        if self.menus.remove(&id).is_none() {
+        if !self.menus.contains_key(&id) {
             return Err(ProjectError::Invalid(format!("menu {id} does not exist")));
         }
-        self.clear_links(Target::Menu(id));
-        let _ = self.placements.remove(&id.0);
+        // A first page goes with its later pages (Encore's menu pages).
+        let pages: Vec<MenuId> = if self.is_menu_page(id) {
+            vec![id]
+        } else {
+            self.menu_pages(id)
+        };
+        for page in pages {
+            let _ = self.menus.remove(&page);
+            self.clear_links(Target::Menu(page));
+            let _ = self.placements.remove(&page.0);
+        }
         Ok(())
     }
 
@@ -148,7 +166,11 @@ impl Project {
                 }
                 || menu.graphics.iter().any(|graphic| {
                     matches!(graphic.kind, crate::graphic::GraphicKind::Image { asset } if asset == id)
-                });
+                })
+                || menu
+                    .buttons
+                    .iter()
+                    .any(|button| button.transition == Some(id));
             if uses {
                 return Some(menu.name.clone());
             }

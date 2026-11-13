@@ -11,8 +11,9 @@ use disccraft_m2tsmux::{
     VIDEO_PID, bd_lpcm_units, mux_m2ts,
 };
 use disccraft_project::DiscSettings;
-use disccraft_psmux::es::{Ac3Frame, Ac3Stream, LpcmStream, PictureType};
+use disccraft_psmux::es::{Ac3Frame, Ac3Stream, LpcmStream, PictureType, VideoStream};
 
+use crate::hd::HdTitle;
 use crate::{BdError, frame_rate, invalid, io_error, video_format, write_bytes};
 
 /// A clip written to `STREAM` and `CLIPINF`.
@@ -78,29 +79,41 @@ impl PreparedClip {
     }
 }
 
-/// Write one M2TS clip and its CLPI file.
+/// Write one M2TS clip and its CLPI file (with `hd`, the title's HD video in place of its SD video).
 pub(crate) fn write_clip(
     title: &TitleStreams,
+    hd: Option<&HdTitle>,
     number: u16,
     settings: &DiscSettings,
-    stream_dir: &Path,
-    clipinf_dir: &Path,
+    (stream_dir, clipinf_dir): (&Path, &Path),
 ) -> Result<BuiltClip, BdError> {
-    let prepared = prepare_clip(title, number, settings)?;
+    let prepared = prepare_clip(title, hd, number, settings)?;
     write_prepared(prepared, stream_dir, clipinf_dir)
 }
 
 /// Assembles a title's streams and timing without writing anything.
 pub(crate) fn prepare_clip(
     title: &TitleStreams,
+    hd: Option<&HdTitle>,
     number: u16,
     settings: &DiscSettings,
 ) -> Result<PreparedClip, BdError> {
-    let (presentation_start, presentation_end) = presentation_times(title)?;
-    let (inputs, streams) = build_inputs(title)?;
+    let (presentation_start, presentation_end) = match hd {
+        Some(hd) => hd_presentation_times(title, hd)?,
+        None => presentation_times(title)?,
+    };
+    let (inputs, streams) = build_inputs(title, hd)?;
     let video_stream = Stream {
         pid: VIDEO_PID,
-        coding: video_coding(settings, title.wide),
+        coding: match hd {
+            // HD is 16:9; a 4:3 source is pillarboxed in it.
+            Some(hd) => StreamCoding::H264Video {
+                video_format: hd.video_format(),
+                frame_rate: hd.frame_rate(),
+                aspect: 3,
+            },
+            None => video_coding(settings, title.wide),
+        },
     };
     let marks = chapter_marks(presentation_start, &title.chapter_starts)?;
     Ok(PreparedClip {
@@ -142,14 +155,30 @@ pub(crate) fn write_prepared(
     Ok(built)
 }
 
-fn build_inputs(title: &TitleStreams) -> Result<(Vec<EsInput>, Vec<Stream>), BdError> {
-    let video = EsInput {
-        pid: VIDEO_PID,
-        kind: StreamKind::Mpeg2Video,
-        units: video_units(title)?,
+fn build_inputs(
+    title: &TitleStreams,
+    hd: Option<&HdTitle>,
+) -> Result<(Vec<EsInput>, Vec<Stream>), BdError> {
+    let video = match hd {
+        Some(hd) => EsInput {
+            pid: VIDEO_PID,
+            kind: StreamKind::H264Video,
+            units: hd_units(title, hd)?,
+        },
+        None => EsInput {
+            pid: VIDEO_PID,
+            kind: StreamKind::Mpeg2Video,
+            units: video_units(title)?,
+        },
     };
     let (audio_inputs, mut streams) = audio_inputs(title)?;
-    let (pg_inputs, pg_streams) = pg_inputs(title)?;
+    let (pg_inputs, pg_streams) = match hd {
+        Some(hd) => pg_inputs(&hd.subtitles, (hd.width, hd.height))?,
+        None => pg_inputs(
+            &title.subtitles,
+            (title.video.sequence.width, title.video.sequence.height),
+        )?,
+    };
 
     let mut inputs = vec![video];
     inputs.extend(audio_inputs);
@@ -158,11 +187,15 @@ fn build_inputs(title: &TitleStreams) -> Result<(Vec<EsInput>, Vec<Stream>), BdE
     Ok((inputs, streams))
 }
 
-/// Encode every subtitle track as a presentation graphics stream (PID `PG_PID + i`).
-fn pg_inputs(title: &TitleStreams) -> Result<(Vec<EsInput>, Vec<Stream>), BdError> {
+/// Encode every subtitle track as a presentation graphics stream (PID `PG_PID + i`) for a `width` x `height`
+/// video.
+fn pg_inputs(
+    subtitles: &[SubtitleTrack],
+    (width, height): (u16, u16),
+) -> Result<(Vec<EsInput>, Vec<Stream>), BdError> {
     let mut inputs = Vec::new();
     let mut streams = Vec::new();
-    for (index, track) in title.subtitles.iter().enumerate() {
+    for (index, track) in subtitles.iter().enumerate() {
         let offset = u16::try_from(index)
             .ok()
             .filter(|i| *i < 32)
@@ -173,11 +206,7 @@ fn pg_inputs(title: &TitleStreams) -> Result<(Vec<EsInput>, Vec<Stream>), BdErro
         inputs.push(EsInput {
             pid,
             kind: StreamKind::Pgs,
-            units: pg_units(
-                track,
-                title.video.sequence.width,
-                title.video.sequence.height,
-            )?,
+            units: pg_units(track, width, height)?,
         });
         streams.push(Stream {
             pid,
@@ -223,15 +252,78 @@ fn pg_units(track: &SubtitleTrack, width: u16, height: u16) -> Result<Vec<EsUnit
 }
 
 fn video_units(title: &TitleStreams) -> Result<Vec<EsUnit>, BdError> {
+    picture_units(&title.video, &title.video_data)
+}
+
+/// The access units of a title's HD video, timed from the title's first picture (where its audio starts too). An
+/// IDR picture is a random access point.
+fn hd_units(title: &TitleStreams, hd: &HdTitle) -> Result<Vec<EsUnit>, BdError> {
+    let start =
+        i64::try_from(to_90k(title.first_pts)?).map_err(|_| invalid("timestamp overflow"))?;
+    let at = |time: i64| {
+        start
+            .checked_add(time)
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| invalid("HD time stamp out of range"))
+    };
+    let mut units = Vec::with_capacity(hd.units.len());
+    for unit in &hd.units {
+        let begin =
+            usize::try_from(unit.offset).map_err(|_| invalid("HD unit offset too large"))?;
+        let end = begin
+            .checked_add(usize::try_from(unit.len).map_err(|_| invalid("HD unit too large"))?)
+            .ok_or_else(|| invalid("HD unit range overflow"))?;
+        let data = hd
+            .data
+            .get(begin..end)
+            .ok_or_else(|| invalid("HD unit outside its stream"))?
+            .to_vec();
+        units.push(EsUnit {
+            pts: at(unit.pts)?,
+            dts: at(unit.dts)?,
+            data,
+            random_access: unit.keyframe,
+        });
+    }
+    if units.is_empty() {
+        return Err(invalid("HD video has no pictures"));
+    }
+    Ok(units)
+}
+
+/// A title's presentation start and end (45 kHz) with its HD video: from its first picture to the end of the last
+/// HD frame.
+fn hd_presentation_times(title: &TitleStreams, hd: &HdTitle) -> Result<(u32, u32), BdError> {
+    let start = to_45k(title.first_pts)?;
+    let last = hd
+        .units
+        .iter()
+        .map(|unit| unit.pts)
+        .max()
+        .ok_or_else(|| invalid("HD video has no pictures"))?;
+    let length = last
+        .checked_add(hd.frame_90k())
+        .and_then(|end| u32::try_from(end / 2).ok())
+        .ok_or_else(|| invalid("HD video too long"))?;
+    let end = start
+        .checked_add(length)
+        .ok_or_else(|| invalid("presentation end overflow"))?;
+    Ok((start, end))
+}
+
+/// The access units of a parsed MPEG-2 video stream (`video_data` its bytes), for the multiplexer.
+pub(crate) fn picture_units(
+    video: &VideoStream,
+    video_data: &[u8],
+) -> Result<Vec<EsUnit>, BdError> {
     let mut units = Vec::new();
 
-    for picture in title.video.pictures.iter() {
+    for picture in video.pictures.iter() {
         let end = picture
             .offset
             .checked_add(picture.len)
             .ok_or_else(|| invalid("picture range overflow"))?;
-        let data = title
-            .video_data
+        let data = video_data
             .get(picture.offset..end)
             .ok_or_else(|| invalid("picture data out of range"))?
             .to_vec();
@@ -326,7 +418,10 @@ fn ac3_units(frames: &[Ac3Frame], data: &[u8]) -> Result<Vec<EsUnit>, BdError> {
     Ok(units)
 }
 
-fn lpcm_coding(stream: &LpcmStream, language: Option<[u8; 2]>) -> Result<StreamCoding, BdError> {
+pub(crate) fn lpcm_coding(
+    stream: &LpcmStream,
+    language: Option<[u8; 2]>,
+) -> Result<StreamCoding, BdError> {
     if stream.sample_rate != 48_000 {
         return Err(BdError::Unsupported(
             "LPCM sample rate must be 48 kHz".to_string(),
@@ -418,9 +513,19 @@ pub(crate) fn to_45k(timestamp: i64) -> Result<u32, BdError> {
 
 fn presentation_times(title: &TitleStreams) -> Result<(u32, u32), BdError> {
     let start = to_45k(title.first_pts)?;
+    let end = to_45k(video_end(&title.video)?)?;
+    if end < start {
+        return Err(invalid("presentation end before start"));
+    }
+
+    Ok((start, end))
+}
+
+/// When the last picture of `video` ends (27 MHz).
+pub(crate) fn video_end(video: &VideoStream) -> Result<i64, BdError> {
     let mut max_end: Option<i64> = None;
 
-    for picture in title.video.pictures.iter() {
+    for picture in video.pictures.iter() {
         let end = picture
             .pts
             .checked_add(picture.duration)
@@ -432,13 +537,7 @@ fn presentation_times(title: &TitleStreams) -> Result<(u32, u32), BdError> {
         });
     }
 
-    let end = max_end.ok_or_else(|| invalid("title has no pictures"))?;
-    let end = to_45k(end)?;
-    if end < start {
-        return Err(invalid("presentation end before start"));
-    }
-
-    Ok((start, end))
+    max_end.ok_or_else(|| invalid("video has no pictures"))
 }
 
 fn chapter_marks(presentation_start: u32, chapter_starts: &[i64]) -> Result<Vec<u32>, BdError> {

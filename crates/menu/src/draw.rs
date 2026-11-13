@@ -281,13 +281,35 @@ fn text_layout(
     }
     let size = f32::from(text.size.clamp(MIN_TEXT_SIZE, MAX_TEXT_SIZE));
     let format = text.format;
+    let laid = formatted_layout(
+        &text.text,
+        family,
+        size,
+        text.font_style.as_deref(),
+        &format,
+    );
+    // The drawn (scaled, turned, squeezed) bounds start at the text's x, y.
+    let scale = text_scale(&format);
+    let (w, h) = oriented_size(&laid, sx, text.orientation, scale);
+    let center = (f32::from(text.x) + w * 0.5, f32::from(text.y) + h * 0.5);
+    let pen = oriented_pen(&laid, sx, text.orientation, scale, center);
+    pen.iter()
+        .all(|value| value.is_finite())
+        .then_some((laid, pen))
+}
+
+/// Lays out `text` at `size` in `family` (and `face`, a style of it) with the Character panel's `format`: faux bold
+/// / italic, lines, caps, tracking, kerning, baseline shift, superscript / subscript (smaller and moved; the line
+/// box stays the full size's), alignment and leading. Scales and anti-aliasing are applied when it is drawn.
+fn formatted_layout(
+    text: &str,
+    family: &str,
+    size: f32,
+    face: Option<&str>,
+    format: &TextFormat,
+) -> Arc<Layout> {
     let mut style = text_style(family, size);
-    if let Some(face) = text
-        .font_style
-        .as_deref()
-        .map(str::trim)
-        .filter(|face| !face.is_empty())
-    {
+    if let Some(face) = face.map(str::trim).filter(|face| !face.is_empty()) {
         style.style = face.to_owned();
     }
     style.faux_bold = format.bold;
@@ -302,7 +324,6 @@ fn text_layout(
     style.tracking = f32::from(format.tracking);
     style.kerning = format.kerning;
     style.baseline_shift = f32::from(format.baseline);
-    // Superscript / subscript: the text set smaller and moved off the line; the line box stays the full size's.
     let script_shift = match format.script {
         TextScript::Normal => None,
         TextScript::Superscript => Some(size * SCRIPT_POSITION),
@@ -322,9 +343,9 @@ fn text_layout(
         leading: f32::from(format.leading),
         ..ParagraphStyle::default()
     };
-    let mut laid = layout(&text.text, &style, &paragraph);
+    let mut laid = layout(text, &style, &paragraph);
     if let (Some(full_style), Some(shift)) = (full_style, script_shift) {
-        let full = layout(&text.text, &full_style, &paragraph);
+        let full = layout(text, &full_style, &paragraph);
         let mut bounds = laid.bounds;
         // The moved small text and the full-size line boxes together.
         bounds[1] = (bounds[1] - shift).min(full.bounds[1]);
@@ -333,14 +354,51 @@ fn text_layout(
         owned.bounds = bounds;
         laid = Arc::new(owned);
     }
-    // The drawn (scaled, turned, squeezed) bounds start at the text's x, y.
-    let scale = text_scale(&format);
-    let (w, h) = oriented_size(&laid, sx, text.orientation, scale);
-    let center = (f32::from(text.x) + w * 0.5, f32::from(text.y) + h * 0.5);
-    let pen = oriented_pen(&laid, sx, text.orientation, scale, center);
-    pen.iter()
-        .all(|value| value.is_finite())
-        .then_some((laid, pen))
+    laid
+}
+
+/// Stretches each picture over its button's video thumbnail area (Encore's `(%)` layer), clipped to the frame.
+pub(crate) fn draw_thumbnails(
+    menu: &Menu,
+    width: u16,
+    height: u16,
+    rgb: &mut [u8],
+    pictures: &[crate::ThumbnailPicture<'_>],
+) {
+    for picture in pictures {
+        let Some(area) = menu
+            .buttons
+            .get(picture.button)
+            .and_then(Button::thumbnail_rect)
+        else {
+            continue;
+        };
+        // Inside the frame only (a rectangle from a file may reach far outside it).
+        let w = area.w.min(width.saturating_sub(area.x));
+        let h = area.h.min(height.saturating_sub(area.y));
+        if w == 0 || h == 0 {
+            continue;
+        }
+        let mut scaled = vec![0u8; usize::from(w) * usize::from(h) * 3];
+        if !scale_rgb_into(
+            picture.rgb,
+            picture.width,
+            picture.height,
+            w,
+            h,
+            &mut scaled,
+        ) {
+            continue;
+        }
+        let row_bytes = usize::from(w) * 3;
+        for (row, line) in scaled.chunks_exact(row_bytes).enumerate() {
+            let y = usize::from(area.y) + row;
+            let start = (y * usize::from(width) + usize::from(area.x)) * 3;
+            if let Some(target) = rgb.get_mut(start..start + row_bytes) {
+                target.copy_from_slice(line);
+            }
+        }
+    }
 }
 
 pub(crate) fn draw_labels(menu: &Menu, width: u16, height: u16, rgb: &mut [u8]) {
@@ -635,6 +693,7 @@ fn draw_label(
         return;
     };
     let (mask, mask_x, mask_y) = render::rasterize(&laid, &pen);
+    let mask = antialiased(mask, button.label_format.antialias);
     if mask.w == 0 || mask.h == 0 {
         return;
     }
@@ -651,7 +710,8 @@ fn draw_label(
     blend_mask(&mask, mask_x, mask_y, color, rgb, width, height);
 }
 
-/// Lays out a button's text, centred in the button (`sx`: the horizontal squeeze). `None` for an empty text.
+/// Lays out a button's text, centred in the button (in the part its video thumbnail leaves; `sx`: the horizontal
+/// squeeze). `None` for an empty text.
 fn label_layout(
     button: &Button,
     family: &str,
@@ -660,7 +720,7 @@ fn label_layout(
     if button.label.is_empty() {
         return None;
     }
-    let rect = button.rect;
+    let rect = button.label_rect();
     // The text is sized for the button standing upright, then turned with it.
     let upright = if button.orientation.swaps_sides() {
         Rect {
@@ -671,16 +731,38 @@ fn label_layout(
     } else {
         rect
     };
-    let style = text_style(family, font_size(upright));
-    let laid = layout(&button.label, &style, &ParagraphStyle::default());
+    // The button's text with its own Character formatting (sized by the button).
+    let laid = formatted_layout(
+        &button.label,
+        family,
+        font_size(upright),
+        button.label_font_style.as_deref(),
+        &button.label_format,
+    );
     let center = (
         f32::from(rect.x) + f32::from(rect.w) * 0.5,
         f32::from(rect.y) + f32::from(rect.h) * 0.5,
     );
-    let pen = oriented_pen(&laid, sx, button.orientation, (1.0, 1.0), center);
+    let pen = oriented_pen(
+        &laid,
+        sx,
+        button.orientation,
+        text_scale(&button.label_format),
+        center,
+    );
     pen.iter()
         .all(|value| value.is_finite())
         .then_some((laid, pen))
+}
+
+/// A button's text as a coverage mask in frame pixels (for a text subpicture), with where its corner lands.
+pub(crate) fn label_mask(menu: &Menu, button: &Button) -> Option<(Mask, i32, i32)> {
+    let family = family_for(menu.label_font.as_deref());
+    let sx = squeeze(menu);
+    let (laid, pen) = label_layout(button, &family, sx)?;
+    let (mask, x, y) = render::rasterize(&laid, &pen);
+    let mask = antialiased(mask, button.label_format.antialias);
+    (mask.w > 0 && mask.h > 0).then_some((mask, x, y))
 }
 
 /// A transparent RGBA canvas with one menu text object drawn in its colour.
@@ -710,6 +792,7 @@ pub(crate) fn label_rgba(menu: &Menu, button: &Button, width: u16, height: u16) 
     let sx = squeeze(menu);
     if let Some((laid, pen)) = label_layout(button, &family, sx) {
         let (mask, mask_x, mask_y) = render::rasterize(&laid, &pen);
+        let mask = antialiased(mask, button.label_format.antialias);
         mask_into_rgba(
             &mask,
             mask_x,

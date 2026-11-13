@@ -303,7 +303,7 @@ impl DiscCraftApp {
         }
     }
 
-    /// 下のボタン（Encore: 配置 / 新規メニュー / 背景を設定 / 項目を追加 / 削除）。
+    /// 下のボタン（Encore と同じ並び: 配置 / 置き換え / 背景を設定 / 新規メニュー / 項目を追加 / 削除）。
     fn library_tools(&mut self, ui: &mut Ui, selected: Option<LibraryPick>) {
         let menu = self.viewer_menu();
         let kind = self.pick_kind(selected);
@@ -316,23 +316,31 @@ impl DiscCraftApp {
             let place = ui
                 .add_enabled(placeable && menu.is_some(), egui::Button::new(tl!("Place")))
                 .on_hover_text(tl!("Place the selected item in the open menu"));
-            let new_menu = ui
-                .add_enabled(is_menu, egui::Button::new(tl!("New Menu")))
-                .on_hover_text(tl!("Create a new menu from the selected menu"));
+            let replace = ui
+                .add_enabled(is_menu && menu.is_some(), egui::Button::new(tl!("Replace")))
+                .on_hover_text(tl!(
+                    "Replace the open menu with the selected menu, keeping its links"
+                ));
             let background = ui
                 .add_enabled(
                     is_background && menu.is_some(),
                     egui::Button::new(tl!("Set Background")),
                 )
                 .on_hover_text(tl!("Use the selected background in the open menu"));
+            let new_menu = ui
+                .add_enabled(is_menu, egui::Button::new(tl!("New Menu")))
+                .on_hover_text(tl!("Create a new menu from the selected menu"));
             if place.clicked() {
                 action = Some(LibraryAction::Place);
             }
-            if new_menu.clicked() {
-                action = Some(LibraryAction::NewMenu);
+            if replace.clicked() {
+                action = Some(LibraryAction::Replace);
             }
             if background.clicked() {
                 action = Some(LibraryAction::SetBackground);
+            }
+            if new_menu.clicked() {
+                action = Some(LibraryAction::NewMenu);
             }
             let add = ui
                 .add_enabled(menu.is_some(), egui::Button::new(tl!("Add Item")))
@@ -453,6 +461,15 @@ impl DiscCraftApp {
         }
         if ui
             .add_enabled(
+                kind == Some(LibraryKind::Menu) && menu.is_some(),
+                egui::Button::new(tl!("Replace")),
+            )
+            .clicked()
+        {
+            action = Some(LibraryAction::Replace);
+        }
+        if ui
+            .add_enabled(
                 kind == Some(LibraryKind::Menu),
                 egui::Button::new(tl!("Create New Menu")),
             )
@@ -516,6 +533,9 @@ impl DiscCraftApp {
                     self.select(Selection::Menu(MenuId(id)));
                 }
             }
+            (UserItemKind::Menu(spec), LibraryAction::Replace) => {
+                self.library_replace_menu(json!({ "spec": spec }));
+            }
             (UserItemKind::Button(spec), LibraryAction::Place) => {
                 let Some(menu) = self.viewer_menu() else {
                     self.status = tl!("Open a menu first").to_owned();
@@ -554,6 +574,9 @@ impl DiscCraftApp {
                 if let Some(item) = library_item(id) {
                     self.library_new_menu(item);
                 }
+            }
+            (LibraryPick::Preset(id), LibraryAction::Replace) => {
+                self.library_replace_menu(json!({ "preset": id }));
             }
             (LibraryPick::Preset(id), LibraryAction::Place) => {
                 if let Some(item) = library_item(id) {
@@ -607,6 +630,22 @@ impl DiscCraftApp {
         }
         self.select(Selection::Menu(MenuId(id)));
         self.status = tlf!("Created menu {name}", name = item_name(item.id));
+    }
+
+    /// 置き換え（Encore）: 選んだライブラリのメニューを、開いているメニューのデザインにする。リンクは番号で残す。
+    /// `source` は `menu.replace` の "preset" か "spec"。
+    fn library_replace_menu(&mut self, source: Value) {
+        let Some(menu) = self.viewer_menu() else {
+            self.status = tl!("Open a menu first").to_owned();
+            return;
+        };
+        let mut params = source;
+        if let Some(object) = params.as_object_mut() {
+            let _ = object.insert("menu".to_owned(), json!(menu.0));
+        }
+        if self.run_command("menu.replace", params).is_some() {
+            self.status = tl!("Replaced the menu").to_owned();
+        }
     }
 
     /// ボタンのプリセットを開いているメニューに置く。
@@ -730,6 +769,8 @@ struct PreviewItem {
     highlight: [u8; 3],
     /// Buttons as (label, x, y, w, h) in a 720x480 frame.
     buttons: Vec<(String, u16, u16, u16, u16)>,
+    /// Each button's video thumbnail.
+    thumbnails: Vec<Option<disccraft_project::ThumbnailArea>>,
 }
 
 impl From<&'static LibraryItem> for PreviewItem {
@@ -744,6 +785,7 @@ impl From<&'static LibraryItem> for PreviewItem {
                 .iter()
                 .map(|b| (label_text(b.label), b.x, b.y, b.w, b.h))
                 .collect(),
+            thumbnails: item.buttons.iter().map(|b| b.thumbnail).collect(),
         }
     }
 }
@@ -761,6 +803,7 @@ impl PreviewItem {
                     .iter()
                     .map(|b| (b.label.clone(), b.x, b.y, b.w, b.h))
                     .collect(),
+                thumbnails: spec.buttons.iter().map(|b| b.thumbnail).collect(),
             },
             UserItemKind::Button(spec) => PreviewItem {
                 kind: LibraryKind::Button,
@@ -768,6 +811,7 @@ impl PreviewItem {
                 text: [255, 255, 255],
                 highlight: [255, 208, 0],
                 buttons: vec![(spec.label.clone(), spec.x, spec.y, spec.w, spec.h)],
+                thumbnails: vec![spec.thumbnail],
             },
             UserItemKind::Background(color) => PreviewItem {
                 kind: LibraryKind::Background,
@@ -775,6 +819,7 @@ impl PreviewItem {
                 text: [255, 255, 255],
                 highlight: [255, 208, 0],
                 buttons: Vec::new(),
+                thumbnails: Vec::new(),
             },
         }
     }
@@ -784,6 +829,8 @@ impl PreviewItem {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LibraryAction {
     Place,
+    /// 置き換え（開いているメニューを選んだメニューのデザインに）。
+    Replace,
     NewMenu,
     SetBackground,
     /// 項目を追加（開いているメニューをユーザーのセットへ）。
@@ -837,8 +884,23 @@ fn preset_preview(ui: &mut Ui, item: Option<&PreviewItem>) {
             egui::Stroke::new(1.0, stroke_color),
             egui::StrokeKind::Inside,
         );
+        // ビデオサムネールの場所（灰色）と、その下の文字。
+        let mut text_center = rect.center();
+        if let Some(area) = item.thumbnails.get(index).copied().flatten() {
+            let part =
+                |value: u16| f32::from(value) / f32::from(disccraft_project::THUMBNAIL_PARTS);
+            let thumb = egui::Rect::from_min_size(
+                rect.min + egui::vec2(rect.width() * part(area.x), rect.height() * part(area.y)),
+                egui::vec2(rect.width() * part(area.w), rect.height() * part(area.h)),
+            )
+            .shrink(1.0);
+            painter.rect_filled(thumb, 0.0, Color32::from_gray(110));
+            if rect.bottom() - thumb.bottom() > 4.0 {
+                text_center = egui::pos2(rect.center().x, (thumb.bottom() + rect.bottom()) / 2.0);
+            }
+        }
         painter.text(
-            rect.center(),
+            text_center,
             egui::Align2::CENTER_CENTER,
             label,
             egui::FontId::proportional((rect.height() * 0.5).clamp(6.0, 12.0)),
@@ -863,10 +925,12 @@ pub(crate) fn item_name(id: &str) -> &'static str {
         "menu.plain-light" => tl!("Plain Light"),
         "menu.bottom-bar" => tl!("Bottom Bar"),
         "menu.chapter-grid" => tl!("Chapter Grid"),
+        "menu.thumbnail-grid" => tl!("Thumbnail Grid"),
         "menu.left-list" => tl!("Left List"),
         "button.wide" => tl!("Wide Button"),
         "button.small" => tl!("Small Button"),
         "button.tile" => tl!("Tile"),
+        "button.thumbnail" => tl!("Video Thumbnail"),
         "button.bar" => tl!("Full-Width Bar"),
         "background.black" => tl!("Black"),
         "background.charcoal" => tl!("Charcoal"),
@@ -879,9 +943,45 @@ pub(crate) fn item_name(id: &str) -> &'static str {
 }
 
 impl DiscCraftApp {
-    /// メニュー ▸ チャプターインデックスを作成（`multi_page` は 複数ページの…）。選択中のタイムラインのチャプターごとに
-    /// ボタンを並べたメニューを作り、最初のページを開く。
+    /// Whether the menu in the viewer has chapter buttons (a template for Encore's チャプターインデックスを作成).
+    pub(crate) fn viewer_menu_has_chapter_buttons(&self) -> bool {
+        self.viewer_menu()
+            .and_then(|id| self.session.project.menu(id))
+            .is_some_and(|menu| {
+                menu.buttons
+                    .iter()
+                    .any(|button| button.kind == disccraft_project::ButtonKind::Chapter)
+            })
+    }
+
+    /// メニュー ▸ チャプターインデックスを作成（`multi_page` は 複数ページの…）。ビューアのメニューにチャプターボタンが
+    /// あれば Encore と同じく、リンク済みのチャプターボタンに続けて残りのチャプターボタンにリンクを入れる。なければ
+    /// 選択中のタイムラインのチャプターごとにボタンを並べたメニューを作り、最初のページを開く（DiscCraft 独自）。
     pub(crate) fn create_chapter_index(&mut self, multi_page: bool) {
+        if !multi_page
+            && self.viewer_menu_has_chapter_buttons()
+            && let Some(menu) = self.viewer_menu()
+        {
+            // Encore: a chapter button has to link to a timeline first.
+            let linked = self.session.project.menu(menu).is_some_and(|found| {
+                found.buttons.iter().any(|button| {
+                    button.kind == disccraft_project::ButtonKind::Chapter
+                        && matches!(button.link, disccraft_project::Link::Timeline { .. })
+                })
+            });
+            if linked {
+                let _ = self.run_command(
+                    "menu.fillChapterIndex",
+                    serde_json::json!({ "menu": menu.0 }),
+                );
+            } else {
+                self.status = tl!(
+                    "Could not create the chapter index. Link at least one chapter button of the current menu to a timeline."
+                )
+                .to_string();
+            }
+            return;
+        }
         let Some(id) = self.selected_timeline() else {
             return;
         };

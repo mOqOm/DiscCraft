@@ -14,7 +14,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "ビルド",
         menu: &["ファイル"],
         shortcut: None,
-        params: r#"{"output": "folder" | "iso", "path": string}"#,
+        params: r#"{"output": "folder" | "iso", "path": string, "cache"?: string}"#,
         enabled: always_enabled,
         run: run_build,
         journal: false,
@@ -42,6 +42,7 @@ fn run_transcode_status(session: &mut Session, params: &Value) -> CommandResult 
             Some(disccraft_build::cache_dir(&BuildOptions {
                 output,
                 path: PathBuf::from(path),
+                cache: None,
             }))
             .filter(|dir| dir.is_dir())
         }
@@ -72,7 +73,14 @@ fn run_build(session: &mut Session, params: &Value) -> CommandResult {
     let output_text = req_str(params, "output")?;
     let output = parse_output(&output_text)?;
     let path = PathBuf::from(req_str(params, "path")?);
-    let options = BuildOptions { output, path };
+    let cache = crate::params::opt_str(params, "cache")?
+        .filter(|cache| !cache.trim().is_empty())
+        .map(PathBuf::from);
+    let options = BuildOptions {
+        output,
+        path,
+        cache,
+    };
 
     let report = disccraft_build::build(&session.project, &options)?;
     let titles =

@@ -12,7 +12,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[CommandSpec {
     label: "メニューの環境設定を変更",
     menu: &["編集", "環境設定"],
     shortcut: None,
-    params: r#"{"vertical"?: bool, "verticalWrap"?: bool, "verticalWrapMode"?: "same" | "next", "horizontal"?: bool, "horizontalWrap"?: bool, "horizontalWrapMode"?: "same" | "next", "syncButtonNames"?: bool, "nameButtonsFromLinks"?: bool}"#,
+    params: r#"{"vertical"?: bool, "verticalWrap"?: bool, "verticalWrapMode"?: "same" | "next", "horizontal"?: bool, "horizontalWrap"?: bool, "horizontalWrapMode"?: "same" | "next", "excludeNextPrevious"?: bool, "syncButtonNames"?: bool, "nameButtonsFromLinks"?: bool}"#,
     enabled: always_enabled,
     run: run_set_menu_options,
     journal: true,
@@ -45,6 +45,7 @@ fn run_set_menu_options(session: &mut Session, params: &Value) -> CommandResult 
     let horizontal = flag(params, "horizontal")?;
     let horizontal_wrap = flag(params, "horizontalWrap")?;
     let horizontal_mode = mode(params, "horizontalWrapMode")?;
+    let exclude = flag(params, "excludeNextPrevious")?;
     let sync_names = flag(params, "syncButtonNames")?;
     let from_links = flag(params, "nameButtonsFromLinks")?;
     let settings = &mut session.project.settings;
@@ -66,6 +67,9 @@ fn run_set_menu_options(session: &mut Session, params: &Value) -> CommandResult 
     }
     if let Some(value) = horizontal_mode {
         routing.horizontal_wrap_mode = value;
+    }
+    if let Some(value) = exclude {
+        routing.exclude_next_previous = value;
     }
     if let Some(value) = sync_names {
         settings.button_defaults.sync_name = value;

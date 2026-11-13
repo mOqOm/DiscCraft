@@ -73,6 +73,7 @@ fn blu_ray_iso_opens_in_libbluray() {
         &BuildOptions {
             output: OutputKind::Iso,
             path: iso.clone(),
+            cache: None,
         },
     )
     .unwrap();

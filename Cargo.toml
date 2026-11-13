@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "apps/*", "xtask"]
+members = ["crates/*", "apps/*"]
 
 [workspace.package]
 version = "0.1.0"
@@ -38,7 +38,7 @@ disccraft-ui-egui = { path = "crates/ui-egui" }
 disccraft-automation = { path = "crates/automation" }
 disccraft-platform = { path = "crates/platform" }
 
-# 外部 crate（ライセンスは AGENTS.md の許可リストに従う）
+# 外部 crate
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -46,15 +46,16 @@ clap = { version = "4", features = ["derive"] }
 png = "0.17"
 # Subtitle files in Shift_JIS / UTF-16 ((Apache-2.0 OR MIT) AND BSD-3-Clause; already in the tree).
 encoding_rs = "0.8"
-# SVG rendering (MPL-2.0, used unmodified as AGENTS.md rule 4 allows; already in the tree through PhotoCraft).
+# SVG rendering (MPL-2.0, used unmodified).
 resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts", "raster-images"] }
 egui = "0.37"
 eframe = "0.37"
 rfd = "0.18"
+cpal = "0.18.2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 # FilmCraft（MIT OR Apache-2.0）。crates.io 未公開のため git 依存で rev を固定する。
-# 使い道は docs/architecture.md §5.3、帰属は NOTICE。
+# 帰属は NOTICE。
 filmcraft-time = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
 filmcraft-geom = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
 filmcraft-color = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
@@ -102,3 +103,38 @@ hayro = { git = "https://github.com/storytold/craft-libs", rev = "c5a1cbfb5f9049
 hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "c5a1cbfb5f9049f9270955caffb5bee5997aebf7" }
 hayro-interpret = { git = "https://github.com/storytold/craft-libs", rev = "c5a1cbfb5f9049f9270955caffb5bee5997aebf7" }
 hayro-jbig2 = { git = "https://github.com/storytold/craft-libs", rev = "c5a1cbfb5f9049f9270955caffb5bee5997aebf7" }
+
+# 開発ビルド（テスト、CLI での確かめ）でも、映像・音声の変換、多重化、描画の重いクレートは最適化する。
+# 最適化なしでは何十倍も遅い（デバッグビルドで 20 秒の MP4 の DVD への変換に 444 秒）。最初のコンパイルだけ長くなる。
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev.package.disccraft-mpeg2venc]
+opt-level = 3
+
+[profile.dev.package.disccraft-ac3enc]
+opt-level = 3
+
+[profile.dev.package.disccraft-transcode]
+opt-level = 3
+
+[profile.dev.package.disccraft-psmux]
+opt-level = 3
+
+[profile.dev.package.disccraft-m2tsmux]
+opt-level = 3
+
+[profile.dev.package.disccraft-spu]
+opt-level = 3
+
+[profile.dev.package.disccraft-pgs]
+opt-level = 3
+
+[profile.dev.package.disccraft-menu]
+opt-level = 3
+
+[profile.dev.package.disccraft-photo]
+opt-level = 3
+
+[profile.dev.package.disccraft-udf]
+opt-level = 3

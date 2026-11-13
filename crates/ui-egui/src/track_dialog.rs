@@ -222,7 +222,15 @@ impl DiscCraftApp {
                         state
                             .kind
                             .add_command(state.timeline.0, asset.0, state.language.trim());
-                    let _ = self.run_command(command, params);
+                    let added = self.run_command(command, params);
+                    // Encore と同じく、足した字幕トラックをモニターに出す。
+                    if state.kind == TrackKind::Subtitle
+                        && let Some(track) = added
+                            .and_then(|value| value.get("track").and_then(Value::as_u64))
+                            .and_then(|track| usize::try_from(track).ok())
+                    {
+                        let _ = self.shown_subtitles.insert(state.timeline, Some(track));
+                    }
                 }
             }
             Some(false) => self.track_dialog = None,

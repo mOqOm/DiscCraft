@@ -19,8 +19,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use disccraft_bd::{BdBuildReport, build_bdmv};
-use disccraft_dvd::{DvdBuildReport, DvdError, build_video_ts};
+use disccraft_bd::{BdBuildReport, build_bdmv_with};
+use disccraft_dvd::{DvdBuildReport, DvdError, build_video_ts_with};
 pub use disccraft_dvd::{TranscodeStatus, transcode_status};
 use disccraft_project::{DiscKind, Project};
 
@@ -40,6 +40,10 @@ pub struct BuildOptions {
     pub output: OutputKind,
     /// Output directory.
     pub path: PathBuf,
+    /// Where transcoded media is kept between builds; `None` for `disccraft-cache` next to the output (see
+    /// [`cache_dir`]). A cache of its own lets a folder and an image of the same project, or builds into a fresh
+    /// output, share their transcodes.
+    pub cache: Option<PathBuf>,
 }
 
 /// Build result.
@@ -63,6 +67,9 @@ pub struct BuildReport {
 /// inside the `<name>.files` folder built next to it).
 #[must_use]
 pub fn cache_dir(options: &BuildOptions) -> PathBuf {
+    if let Some(cache) = &options.cache {
+        return cache.clone();
+    }
     let folder = match options.output {
         OutputKind::Folder => options.path.clone(),
         OutputKind::Iso => {
@@ -80,21 +87,30 @@ pub fn cache_dir(options: &BuildOptions) -> PathBuf {
 /// Build a disc output from a project.
 pub fn build(project: &Project, options: &BuildOptions) -> Result<BuildReport, String> {
     let started = Instant::now();
+    // Button transitions become hidden titles (Encore's button Transition).
+    let expanded = project
+        .with_transitions_expanded()
+        .map_err(|error| error.to_string())?;
+    let project = &expanded;
 
+    let cache = cache_dir(options);
+    let at = (cache.as_path(), started);
     match (project.settings.kind, options.output) {
-        (DiscKind::Dvd, OutputKind::Folder) => build_dvd_folder(project, &options.path, started),
-        (DiscKind::Dvd, OutputKind::Iso) => build_dvd_iso(project, &options.path, started),
-        (DiscKind::BluRay, OutputKind::Folder) => build_bd_folder(project, &options.path, started),
-        (DiscKind::BluRay, OutputKind::Iso) => build_bd_iso(project, &options.path, started),
+        (DiscKind::Dvd, OutputKind::Folder) => build_dvd_folder(project, &options.path, at),
+        (DiscKind::Dvd, OutputKind::Iso) => build_dvd_iso(project, &options.path, at),
+        (DiscKind::BluRay, OutputKind::Folder) => build_bd_folder(project, &options.path, at),
+        (DiscKind::BluRay, OutputKind::Iso) => build_bd_iso(project, &options.path, at),
     }
 }
 
 fn build_bd_folder(
     project: &Project,
     path: &Path,
-    started: Instant,
+    (cache, started): (&Path, Instant),
 ) -> Result<BuildReport, String> {
-    match catch_unwind(AssertUnwindSafe(|| build_bdmv(project, path))) {
+    match catch_unwind(AssertUnwindSafe(|| {
+        build_bdmv_with(project, path, cache, &mut |_, _| {})
+    })) {
         Ok(Ok(report)) => Ok(report_from_bd(report, started)),
         Ok(Err(err)) => Err(err.to_string()),
         Err(_) => Err("internal error during build".to_string()),
@@ -102,10 +118,14 @@ fn build_bd_folder(
 }
 
 /// Build the `BDMV` folder next to the image (`<name>.files`), then write a UDF 2.50 image of it.
-fn build_bd_iso(project: &Project, iso: &Path, started: Instant) -> Result<BuildReport, String> {
+fn build_bd_iso(
+    project: &Project,
+    iso: &Path,
+    (cache, started): (&Path, Instant),
+) -> Result<BuildReport, String> {
     let stem = iso.file_stem().and_then(|s| s.to_str()).unwrap_or("disc");
     let folder = iso.with_file_name(format!("{stem}.files"));
-    let mut report = build_bd_folder(project, &folder, started)?;
+    let mut report = build_bd_folder(project, &folder, (cache, started))?;
     let mut files = Vec::new();
     collect_tree(&folder, &folder.join("BDMV"), &mut files)?;
     files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -190,9 +210,11 @@ fn report_from_bd(report: BdBuildReport, started: Instant) -> BuildReport {
 fn build_dvd_folder(
     project: &Project,
     path: &Path,
-    started: Instant,
+    (cache, started): (&Path, Instant),
 ) -> Result<BuildReport, String> {
-    let result = catch_unwind(AssertUnwindSafe(|| build_video_ts(project, path)));
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        build_video_ts_with(project, path, cache, &mut |_, _| {})
+    }));
 
     match result {
         Ok(Ok(report)) => Ok(report_from_dvd(report, started)),
@@ -201,10 +223,14 @@ fn build_dvd_folder(
     }
 }
 
-fn build_dvd_iso(project: &Project, iso: &Path, started: Instant) -> Result<BuildReport, String> {
+fn build_dvd_iso(
+    project: &Project,
+    iso: &Path,
+    (cache, started): (&Path, Instant),
+) -> Result<BuildReport, String> {
     let stem = iso.file_stem().and_then(|s| s.to_str()).unwrap_or("disc");
     let folder = iso.with_file_name(format!("{stem}.files"));
-    let mut report = build_dvd_folder(project, &folder, started)?;
+    let mut report = build_dvd_folder(project, &folder, (cache, started))?;
     let video_ts = folder.join("VIDEO_TS");
     let names: Vec<String> = std::fs::read_dir(&video_ts)
         .map_err(|e| format!("{}: {e}", video_ts.display()))?
@@ -291,12 +317,20 @@ mod tests {
         let folder = BuildOptions {
             output: OutputKind::Folder,
             path: PathBuf::from("out"),
+            cache: None,
         };
         assert_eq!(cache_dir(&folder), Path::new("out").join("disccraft-cache"));
         let iso = BuildOptions {
             output: OutputKind::Iso,
             path: Path::new("out").join("movie.iso"),
+            cache: None,
         };
+        // A cache of its own (shared by builds).
+        let shared = BuildOptions {
+            cache: Some(PathBuf::from("cache")),
+            ..iso.clone()
+        };
+        assert_eq!(cache_dir(&shared), Path::new("cache"));
         assert_eq!(
             cache_dir(&iso),
             Path::new("out").join("movie.files").join("disccraft-cache")
@@ -311,6 +345,7 @@ mod tests {
         let options = BuildOptions {
             output: OutputKind::Folder,
             path: dir.clone(),
+            cache: None,
         };
         let result = build(&project, &options);
         let _ = std::fs::remove_dir_all(&dir);

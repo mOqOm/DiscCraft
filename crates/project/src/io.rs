@@ -2,7 +2,7 @@ use crate::model::Project;
 use serde_json::{Map, Value};
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 /// File format marker.
 pub const FORMAT: &str = "disccraft-project";
@@ -47,20 +47,31 @@ pub enum ProjectError {
 
 /// Serialize a project to the canonical JSON envelope.
 pub fn to_json(p: &Project) -> Result<String, ProjectError> {
+    pretty(&envelope(p)?)
+}
+
+/// The canonical JSON envelope of a project.
+fn envelope(p: &Project) -> Result<Value, ProjectError> {
     let project = serde_json::to_value(p).map_err(|e| ProjectError::Json(e.to_string()))?;
     let mut root = Map::new();
     root.insert("format".to_string(), Value::String(FORMAT.to_string()));
     root.insert("version".to_string(), Value::from(SCHEMA_VERSION));
     root.insert("project".to_string(), project);
-    serde_json::to_string_pretty(&Value::Object(root))
-        .map_err(|e| ProjectError::Json(e.to_string()))
+    Ok(Value::Object(root))
+}
+
+fn pretty(value: &Value) -> Result<String, ProjectError> {
+    serde_json::to_string_pretty(value).map_err(|e| ProjectError::Json(e.to_string()))
 }
 
 /// Deserialize a project from the canonical JSON envelope.
 pub fn from_json(s: &str) -> Result<Project, ProjectError> {
-    let mut value: Value =
-        serde_json::from_str(s).map_err(|e| ProjectError::Json(e.to_string()))?;
+    let value: Value = serde_json::from_str(s).map_err(|e| ProjectError::Json(e.to_string()))?;
+    from_value(value)
+}
 
+/// [`from_json`] from an already parsed envelope.
+fn from_value(mut value: Value) -> Result<Project, ProjectError> {
     let format = value
         .get("format")
         .and_then(Value::as_str)
@@ -87,9 +98,15 @@ pub fn from_json(s: &str) -> Result<Project, ProjectError> {
     serde_json::from_value(project).map_err(|e| ProjectError::Json(e.to_string()))
 }
 
-/// Atomically save a project to a path.
+/// Atomically save a project to a path. Each asset's path is also written relative to the project file's folder
+/// ("relativePath"), so a project moved or copied together with its media (a zip of a sample folder, another
+/// computer) still finds them; the absolute "path" stays first, as before.
 pub fn save(p: &Project, path: &Path) -> Result<(), ProjectError> {
-    let json = to_json(p)?;
+    let mut value = envelope(p)?;
+    if let Some(folder) = folder_of(path) {
+        add_relative_paths(&mut value, &folder);
+    }
+    let json = pretty(&value)?;
     let base = path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -113,7 +130,154 @@ pub fn load(path: &Path) -> Result<Project, ProjectError> {
 
     let bytes = fs::read(path).map_err(|e| io_error(path, e))?;
     let text = String::from_utf8(bytes).map_err(|e| ProjectError::Json(e.to_string()))?;
-    from_json(&text)
+    let mut value: Value =
+        serde_json::from_str(&text).map_err(|e| ProjectError::Json(e.to_string()))?;
+    if let Some(folder) = folder_of(path) {
+        find_moved_assets(&mut value, &folder);
+    }
+    from_value(value)
+}
+
+/// Longest relative path accepted from a project file.
+const MAX_RELATIVE_PATH: usize = 4096;
+
+/// The folder a project file is in (made absolute against the current folder).
+fn folder_of(path: &Path) -> Option<PathBuf> {
+    std::path::absolute(path)
+        .ok()?
+        .parent()
+        .map(Path::to_path_buf)
+}
+
+/// The asset objects of a project envelope.
+fn assets_mut(value: &mut Value) -> Vec<&mut Map<String, Value>> {
+    match value
+        .get_mut("project")
+        .and_then(|project| project.get_mut("assets"))
+    {
+        Some(Value::Object(assets)) => assets
+            .values_mut()
+            .filter_map(Value::as_object_mut)
+            .collect(),
+        Some(Value::Array(assets)) => assets.iter_mut().filter_map(Value::as_object_mut).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Writes each asset's path relative to `folder` ("relativePath"; left out when there is none, such as a file on
+/// another drive).
+fn add_relative_paths(value: &mut Value, folder: &Path) {
+    for asset in assets_mut(value) {
+        let relative = asset
+            .get("path")
+            .and_then(Value::as_str)
+            .and_then(|path| relative_path(folder, Path::new(path)));
+        match relative {
+            Some(relative) => {
+                asset.insert("relativePath".to_string(), Value::String(relative));
+            }
+            None => {
+                let _ = asset.remove("relativePath");
+            }
+        }
+    }
+}
+
+/// An asset whose recorded path is gone but whose relative path from `folder` names a file takes that file (and is
+/// no longer offline): the project was moved together with its media.
+fn find_moved_assets(value: &mut Value, folder: &Path) {
+    for asset in assets_mut(value) {
+        let gone = asset
+            .get("path")
+            .and_then(Value::as_str)
+            .is_none_or(|path| !Path::new(path).exists());
+        if !gone {
+            continue;
+        }
+        let Some(found) = asset
+            .get("relativePath")
+            .and_then(Value::as_str)
+            .and_then(|relative| resolve_relative(folder, relative))
+            .filter(|candidate| candidate.is_file())
+        else {
+            continue;
+        };
+        asset.insert(
+            "path".to_string(),
+            Value::String(found.to_string_lossy().into_owned()),
+        );
+        asset.insert("offline".to_string(), Value::Bool(false));
+    }
+}
+
+/// `target` relative to the folder `base`, with forward slashes ("media/clip.m2v", "../shared/logo.png"). `None`
+/// when either is not absolute or they are on different drives.
+pub(crate) fn relative_path(base: &Path, target: &Path) -> Option<String> {
+    if !base.is_absolute() || !target.is_absolute() {
+        return None;
+    }
+    let base: Vec<Component<'_>> = base.components().collect();
+    let target: Vec<Component<'_>> = target.components().collect();
+    // Windows paths do not care about case.
+    let same = |a: &Component<'_>, b: &Component<'_>| {
+        let text = |c: &Component<'_>| c.as_os_str().to_string_lossy().into_owned();
+        if cfg!(windows) {
+            text(a).eq_ignore_ascii_case(&text(b))
+        } else {
+            a == b
+        }
+    };
+    match (base.first(), target.first()) {
+        (Some(a), Some(b)) if same(a, b) => {}
+        _ => return None,
+    }
+    let common = base
+        .iter()
+        .zip(&target)
+        .take_while(|(a, b)| same(a, b))
+        .count();
+    let mut parts: Vec<String> = Vec::new();
+    for component in base.get(common..)? {
+        match component {
+            Component::Normal(_) => parts.push("..".to_string()),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    for component in target.get(common..)? {
+        match component {
+            Component::Normal(name) => parts.push(name.to_string_lossy().into_owned()),
+            Component::ParentDir => parts.push("..".to_string()),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// `relative` (forward slashes) from the folder `base`. `None` for anything that is not a plain relative path
+/// (a drive, a root, a backslash) or climbs above the root.
+fn resolve_relative(base: &Path, relative: &str) -> Option<PathBuf> {
+    if relative.is_empty()
+        || relative.len() > MAX_RELATIVE_PATH
+        || relative.starts_with('/')
+        || relative.contains(['\\', ':'])
+    {
+        return None;
+    }
+    let mut path = base.to_path_buf();
+    for part in relative.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if !path.pop() {
+                    return None;
+                }
+            }
+            name => path.push(name),
+        }
+    }
+    Some(path)
 }
 
 fn migrate(_value: &mut Value, version: u32) -> Result<(), ProjectError> {
@@ -142,7 +306,7 @@ fn io_error(path: &Path, error: std::io::Error) -> ProjectError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProjectError, from_json, load, save, to_json};
+    use super::{ProjectError, from_json, load, relative_path, resolve_relative, save, to_json};
     use crate::Project;
     use std::error::Error;
     use std::fs;
@@ -192,6 +356,98 @@ mod tests {
             }
             i = end;
         }
+        Ok(())
+    }
+
+    /// A fresh folder in the temp folder.
+    fn temp_folder(name: &str) -> Result<std::path::PathBuf, Box<dyn Error>> {
+        let dir = std::env::temp_dir().join(format!(
+            "disccraft-project-io-{}-{name}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
+    #[test]
+    fn a_moved_project_finds_its_media() -> Result<(), Box<dyn Error>> {
+        let root = temp_folder("moved")?;
+        let first = root.join("sample");
+        fs::create_dir_all(first.join("media"))?;
+        let clip = first.join("media").join("clip.png");
+        fs::write(&clip, b"not really a picture")?;
+        let mut project = Project::default();
+        let asset = project.add_asset(&clip)?;
+        let file = first.join("sample.dcproj");
+        save(&project, &file)?;
+        let text = fs::read_to_string(&file)?;
+        assert!(
+            text.contains("\"relativePath\": \"media/clip.png\""),
+            "{text}"
+        );
+
+        // Moved (renamed) together with its media: the old path is gone, the relative one is found.
+        let moved = root.join("elsewhere");
+        fs::rename(&first, &moved)?;
+        let loaded = load(&moved.join("sample.dcproj"))?;
+        let found = loaded.assets.get(&asset).ok_or("asset")?;
+        assert_eq!(
+            std::path::Path::new(&found.path),
+            moved.join("media").join("clip.png")
+        );
+        assert!(!found.offline);
+
+        // A copy whose original is still there keeps the recorded path (as Premiere and Encore do).
+        let copy = root.join("copy");
+        fs::create_dir_all(copy.join("media"))?;
+        fs::copy(
+            moved.join("media").join("clip.png"),
+            copy.join("media").join("clip.png"),
+        )?;
+        save(&loaded, &moved.join("sample.dcproj"))?;
+        fs::copy(moved.join("sample.dcproj"), copy.join("sample.dcproj"))?;
+        let copied = load(&copy.join("sample.dcproj"))?;
+        assert_eq!(
+            copied.assets.get(&asset).map(|asset| asset.path.clone()),
+            Some(found.path.clone())
+        );
+        fs::remove_dir_all(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn relative_paths_climb_and_refuse_odd_ones() -> Result<(), Box<dyn Error>> {
+        let base = temp_folder("relative")?;
+        let project = base.join("projects").join("one");
+        let shared = base.join("shared").join("logo.png");
+        assert_eq!(
+            relative_path(&project, &shared).as_deref(),
+            Some("../../shared/logo.png")
+        );
+        assert_eq!(
+            relative_path(&project, std::path::Path::new("logo.png")),
+            None
+        );
+        if cfg!(windows) {
+            assert_eq!(
+                relative_path(
+                    std::path::Path::new("C:\\a"),
+                    std::path::Path::new("D:\\b\\c.png")
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            resolve_relative(&project, "../../shared/logo.png"),
+            Some(shared.clone())
+        );
+        for odd in ["C:/x.png", "/x.png", "a\\b.png", ""] {
+            assert_eq!(resolve_relative(&project, odd), None, "{odd}");
+        }
+        fs::remove_dir_all(&base)?;
         Ok(())
     }
 

@@ -14,6 +14,10 @@ use std::hash::{Hash, Hasher};
 pub(crate) struct MenuTexture {
     pub(crate) hash: u64,
     pub(crate) handle: egui::TextureHandle,
+    /// The highlight subpicture as white masks the size of the frame, one per colour (1 to 3), tinted with a
+    /// state's colours to preview it: a frame, the text when the button makes a text subpicture, or the
+    /// subpicture's layers.
+    pub(crate) highlights: [Option<egui::TextureHandle>; 3],
     pub(crate) width: u16,
     pub(crate) height: u16,
 }
@@ -248,7 +252,7 @@ impl DiscCraftApp {
             .shadow_preview(menu)
             .or_else(|| self.color_set_preview(menu));
         let menu = previewed.as_ref().unwrap_or(menu);
-        let hash = menu_hash(menu);
+        let hash = self.picture_hash(menu);
         let need_render = self
             .menu_texture
             .as_ref()
@@ -273,7 +277,7 @@ impl DiscCraftApp {
         let frame = (cached.width, cached.height);
         // Encore の「テレビ画面に合わせてメニューピクセルを校正」を外すと、ピクセルをそのまま（720x480 は 3:2）で。
         let aspect = if self.correct_pixel_aspect {
-            menu_aspect(menu)
+            menu_aspect(menu, frame)
         } else {
             f32::from(frame.0.max(1)) / f32::from(frame.1.max(1))
         };
@@ -389,7 +393,7 @@ impl DiscCraftApp {
             .shadow_preview(menu)
             .or_else(|| self.color_set_preview(menu));
         let menu = previewed.as_ref().unwrap_or(menu);
-        let hash = menu_hash(menu);
+        let hash = self.picture_hash(menu);
         let need_render = self
             .menu_texture
             .as_ref()
@@ -408,9 +412,9 @@ impl DiscCraftApp {
         }
 
         // 拡大率に合わせた 4:3 の大きさ（全体表示はパネルに収める）。
-        let size = zoom.size(ui.available_size(), menu_aspect(menu));
-
         let frame = (cached.width, cached.height);
+        let size = zoom.size(ui.available_size(), menu_aspect(menu, frame));
+
         let response = ui.add(egui::Image::new((cached.handle.id(), size)));
         self.draw_buttons(ui, menu, frame, response.rect, highlight);
     }
@@ -467,8 +471,41 @@ impl DiscCraftApp {
             }
         }
         ui.separator();
+        self.page_buttons(ui, menu);
+        ui.separator();
         if ui.button(tl!("Add Button")).clicked() {
             self.add_button(menu);
+        }
+    }
+
+    /// Encore のビューアの下の ページ送り: 前のページを表示 / 現在のページ番号（0 から）/ 次のページを表示。
+    fn page_buttons(&mut self, ui: &mut Ui, menu: MenuId) {
+        let pages = self.session.project.menu_pages(menu);
+        let number = self.session.project.menu_page_number(menu);
+        let previous = number
+            .checked_sub(1)
+            .and_then(|index| pages.get(index).copied());
+        let next = pages.get(number.saturating_add(1)).copied();
+        let mut go = None;
+        if ui
+            .add_enabled(previous.is_some(), egui::Button::new("◀"))
+            .on_hover_text(tl!("Show Previous Page"))
+            .clicked()
+        {
+            go = previous;
+        }
+        let _ = ui
+            .label(number.to_string())
+            .on_hover_text(tlf!("Current page number: {n}", n = number));
+        if ui
+            .add_enabled(next.is_some(), egui::Button::new("▶"))
+            .on_hover_text(tl!("Show Next Page"))
+            .clicked()
+        {
+            go = next;
+        }
+        if let Some(page) = go {
+            self.select(crate::app::Selection::Menu(page));
         }
     }
 
@@ -522,7 +559,8 @@ impl DiscCraftApp {
             let ([ar, ag, ab], activated_opacity) = group.activated_look();
             let activated_alpha = disccraft_project::opacity_to_alpha(activated_opacity);
             // Encore の標準グループ: 選ばれていないボタンの枠の色（不透明度 0 なら見えない）。
-            let normal = menu.color_set_or_default().normal;
+            let set = menu.color_set_or_default();
+            let normal = set.normal;
 
             // モニター（highlight を渡す）はリモコンのハイライトだけを描く。
             // 編集画面は選択中と既定ボタンをハイライトとして描く。
@@ -530,6 +568,47 @@ impl DiscCraftApp {
                 Some(_) => highlighted,
                 None => selected || self.is_default(menu, index),
             };
+
+            // The disc's own highlight (the frame, the text of a text subpicture, or a subpicture's layers) in the
+            // state's colours 1 to 3.
+            let tint = |n: u8| {
+                let (color, opacity) = match self.highlight_preview {
+                    HighlightPreview::Selected if active => group.selected_color(n),
+                    HighlightPreview::Activated if active => group.activated_color(n),
+                    _ => {
+                        let normal = set.normal_color(n);
+                        (normal.color, normal.opacity)
+                    }
+                };
+                let [tr, tg, tb] = color;
+                (opacity > 0).then(|| {
+                    egui::Color32::from_rgba_unmultiplied(
+                        tr,
+                        tg,
+                        tb,
+                        disccraft_project::opacity_to_alpha(opacity),
+                    )
+                })
+            };
+            if let Some(cached) = self
+                .menu_texture
+                .as_ref()
+                .filter(|cached| (cached.width, cached.height) == frame)
+            {
+                let (fw, fh) = (f32::from(frame.0).max(1.0), f32::from(frame.1).max(1.0));
+                let uv = egui::Rect::from_min_max(
+                    egui::pos2(f32::from(rect.x) / fw, f32::from(rect.y) / fh),
+                    egui::pos2(
+                        f32::from(rect.x.saturating_add(rect.w)) / fw,
+                        f32::from(rect.y.saturating_add(rect.h)) / fh,
+                    ),
+                );
+                for (n, mask) in (1_u8..).zip(&cached.highlights) {
+                    if let (Some(tint), Some(mask)) = (tint(n), mask) {
+                        ui.painter().image(mask.id(), canvas_rect, uv, tint);
+                    }
+                }
+            }
 
             let color = match self.highlight_preview {
                 HighlightPreview::Selected if active => {
@@ -556,6 +635,31 @@ impl DiscCraftApp {
                 egui::Stroke::new(if active { 2.0 } else { 1.0 }, color),
                 egui::StrokeKind::Inside,
             );
+
+            // 絵のないビデオサムネール（リンクがない、ビデオ以外へのリンク）は、編集画面だけ点線で場所を示す。
+            if highlight.is_none()
+                && let Some(area) = button.thumbnail.map(|area| area.rect_in(rect))
+                && self
+                    .session
+                    .project
+                    .thumbnail_source(&button.link)
+                    .is_none()
+            {
+                let area = to_canvas(area, frame, canvas).shrink(1.0);
+                let corners = [
+                    area.left_top(),
+                    area.right_top(),
+                    area.right_bottom(),
+                    area.left_bottom(),
+                    area.left_top(),
+                ];
+                let _ = ui.painter().add(egui::Shape::dashed_line(
+                    &corners,
+                    egui::Stroke::new(1.0, egui::Color32::from_white_alpha(110)),
+                    4.0,
+                    3.0,
+                ));
+            }
 
             if selected && single {
                 let handle = egui::Rect::from_min_size(
@@ -885,10 +989,20 @@ impl DiscCraftApp {
 
                 let image = egui::ColorImage::from_rgb([width, height], &rendered.rgb);
                 let handle = ctx.load_texture("menu", image, egui::TextureOptions::LINEAR);
+                let highlights = [1_u8, 2, 3].map(|n| {
+                    highlight_mask(&rendered.highlight, width, height, n).map(|mask| {
+                        ctx.load_texture(
+                            format!("menu_highlight_{n}"),
+                            mask,
+                            egui::TextureOptions::NEAREST,
+                        )
+                    })
+                });
 
                 self.menu_texture = Some(MenuTexture {
                     hash,
                     handle,
+                    highlights,
                     width: rendered.width,
                     height: rendered.height,
                 });
@@ -901,24 +1015,99 @@ impl DiscCraftApp {
     }
 
     /// メニューの絵。背景がビデオなら、Encore と同じくビデオの最初のフレームの上に描く（取り出せなければ黒）。
+    /// Blu-ray のポップアップで背景タイムラインがあれば、そのタイムラインの背景フレームの上に描く。
+    /// ビデオサムネールのボタンには、リンク先のチャプターのポスターフレームを入れる。
     pub(crate) fn render_menu_picture(
         &mut self,
         menu: &Menu,
     ) -> Result<disccraft_menu::RenderedMenu, disccraft_menu::MenuError> {
-        if let MenuBackground::Video { asset, .. } = &menu.background
-            && let Some((rgb, width, height)) = self.first_video_frame(*asset)
-            && let Ok(rendered) = disccraft_menu::render_menu_over_picture(
+        let frames: Vec<(usize, std::sync::Arc<Vec<u8>>, usize, usize)> = self
+            .session
+            .project
+            .menu_thumbnails(menu)
+            .into_iter()
+            .filter_map(|thumbnail| {
+                let (rgb, width, height) = if thumbnail.source.still {
+                    // A slideshow's first slide (Encore).
+                    let (rgb, width, height) =
+                        disccraft_menu::image_rgb(&self.session.project, thumbnail.source.asset)?;
+                    (std::sync::Arc::new(rgb), width, height)
+                } else {
+                    // A still thumbnail without a poster frame: the chapter's first bright frame (Encore).
+                    self.video_frame_from(
+                        thumbnail.source.asset,
+                        thumbnail.source.start,
+                        Some(!thumbnail.source.poster && !menu.plays_buttons()),
+                    )?
+                };
+                Some((thumbnail.button, rgb, width, height))
+            })
+            .collect();
+        let thumbnails: Vec<disccraft_menu::ThumbnailPicture<'_>> = frames
+            .iter()
+            .map(
+                |(button, rgb, width, height)| disccraft_menu::ThumbnailPicture {
+                    button: *button,
+                    rgb: rgb.as_slice(),
+                    width: *width,
+                    height: *height,
+                },
+            )
+            .collect();
+        let popup_picture = if menu.popup
+            && let Some(background) = menu.popup_background
+            && let Some(video) = self
+                .session
+                .project
+                .timelines
+                .get(&background.timeline)
+                .map(|timeline| timeline.video)
+        {
+            self.video_frame_at(video, background.time)
+        } else {
+            None
+        };
+        let video_picture = match &menu.background {
+            MenuBackground::Video { asset, .. } => self.first_video_frame(*asset),
+            _ => None,
+        };
+        for (rgb, width, height) in popup_picture.iter().chain(video_picture.iter()) {
+            if let Ok(rendered) = disccraft_menu::render_menu_with(
                 &self.session.project,
                 menu,
-                &rgb,
-                width,
-                height,
-            )
-        {
-            return Ok(rendered);
+                disccraft_menu::MenuPictures {
+                    background: Some((rgb.as_slice(), *width, *height)),
+                    thumbnails: &thumbnails,
+                },
+            ) {
+                return Ok(rendered);
+            }
         }
         // 新しいメニュー（ボタンがまだない）も、背景とテキストを出す。
-        disccraft_menu::render_menu_preview(&self.session.project, menu)
+        disccraft_menu::render_menu_with(
+            &self.session.project,
+            menu,
+            disccraft_menu::MenuPictures {
+                background: None,
+                thumbnails: &thumbnails,
+            },
+        )
+    }
+
+    /// メニューの絵を描き直すかどうかを決める値: メニューと、ビデオサムネールの絵の出どころ（リンク先の
+    /// ポスターフレームを動かしても描き直す）。
+    pub(crate) fn picture_hash(&self, menu: &Menu) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        menu_hash(menu).hash(&mut hasher);
+        for thumbnail in self.session.project.menu_thumbnails(menu) {
+            (
+                thumbnail.button,
+                thumbnail.source.asset.0,
+                thumbnail.source.start.0,
+            )
+                .hash(&mut hasher);
+        }
+        hasher.finish()
     }
 
     /// [`Self::first_video_frame`] for other modules.
@@ -927,6 +1116,53 @@ impl DiscCraftApp {
         asset: disccraft_project::AssetId,
     ) -> Option<(std::sync::Arc<Vec<u8>>, usize, usize)> {
         self.first_video_frame(asset)
+    }
+
+    /// ビデオのアセットの `time` のフレーム（`asset.frame`。アセットと時刻ごとに 1 回だけ取り出して覚える）。
+    fn video_frame_at(
+        &mut self,
+        asset: disccraft_project::AssetId,
+        time: disccraft_project::Tick,
+    ) -> Option<(std::sync::Arc<Vec<u8>>, usize, usize)> {
+        self.video_frame_from(asset, time, None)
+    }
+
+    /// The frame at `time` (`asset.frame`, remembered). A video thumbnail (`thumbnail` is `Some(bright)`) takes the
+    /// picture without letterbox bars and, when `bright`, the first bright frame from there.
+    fn video_frame_from(
+        &mut self,
+        asset: disccraft_project::AssetId,
+        time: disccraft_project::Tick,
+        thumbnail: Option<bool>,
+    ) -> Option<(std::sync::Arc<Vec<u8>>, usize, usize)> {
+        let key = (asset.0, time.0, thumbnail);
+        let (thumbnail, bright) = (thumbnail.is_some(), thumbnail == Some(true));
+        if let Some(cached) = self.timed_frames.get(&key) {
+            return cached.clone();
+        }
+        let frame = self
+            .run_query(
+                "asset.frame",
+                serde_json::json!({
+                    "asset": asset.0,
+                    "seconds": time.seconds().max(0.0),
+                    "bright": bright,
+                    "bars": !thumbnail,
+                }),
+            )
+            .and_then(|value| {
+                let width = usize::try_from(value.get("width")?.as_u64()?).ok()?;
+                let height = usize::try_from(value.get("height")?.as_u64()?).ok()?;
+                let rgb: Vec<u8> = value
+                    .get("rgb")?
+                    .as_array()?
+                    .iter()
+                    .map(|byte| byte.as_u64().and_then(|b| u8::try_from(b).ok()))
+                    .collect::<Option<Vec<u8>>>()?;
+                Some((std::sync::Arc::new(rgb), width, height))
+            });
+        let _ = self.timed_frames.insert(key, frame.clone());
+        frame
     }
 
     /// ビデオのアセットの最初のフレーム（`asset.frame`。アセットごとに 1 回だけ取り出して覚える）。
@@ -985,13 +1221,51 @@ impl DiscCraftApp {
     }
 }
 
-/// The shape the menu is shown at: 16:9 for a widescreen menu, else 4:3.
-pub(crate) fn menu_aspect(menu: &Menu) -> f32 {
-    if menu.widescreen {
+/// The shape the menu is shown at: 16:9 for a widescreen menu or an HD frame (square pixels), else 4:3.
+pub(crate) fn menu_aspect(menu: &Menu, frame: (u16, u16)) -> f32 {
+    if frame.0 > 720 {
+        f32::from(frame.0) / f32::from(frame.1.max(1))
+    } else if menu.widescreen {
         16.0 / 9.0
     } else {
         4.0 / 3.0
     }
+}
+
+/// Colour `n` (1 to 3) of the highlight layer as a white mask the size of the frame (`None` for colours 2 and 3
+/// when the layer has none).
+fn highlight_mask(
+    layer: &disccraft_menu::HighlightLayer,
+    width: usize,
+    height: usize,
+    n: u8,
+) -> Option<egui::ColorImage> {
+    if n > 1 && !layer.pixels.contains(&n) {
+        return None;
+    }
+    let mut pixels = vec![egui::Color32::TRANSPARENT; width.checked_mul(height)?];
+    let layer_w = usize::from(layer.width);
+    for (index, value) in layer.pixels.iter().enumerate() {
+        if *value != n || layer_w == 0 {
+            continue;
+        }
+        let x = usize::from(layer.x).checked_add(index % layer_w)?;
+        let y = usize::from(layer.y).checked_add(index / layer_w)?;
+        if x < width
+            && y < height
+            && let Some(pixel) = y
+                .checked_mul(width)
+                .and_then(|row| row.checked_add(x))
+                .and_then(|i| pixels.get_mut(i))
+        {
+            *pixel = egui::Color32::WHITE;
+        }
+    }
+    Some(egui::ColorImage {
+        size: [width, height],
+        pixels,
+        source_size: egui::vec2(width as f32, height as f32),
+    })
 }
 
 pub(crate) fn menu_hash(menu: &Menu) -> u64 {
@@ -1063,9 +1337,9 @@ pub(crate) fn link_targets(project: &Project, include_chapters: bool) -> Vec<(St
         }
     }
 
-    for (id, menu) in project.menus.iter() {
+    for id in project.menus.keys() {
         targets.push((
-            tlf!("Menu: {name}", name = menu.name),
+            tlf!("Menu: {name}", name = menu_title(project, *id)),
             Link::Menu {
                 id: *id,
                 button: None,
@@ -1142,11 +1416,26 @@ fn timeline_link_label(project: &Project, id: TimelineId, chapter: u32) -> Strin
     format!("{}:{}", name, chapter_label)
 }
 
-fn menu_link_label(project: &Project, id: MenuId, button: Option<u32>) -> String {
+/// A menu's name as the lists show it: a later page is its first page's name and the page number.
+pub(crate) fn menu_title(project: &Project, id: MenuId) -> String {
+    let root = project.menu_root(id);
     let name = project
-        .menu(id)
+        .menu(root)
         .map(|menu| menu.name.clone())
         .unwrap_or_else(|| tl!("Unknown").to_string());
+    if root == id {
+        name
+    } else {
+        tlf!(
+            "{name}: page {n}",
+            name = name,
+            n = project.menu_page_number(id)
+        )
+    }
+}
+
+fn menu_link_label(project: &Project, id: MenuId, button: Option<u32>) -> String {
+    let name = menu_title(project, id);
 
     // Encore と同じ「メニュー名:初期設定」/「メニュー名:ボタン」。
     match button {
