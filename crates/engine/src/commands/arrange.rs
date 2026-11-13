@@ -129,8 +129,14 @@ fn pasted_button(item: &Value) -> Result<Button, String> {
         audio: None,
         subtitle: disccraft_project::SubtitleDefault::NoChange,
         kind: Default::default(),
+        text_subpicture: false,
+        transition: None,
+        label_format: Default::default(),
+        label_font_style: None,
         shadow: None,
         orientation: Default::default(),
+        thumbnail: None,
+        subpicture: None,
     })
 }
 

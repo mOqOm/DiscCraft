@@ -90,6 +90,15 @@ pub fn chapter_grid(count: usize) -> Vec<Rect> {
         .collect()
 }
 
+/// `rect` on the frame of `settings`: on SD x and w unchanged, y and h scaled by frame_h / 480 (rounded down); on
+/// HD in the middle of the frame ([`crate::design_rect`]).
+fn placed(rect: Rect, settings: &crate::model::DiscSettings) -> Rect {
+    if crate::hd_frame::hd_frame(settings) {
+        return crate::hd_frame::design_rect(settings, rect);
+    }
+    scaled(rect, frame_size(settings).1)
+}
+
 /// `rect` in a frame `frame_h` pixels high: x and w unchanged, y and h scaled by frame_h / 480 (rounded down).
 fn scaled(rect: Rect, frame_h: u16) -> Rect {
     let scale = |value: u16| {
@@ -149,7 +158,86 @@ fn or_default(text: &str, fallback: &str) -> String {
     }
 }
 
+/// Why a menu cannot be filled as a chapter index (Encore's messages).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FillChapterIndexError {
+    /// The menu does not exist.
+    NoMenu,
+    /// The menu has no chapter buttons.
+    NoChapterButtons,
+    /// None of its chapter buttons links to a timeline's chapter.
+    NoLinkedChapterButton,
+}
+
 impl Project {
+    /// Encore's チャプターインデックスを作成 on a menu that has chapter buttons (a template): the first chapter button
+    /// linked to a timeline's chapter sets the timeline and where the index starts, and every chapter button, in
+    /// button order, links to the chapter that follows from there (the ones before it to the chapters before).
+    /// Buttons outside the timeline's chapters keep their links. A button set to take its name from its link takes
+    /// the chapter's name. Returns how many buttons were linked.
+    pub fn fill_chapter_index(&mut self, menu: MenuId) -> Result<usize, FillChapterIndexError> {
+        let found = self.menu(menu).ok_or(FillChapterIndexError::NoMenu)?;
+        let chapter_buttons: Vec<usize> = found
+            .buttons
+            .iter()
+            .enumerate()
+            .filter(|(_, button)| button.kind == crate::menu::ButtonKind::Chapter)
+            .map(|(index, _)| index)
+            .collect();
+        if chapter_buttons.is_empty() {
+            return Err(FillChapterIndexError::NoChapterButtons);
+        }
+        let (position, timeline, chapter) = chapter_buttons
+            .iter()
+            .enumerate()
+            .find_map(|(position, &index)| match found.buttons.get(index)?.link {
+                Link::Timeline { id, chapter } if self.timelines.contains_key(&id) => {
+                    Some((position, id, chapter))
+                }
+                _ => None,
+            })
+            .ok_or(FillChapterIndexError::NoLinkedChapterButton)?;
+        let chapters = self
+            .timelines
+            .get(&timeline)
+            .map_or(0, |timeline| timeline.chapters.len().max(1));
+        let start = i64::from(chapter) - i64::try_from(position).unwrap_or(i64::MAX);
+        let mut linked = 0;
+        for (offset, &index) in chapter_buttons.iter().enumerate() {
+            let Some(chapter) = i64::try_from(offset)
+                .ok()
+                .and_then(|offset| start.checked_add(offset))
+                .and_then(|chapter| u32::try_from(chapter).ok())
+                .filter(|chapter| {
+                    usize::try_from(*chapter).is_ok_and(|chapter| chapter < chapters)
+                })
+            else {
+                continue;
+            };
+            let link = Link::Timeline {
+                id: timeline,
+                chapter,
+            };
+            let name = crate::menu::Menu::link_target_name(self, &link);
+            if let Some(button) = self
+                .menu_mut(menu)
+                .and_then(|menu| menu.buttons.get_mut(index))
+            {
+                button.link = link;
+                if button.name_from_link
+                    && let Some(name) = name
+                {
+                    if button.sync_name {
+                        button.label.clone_from(&name);
+                    }
+                    button.name = name;
+                }
+                linked += 1;
+            }
+        }
+        Ok(linked)
+    }
+
     /// Creates a chapter index for `timeline`. `per_page`: `None` = one page holding every chapter (error when the
     /// timeline has more than [`MAX_SINGLE_PAGE`] chapters); `Some(n)` = pages of `n` chapters (1..=18, else error)
     /// with previous / next buttons. Returns the new menus in page order.
@@ -218,7 +306,6 @@ impl Project {
         names: &[String],
         labels: &ChapterIndexLabels,
     ) -> Result<(), ProjectError> {
-        let frame_h = frame_size(&self.settings).1;
         for (&chapter, rect) in chapters.iter().zip(chapter_grid(chapters.len())) {
             let link = Link::Timeline {
                 id: timeline,
@@ -226,7 +313,7 @@ impl Project {
                     .map_err(|_| invalid("chapter index is too large"))?,
             };
             let label = chapter_text(labels, names, chapter);
-            let index = self.add_button(menu, label, Some(scaled(rect, frame_h)), link)?;
+            let index = self.add_button(menu, label, Some(placed(rect, &self.settings)), link)?;
             self.set_button_kind_quietly(menu, index, crate::menu::ButtonKind::Chapter);
         }
         Ok(())
@@ -255,14 +342,14 @@ impl Project {
         next: Option<MenuId>,
         labels: &ChapterIndexLabels,
     ) -> Result<(), ProjectError> {
-        let frame_h = frame_size(&self.settings).1;
         if let Some(target) = previous {
             let link = Link::Menu {
                 id: target,
                 button: None,
             };
             let label = or_default(&labels.previous, "Previous");
-            let index = self.add_button(menu, label, Some(scaled(PREVIOUS, frame_h)), link)?;
+            let index =
+                self.add_button(menu, label, Some(placed(PREVIOUS, &self.settings)), link)?;
             self.set_button_kind_quietly(menu, index, crate::menu::ButtonKind::Previous);
         }
         if let Some(target) = next {
@@ -271,7 +358,7 @@ impl Project {
                 button: None,
             };
             let label = or_default(&labels.next, "Next");
-            let index = self.add_button(menu, label, Some(scaled(NEXT, frame_h)), link)?;
+            let index = self.add_button(menu, label, Some(placed(NEXT, &self.settings)), link)?;
             self.set_button_kind_quietly(menu, index, crate::menu::ButtonKind::Next);
         }
         Ok(())
@@ -280,7 +367,7 @@ impl Project {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChapterIndexLabels, MAX_SINGLE_PAGE, chapter_grid};
+    use super::{ChapterIndexLabels, FillChapterIndexError, MAX_SINGLE_PAGE, chapter_grid};
     use crate::Tick;
     use crate::ids::{MenuId, TimelineId};
     use crate::link::Link;
@@ -442,6 +529,72 @@ mod tests {
             .and_then(|menu| menu.buttons.last())
             .map(|button| button.label.clone());
         assert_eq!(back.as_deref(), Some("Back"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_template_menus_chapter_buttons_follow_the_linked_one() -> Result<(), Box<dyn Error>> {
+        let (mut project, timeline) = project_with_chapters(4)?;
+        let menu = project.add_menu(None)?;
+        let at = |chapter: u32| Link::Timeline {
+            id: timeline,
+            chapter,
+        };
+        // A main button, then four chapter buttons; none linked yet.
+        let _ = project.add_button(menu, "Main".to_owned(), None, Link::Stop)?;
+        for n in 0..5 {
+            let _ = project.add_button(menu, format!("C{n}"), None, Link::NotSet)?;
+        }
+        assert_eq!(
+            project.fill_chapter_index(menu),
+            Err(FillChapterIndexError::NoChapterButtons)
+        );
+        if let Some(found) = project.menu_mut(menu) {
+            for button in found.buttons.iter_mut().skip(1) {
+                button.kind = crate::menu::ButtonKind::Chapter;
+            }
+        }
+        assert_eq!(
+            project.fill_chapter_index(menu),
+            Err(FillChapterIndexError::NoLinkedChapterButton)
+        );
+        // The second chapter button links to chapter 2 (index 1): the first gets chapter 1, the rest 3 and 4; the
+        // fifth is past the last chapter and keeps its link.
+        if let Some(button) = project
+            .menu_mut(menu)
+            .and_then(|found| found.buttons.get_mut(2))
+        {
+            button.link = at(1);
+            button.name_from_link = true;
+        }
+        if let Some(button) = project
+            .menu_mut(menu)
+            .and_then(|found| found.buttons.get_mut(3))
+        {
+            button.name_from_link = true;
+        }
+        assert_eq!(project.fill_chapter_index(menu), Ok(4));
+        assert_eq!(
+            links(&project, menu),
+            [Link::Stop, at(0), at(1), at(2), at(3), Link::NotSet]
+        );
+        let names: Vec<String> = project
+            .menu(menu)
+            .map(|found| {
+                found
+                    .buttons
+                    .iter()
+                    .map(|button| button.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Only the buttons set to take their name from the link are renamed.
+        assert_eq!(names[1], "C0");
+        assert_eq!(names[3], "Chapter 3");
+        assert_eq!(
+            project.fill_chapter_index(MenuId(999)),
+            Err(FillChapterIndexError::NoMenu)
+        );
         Ok(())
     }
 

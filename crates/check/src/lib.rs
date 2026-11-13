@@ -39,7 +39,11 @@ pub fn check_project(project: &Project) -> Vec<Problem> {
 
 /// Returns the estimated disc usage for a project.
 pub fn usage(project: &Project) -> Result<Estimate, String> {
-    disccraft_dvd::estimate(project).map_err(|err| err.to_string())
+    // Button transitions are titles on the disc too.
+    let expanded = project
+        .with_transitions_expanded()
+        .map_err(|err| err.to_string())?;
+    disccraft_dvd::estimate(&expanded).map_err(|err| err.to_string())
 }
 
 /// Appends a navigation problem if compilation fails.

@@ -75,21 +75,42 @@ pub(crate) fn encode_video(
     let out_height = u16::try_from(output_height)
         .map_err(|_| TranscodeError::Unsupported("output height too large".to_string()))?;
 
-    for index in 0..frames {
-        let time = rate.tick_of(frame_index_to_i64(index)?);
-        let frame = source.video_frame(time)?;
-        let rgb = render_source_frame(&frame, output_height, target)?;
-        let frame420 = rgb_to_frame420(out_width, out_height, &rgb)
-            .map_err(|error| TranscodeError::Encode(error.to_string()))?;
-        let access_unit = encoder
-            .encode_frame(&frame420)
-            .map_err(|error| TranscodeError::Encode(error.to_string()))?;
-
-        writer
-            .write_all(&access_unit)
-            .map_err(|error| io_error(output_path, error))?;
-        report_progress(progress, index, frames);
-    }
+    // The pictures are decoded, scaled and converted on a thread of their own, a few ahead of the encoder (which
+    // runs here, its slices on threads of their own), so the two overlap.
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<
+        Result<disccraft_mpeg2venc::Frame420, TranscodeError>,
+    >(PIPELINE_DEPTH);
+    std::thread::scope(|scope| -> Result<(), TranscodeError> {
+        let _ = scope.spawn(move || {
+            for index in 0..frames {
+                let picture = (|| {
+                    let time = rate.tick_of(frame_index_to_i64(index)?);
+                    let frame = source.video_frame(time)?;
+                    let rgb = render_source_frame(&frame, output_height, target)?;
+                    rgb_to_frame420(out_width, out_height, &rgb)
+                        .map_err(|error| TranscodeError::Encode(error.to_string()))
+                })();
+                let failed = picture.is_err();
+                // A closed channel: the encoder stopped (an error); nothing more to do.
+                if sender.send(picture).is_err() || failed {
+                    break;
+                }
+            }
+        });
+        for index in 0..frames {
+            let frame420 = receiver
+                .recv()
+                .map_err(|_| TranscodeError::Encode("the decoder stopped early".to_string()))??;
+            let access_unit = encoder
+                .encode_frame(&frame420)
+                .map_err(|error| TranscodeError::Encode(error.to_string()))?;
+            writer
+                .write_all(&access_unit)
+                .map_err(|error| io_error(output_path, error))?;
+            report_progress(progress, index, frames);
+        }
+        Ok(())
+    })?;
 
     let tail = encoder.finish();
     writer
@@ -105,6 +126,9 @@ pub(crate) fn encode_video(
 
     Ok(())
 }
+
+/// How many converted pictures the decoding thread keeps ready ahead of the encoder.
+const PIPELINE_DEPTH: usize = 8;
 
 /// Compute letterbox/pillarbox geometry for a source frame.
 pub(crate) fn target_geometry(
@@ -410,6 +434,37 @@ fn write_rgb(rgb: &mut [u8], output_width: usize, y: u32, x: u32, pixel: [u8; 3]
 pub(crate) fn rgb_frame_at(source: &Source, time: Tick) -> Result<Vec<u8>, TranscodeError> {
     let frame = source.video_frame(time)?;
     render_source_frame(&frame, output_height(Standard::Ntsc), FOUR_THREE)
+}
+
+/// The picture at `time` without the letterbox or pillarbox bars of [`rgb_frame_at`]: its part of the 720 x 480
+/// frame, as (width, height, RGB24).
+pub(crate) fn rgb_picture_at(
+    source: &Source,
+    time: Tick,
+) -> Result<(u32, u32, Vec<u8>), TranscodeError> {
+    let frame = source.video_frame(time)?;
+    let height = output_height(Standard::Ntsc);
+    let geometry = target_geometry(frame.width, frame.height, frame.par, height, FOUR_THREE)
+        .ok_or_else(|| TranscodeError::Unsupported("invalid frame geometry".to_string()))?;
+    let rgb = render_source_frame(&frame, height, FOUR_THREE)?;
+    let crop = || -> Option<Vec<u8>> {
+        let stride = usize::try_from(OUTPUT_WIDTH).ok()?.checked_mul(3)?;
+        let left = usize::try_from(geometry.x).ok()?.checked_mul(3)?;
+        let row_bytes = usize::try_from(geometry.width).ok()?.checked_mul(3)?;
+        let mut out =
+            Vec::with_capacity(row_bytes.checked_mul(usize::try_from(geometry.height).ok()?)?);
+        for row in geometry.y..geometry.y.checked_add(geometry.height)? {
+            let start = usize::try_from(row)
+                .ok()?
+                .checked_mul(stride)?
+                .checked_add(left)?;
+            out.extend_from_slice(rgb.get(start..start.checked_add(row_bytes)?)?);
+        }
+        Some(out)
+    };
+    let picture = crop()
+        .ok_or_else(|| TranscodeError::Unsupported("failed to crop the picture".to_string()))?;
+    Ok((geometry.width, geometry.height, picture))
 }
 
 pub(crate) fn for_each_rgb_frame(

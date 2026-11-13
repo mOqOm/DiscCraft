@@ -35,6 +35,16 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "button.setLabelFormat",
+        label: "ボタンの文字の書式を設定",
+        menu: &["ボタン"],
+        shortcut: None,
+        params: r##"{"menu": id, "button": index, "fontStyle"?: string | null, "bold"?: bool, "italic"?: bool, "underline"?: bool, "strikethrough"?: bool, "caps"?: "normal" | "all" | "small", "align"?: "left" | "center" | "right", "tracking"?: -1000..1000, "leading"?: -100..200, "kerning"?: bool, "baseline"?: -100..100, "verticalScale"?: 1..1000, "horizontalScale"?: 1..1000, "script"?: "normal" | "superscript" | "subscript", "antialias"?: "none" | "crisp" | "strong" | "smooth" | "sharp"}"##,
+        enabled: always_enabled,
+        run: run_set_label_format,
+        journal: true,
+    },
+    CommandSpec {
         id: "menu.setLabelFont",
         label: "ボタンの文字のフォントを設定",
         menu: &["メニュー"],
@@ -169,46 +179,7 @@ fn run_set_text(session: &mut Session, params: &Value) -> CommandResult {
     };
     let font = font_param(params)?;
     let font_style = name_param(params, "fontStyle")?;
-    let bold = opt_flag(params, "bold")?;
-    let italic = opt_flag(params, "italic")?;
-    let underline = opt_flag(params, "underline")?;
-    let strikethrough = opt_flag(params, "strikethrough")?;
-    let vertical_scale = opt_scale(params, "verticalScale")?;
-    let horizontal_scale = opt_scale(params, "horizontalScale")?;
-    let script = opt_str(params, "script")?
-        .map(|text| {
-            TextScript::parse(&text).ok_or_else(|| {
-                "parameter \"script\" must be \"normal\", \"superscript\" or \"subscript\""
-                    .to_string()
-            })
-        })
-        .transpose()?;
-    let antialias = opt_str(params, "antialias")?
-        .map(|text| {
-            TextAntialias::parse(&text).ok_or_else(|| {
-                "parameter \"antialias\" must be \"none\", \"crisp\", \"strong\", \"smooth\" or \"sharp\""
-                    .to_string()
-            })
-        })
-        .transpose()?;
-    let caps = opt_str(params, "caps")?
-        .map(|text| {
-            TextCaps::parse(&text).ok_or_else(|| {
-                "parameter \"caps\" must be \"normal\", \"all\" or \"small\"".to_string()
-            })
-        })
-        .transpose()?;
-    let align = opt_str(params, "align")?
-        .map(|text| {
-            TextAlign::parse(&text).ok_or_else(|| {
-                "parameter \"align\" must be \"left\", \"center\" or \"right\"".to_string()
-            })
-        })
-        .transpose()?;
-    let tracking = opt_i16(params, "tracking", MIN_TRACKING, MAX_TRACKING)?;
-    let leading = opt_i16(params, "leading", MIN_LEADING, MAX_LEADING)?;
-    let kerning = opt_flag(params, "kerning")?;
-    let baseline = opt_i16(params, "baseline", MIN_BASELINE, MAX_BASELINE)?;
+    let patch = FormatPatch::parse(params)?;
     let Some(menu) = session.project.menu_mut(menu_id) else {
         return Err(format!("menu {} does not exist", menu_id.0));
     };
@@ -218,48 +189,7 @@ fn run_set_text(session: &mut Session, params: &Value) -> CommandResult {
     if let Some(text) = text {
         target.text = text;
     }
-    if let Some(bold) = bold {
-        target.format.bold = bold;
-    }
-    if let Some(italic) = italic {
-        target.format.italic = italic;
-    }
-    if let Some(underline) = underline {
-        target.format.underline = underline;
-    }
-    if let Some(strikethrough) = strikethrough {
-        target.format.strikethrough = strikethrough;
-    }
-    if let Some(caps) = caps {
-        target.format.caps = caps;
-    }
-    if let Some(align) = align {
-        target.format.align = align;
-    }
-    if let Some(tracking) = tracking {
-        target.format.tracking = tracking;
-    }
-    if let Some(leading) = leading {
-        target.format.leading = leading;
-    }
-    if let Some(kerning) = kerning {
-        target.format.kerning = kerning;
-    }
-    if let Some(baseline) = baseline {
-        target.format.baseline = baseline;
-    }
-    if let Some(scale) = vertical_scale {
-        target.format.vertical_scale = scale;
-    }
-    if let Some(scale) = horizontal_scale {
-        target.format.horizontal_scale = scale;
-    }
-    if let Some(script) = script {
-        target.format.script = script;
-    }
-    if let Some(antialias) = antialias {
-        target.format.antialias = antialias;
-    }
+    patch.apply(&mut target.format);
     if let Some(x) = x {
         target.x = x;
     }
@@ -277,6 +207,152 @@ fn run_set_text(session: &mut Session, params: &Value) -> CommandResult {
     }
     if let Some(font_style) = font_style {
         target.font_style = font_style;
+    }
+    Ok(empty_object())
+}
+
+/// The Character panel fields of `menu.setText` / `button.setLabelFormat` (each optional: left out keeps it).
+#[derive(Clone, Copy, Default)]
+struct FormatPatch {
+    bold: Option<bool>,
+    italic: Option<bool>,
+    underline: Option<bool>,
+    strikethrough: Option<bool>,
+    caps: Option<TextCaps>,
+    align: Option<TextAlign>,
+    tracking: Option<i16>,
+    leading: Option<i16>,
+    kerning: Option<bool>,
+    baseline: Option<i16>,
+    vertical_scale: Option<u16>,
+    horizontal_scale: Option<u16>,
+    script: Option<TextScript>,
+    antialias: Option<TextAntialias>,
+}
+
+impl FormatPatch {
+    fn parse(params: &Value) -> Result<Self, String> {
+        Ok(Self {
+            bold: opt_flag(params, "bold")?,
+            italic: opt_flag(params, "italic")?,
+            underline: opt_flag(params, "underline")?,
+            strikethrough: opt_flag(params, "strikethrough")?,
+            caps: opt_str(params, "caps")?
+                .map(|text| {
+                    TextCaps::parse(&text).ok_or_else(|| {
+                        "parameter \"caps\" must be \"normal\", \"all\" or \"small\"".to_string()
+                    })
+                })
+                .transpose()?,
+            align: opt_str(params, "align")?
+                .map(|text| {
+                    TextAlign::parse(&text).ok_or_else(|| {
+                        "parameter \"align\" must be \"left\", \"center\" or \"right\"".to_string()
+                    })
+                })
+                .transpose()?,
+            tracking: opt_i16(params, "tracking", MIN_TRACKING, MAX_TRACKING)?,
+            leading: opt_i16(params, "leading", MIN_LEADING, MAX_LEADING)?,
+            kerning: opt_flag(params, "kerning")?,
+            baseline: opt_i16(params, "baseline", MIN_BASELINE, MAX_BASELINE)?,
+            vertical_scale: opt_scale(params, "verticalScale")?,
+            horizontal_scale: opt_scale(params, "horizontalScale")?,
+            script: opt_str(params, "script")?
+                .map(|text| {
+                    TextScript::parse(&text).ok_or_else(|| {
+                        "parameter \"script\" must be \"normal\", \"superscript\" or \"subscript\""
+                            .to_string()
+                    })
+                })
+                .transpose()?,
+            antialias: opt_str(params, "antialias")?
+                .map(|text| {
+                    TextAntialias::parse(&text).ok_or_else(|| {
+                        "parameter \"antialias\" must be \"none\", \"crisp\", \"strong\", \"smooth\" or \"sharp\""
+                            .to_string()
+                    })
+                })
+                .transpose()?,
+        })
+    }
+
+    fn apply(&self, format: &mut TextFormat) {
+        let Self {
+            bold,
+            italic,
+            underline,
+            strikethrough,
+            caps,
+            align,
+            tracking,
+            leading,
+            kerning,
+            baseline,
+            vertical_scale,
+            horizontal_scale,
+            script,
+            antialias,
+        } = *self;
+        if let Some(value) = bold {
+            format.bold = value;
+        }
+        if let Some(value) = italic {
+            format.italic = value;
+        }
+        if let Some(value) = underline {
+            format.underline = value;
+        }
+        if let Some(value) = strikethrough {
+            format.strikethrough = value;
+        }
+        if let Some(value) = caps {
+            format.caps = value;
+        }
+        if let Some(value) = align {
+            format.align = value;
+        }
+        if let Some(value) = tracking {
+            format.tracking = value;
+        }
+        if let Some(value) = leading {
+            format.leading = value;
+        }
+        if let Some(value) = kerning {
+            format.kerning = value;
+        }
+        if let Some(value) = baseline {
+            format.baseline = value;
+        }
+        if let Some(value) = vertical_scale {
+            format.vertical_scale = value;
+        }
+        if let Some(value) = horizontal_scale {
+            format.horizontal_scale = value;
+        }
+        if let Some(value) = script {
+            format.script = value;
+        }
+        if let Some(value) = antialias {
+            format.antialias = value;
+        }
+    }
+}
+
+/// Encore's Character panel on a button's text: the same fields as `menu.setText`, and "fontStyle".
+fn run_set_label_format(session: &mut Session, params: &Value) -> CommandResult {
+    let menu_id = MenuId(req_u64(params, "menu")?);
+    let button = req_usize(params, "button")?;
+    let patch = FormatPatch::parse(params)?;
+    let font_style = name_param(params, "fontStyle")?;
+    let Some(menu) = session.project.menu_mut(menu_id) else {
+        return Err(format!("menu {} does not exist", menu_id.0));
+    };
+    let Some(target) = menu.buttons.get_mut(button) else {
+        return Err(format!("button {button} does not exist"));
+    };
+    patch.apply(&mut target.label_format);
+    if let Some(font_style) = font_style {
+        target.label_font_style = font_style;
     }
     Ok(empty_object())
 }
@@ -352,6 +428,39 @@ mod tests {
             .and_then(serde_json::Value::as_u64)
             .ok_or("no menu id")?;
         Ok((session, menu))
+    }
+
+    #[test]
+    fn a_button_text_is_formatted() -> Result<(), Box<dyn Error>> {
+        let (mut session, menu) = session_with_menu()?;
+        session.execute("menu.addButton", &json!({"menu": menu, "label": "Play"}))?;
+        session.execute(
+            "button.setLabelFormat",
+            &json!({"menu": menu, "button": 0, "bold": true, "verticalScale": 120, "fontStyle": "Bold", "antialias": "none"}),
+        )?;
+        let button = session
+            .project
+            .menus
+            .values()
+            .next()
+            .and_then(|menu| menu.buttons.first().cloned())
+            .ok_or("button")?;
+        assert!(button.label_format.bold);
+        assert_eq!(button.label_format.vertical_scale, 120);
+        assert_eq!(button.label_font_style.as_deref(), Some("Bold"));
+        assert_eq!(
+            button.label_format.antialias,
+            disccraft_project::TextAntialias::None
+        );
+        assert!(
+            session
+                .execute(
+                    "button.setLabelFormat",
+                    &json!({"menu": menu, "button": 0, "tracking": 5000}),
+                )
+                .is_err()
+        );
+        Ok(())
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! 「プロジェクトをチェック」の浮動ウィンドウ（Encore と同じ形。docs/ui-parity.md §3.5）。ローカル LLM が生成した。
+//! 「プロジェクトをチェック」の浮動ウィンドウ（Encore と同じ形。docs/ui-parity.md §3.5）。
 //!
 //! 上にチェックする項目のチェックボックスと「開始」、下に結果の表（種類 / 問題）と件数を出す。
 
@@ -99,16 +99,11 @@ impl CheckCategory {
             "emptyPlaylist"
             | "emptySlideshow"
             | "badSlideDuration"
-            | "bluRayManualAdvance"
             | "emptyChapterPlaylist"
-            | "tooManyEntries"
-            | "bluRayPlaybackOrder" => Self::Playlists,
-            "bluRayOverride" => Self::Overrides,
+            | "tooManyEntries" => Self::Playlists,
             "menuRemoteNotMenu" => Self::RemoteMenus,
             "buttonsOverlap" | "tooManyButtons" => Self::OverlappingButtons,
-            "menuWithoutButtons" | "menuDuration" | "menuAspectMix" | "bluRayMenuMedia" => {
-                Self::MenuSize
-            }
+            "menuWithoutButtons" | "menuDuration" | "menuAspectMix" => Self::MenuSize,
             "chapterOrder" | "firstChapter" | "tooManyChapters" => Self::Chapters,
             "assetOffline" | "missingAsset" | "unsupportedMedia" => Self::Media,
             "tooManyAudio" | "tooManySubtitles" | "tooManyTitles" => Self::StreamLimits,
@@ -319,10 +314,6 @@ mod tests {
         assert_eq!(
             CheckCategory::of_code("buttonsOverlap"),
             CheckCategory::OverlappingButtons
-        );
-        assert_eq!(
-            CheckCategory::of_code("bluRayOverride"),
-            CheckCategory::Overrides
         );
         assert_eq!(
             CheckCategory::of_code("menuWithoutButtons"),

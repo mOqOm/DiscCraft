@@ -205,6 +205,18 @@ impl DiscCraftApp {
                     });
                 });
             }
+            ui.separator();
+            if ui
+                .checkbox(
+                    &mut routing.exclude_next_previous,
+                    tl!("Exclude Next and Previous Buttons"),
+                )
+                .changed()
+            {
+                change = Some(
+                    serde_json::json!({ "excludeNextPrevious": routing.exclude_next_previous }),
+                );
+            }
         });
         ui.group(|ui| {
             ui.label(tl!("Button Sync Defaults"));

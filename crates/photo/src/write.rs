@@ -127,6 +127,59 @@ mod tests {
     }
 
     #[test]
+    fn a_thumbnail_layer_marks_where_the_video_goes() -> Result<(), Box<dyn Error>> {
+        let dir = std::env::temp_dir().join(format!("disccraft-psd-thumb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("menu.psd");
+        let (w, h) = (16_usize, 8_usize);
+        let area = |x0: usize, y0: usize, x1: usize, y1: usize| {
+            let mut rgba = vec![0u8; w * h * 4];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = (y * w + x) * 4;
+                    if let Some(px) = rgba.get_mut(i..i + 4) {
+                        px.copy_from_slice(&[128, 128, 128, 255]);
+                    }
+                }
+            }
+            rgba
+        };
+        let layers = vec![
+            PsdLayer::Raster {
+                name: "背景".to_owned(),
+                rgba: solid(w, h, [0, 0, 0, 255]),
+                visible: true,
+            },
+            PsdLayer::Group {
+                name: "(+) Scene".to_owned(),
+                children: vec![
+                    PsdLayer::Raster {
+                        name: "frame".to_owned(),
+                        rgba: area(1, 1, 15, 7),
+                        visible: true,
+                    },
+                    // Hidden still counts: it marks the place.
+                    PsdLayer::Raster {
+                        name: "(%) video".to_owned(),
+                        rgba: area(2, 2, 14, 6),
+                        visible: false,
+                    },
+                ],
+            },
+        ];
+        write_layered_psd(&path, 16, 8, &layers)?;
+        let menu = load_psd_menu(&path)?;
+        let button = menu.buttons.first().ok_or("no button")?;
+        assert_eq!(button.thumbnail, Some([2, 2, 12, 4]));
+        assert_eq!(
+            (button.x, button.y, button.width, button.height),
+            (1, 1, 14, 6)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
     fn a_written_menu_reads_back_with_its_buttons() -> Result<(), Box<dyn Error>> {
         let dir = std::env::temp_dir().join(format!("disccraft-psd-write-{}", std::process::id()));
         std::fs::create_dir_all(&dir)?;
@@ -179,6 +232,10 @@ mod tests {
         let menu = load_psd_menu(&path)?;
         assert_eq!((menu.width, menu.height), (16, 8));
         assert_eq!(menu.buttons.len(), 1);
+        assert_eq!(
+            menu.buttons.first().and_then(|button| button.thumbnail),
+            None
+        );
         let button = menu.buttons.first().ok_or("no button")?;
         assert_eq!(
             (
@@ -208,6 +265,78 @@ mod tests {
         }];
         assert!(write_layered_psd(&path, 16, 8, &bad).is_err());
         assert!(write_layered_psd(&path, 0, 8, &[]).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn each_subpicture_layer_is_its_colour_and_the_top_one_wins() -> Result<(), Box<dyn Error>> {
+        let dir = std::env::temp_dir().join(format!("disccraft-psd-sub-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("menu.psd");
+        let (w, h) = (8_usize, 4_usize);
+        // A layer of `colour` at `alpha` over x0..x1 of rows 1..3.
+        let strip = |x0: usize, x1: usize, colour: [u8; 3], alpha: u8| {
+            let mut rgba = vec![0u8; w * h * 4];
+            for y in 1..3 {
+                for x in x0..x1 {
+                    let i = (y * w + x) * 4;
+                    if let Some(px) = rgba.get_mut(i..i + 4) {
+                        px.copy_from_slice(&[colour[0], colour[1], colour[2], alpha]);
+                    }
+                }
+            }
+            rgba
+        };
+        let layers = vec![
+            PsdLayer::Raster {
+                name: "背景".to_owned(),
+                rgba: solid(w, h, [0, 0, 0, 255]),
+                visible: true,
+            },
+            PsdLayer::Group {
+                name: "(+) Play".to_owned(),
+                children: vec![
+                    // Bottom to top: colour 1 over x 1..7, colour 3 over x 4..6 (any colour of its own), colour 2
+                    // over x 5..7, and a faint colour 2 over x 1..2 that does not count.
+                    PsdLayer::Raster {
+                        name: "(=1) 縁".to_owned(),
+                        rgba: strip(1, 7, [255, 0, 0], 255),
+                        visible: false,
+                    },
+                    PsdLayer::Raster {
+                        name: "(=3)".to_owned(),
+                        rgba: strip(4, 6, [0, 0, 0], 255),
+                        visible: true,
+                    },
+                    PsdLayer::Raster {
+                        name: "(=2) 中".to_owned(),
+                        rgba: strip(5, 7, [9, 9, 9], 255),
+                        visible: false,
+                    },
+                    PsdLayer::Raster {
+                        name: "(=2) かすか".to_owned(),
+                        rgba: strip(1, 2, [9, 9, 9], 60),
+                        visible: false,
+                    },
+                ],
+            },
+        ];
+        write_layered_psd(&path, 8, 4, &layers)?;
+        let menu = load_psd_menu(&path)?;
+        let button = menu.buttons.first().ok_or("no button")?;
+        assert_eq!(
+            (button.x, button.y, button.width, button.height),
+            (1, 1, 6, 2)
+        );
+        let sub = button.subpicture.as_ref().ok_or("no subpicture")?;
+        assert_eq!((sub.width, sub.height), (6, 2));
+        assert_eq!(sub.values, [1, 1, 1, 3, 2, 2].repeat(2));
+        // Each layer's own colour (the first one of a number).
+        assert_eq!(
+            sub.colors,
+            [Some([255, 0, 0]), Some([9, 9, 9]), Some([0, 0, 0])]
+        );
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

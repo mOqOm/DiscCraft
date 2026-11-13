@@ -8,6 +8,7 @@ use crate::io::ProjectError;
 use crate::link::Link;
 use crate::menu::{MenuBackground, Rect, frame_size};
 use crate::model::{DiscSettings, Project};
+use crate::thumbnail::ThumbnailArea;
 use serde::{Deserialize, Serialize};
 
 /// A button of a menu spec, laid out in a 720x480 frame (an owned [`PresetButton`]).
@@ -24,16 +25,39 @@ pub struct ButtonSpec {
     pub w: u16,
     /// Height.
     pub h: u16,
+    /// The button's video thumbnail, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<ThumbnailArea>,
+    /// What the button is for (a chapter index template's chapter buttons, its main / previous / next buttons).
+    #[serde(default, skip_serializing_if = "is_normal")]
+    pub kind: crate::menu::ButtonKind,
+}
+
+fn is_normal(kind: &crate::menu::ButtonKind) -> bool {
+    *kind == crate::menu::ButtonKind::Normal
+}
+
+/// The kind of a preset button, by its label: "Chapter" and "Chapter N" are chapter buttons and "Main Menu" goes back
+/// to the main menu, so the chapter presets work as chapter index templates (Encore's チャプターインデックスを作成).
+fn preset_kind(label: &str) -> crate::menu::ButtonKind {
+    if label == "Chapter" || label.starts_with("Chapter ") {
+        crate::menu::ButtonKind::Chapter
+    } else if label == "Main Menu" {
+        crate::menu::ButtonKind::Main
+    } else {
+        crate::menu::ButtonKind::Normal
+    }
 }
 
 impl ButtonSpec {
-    fn preset(&self) -> PresetButton {
+    pub(crate) fn preset(&self) -> PresetButton {
         PresetButton {
             label: "",
             x: self.x,
             y: self.y,
             w: self.w,
             h: self.h,
+            thumbnail: self.thumbnail,
         }
     }
 }
@@ -68,6 +92,8 @@ impl From<&LibraryItem> for MenuSpec {
                     y: button.y,
                     w: button.w,
                     h: button.h,
+                    thumbnail: button.thumbnail,
+                    kind: preset_kind(button.label),
                 })
                 .collect(),
         }
@@ -98,7 +124,17 @@ pub struct PresetButton {
     pub w: u16,
     /// Height.
     pub h: u16,
+    /// The button's video thumbnail (the top three quarters of a thumbnail button), when it has one.
+    pub thumbnail: Option<ThumbnailArea>,
 }
+
+/// The upper three quarters of a button: the video thumbnail of the thumbnail presets (the text goes below).
+const UPPER_THUMBNAIL: Option<ThumbnailArea> = Some(ThumbnailArea {
+    x: 0,
+    y: 0,
+    w: crate::thumbnail::THUMBNAIL_PARTS,
+    h: crate::thumbnail::THUMBNAIL_PARTS / 4 * 3,
+});
 
 /// One library item.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,6 +171,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 150,
                 w: 320,
                 h: 44,
+                thumbnail: None,
             },
             PresetButton {
                 label: "Chapters",
@@ -142,6 +179,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 210,
                 w: 320,
                 h: 44,
+                thumbnail: None,
             },
             PresetButton {
                 label: "Extras",
@@ -149,6 +187,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 270,
                 w: 320,
                 h: 44,
+                thumbnail: None,
             },
             PresetButton {
                 label: "Setup",
@@ -156,6 +195,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 330,
                 w: 320,
                 h: 44,
+                thumbnail: None,
             },
         ],
     },
@@ -173,6 +213,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 170,
                 w: 320,
                 h: 44,
+                thumbnail: None,
             },
             PresetButton {
                 label: "Chapters",
@@ -180,6 +221,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 230,
                 w: 320,
                 h: 44,
+                thumbnail: None,
             },
             PresetButton {
                 label: "Extras",
@@ -187,6 +229,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 290,
                 w: 320,
                 h: 44,
+                thumbnail: None,
             },
         ],
     },
@@ -204,6 +247,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 400,
                 w: 180,
                 h: 40,
+                thumbnail: None,
             },
             PresetButton {
                 label: "Chapters",
@@ -211,6 +255,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 400,
                 w: 180,
                 h: 40,
+                thumbnail: None,
             },
             PresetButton {
                 label: "Extras",
@@ -218,6 +263,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 400,
                 w: 180,
                 h: 40,
+                thumbnail: None,
             },
         ],
     },
@@ -235,6 +281,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 110,
                 w: 260,
                 h: 60,
+                thumbnail: None,
             },
             PresetButton {
                 label: "Chapter 2",
@@ -242,6 +289,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 110,
                 w: 260,
                 h: 60,
+                thumbnail: None,
             },
             PresetButton {
                 label: "Chapter 3",
@@ -249,6 +297,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 200,
                 w: 260,
                 h: 60,
+                thumbnail: None,
             },
             PresetButton {
                 label: "Chapter 4",
@@ -256,6 +305,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 200,
                 w: 260,
                 h: 60,
+                thumbnail: None,
             },
             PresetButton {
                 label: "Chapter 5",
@@ -263,6 +313,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 290,
                 w: 260,
                 h: 60,
+                thumbnail: None,
             },
             PresetButton {
                 label: "Chapter 6",
@@ -270,6 +321,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 290,
                 w: 260,
                 h: 60,
+                thumbnail: None,
             },
             PresetButton {
                 label: "Main Menu",
@@ -277,6 +329,49 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 390,
                 w: 200,
                 h: 40,
+                thumbnail: None,
+            },
+        ],
+    },
+    LibraryItem {
+        id: "menu.thumbnail-grid",
+        name: "Thumbnail Grid",
+        kind: LibraryKind::Menu,
+        background: [24, 24, 28],
+        text: [235, 235, 235],
+        highlight: [80, 170, 255],
+        buttons: &[
+            PresetButton {
+                label: "Chapter 1",
+                x: 90,
+                y: 70,
+                w: 240,
+                h: 160,
+                thumbnail: UPPER_THUMBNAIL,
+            },
+            PresetButton {
+                label: "Chapter 2",
+                x: 390,
+                y: 70,
+                w: 240,
+                h: 160,
+                thumbnail: UPPER_THUMBNAIL,
+            },
+            PresetButton {
+                label: "Chapter 3",
+                x: 90,
+                y: 250,
+                w: 240,
+                h: 160,
+                thumbnail: UPPER_THUMBNAIL,
+            },
+            PresetButton {
+                label: "Chapter 4",
+                x: 390,
+                y: 250,
+                w: 240,
+                h: 160,
+                thumbnail: UPPER_THUMBNAIL,
             },
         ],
     },
@@ -294,6 +389,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 120,
                 w: 260,
                 h: 40,
+                thumbnail: None,
             },
             PresetButton {
                 label: "Scene Selection",
@@ -301,6 +397,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 170,
                 w: 260,
                 h: 40,
+                thumbnail: None,
             },
             PresetButton {
                 label: "Audio",
@@ -308,6 +405,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 220,
                 w: 260,
                 h: 40,
+                thumbnail: None,
             },
             PresetButton {
                 label: "Subtitles",
@@ -315,6 +413,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 270,
                 w: 260,
                 h: 40,
+                thumbnail: None,
             },
             PresetButton {
                 label: "Extras",
@@ -322,6 +421,7 @@ pub const LIBRARY: &[LibraryItem] = &[
                 y: 320,
                 w: 260,
                 h: 40,
+                thumbnail: None,
             },
         ],
     },
@@ -338,6 +438,7 @@ pub const LIBRARY: &[LibraryItem] = &[
             y: 0,
             w: 320,
             h: 44,
+            thumbnail: None,
         }],
     },
     LibraryItem {
@@ -353,6 +454,7 @@ pub const LIBRARY: &[LibraryItem] = &[
             y: 0,
             w: 180,
             h: 36,
+            thumbnail: None,
         }],
     },
     LibraryItem {
@@ -368,6 +470,23 @@ pub const LIBRARY: &[LibraryItem] = &[
             y: 0,
             w: 160,
             h: 120,
+            thumbnail: None,
+        }],
+    },
+    LibraryItem {
+        id: "button.thumbnail",
+        name: "Video Thumbnail",
+        kind: LibraryKind::Button,
+        background: [60, 60, 60],
+        text: [255, 255, 255],
+        highlight: [255, 208, 0],
+        buttons: &[PresetButton {
+            label: "Chapter",
+            x: 0,
+            y: 0,
+            w: 200,
+            h: 150,
+            thumbnail: UPPER_THUMBNAIL,
         }],
     },
     LibraryItem {
@@ -383,6 +502,7 @@ pub const LIBRARY: &[LibraryItem] = &[
             y: 0,
             w: 600,
             h: 40,
+            thumbnail: None,
         }],
     },
     LibraryItem {
@@ -449,6 +569,17 @@ pub fn library_item(id: &str) -> Option<&'static LibraryItem> {
 /// `button`'s rectangle in the project's frame: x and w unchanged, y and h scaled by frame_height / 480
 /// (u32 math, rounded down), then clamped so the rectangle stays inside the frame (w, h at least 1).
 pub fn preset_rect(button: &PresetButton, settings: &DiscSettings) -> Rect {
+    if crate::hd_frame::hd_frame(settings) {
+        return crate::hd_frame::design_rect(
+            settings,
+            Rect {
+                x: button.x,
+                y: button.y,
+                w: button.w,
+                h: button.h,
+            },
+        );
+    }
     let (frame_w, frame_h) = frame_size(settings);
     let frame_w = u32::from(frame_w);
     let frame_h = u32::from(frame_h);
@@ -561,7 +692,9 @@ impl Project {
                 _ => button.label.clone(),
             };
             let rect = preset_rect(&button.preset(), &self.settings);
-            self.add_button(menu_id, label, Some(rect), Link::NotSet)?;
+            let index = self.add_button(menu_id, label, Some(rect), Link::NotSet)?;
+            self.set_button_thumbnail(menu_id, index, button.thumbnail);
+            self.set_button_kind(menu_id, index, button.kind);
         }
         Ok(menu_id)
     }
@@ -581,7 +714,7 @@ impl Project {
             buttons: menu
                 .buttons
                 .iter()
-                .map(|button| self.button_spec_of(&button.label, button.rect))
+                .map(|button| self.button_spec_of(button))
                 .collect(),
         })
     }
@@ -589,11 +722,28 @@ impl Project {
     /// One button of `menu` as a spec (its label and rectangle in a 720x480 frame).
     pub fn button_spec(&self, menu: MenuId, index: usize) -> Option<ButtonSpec> {
         let button = self.menu(menu)?.buttons.get(index)?;
-        Some(self.button_spec_of(&button.label, button.rect))
+        Some(self.button_spec_of(button))
     }
 
-    /// `rect` in this project's frame as a 720x480 spec rectangle (the inverse of [`preset_rect`]).
-    fn button_spec_of(&self, label: &str, rect: Rect) -> ButtonSpec {
+    /// Gives a button its video thumbnail area (a spec's).
+    fn set_button_thumbnail(
+        &mut self,
+        menu: MenuId,
+        index: usize,
+        thumbnail: Option<ThumbnailArea>,
+    ) {
+        if let Some(button) = self
+            .menu_mut(menu)
+            .and_then(|menu| menu.buttons.get_mut(index))
+        {
+            button.thumbnail = thumbnail;
+        }
+    }
+
+    /// A button as a spec: its label, its rectangle in a 720x480 frame (the inverse of [`preset_rect`]) and its
+    /// thumbnail.
+    fn button_spec_of(&self, button: &crate::menu::Button) -> ButtonSpec {
+        let (label, rect) = (button.label.as_str(), button.rect);
         let (_, frame_h) = frame_size(&self.settings);
         let scale = |value: u16| -> u16 {
             let scaled = u32::from(value).saturating_mul(480) / u32::from(frame_h.max(1));
@@ -605,6 +755,8 @@ impl Project {
             y: scale(rect.y),
             w: rect.w,
             h: scale(rect.h).max(1),
+            thumbnail: button.thumbnail,
+            kind: button.kind,
         }
     }
 
@@ -625,6 +777,8 @@ impl Project {
             y: button.y,
             w: button.w,
             h: button.h,
+            thumbnail: button.thumbnail,
+            kind: preset_kind(button.label),
         };
         self.place_button_spec(menu, &spec, label)
     }
@@ -656,7 +810,20 @@ impl Project {
             _ => button.label.clone(),
         };
 
-        self.add_button(menu, label, Some(rect), Link::NotSet)
+        let index = self.add_button(menu, label, Some(rect), Link::NotSet)?;
+        self.set_button_thumbnail(menu, index, button.thumbnail);
+        self.set_button_kind(menu, index, button.kind);
+        Ok(index)
+    }
+
+    /// Gives a button just added its kind (a spec's).
+    fn set_button_kind(&mut self, menu: MenuId, index: usize, kind: crate::menu::ButtonKind) {
+        if let Some(button) = self
+            .menu_mut(menu)
+            .and_then(|menu| menu.buttons.get_mut(index))
+        {
+            button.kind = kind;
+        }
     }
 
     /// Sets `menu`'s background to the color of a background preset. Errors for unknown id, wrong kind or missing menu.

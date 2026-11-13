@@ -9,7 +9,7 @@ use disccraft_project::{
     AssetId, AssetKind, Capacity, Project, Slideshow, Tick, Timeline, TimelineId, VideoStandard,
 };
 use disccraft_transcode::slideshow::{
-    SlideFit, SlideInput, SlideTransition, Transition, render_slideshow,
+    SlideFit, SlideInput, SlideTransition, Transition, render_slideshow, render_slideshow_hd,
 };
 use disccraft_transcode::{Standard, TranscodeOptions, probe_seconds, transcode, transcode_audio};
 
@@ -29,6 +29,7 @@ const SEQUENCE_HEADER_BYTES: usize = 11;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 const CACHE_VERSION: &str = "disccraft-mpeg2venc-1";
+const SLIDE_RENDER_VERSION: &str = "slides-2";
 const TICKS_PER_SECOND: i64 = 254_016_000_000;
 
 /// Bitrate budget for transcoded titles.
@@ -112,6 +113,58 @@ pub(crate) fn budget(project: &Project) -> Result<Budget, DvdError> {
 
 /// Prepare one title for muxing, using the transcode cache when needed.
 ///
+/// Transcodes every title that needs it (timelines and slideshows) into `cache_dir`, several at a time (one per
+/// CPU core: the MPEG-2 encoder uses one core each), so the builds that follow find them in the cache. The output
+/// is the same as transcoding them one by one. `progress` hears from every transcode, on the calling thread.
+///
+/// # Errors
+///
+/// The first title that cannot be prepared (in project order).
+pub(crate) fn prepare_all(
+    project: &Project,
+    cache_dir: &Path,
+    budget: &Budget,
+    progress: &mut dyn FnMut(&str, f32),
+) -> Result<(), DvdError> {
+    enum Job<'a> {
+        Timeline(&'a Timeline),
+        Slideshow(&'a Slideshow),
+    }
+    // One job per video (timelines of the same video share its transcode) and per slideshow picture.
+    let mut videos = std::collections::BTreeSet::new();
+    let mut jobs: Vec<Job<'_>> = project
+        .timelines
+        .values()
+        .filter(|timeline| videos.insert(timeline.video))
+        .map(Job::Timeline)
+        .collect();
+    let mut shows = std::collections::BTreeSet::new();
+    for id in crate::slideshow_ids(project) {
+        if let Some(slideshow) = project.slideshows.get(&id)
+            && slideshow_cache_key(project, slideshow, budget).map_or(true, |key| shows.insert(key))
+        {
+            jobs.push(Job::Slideshow(slideshow));
+        }
+    }
+    let results = crate::parallel::run(&jobs, progress, |job, report| match job {
+        Job::Timeline(timeline) => prepare_title(project, timeline, cache_dir, budget, report),
+        Job::Slideshow(slideshow) => {
+            prepare_slideshow(project, slideshow, cache_dir, budget, report)
+        }
+    });
+    for result in results {
+        result?;
+    }
+    Ok(())
+}
+
+/// A number for a transcode's part files, so two transcodes running at once never write the same file (the one
+/// that finishes last publishes its result; both are the same).
+fn part_number() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// # Errors
 ///
 /// Returns [`DvdError::Unsupported`] when transcoding fails, and I/O or
@@ -758,10 +811,21 @@ fn slideshow_cache_key(
 ) -> Result<String, DvdError> {
     let mut seed = fnv1a64(b"slideshow", FNV_OFFSET);
     seed = fnv1a64(CACHE_VERSION.as_bytes(), seed);
+    // The slide renderer's version (2: M10.6 gave tall slides their right width).
+    seed = fnv1a64(SLIDE_RENDER_VERSION.as_bytes(), seed);
     seed = fnv1a64(standard_tag(project.settings.standard).as_bytes(), seed);
     seed = fnv1a64(budget.video_bitrate.to_string().as_bytes(), seed);
     seed = fnv1a64(budget.max_bitrate.to_string().as_bytes(), seed);
     seed = fnv1a64(if budget.wide { b"16:9" } else { b"4:3" }, seed);
+    seed = slideshow_seed(project, slideshow, seed)?;
+
+    Ok(format!("{seed:016x}"))
+}
+
+/// `seed` with what a slideshow's pictures and audio are made of: the slides (files, lengths, fits, transitions),
+/// the show's transition and its audio clips.
+fn slideshow_seed(project: &Project, slideshow: &Slideshow, seed: u64) -> Result<u64, DvdError> {
+    let mut seed = seed;
     seed = fnv1a64(slideshow.slides.len().to_string().as_bytes(), seed);
     seed = fnv1a64(slideshow.transition.as_str().as_bytes(), seed);
     seed = fnv1a64(slideshow.transition_duration.0.to_string().as_bytes(), seed);
@@ -821,7 +885,7 @@ fn slideshow_cache_key(
         seed,
     );
 
-    Ok(format!("{seed:016x}"))
+    Ok(seed)
 }
 
 /// Return an absolute path string, falling back to the original path.
@@ -869,8 +933,8 @@ fn transcode_to_cache(
 ) -> Result<(PathBuf, Option<PathBuf>), DvdError> {
     fs::create_dir_all(cache_dir).map_err(|err| crate::io_error(cache_dir, err))?;
 
-    let video_part = cache_dir.join(format!("{key}.m2v.part"));
-    let audio_part = cache_dir.join(format!("{key}.wav.part"));
+    let video_part = cache_dir.join(format!("{key}.{}.m2v.part", part_number()));
+    let audio_part = cache_dir.join(format!("{key}.{}.wav.part", part_number()));
 
     let mut progress_cb = |fraction: f32| progress(asset_name, fraction);
 
@@ -921,8 +985,8 @@ fn transcode_slideshow_to_cache(
 ) -> Result<(PathBuf, Option<PathBuf>), DvdError> {
     fs::create_dir_all(cache_dir).map_err(|err| crate::io_error(cache_dir, err))?;
 
-    let video_part = cache_dir.join(format!("{key}.m2v.part"));
-    let audio_part = cache_dir.join(format!("{key}.wav.part"));
+    let video_part = cache_dir.join(format!("{key}.{}.m2v.part", part_number()));
+    let audio_part = cache_dir.join(format!("{key}.{}.wav.part", part_number()));
     let options = TranscodeOptions {
         standard: transcode_standard(project.settings.standard),
         video_bitrate: budget.video_bitrate,
@@ -982,6 +1046,73 @@ fn transcode_slideshow_to_cache(
     }
 
     Ok((video_out, Some(audio_out)))
+}
+
+/// An HD Blu-ray disc's slideshow title: its pictures as H.264 of `options` (ROADMAP M10.6), encoded once and
+/// kept in `cache_dir` (by the slides, the show's settings and the format). Returns the elementary stream's file
+/// and its access-unit index's ([`disccraft_transcode::hd::read_h264_index`]).
+///
+/// # Errors
+///
+/// When a slide cannot be read or encoded, or the cache cannot be written.
+pub fn encode_hd_slideshow(
+    project: &Project,
+    slideshow: &Slideshow,
+    cache_dir: &Path,
+    options: &disccraft_transcode::hd::HdOptions,
+    progress: &mut dyn FnMut(&str, f32),
+) -> Result<(PathBuf, PathBuf), DvdError> {
+    let mut seed = fnv1a64(b"hd-slideshow", FNV_OFFSET);
+    seed = fnv1a64(SLIDE_RENDER_VERSION.as_bytes(), seed);
+    let format = format!(
+        "{}x{} {}/{} {} {}",
+        options.width,
+        options.height,
+        options.fps_num,
+        options.fps_den,
+        options.target_kbps,
+        options.max_kbps
+    );
+    seed = fnv1a64(format.as_bytes(), seed);
+    seed = slideshow_seed(project, slideshow, seed)?;
+    let es = cache_dir.join(format!("hd-{seed:016x}.h264"));
+    let index = cache_dir.join(format!("hd-{seed:016x}.idx"));
+    if es.is_file() && index.is_file() {
+        return Ok((es, index));
+    }
+
+    fs::create_dir_all(cache_dir).map_err(|err| crate::io_error(cache_dir, err))?;
+    let es_part = cache_dir.join(format!("hd-{seed:016x}.{}.h264.part", part_number()));
+    let index_part = cache_dir.join(format!("hd-{seed:016x}.{}.idx.part", part_number()));
+    let slides = slideshow_inputs(project, slideshow)?;
+    let transition = Transition {
+        kind: transition_kind(slideshow.transition),
+        seconds: slide_seconds(slideshow.transition_duration)?,
+    };
+    let label = format!("HD: {}", slideshow.name);
+    if let Err(err) = render_slideshow_hd(
+        &slides,
+        transition,
+        (&es_part, &index_part),
+        options,
+        &mut |fraction| progress(&label, fraction),
+    ) {
+        remove_parts(&es_part, &index_part);
+        return Err(DvdError::Unsupported(format!(
+            "transcode slideshow {}: {err}",
+            slideshow.name
+        )));
+    }
+    // The index last: the stream is only taken with its index.
+    if let Err(err) = fs::rename(&es_part, &es) {
+        remove_parts(&es_part, &index_part);
+        return Err(crate::io_error(&es_part, err));
+    }
+    if let Err(err) = fs::rename(&index_part, &index) {
+        remove_parts(&es_part, &index_part);
+        return Err(crate::io_error(&index_part, err));
+    }
+    Ok((es, index))
 }
 
 /// The renderer's transition kind for the project's.
@@ -1088,7 +1219,7 @@ fn transcode_audio_to_cache(
         return Ok(wav_out);
     }
 
-    let part = cache_dir.join(format!("{key}.wav.part"));
+    let part = cache_dir.join(format!("{key}.{}.wav.part", part_number()));
 
     if let Err(err) = transcode_audio(input, &part, None) {
         fs::remove_file(&part).unwrap_or(());

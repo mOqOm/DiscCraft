@@ -9,14 +9,19 @@
 )]
 
 mod menus;
+pub use menus::{HdMotionMenu, MotionMenu, encode_hd_motion_menu, encode_motion_menu};
+mod thumbnails;
+pub use thumbnails::{ThumbnailFrame, still_thumbnails};
 mod output;
 mod prepare;
-pub use prepare::{Estimate, TranscodeStatus, estimate, transcode_status};
+pub use prepare::{Estimate, TranscodeStatus, encode_hd_slideshow, estimate, transcode_status};
 mod source;
 pub mod streams;
 pub use streams::{
     SubtitleCue, SubtitleTrack, TitleAudio, TitleSource, TitleStreams, load_title_streams,
+    subtitle_tracks_sized,
 };
+mod parallel;
 mod vmg;
 mod vts;
 
@@ -135,6 +140,25 @@ const START_DTS: i64 = 8_100_000;
 const MAX_CELLS: usize = 255;
 
 /// Convert a project tick to a 27 MHz timestamp.
+/// The lines a subpicture may cover on a frame `frame_height` lines high: 478 on 525/60 (NTSC), 573 on 625/50 (PAL).
+/// (Wikipedia's DVD-Video article gives 720 x 478 and 720 x 537; 537 reads as 573 with two digits swapped, as the
+/// 625/50 frame has 576 lines.)
+pub(crate) fn subpicture_lines(frame_height: u16) -> u16 {
+    if frame_height <= 480 { 478 } else { 573 }
+}
+
+/// Cuts the rows of a subpicture at `y` that fall below the area a subpicture may cover on a frame
+/// `frame_height` lines high (see [`subpicture_lines`]).
+pub(crate) fn fit_subpicture(bitmap: &mut disccraft_spu::Bitmap, y: u16, frame_height: u16) {
+    let rows = subpicture_lines(frame_height).saturating_sub(y);
+    if bitmap.height > rows {
+        bitmap.height = rows.max(1);
+        bitmap
+            .pixels
+            .truncate(usize::from(bitmap.width).saturating_mul(usize::from(bitmap.height)));
+    }
+}
+
 pub fn ticks_to_27m(t: Tick) -> i64 {
     t.0.checked_div(9408).unwrap_or(i64::MIN)
 }
@@ -186,6 +210,8 @@ pub fn build_video_ts_with(
         budget: prepare::budget(project)?,
         progress,
     };
+    // Transcode the titles in parallel first; the titles below then come from the cache.
+    prepare::prepare_all(project, prep.cache_dir, &prep.budget, prep.progress)?;
     let nav = compile(project)?;
 
     let video_ts = output::prepare_video_ts(out_dir)?;

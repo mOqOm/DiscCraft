@@ -93,6 +93,8 @@ mod tests {
                 y: 20,
                 w: 300,
                 h: 40,
+                thumbnail: Some(disccraft_project::ThumbnailArea::WHOLE),
+                kind: disccraft_project::ButtonKind::Chapter,
             }),
         })?;
         let text = serde_json::to_string(&library)?;

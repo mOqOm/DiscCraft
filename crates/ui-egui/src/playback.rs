@@ -1,11 +1,13 @@
 //! タイムラインの再生（タイムライン ▸ 再生、Space）。engine の [`Player`] が映像を実時間でデコードし、
-//! 画面は描くたびにいちばん新しいフレームをモニターに映して再生ヘッドを進める。音はまだ出さない。
+//! 画面は描くたびにいちばん新しいフレームをモニターに映して再生ヘッドを進める。音（M6.175）はタイムラインの
+//! 1 つ目のオーディオトラック（なければ映像のファイルの音）を、OS の既定の出力デバイスで鳴らす
+//! （[`crate::audio_out`]）。
 
 use crate::DiscCraftApp;
 use crate::i18n::{tl, tlf};
 use crate::workspace::CenterTab;
 
-use disccraft_engine::{Player, PlayerFrame, PlayerStatus};
+use disccraft_engine::{Player, PlayerAudio, PlayerFrame, PlayerStatus};
 use disccraft_project::TimelineId;
 use std::path::PathBuf;
 
@@ -18,6 +20,12 @@ pub(crate) struct Playback {
     timeline: TimelineId,
     /// 映像のアセット（モニターのフレームのキャッシュのキー）。
     asset: u64,
+    /// 鳴っている音（出力デバイスがないときは `None`）。落とすと止まるので、持っておくだけ。
+    _audio: Option<crate::audio_out::AudioOut>,
+    /// オーディオトラックの音か（映像のファイルの音なら、音がなくても知らせない）。
+    track_audio: bool,
+    /// 音を再生できないことをもう知らせたか。
+    audio_error_shown: bool,
     /// デコードしているスレッド。
     player: Player,
     /// 最後に再生ヘッドを置いた位置（秒）。
@@ -40,12 +48,12 @@ impl DiscCraftApp {
             self.status = tl!("Select a timeline first").to_string();
             return;
         };
-        let Some(video) = self
-            .session
-            .project
-            .timeline(id)
-            .map(|timeline| timeline.video)
-        else {
+        let Some((video, track)) = self.session.project.timeline(id).map(|timeline| {
+            (
+                timeline.video,
+                timeline.audio.first().map(|track| track.asset),
+            )
+        }) else {
             return;
         };
         let Some(path) = self
@@ -70,10 +78,49 @@ impl DiscCraftApp {
         }
         self.tab = CenterTab::Monitor;
         crate::timeline_view::set_playhead_seconds(ctx, id, from);
+
+        // 音: 1 つ目のオーディオトラック、なければ映像のファイルの音を、出力デバイスの周波数で。
+        let audio_path = match track {
+            Some(asset) => self
+                .session
+                .project
+                .assets
+                .get(&asset)
+                .map(|asset| PathBuf::from(&asset.path)),
+            None => Some(path.clone()),
+        };
+        let device = match crate::audio_out::AudioDevice::open_default() {
+            Ok(device) => Some(device),
+            Err(message) => {
+                self.status = tlf!("Playing without sound: {message}", message = message);
+                None
+            }
+        };
+        let player_audio = match (&device, audio_path) {
+            (Some(device), Some(audio)) => Some(PlayerAudio {
+                path: audio,
+                rate: device.rate(),
+            }),
+            _ => None,
+        };
+        let player = Player::start_with_audio(path, player_audio, from, fps);
+        let audio = match (device, player.audio()) {
+            (Some(device), Some(feed)) => match device.play(feed) {
+                Ok(out) => Some(out),
+                Err(message) => {
+                    self.status = tlf!("Playing without sound: {message}", message = message);
+                    None
+                }
+            },
+            _ => None,
+        };
         self.playback = Some(Playback {
             timeline: id,
             asset: video.0,
-            player: Player::start(path, from, fps),
+            _audio: audio,
+            track_audio: track.is_some(),
+            audio_error_shown: false,
+            player,
             last: from,
         });
         ctx.request_repaint();
@@ -94,6 +141,18 @@ impl DiscCraftApp {
 
         let frame = playback.player.take_frame();
         let status = playback.player.status();
+        // オーディオトラックの音をデコードできなければ、一度だけ知らせる（映像はそのまま再生する）。
+        let audio_error = if playback.track_audio && !playback.audio_error_shown {
+            playback.player.audio().and_then(|feed| feed.error())
+        } else {
+            None
+        };
+        if let Some(message) = audio_error {
+            self.status = tlf!("Cannot play the sound: {message}", message = message);
+            if let Some(playback) = self.playback.as_mut() {
+                playback.audio_error_shown = true;
+            }
+        }
         if let Some(frame) = frame {
             self.show_played_frame(ctx, id, &frame);
         }

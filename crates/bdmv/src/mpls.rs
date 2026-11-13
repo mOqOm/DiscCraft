@@ -45,6 +45,43 @@ pub struct PlayListMark {
     pub time: u32,
 }
 
+/// How a playlist plays its play items (the AppInfoPlayList's playback type and count).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Playback {
+    /// In order (playback type 1).
+    #[default]
+    Sequential,
+    /// `count` play items picked at random, each time (playback type 2).
+    Random {
+        /// How many play items play.
+        count: u16,
+    },
+    /// `count` play items in a random order, each once (playback type 3).
+    Shuffle {
+        /// How many play items play.
+        count: u16,
+    },
+}
+
+impl Playback {
+    /// The playback type and count fields.
+    fn fields(self) -> (u8, u16) {
+        match self {
+            Self::Sequential => (1, 0),
+            Self::Random { count } => (2, count),
+            Self::Shuffle { count } => (3, count),
+        }
+    }
+
+    fn from_fields(kind: u8, count: u16) -> Self {
+        match kind {
+            2 => Self::Random { count },
+            3 => Self::Shuffle { count },
+            _ => Self::Sequential,
+        }
+    }
+}
+
 /// A whole playlist.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PlayList {
@@ -52,6 +89,11 @@ pub struct PlayList {
     pub items: Vec<PlayItem>,
     /// Entry marks.
     pub marks: Vec<PlayListMark>,
+    /// The user operations prohibited while the playlist plays (the AppInfoPlayList's UO mask table: bit 63 is
+    /// MenuCall, bit 62 TitleSearch, and so on; see `disccraft_bd`).
+    pub uo_mask: u64,
+    /// In order, random or shuffle.
+    pub playback: Playback,
 }
 
 /// Write a playlist file.
@@ -59,7 +101,7 @@ pub fn write_mpls(playlist: &PlayList) -> Result<Vec<u8>, BdmvError> {
     let mut buf = Vec::new();
     write_header(&mut buf)?;
 
-    write_app_info(&mut buf)?;
+    write_app_info(&mut buf, playlist.uo_mask, playlist.playback)?;
 
     let playlist_addr = len_u32(buf.len())?;
     patch_u32(&mut buf, 8, playlist_addr)?;
@@ -85,11 +127,21 @@ pub fn read_mpls(data: &[u8]) -> Result<PlayList, BdmvError> {
     r.skip(20)?;
 
     let app_len = usize_from_u32(r.u32()?)?;
-    r.skip(app_len)?;
+    // Reserved, playback type, playback count, then the UO mask table.
+    let head = r.u32()?;
+    let kind = u8::try_from((head >> 16) & 0xFF).unwrap_or(1);
+    let count = u16::try_from(head & 0xFFFF).unwrap_or(0);
+    let uo_mask = (u64::from(r.u32()?) << 32) | u64::from(r.u32()?);
+    r.skip(app_len.saturating_sub(12))?;
 
     let items = read_playlist(data, playlist_addr)?;
     let marks = read_marks(data, marks_addr)?;
-    Ok(PlayList { items, marks })
+    Ok(PlayList {
+        items,
+        marks,
+        uo_mask,
+        playback: Playback::from_fields(kind, count),
+    })
 }
 
 fn write_header(buf: &mut Vec<u8>) -> Result<(), BdmvError> {
@@ -102,12 +154,13 @@ fn write_header(buf: &mut Vec<u8>) -> Result<(), BdmvError> {
     Ok(())
 }
 
-fn write_app_info(buf: &mut Vec<u8>) -> Result<(), BdmvError> {
+fn write_app_info(buf: &mut Vec<u8>, uo_mask: u64, playback: Playback) -> Result<(), BdmvError> {
+    let (kind, count) = playback.fields();
     let mut body = Vec::new();
     body.push(0);
-    body.push(1);
-    body.extend_from_slice(&[0; 2]);
-    body.extend_from_slice(&[0; 8]);
+    body.push(kind);
+    body.extend_from_slice(&count.to_be_bytes());
+    body.extend_from_slice(&uo_mask.to_be_bytes());
     body.extend_from_slice(&[0; 2]);
 
     let len = len_u32(body.len())?;
@@ -548,6 +601,9 @@ mod tests {
                     time: 30_000,
                 },
             ],
+            // MenuCall and ChapterSearch prohibited.
+            uo_mask: (1 << 63) | (1 << 61),
+            playback: Playback::Shuffle { count: 1 },
         }
     }
 

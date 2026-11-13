@@ -36,6 +36,36 @@ const GPRM_SCRATCH_TITLE: u8 = 6;
 /// the next title to end follows the override instead of its own end action. Menus clear it.
 const GPRM_OVERRIDE: u8 = 7;
 
+/// GPRM8: how many times the motion menu now on screen has played (Encore's ループ回数).
+const GPRM_MENU_LOOPS: u8 = 8;
+
+/// GPRM10: the button a link asks the next menu to highlight, as SPRM8 holds it (button number × 1024); 0 when the
+/// menu should highlight its own. The menu's pre commands use it and clear it.
+const GPRM_SELECT: u8 = 10;
+
+/// Pre and post commands of a motion menu that plays `times` times (2 or more), the later plays from `program`
+/// (program 1, or 2 from its loop point) with LinkPGN, which does not run the pre commands again (the count and the
+/// highlighted button stay); then `end`. The pre commands go after the menu's own.
+pub fn counted_loop_to_program(
+    times: u16,
+    program: u8,
+    end: &[cmd::Cmd],
+) -> (Vec<cmd::Cmd>, Vec<cmd::Cmd>) {
+    let pre = vec![cmd::set_gprm(GPRM_MENU_LOOPS, 0)];
+    let mut post = vec![
+        // 1
+        cmd::add_gprm(GPRM_MENU_LOOPS, 1),
+        // 2: played enough: on to line 4.
+        cmd::if_eq_goto(GPRM_MENU_LOOPS, times, 4),
+        // 3: once more, from the loop point.
+        cmd::link_pgn(program, 0),
+        // 4
+        cmd::set_gprm(GPRM_MENU_LOOPS, 0),
+    ];
+    post.extend_from_slice(end);
+    (pre, post)
+}
+
 /// Key for a hidden chapter-entry PGC.
 type ChapterKey = (u8, u16);
 
@@ -169,6 +199,14 @@ pub enum HiddenKind {
         /// Button number, one-based.
         button: u8,
     },
+    /// Hidden PGC a button whose link takes more than one command jumps to (a link to a menu's button: GPRM10, then
+    /// the link).
+    ButtonLink {
+        /// VMGM PGCN of the menu.
+        menu: u16,
+        /// Button number, one-based.
+        button: u8,
+    },
 }
 
 /// Compiled hidden VMGM PGC.
@@ -258,6 +296,8 @@ struct Context {
     playlist_dispatch: Option<u16>,
     /// Whether any timeline has an override (menus then clear the pending override).
     has_overrides: bool,
+    /// How many buttons each menu has (a link can highlight one of them).
+    menu_buttons: BTreeMap<MenuId, usize>,
 }
 
 impl Context {
@@ -314,6 +354,11 @@ pub fn compile(project: &Project) -> Result<CompiledNav, NavError> {
         playlist_step: BTreeMap::new(),
         playlist_dispatch: None,
         has_overrides: !override_targets(project).is_empty(),
+        menu_buttons: project
+            .menus
+            .iter()
+            .map(|(id, menu)| (*id, menu.buttons.len()))
+            .collect(),
     };
 
     let menus = compile_menus(project, &mut ctx, title_menu)?;
@@ -505,10 +550,21 @@ fn compile_menus(
             .ok_or_else(|| NavError::Invalid(format!("menu {id} does not exist")))?;
 
         ctx.current_menu = pgcn;
-        let mut pre = vec![
+        // Lines 1 to 4: highlight the menu's own button, or the one a link asked for (Encore's link to a menu's
+        // button). The HLI forces no button, so a motion menu's later plays (LinkPGN) keep the viewer's.
+        let mut pre = Vec::new();
+        if let Some(own) = default_highlight(menu) {
+            pre.extend([
+                cmd::set_hl_btnn(own),
+                cmd::if_eq_goto(GPRM_SELECT, 0, 4),
+                cmd::set_hl_btnn_gprm(GPRM_SELECT),
+                cmd::set_gprm(GPRM_SELECT, 0),
+            ]);
+        }
+        pre.extend([
             cmd::set_gprm(GPRM_ACTIVE_PLAYLIST, 0),
             cmd::set_gprm(GPRM_LAST_MENU, pgcn),
-        ];
+        ]);
         // Reaching a menu ends any pending override.
         if ctx.has_overrides {
             pre.push(cmd::set_gprm(GPRM_OVERRIDE, 0));
@@ -547,6 +603,21 @@ fn compile_menus(
                 continue;
             }
             let commands = link_command(ctx, &button.link, false)?;
+            if commands.len() > 1 {
+                // A link to a menu's button: GPRM10, then the link (a button command is a single VM command).
+                let button_number = u8::try_from(index.saturating_add(1))
+                    .map_err(|_| NavError::Invalid("too many buttons".to_string()))?;
+                let (hidden, slot) = push_hidden(
+                    ctx,
+                    HiddenKind::ButtonLink {
+                        menu: pgcn,
+                        button: button_number,
+                    },
+                )?;
+                set_hidden_pre(ctx, slot, commands)?;
+                buttons.push(cmd::link_pgcn(hidden));
+                continue;
+            }
             buttons.push(single_command(commands)?);
         }
         // The end action; with an override (and an end action that plays a title), the pending override is set
@@ -828,7 +899,7 @@ fn link_command(ctx: &mut Context, link: &Link, from_title: bool) -> Result<Vec<
             }
         }
         Link::LastMenu => link_last_menu(ctx, from_title),
-        Link::Menu { id, .. } => link_menu(ctx, *id, from_title),
+        Link::Menu { id, button } => link_menu(ctx, *id, *button, from_title),
         Link::Timeline { id, chapter } => link_timeline(ctx, *id, *chapter, from_title),
         Link::Playlist { id } => link_playlist(ctx, *id, from_title),
         Link::Slideshow { id } => {
@@ -853,15 +924,42 @@ fn link_last_menu(ctx: &mut Context, from_title: bool) -> Result<Vec<Cmd>, NavEr
     }
 }
 
-/// Resolves a menu link.
-fn link_menu(ctx: &Context, id: MenuId, from_title: bool) -> Result<Vec<Cmd>, NavError> {
+/// Resolves a menu link. A link to one of the menu's buttons (an index) asks the menu to highlight it (GPRM10).
+fn link_menu(
+    ctx: &Context,
+    id: MenuId,
+    button: Option<u32>,
+    from_title: bool,
+) -> Result<Vec<Cmd>, NavError> {
     let pgcn = resolve_menu(ctx, id)?;
-
-    if from_title {
-        Ok(vec![cmd::call_ss_vmgm_pgcn(pgcn, 0)])
-    } else {
-        Ok(vec![cmd::link_pgcn(pgcn)])
+    let count = ctx.menu_buttons.get(&id).copied().unwrap_or(0);
+    let mut commands = Vec::new();
+    if let Some(number) = button
+        .and_then(|button| usize::try_from(button).ok())
+        .filter(|button| *button < count)
+        .and_then(|button| u8::try_from(button.saturating_add(1)).ok())
+    {
+        commands.push(cmd::set_gprm(GPRM_SELECT, cmd::highlight_value(number)));
     }
+    commands.push(if from_title {
+        cmd::call_ss_vmgm_pgcn(pgcn, 0)
+    } else {
+        cmd::link_pgcn(pgcn)
+    });
+    Ok(commands)
+}
+
+/// The button (one-based) a menu highlights when it is entered without one of its own: its default (the last
+/// button when the default is out of range). `None` for a menu without buttons.
+fn default_highlight(menu: &disccraft_project::Menu) -> Option<u8> {
+    let count = menu.buttons.len();
+    if count == 0 {
+        return None;
+    }
+    let index = usize::try_from(menu.default_button)
+        .unwrap_or(count)
+        .min(count.saturating_sub(1));
+    u8::try_from(index.saturating_add(1)).ok()
 }
 
 /// Resolves a timeline chapter link.
@@ -1423,6 +1521,68 @@ fn single_command(mut commands: Vec<Cmd>) -> Result<Cmd, NavError> {
 
 #[cfg(test)]
 mod tests {
+    /// The first lines of a menu's pre commands: highlight button `own`, unless a link asked for another (GPRM10).
+    fn highlight_lines(own: u8) -> Vec<crate::Cmd> {
+        vec![
+            cmd::set_hl_btnn(own),
+            cmd::if_eq_goto(10, 0, 4),
+            cmd::set_hl_btnn_gprm(10),
+            cmd::set_gprm(10, 0),
+        ]
+    }
+
+    #[test]
+    fn a_link_to_a_menus_button_asks_the_menu_to_highlight_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::default();
+        let first = project.add_menu(Some("First".to_string()))?;
+        let second = project.add_menu(Some("Second".to_string()))?;
+        project.add_button(second, "A".to_string(), None, Link::Stop)?;
+        project.add_button(second, "B".to_string(), None, Link::Stop)?;
+        project.add_button(second, "C".to_string(), None, Link::Stop)?;
+        let to = |button: Option<u32>| Link::Menu { id: second, button };
+        project.add_button(first, "To C".to_string(), None, to(Some(2)))?;
+        project.add_button(first, "To second".to_string(), None, to(None))?;
+        project.add_button(first, "To nothing".to_string(), None, to(Some(9)))?;
+        project.menu_mut(second).ok_or("menu")?.default_button = 1;
+        project.menu_mut(first).ok_or("menu")?.end_action = to(Some(0));
+
+        let nav = compile(&project)?;
+        let menu_of = |id: disccraft_project::MenuId| {
+            nav.menus
+                .iter()
+                .find(|menu| menu.menu == id)
+                .ok_or("menu nav")
+        };
+        let (first_nav, second_nav) = (menu_of(first)?, menu_of(second)?);
+        // The second menu highlights its default (button 2) unless asked.
+        assert!(second_nav.pre.starts_with(&highlight_lines(2)));
+        // A button links through a hidden PGC that asks for button 3; a plain link and a button the menu does not
+        // have go straight there.
+        let plain = cmd::link_pgcn(second_nav.pgcn);
+        assert_eq!(first_nav.buttons.get(1), Some(&plain));
+        assert_eq!(first_nav.buttons.get(2), Some(&plain));
+        let hidden = nav
+            .hidden
+            .iter()
+            .find(|hidden| matches!(hidden.kind, HiddenKind::ButtonLink { button: 1, .. }))
+            .ok_or("hidden PGC")?;
+        assert_eq!(
+            first_nav.buttons.first(),
+            Some(&cmd::link_pgcn(hidden.pgcn))
+        );
+        assert_eq!(
+            hidden.pre,
+            vec![cmd::set_gprm(10, cmd::highlight_value(3)), plain]
+        );
+        // The end action asks for button 1 in its post commands.
+        assert_eq!(
+            first_nav.post,
+            vec![cmd::set_gprm(10, cmd::highlight_value(1)), plain]
+        );
+        Ok(())
+    }
+
     use super::{HiddenKind, NavError, compile, compile_title_pre};
     use crate::cmd;
     use disccraft_project::{Link, Project, Tick};
@@ -1481,7 +1641,14 @@ mod tests {
         assert_eq!(menu_nav.menu, menu);
         assert_eq!(menu_nav.pgcn, 1);
         assert!(menu_nav.title_menu);
-        assert_eq!(menu_nav.pre, vec![cmd::set_gprm(3, 0), cmd::set_gprm(2, 1)]);
+        assert_eq!(
+            menu_nav.pre,
+            [
+                highlight_lines(1),
+                vec![cmd::set_gprm(3, 0), cmd::set_gprm(2, 1)]
+            ]
+            .concat()
+        );
         assert_eq!(menu_nav.buttons.len(), 3);
         assert_eq!(
             menu_nav.buttons.first().copied().ok_or("missing button")?,
@@ -1580,7 +1747,14 @@ mod tests {
         assert_eq!(nav.hidden.len(), 5);
 
         let menu_nav = nav.menus.first().ok_or("missing menu nav")?;
-        assert_eq!(menu_nav.pre, vec![cmd::set_gprm(3, 0), cmd::set_gprm(2, 1)]);
+        assert_eq!(
+            menu_nav.pre,
+            [
+                highlight_lines(1),
+                vec![cmd::set_gprm(3, 0), cmd::set_gprm(2, 1)]
+            ]
+            .concat()
+        );
         assert_eq!(
             menu_nav.buttons.first().copied().ok_or("missing button")?,
             cmd::link_pgcn(start)

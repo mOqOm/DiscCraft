@@ -63,7 +63,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "アセットのフレームを取り出す",
         menu: &["アセット"],
         shortcut: None,
-        params: r#"{"asset": id, "seconds": f64}"#,
+        params: r#"{"asset": id, "seconds": f64, "bright"?: bool, "bars"?: bool}"#,
         enabled: always_enabled,
         run: run_frame,
         journal: false,
@@ -88,14 +88,32 @@ fn run_frame(session: &mut Session, params: &Value) -> CommandResult {
         return Err("asset.frame: not a video asset".to_string());
     }
 
-    let (width, height, rgb) = disccraft_transcode::frame_at(Path::new(&asset.path), seconds)
+    // "bright": the first bright (non-black) frame from there (a still video thumbnail without a poster frame).
+    // "bars": false gives the picture without its letterbox bars (a video thumbnail stretches it over its area).
+    let bright = matches!(params.get("bright"), Some(Value::Bool(true)));
+    let bars = !matches!(params.get("bars"), Some(Value::Bool(false)));
+    let reader = disccraft_transcode::FrameReader::open(Path::new(&asset.path))
         .map_err(|error| error.to_string())?;
+    let seconds = if bright {
+        reader
+            .first_bright_time(seconds)
+            .map_err(|error| error.to_string())?
+    } else {
+        seconds
+    };
+    let (width, height, rgb) = if bars {
+        reader.frame(seconds)
+    } else {
+        reader.picture(seconds)
+    }
+    .map_err(|error| error.to_string())?;
     let (width, height, rgb) = downscale_rgb(width, height, &rgb, 3, FRAME_EDGE)
         .ok_or_else(|| "asset.frame: cannot scale the frame".to_string())?;
 
     let bytes: Vec<Value> = rgb.into_iter().map(Value::from).collect();
     Ok(object(&[
         ("asset", Value::from(id)),
+        ("seconds", Value::from(seconds)),
         ("width", Value::from(width)),
         ("height", Value::from(height)),
         ("rgb", Value::Array(bytes)),

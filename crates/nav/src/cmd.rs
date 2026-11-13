@@ -95,6 +95,34 @@ pub fn set_gprm(reg: u8, value: u16) -> Cmd {
     ]
 }
 
+/// Constructs `GPRM r += v` with an immediate value.
+pub fn add_gprm(reg: u8, value: u16) -> Cmd {
+    [
+        0x73,
+        0x00,
+        0x00,
+        reg_byte(reg),
+        hi(value),
+        lo(value),
+        0x00,
+        0x00,
+    ]
+}
+
+/// Constructs `if (GPRM r == v) Goto line` (lines count from 1 in the command list).
+pub fn if_eq_goto(reg: u8, value: u16, line: u8) -> Cmd {
+    [
+        0x00,
+        0xA1,
+        0x00,
+        reg_byte(reg),
+        hi(value),
+        lo(value),
+        0x00,
+        line,
+    ]
+}
+
 /// Constructs `GPRM d = GPRM s`.
 pub fn mov_gprm(dst: u8, src: u8) -> Cmd {
     [
@@ -121,6 +149,16 @@ pub fn set_hl_btnn(button: u8) -> Cmd {
         0x00,
         0x00,
     ]
+}
+
+/// Constructs `SetHL_BTNN GPRM r`: highlight the button GPRM `r` holds, as SPRM8 holds it (button number × 1024).
+pub fn set_hl_btnn_gprm(reg: u8) -> Cmd {
+    [0x46, 0x00, 0x00, 0x00, 0x00, reg_byte(reg), 0x00, 0x00]
+}
+
+/// The value of SPRM8 (and of a GPRM for [`set_hl_btnn_gprm`]) that highlights `button` (one-based).
+pub fn highlight_value(button: u8) -> u16 {
+    u16::from(button & 0x3F) << 10
 }
 
 /// Constructs `SetSTN`: select the audio stream (0-based, `None` keeps the player's), and the subpicture stream

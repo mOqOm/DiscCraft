@@ -80,18 +80,18 @@ fn reads_buttons_highlights_and_background() {
     let _ = std::fs::remove_file(&path);
 
     assert_eq!((menu.width, menu.height), (W, H));
-    // Photoshop lists layers top first: the Back group was added last.
+    // Encore numbers the buttons from the bottom of the layer stack: Play was added first (lowest), Back last.
     let names: Vec<&str> = menu.buttons.iter().map(|b| b.name.as_str()).collect();
-    assert_eq!(names, ["Back", "Play"]);
+    assert_eq!(names, ["Play", "Back"]);
 
     // The button covers its whole layer set (label and highlight), as in Encore.
-    let play = &menu.buttons[1];
+    let play = &menu.buttons[0];
     assert_eq!((play.x, play.y, play.width, play.height), (6, 6, 24, 14));
     let highlight = play.highlight.as_ref().expect("Play has a highlight");
     assert_eq!((highlight.width, highlight.height), (24, 14));
     assert_eq!(pixel(highlight, 0, 0), [255, 255, 0, 255]);
 
-    let back = &menu.buttons[0];
+    let back = &menu.buttons[1];
     assert_eq!((back.x, back.y, back.width, back.height), (36, 30, 16, 8));
     assert!(back.highlight.is_none());
 

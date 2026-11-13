@@ -61,6 +61,9 @@ enum Sub {
         /// Write a DVD ISO image instead of a folder
         #[arg(long)]
         iso: Option<PathBuf>,
+        /// Keep transcoded media in this folder (shared between builds) instead of next to the output
+        #[arg(long)]
+        cache: Option<PathBuf>,
     },
 }
 
@@ -87,9 +90,14 @@ fn run(cli: Cli) -> Result<(), String> {
         Sub::Mcp => disccraft_automation::McpServer::new()
             .serve(std::io::stdin().lock(), std::io::stdout().lock())
             .map_err(|e| format!("mcp: {e}")),
-        Sub::Build { project, out, iso } => match (iso, out) {
-            (Some(iso), _) => build_project(&project, &iso, "iso"),
-            (None, Some(out)) => build_project(&project, &out, "folder"),
+        Sub::Build {
+            project,
+            out,
+            iso,
+            cache,
+        } => match (iso, out) {
+            (Some(iso), _) => build_project(&project, &iso, "iso", cache.as_deref()),
+            (None, Some(out)) => build_project(&project, &out, "folder", cache.as_deref()),
             (None, None) => Err("--out or --iso is required".to_string()),
         },
     }
@@ -218,7 +226,12 @@ fn inspect_project(project: &Path, json: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn build_project(project: &Path, out: &Path, output: &str) -> Result<(), String> {
+fn build_project(
+    project: &Path,
+    out: &Path,
+    output: &str,
+    cache: Option<&Path>,
+) -> Result<(), String> {
     if !project.exists() {
         return Err(format!(
             "project file does not exist: {}",
@@ -233,6 +246,12 @@ fn build_project(project: &Path, out: &Path, output: &str) -> Result<(), String>
         "path".to_string(),
         Value::String(out.to_string_lossy().into_owned()),
     );
+    if let Some(cache) = cache {
+        params.insert(
+            "cache".to_string(),
+            Value::String(cache.to_string_lossy().into_owned()),
+        );
+    }
 
     let result = session.execute("build.start", &Value::Object(params))?;
     print_build_summary(&result)

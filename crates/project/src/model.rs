@@ -136,6 +136,119 @@ pub struct DiscSettings {
         skip_serializing_if = "crate::menu::ButtonDefaults::is_default"
     )]
     pub button_defaults: crate::menu::ButtonDefaults,
+    /// The video of a Blu-ray disc's titles (Encore's Blu-ray transcode settings): SD MPEG-2, or HD H.264.
+    #[serde(default, skip_serializing_if = "BdVideo::is_sd")]
+    pub bd_video: BdVideo,
+}
+
+/// The video format of a Blu-ray disc's titles, encoded to H.264 when HD. 1080p 23.976 / 24 and the 720p formats are
+/// the progressive ones the Blu-ray standard allows; 1080p 25 / 29.97 / 50 / 59.94 are outside it (computer players
+/// play them, home players may not).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BdVideo {
+    /// SD MPEG-2 at the TV standard's size (720 x 480 or 720 x 576), as on DVD.
+    #[default]
+    #[serde(rename = "sd")]
+    Sd,
+    /// 1920 x 1080, 23.976 frames per second.
+    #[serde(rename = "1080p23.976")]
+    Hd1080p23,
+    /// 1920 x 1080, 24 frames per second.
+    #[serde(rename = "1080p24")]
+    Hd1080p24,
+    /// 1920 x 1080, 25 frames per second (outside the Blu-ray standard).
+    #[serde(rename = "1080p25")]
+    Hd1080p25,
+    /// 1920 x 1080, 29.97 frames per second (outside the Blu-ray standard).
+    #[serde(rename = "1080p29.97")]
+    Hd1080p29,
+    /// 1920 x 1080, 50 frames per second (outside the Blu-ray standard).
+    #[serde(rename = "1080p50")]
+    Hd1080p50,
+    /// 1920 x 1080, 59.94 frames per second (outside the Blu-ray standard).
+    #[serde(rename = "1080p59.94")]
+    Hd1080p59,
+    /// 1280 x 720, 59.94 frames per second.
+    #[serde(rename = "720p59.94")]
+    Hd720p59,
+    /// 1280 x 720, 50 frames per second.
+    #[serde(rename = "720p50")]
+    Hd720p50,
+    /// 1280 x 720, 23.976 frames per second.
+    #[serde(rename = "720p23.976")]
+    Hd720p23,
+    /// 1280 x 720, 24 frames per second.
+    #[serde(rename = "720p24")]
+    Hd720p24,
+}
+
+impl BdVideo {
+    /// Every format, SD first.
+    pub const ALL: [BdVideo; 11] = [
+        BdVideo::Sd,
+        BdVideo::Hd1080p23,
+        BdVideo::Hd1080p24,
+        BdVideo::Hd1080p25,
+        BdVideo::Hd1080p29,
+        BdVideo::Hd1080p50,
+        BdVideo::Hd1080p59,
+        BdVideo::Hd720p59,
+        BdVideo::Hd720p50,
+        BdVideo::Hd720p23,
+        BdVideo::Hd720p24,
+    ];
+
+    /// Whether the Blu-ray standard allows the format (SD, 1080p 23.976 / 24, 720p).
+    pub fn in_standard(self) -> bool {
+        !matches!(
+            self,
+            BdVideo::Hd1080p25 | BdVideo::Hd1080p29 | BdVideo::Hd1080p50 | BdVideo::Hd1080p59
+        )
+    }
+
+    /// Whether this is SD (nothing written to the project file).
+    pub fn is_sd(&self) -> bool {
+        *self == BdVideo::Sd
+    }
+
+    /// The name in project files and commands.
+    pub fn id(self) -> &'static str {
+        match self {
+            BdVideo::Sd => "sd",
+            BdVideo::Hd1080p23 => "1080p23.976",
+            BdVideo::Hd1080p24 => "1080p24",
+            BdVideo::Hd1080p25 => "1080p25",
+            BdVideo::Hd1080p29 => "1080p29.97",
+            BdVideo::Hd1080p50 => "1080p50",
+            BdVideo::Hd1080p59 => "1080p59.94",
+            BdVideo::Hd720p59 => "720p59.94",
+            BdVideo::Hd720p50 => "720p50",
+            BdVideo::Hd720p23 => "720p23.976",
+            BdVideo::Hd720p24 => "720p24",
+        }
+    }
+
+    /// The format named `id`.
+    pub fn from_id(id: &str) -> Option<BdVideo> {
+        BdVideo::ALL.into_iter().find(|video| video.id() == id)
+    }
+
+    /// The HD frame size and rate (numerator, denominator); `None` for SD.
+    pub fn hd(self) -> Option<(u32, u32, u32, u32)> {
+        match self {
+            BdVideo::Sd => None,
+            BdVideo::Hd1080p23 => Some((1920, 1080, 24_000, 1001)),
+            BdVideo::Hd1080p24 => Some((1920, 1080, 24, 1)),
+            BdVideo::Hd1080p25 => Some((1920, 1080, 25, 1)),
+            BdVideo::Hd1080p29 => Some((1920, 1080, 30_000, 1001)),
+            BdVideo::Hd1080p50 => Some((1920, 1080, 50, 1)),
+            BdVideo::Hd1080p59 => Some((1920, 1080, 60_000, 1001)),
+            BdVideo::Hd720p59 => Some((1280, 720, 60_000, 1001)),
+            BdVideo::Hd720p50 => Some((1280, 720, 50, 1)),
+            BdVideo::Hd720p23 => Some((1280, 720, 24_000, 1001)),
+            BdVideo::Hd720p24 => Some((1280, 720, 24, 1)),
+        }
+    }
 }
 
 /// What a disc does with subtitles when it starts.

@@ -13,6 +13,7 @@
 mod about;
 mod actions;
 mod app;
+mod audio_out;
 mod build_panel;
 mod build_view;
 mod button_edit;
@@ -122,6 +123,7 @@ mod tests {
         let options = BuildOptions {
             output: OutputKind::Folder,
             path: PathBuf::from("out"),
+            cache: None,
         };
 
         let mut job2 = BuildJob::default();

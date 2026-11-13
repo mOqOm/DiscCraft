@@ -79,10 +79,45 @@ impl NavCommand {
         Self::new(op, title, 0)
     }
 
-    /// Set_Move: group 3, sub-group 0, set option 1; destination is a GPR index, source is immediate.
+    /// Set_Move: group 2 (Set), sub-group 0, set option 1; destination is a GPR index, source is immediate.
     pub fn set_reg(gpr: u32, value: u32) -> Self {
-        let op = opcode(2, 3, 0, false, true, 1, OptionKind::Set);
+        let op = opcode(2, SET_GROUP, 0, false, true, 1, OptionKind::Set);
         Self::new(op, gpr, value)
+    }
+
+    /// Set_Sub: group 2 (Set), sub-group 0, set option 4; subtracts an immediate value from a GPR.
+    pub fn sub_reg(gpr: u32, value: u32) -> Self {
+        let op = opcode(2, SET_GROUP, 0, false, true, 4, OptionKind::Set);
+        Self::new(op, gpr, value)
+    }
+
+    /// Set_ButtonPage: group 2 (Set), sub-group 1, set option 3. Selects `button` on `page` of the next interactive
+    /// composition (the button and page flags in the top bits say both are set).
+    pub fn set_button_page(button: u16, page: u16) -> Self {
+        let op = opcode(2, SET_GROUP, 1, true, true, 3, OptionKind::Set);
+        Self::new(
+            op,
+            BUTTON_PAGE_FLAG | u32::from(button),
+            BUTTON_PAGE_FLAG | u32::from(page),
+        )
+    }
+
+    /// Set_SetStream: group 2 (Set), sub-group 1, set option 1. Selects the primary audio stream (1-based) and the
+    /// PG stream (1-based, with whether it is shown); `None` leaves that one alone. The flags in the destination's
+    /// bits 31 (audio) and 15 (PG) say which are set; bit 14 shows the PG stream.
+    pub fn set_stream(audio: Option<u16>, pg: Option<(bool, u16)>) -> Self {
+        let mut dst = 0_u32;
+        if let Some(audio) = audio {
+            dst |= BUTTON_PAGE_FLAG | (u32::from(audio & 0x0FFF) << 16);
+        }
+        if let Some((shown, stream)) = pg {
+            dst |= 0x8000 | u32::from(stream & 0x0FFF);
+            if shown {
+                dst |= 0x4000;
+            }
+        }
+        let op = opcode(2, SET_GROUP, 1, true, true, 1, OptionKind::Set);
+        Self::new(op, dst, 0)
     }
 
     /// Branch_GoTo: group 0, sub-group 0, branch option 1, immediate destination.
@@ -110,6 +145,13 @@ pub struct MovieObject {
     /// Navigation commands.
     pub commands: Vec<NavCommand>,
 }
+
+/// The command group of the Set commands: 10b. (The format notes we started from listed 11b; libbluray, the
+/// black-box oracle, reads 11b as an unknown group and skips the command, and takes 10b as Set.)
+const SET_GROUP: u8 = 2;
+
+/// Set_ButtonPage's button / page flag (the top bit of each operand).
+const BUTTON_PAGE_FLAG: u32 = 0x8000_0000;
 
 #[derive(Clone, Copy)]
 enum OptionKind {
@@ -354,7 +396,7 @@ mod tests {
         let set = NavCommand::set_reg(1, 5);
         let op = set.opcode();
         assert_eq!((op >> 29) & 7, 2);
-        assert_eq!((op >> 27) & 3, 3);
+        assert_eq!((op >> 27) & 3, 2);
         assert_eq!((op >> 24) & 7, 0);
         assert_eq!((op >> 23) & 1, 0);
         assert_eq!((op >> 22) & 1, 1);
@@ -372,6 +414,23 @@ mod tests {
         assert_eq!((op >> 8) & 0xF, 2);
         assert_eq!(cmp.dst(), 1);
         assert_eq!(cmp.src(), 5);
+
+        let stream = NavCommand::set_stream(Some(2), Some((false, 1)));
+        let op = stream.opcode();
+        assert_eq!(((op >> 27) & 3, (op >> 24) & 7, op & 0x1F), (2, 1, 1));
+        assert_eq!((stream.dst(), stream.src()), (0x8002_8001, 0));
+        assert_eq!(NavCommand::set_stream(None, Some((true, 3))).dst(), 0xC003);
+
+        let page = NavCommand::set_button_page(2, 0);
+        let op = page.opcode();
+        assert_eq!(((op >> 27) & 3, (op >> 24) & 7, op & 0x1F), (2, 1, 3));
+        assert_eq!((page.dst(), page.src()), (0x8000_0002, 0x8000_0000));
+
+        // Sub differs from Move only in the set option.
+        let sub = NavCommand::sub_reg(1, 1);
+        assert_eq!(sub.opcode() & !0x1F, set.opcode() & !0x1F);
+        assert_eq!(sub.opcode() & 0x1F, 4);
+        assert_eq!((sub.dst(), sub.src()), (1, 1));
     }
 
     #[test]

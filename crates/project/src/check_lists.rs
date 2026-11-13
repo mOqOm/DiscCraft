@@ -1,6 +1,6 @@
 //! Slideshow, playlist and chapter playlist validation.
 
-use crate::chapter_playlist::{ChapterPlaylist, PlaybackOrder};
+use crate::chapter_playlist::ChapterPlaylist;
 use crate::check::{Problem, Severity};
 use crate::ids::{AssetId, MenuId, TimelineId};
 use crate::link::Link;
@@ -93,16 +93,6 @@ fn check_chapter_playlist(
             format!("chapter playlist {id} has no entries"),
         ));
     }
-    if playlist.order != PlaybackOrder::Sequential
-        && project.settings.kind == crate::model::DiscKind::BluRay
-    {
-        problems.push(warning(
-            "bluRayPlaybackOrder",
-            format!(
-                "chapter playlist {id}: Blu-ray discs play the entries in order (random and shuffle are DVD only)"
-            ),
-        ));
-    }
 }
 
 fn check_slideshow(project: &Project, id: u64, slideshow: &Slideshow, problems: &mut Vec<Problem>) {
@@ -115,14 +105,6 @@ fn check_slideshow(project: &Project, id: u64, slideshow: &Slideshow, problems: 
         problems.push(warning(
             "emptySlideshow",
             format!("slideshow {id} has no slides"),
-        ));
-    }
-    if slideshow.manual_advance && project.settings.kind == crate::model::DiscKind::BluRay {
-        problems.push(warning(
-            "bluRayManualAdvance",
-            format!(
-                "slideshow {id}: Blu-ray discs do not apply manual advance yet (it is DVD only)"
-            ),
         ));
     }
 }

@@ -185,10 +185,36 @@ pub fn transcode_h264(
         .map_err(|error| TranscodeError::Encode(error.to_string()))?;
     let mut packets = PacketWriter::new(&mut writer, es_out);
 
-    for frame_index in 0..frames {
-        encode_one_frame(&source, &mut encoder, frame_index, options, &mut packets)?;
-        report_progress(progress, frame_index, frames);
-    }
+    // The pictures are decoded, scaled and converted on a thread of their own, a few ahead of the encoder, so the
+    // two overlap.
+    let (sender, receiver) =
+        std::sync::mpsc::sync_channel::<Result<YuvPlanes, TranscodeError>>(PIPELINE_DEPTH);
+    let source = &source;
+    std::thread::scope(|scope| -> Result<(), TranscodeError> {
+        let _ = scope.spawn(move || {
+            for frame_index in 0..frames {
+                let planes = (|| {
+                    let time = frame_tick(frame_index, options)?;
+                    let frame = source.video_frame(time)?;
+                    let rgb = render_rgb_frame(&frame, options)?;
+                    rgb_to_yuv(&rgb, options)
+                })();
+                let failed = planes.is_err();
+                // A closed channel: the encoder stopped (an error); nothing more to do.
+                if sender.send(planes).is_err() || failed {
+                    break;
+                }
+            }
+        });
+        for frame_index in 0..frames {
+            let planes = receiver
+                .recv()
+                .map_err(|_| TranscodeError::Encode("the decoder stopped early".to_string()))??;
+            encode_planes(&mut encoder, &planes, frame_index, options, &mut packets)?;
+            report_progress(progress, frame_index, frames);
+        }
+        Ok(())
+    })?;
 
     finish_encoder(&mut encoder, options, &mut packets)?;
     packets.flush()?;
@@ -196,6 +222,153 @@ pub fn transcode_h264(
     progress(1.0);
     Ok(frames)
 }
+
+/// One RGB24 picture of `options`' size as an H.264 stream of a single IDR picture (an HD menu's still), at a
+/// constant quantiser fine enough for text.
+pub fn encode_h264_still(rgb: &[u8], options: &HdOptions) -> Result<Vec<u8>, TranscodeError> {
+    validate_options(options)?;
+    let expected = usize::try_from(options.width)
+        .ok()
+        .and_then(|width| width.checked_mul(usize::try_from(options.height).ok()?))
+        .and_then(|pixels| pixels.checked_mul(3));
+    if expected != Some(rgb.len()) {
+        return Err(TranscodeError::Unsupported(
+            "still picture size mismatch".to_string(),
+        ));
+    }
+    let mut config = encoder_config(options);
+    config.rate = RateControl::Qp(STILL_QP);
+    config.intra_only = true;
+    config.bframes = 0;
+    let mut encoder =
+        Encoder::new(config).map_err(|error| TranscodeError::Encode(error.to_string()))?;
+    let planes = rgb_to_yuv(rgb, options)?;
+    let mut data = Vec::new();
+    for packet in encoder
+        .encode(&planes.frame(), 0)
+        .map_err(|error| TranscodeError::Encode(error.to_string()))?
+    {
+        data.extend_from_slice(&packet.data);
+    }
+    for packet in encoder.flush() {
+        data.extend_from_slice(&packet.data);
+    }
+    if data.is_empty() {
+        return Err(TranscodeError::Encode("no picture was encoded".to_string()));
+    }
+    Ok(data)
+}
+
+/// An H.264 encoder fed RGB24 pictures one by one (an HD motion menu): the Annex B stream and its access units
+/// (time stamps in 90 kHz from 0).
+pub struct H264Frames {
+    encoder: Encoder,
+    options: HdOptions,
+    data: Vec<u8>,
+    units: Vec<AccessUnit>,
+    next: i64,
+}
+
+impl H264Frames {
+    /// A new encoder for pictures of `options`' size and rate.
+    ///
+    /// # Errors
+    ///
+    /// When the options are out of range or the encoder cannot start.
+    pub fn new(options: &HdOptions) -> Result<Self, TranscodeError> {
+        validate_options(options)?;
+        let encoder = Encoder::new(encoder_config(options))
+            .map_err(|error| TranscodeError::Encode(error.to_string()))?;
+        Ok(Self {
+            encoder,
+            options: options.clone(),
+            data: Vec::new(),
+            units: Vec::new(),
+            next: 0,
+        })
+    }
+
+    /// Encodes the next picture (RGB24 of the encoder's size).
+    ///
+    /// # Errors
+    ///
+    /// When the picture has the wrong size or cannot be encoded.
+    pub fn push_rgb(&mut self, rgb: &[u8]) -> Result<(), TranscodeError> {
+        let expected = usize::try_from(self.options.width)
+            .ok()
+            .and_then(|width| width.checked_mul(usize::try_from(self.options.height).ok()?))
+            .and_then(|pixels| pixels.checked_mul(3));
+        if expected != Some(rgb.len()) {
+            return Err(TranscodeError::Unsupported(
+                "picture size mismatch".to_string(),
+            ));
+        }
+        let planes = rgb_to_yuv(rgb, &self.options)?;
+        let packets = self
+            .encoder
+            .encode(&planes.frame(), self.next)
+            .map_err(|error| TranscodeError::Encode(error.to_string()))?;
+        self.next = self.next.saturating_add(1);
+        for packet in &packets {
+            self.add(packet)?;
+        }
+        Ok(())
+    }
+
+    /// Flushes the encoder: the stream and its access units.
+    ///
+    /// # Errors
+    ///
+    /// When a time stamp is out of range.
+    pub fn finish(mut self) -> Result<(Vec<u8>, Vec<AccessUnit>), TranscodeError> {
+        for packet in &self.encoder.flush() {
+            self.add(packet)?;
+        }
+        Ok((self.data, self.units))
+    }
+
+    fn add(&mut self, packet: &Packet) -> Result<(), TranscodeError> {
+        let offset = u64::try_from(self.data.len())
+            .map_err(|_| TranscodeError::Unsupported("stream too large".to_string()))?;
+        let len = u32::try_from(packet.data.len())
+            .map_err(|_| TranscodeError::Unsupported("packet too large".to_string()))?;
+        self.data.extend_from_slice(&packet.data);
+        self.units.push(AccessUnit {
+            offset,
+            len,
+            pts: frame_time_to_90k(packet.pts, &self.options)?,
+            dts: frame_time_to_90k(packet.dts, &self.options)?,
+            keyframe: packet.keyframe,
+        });
+        Ok(())
+    }
+}
+
+/// Calls `f` with each of the first `frames` pictures of the video `input` at `options`' rate, as RGB24 of
+/// `options`' size (fitted, with bars), for an HD motion menu's video background.
+///
+/// # Errors
+///
+/// When the video cannot be read, or `f` fails.
+pub fn for_each_hd_frame(
+    input: &Path,
+    options: &HdOptions,
+    frames: u64,
+    f: &mut dyn FnMut(u64, &[u8]) -> Result<(), String>,
+) -> Result<(), TranscodeError> {
+    validate_options(options)?;
+    let source = Source::open(input)?;
+    for index in 0..frames {
+        let time = frame_tick(index, options)?;
+        let frame = source.video_frame(time)?;
+        let rgb = render_rgb_frame(&frame, options)?;
+        f(index, &rgb).map_err(TranscodeError::Encode)?;
+    }
+    Ok(())
+}
+
+/// Quantiser of an HD still (low: menus have text).
+const STILL_QP: u8 = 18;
 
 /// Read an index written by `transcode_h264`.
 pub fn read_h264_index(path: &Path) -> Result<Vec<AccessUnit>, TranscodeError> {
@@ -370,17 +543,17 @@ fn keyint(options: &HdOptions) -> u32 {
 }
 
 /// Encode one output frame.
-fn encode_one_frame<W: Write>(
-    source: &Source,
+/// How many converted pictures the decoding thread keeps ready ahead of the encoder.
+const PIPELINE_DEPTH: usize = 8;
+
+/// Encodes one converted picture.
+fn encode_planes<W: Write>(
     encoder: &mut Encoder,
+    planes: &YuvPlanes,
     frame_index: u64,
     options: &HdOptions,
     packets: &mut PacketWriter<'_, W>,
 ) -> Result<(), TranscodeError> {
-    let time = frame_tick(frame_index, options)?;
-    let frame = source.video_frame(time)?;
-    let rgb = render_rgb_frame(&frame, options)?;
-    let planes = rgb_to_yuv(&rgb, options)?;
     let pts = i64::try_from(frame_index)
         .map_err(|_| TranscodeError::Unsupported("frame index too large".to_string()))?;
     let encoded = encoder
@@ -805,7 +978,7 @@ fn round_clamp_u8(value: f64) -> u8 {
 }
 
 /// Write an access-unit index file.
-fn write_index(path: &Path, units: &[AccessUnit]) -> Result<(), TranscodeError> {
+pub(crate) fn write_index(path: &Path, units: &[AccessUnit]) -> Result<(), TranscodeError> {
     let file = File::create(path).map_err(|error| io_error(path, error))?;
     let mut writer = BufWriter::new(file);
     writer

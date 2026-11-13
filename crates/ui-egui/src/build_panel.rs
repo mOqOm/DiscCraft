@@ -318,6 +318,7 @@ impl DiscCraftApp {
         let options = BuildOptions {
             output: self.build_output,
             path: PathBuf::from(path),
+            cache: None,
         };
 
         self.build_job.start(project, options, build, true);

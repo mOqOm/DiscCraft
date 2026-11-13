@@ -277,6 +277,21 @@ fn write_silence(writer: &mut WavWriter, frames: u64) -> Result<(), TranscodeErr
     Ok(())
 }
 
+/// The buffer as interleaved stereo (left, right), downmixed as the DVD audio is.
+pub(crate) fn interleaved_stereo(buffer: &AudioBuffer) -> Vec<f32> {
+    if buffer.channels.is_empty() {
+        return Vec::new();
+    }
+    let frames = buffer.frames();
+    let mut samples = Vec::with_capacity(frames.saturating_mul(2));
+    for frame in 0..frames {
+        let [left, right] = stereo_at(buffer, frame);
+        samples.push(left);
+        samples.push(right);
+    }
+    samples
+}
+
 fn stereo_at(buffer: &AudioBuffer, frame: usize) -> [f32; 2] {
     match buffer.channels.len() {
         0 => [0.0, 0.0],

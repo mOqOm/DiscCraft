@@ -78,21 +78,38 @@ impl DiscCraftApp {
         self.subtitle_cache.get(&asset.0).map(Arc::clone)
     }
 
-    /// モニターに重ねる字幕: タイムラインの 1 本目の字幕トラックの、`seconds` に出ているもの。
+    /// モニターに重ねる字幕: タイムラインの、モニターに出す字幕トラックの `seconds` に出ているもの。
     pub(crate) fn monitor_subtitle(
         &mut self,
         timeline: TimelineId,
         seconds: f64,
     ) -> Option<String> {
+        let track = self.shown_subtitle(timeline)?;
         let asset = self
             .session
             .project
             .timeline(timeline)?
             .subtitles
-            .first()?
+            .get(track)?
             .asset;
         let cues = self.subtitle_cues(asset);
         cue_at(&cues, seconds).map(|cue| cue.text.clone())
+    }
+
+    /// モニターに出す字幕トラック（なければ `None`）。
+    pub(crate) fn shown_subtitle(&self, timeline: TimelineId) -> Option<usize> {
+        let count = self
+            .session
+            .project
+            .timeline(timeline)
+            .map_or(0, |timeline| timeline.subtitles.len());
+        shown_track(self.shown_subtitles.get(&timeline).copied(), count)
+    }
+
+    /// 字幕トラックの見出しの切り替え（Encore と同じ）: 押したトラックをモニターに出し、出ているトラックなら消す。
+    pub(crate) fn toggle_shown_subtitle(&mut self, timeline: TimelineId, track: usize) {
+        let shown = toggled(self.shown_subtitle(timeline), track);
+        let _ = self.shown_subtitles.insert(timeline, shown);
     }
 
     /// タイムライン ▸ 字幕を読み込み…: ファイルを選んでアセットにし、字幕トラックの追加ダイアログを開く。
@@ -154,9 +171,34 @@ impl DiscCraftApp {
     }
 }
 
+/// モニターに出すトラック: 選んだもの（`Some(None)` はなし）、選んでいなければ 1 本目。ないトラックは出さない。
+fn shown_track(choice: Option<Option<usize>>, count: usize) -> Option<usize> {
+    choice.unwrap_or(Some(0)).filter(|track| *track < count)
+}
+
+/// 見出しを押したあとのトラック: 出ているトラックなら消し、ほかはそのトラックに替える。
+fn toggled(shown: Option<usize>, track: usize) -> Option<usize> {
+    (shown != Some(track)).then_some(track)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SubtitleCue, cue_at, language_from_name};
+    use super::{SubtitleCue, cue_at, language_from_name, shown_track, toggled};
+
+    #[test]
+    fn one_subtitle_track_or_none_is_shown() {
+        // Nothing chosen: the first track, when there is one.
+        assert_eq!(shown_track(None, 2), Some(0));
+        assert_eq!(shown_track(None, 0), None);
+        // A chosen track, or none at all; a track that is gone shows nothing.
+        assert_eq!(shown_track(Some(Some(1)), 2), Some(1));
+        assert_eq!(shown_track(Some(None), 2), None);
+        assert_eq!(shown_track(Some(Some(2)), 2), None);
+        // Clicking another track moves the display there; clicking the shown one turns it off.
+        assert_eq!(toggled(Some(1), 0), Some(0));
+        assert_eq!(toggled(Some(0), 0), None);
+        assert_eq!(toggled(None, 1), Some(1));
+    }
     use std::path::Path;
 
     #[test]

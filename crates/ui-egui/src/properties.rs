@@ -196,6 +196,26 @@ impl DiscCraftApp {
             self.set_widescreen(wide);
         }
 
+        // Encore's Blu-ray transcode settings: the titles' video (SD MPEG-2, or HD H.264).
+        if settings.kind == DiscKind::BluRay {
+            let videos: Vec<(disccraft_project::BdVideo, &str)> = disccraft_project::BdVideo::ALL
+                .iter()
+                .map(|video| (*video, bd_video_name(*video)))
+                .collect();
+            if let Some(video) = choice_row(
+                ui,
+                tl!("Blu-ray video:"),
+                "sheet_bd_video",
+                settings.bd_video,
+                &videos,
+            ) {
+                let _ = self.run_command(
+                    "disc.setBlurayVideo",
+                    serde_json::json!({ "video": video.id() }),
+                );
+            }
+        }
+
         let capacities: Vec<(Capacity, &str)> = Capacity::choices(settings.kind)
             .iter()
             .map(|capacity| (*capacity, capacity_name(*capacity)))
@@ -520,11 +540,37 @@ impl DiscCraftApp {
     /// メニュー（Encore の「基本」タブにあたる項目のうち DiscCraft にあるもの）。
     fn menu_sheet(&mut self, ui: &mut Ui, id: MenuId) {
         sheet_title(ui, tl!("Menu"));
-        self.name_row(ui);
-
         let Some(menu) = self.session.project.menu(id).cloned() else {
             return;
         };
+        // Encore の 基本 / モーション / ポップアップ のタブ。
+        let tab_id = egui::Id::unique("menu_sheet_tab");
+        let mut tab = ui.data(|data| data.get_temp::<u8>(tab_id)).unwrap_or(0);
+        ui.horizontal(|ui| {
+            for (index, label) in [tl!("Basic"), tl!("Motion"), tl!("Pop-up")]
+                .into_iter()
+                .enumerate()
+            {
+                let index = u8::try_from(index).unwrap_or(0);
+                if ui.selectable_label(tab == index, label).clicked() {
+                    tab = index;
+                }
+            }
+        });
+        ui.data_mut(|data| data.insert_temp(tab_id, tab));
+        ui.separator();
+        match tab {
+            1 => {
+                self.menu_motion_rows(ui, &menu);
+                return;
+            }
+            2 => {
+                self.menu_popup_rows(ui, &menu);
+                return;
+            }
+            _ => {}
+        }
+        self.name_row(ui);
         self.description_row(ui, "menu", id.0, &menu.description);
         ui.separator();
         // Encore の「基本」と同じく名前の次にエンドアクション。デュレーションは「モーション」の項目。
@@ -560,19 +606,6 @@ impl DiscCraftApp {
                 "menu.setOverride",
                 serde_json::json!({ "menu": id.0 }),
                 &link,
-            );
-        }
-        self.duration_row(ui, &menu);
-        self.user_ops_row(
-            ui,
-            crate::user_ops::UserOpsTarget::Menu(id),
-            &menu.prohibited_ops,
-        );
-        // ボタンの文字のフォント。
-        if let Some(font) = self.font_row(ui, "menu_label_font", menu.label_font.as_deref()) {
-            let _ = self.run_command(
-                "menu.setLabelFont",
-                serde_json::json!({ "menu": id.0, "font": font }),
             );
         }
         ui.separator();
@@ -620,6 +653,39 @@ impl DiscCraftApp {
                 );
             }
         });
+        // Encore の「カラーセット」: 自動（ハイライトの色から）/ メニューの初期設定（このメニューのセット）。
+        let own = menu.color_set.is_some();
+        ui.horizontal(|ui| {
+            prop_label(ui, tl!("Color Set:"));
+            let mut chosen = None;
+            egui::ComboBox::from_id_salt(("menu_color_set_kind", id.0))
+                .width(FIELD_WIDTH)
+                .selected_text(if own {
+                    tl!("Menu Default")
+                } else {
+                    tl!("Automatic")
+                })
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(!own, tl!("Automatic")).clicked() {
+                        chosen = Some(false);
+                    }
+                    if ui.selectable_label(own, tl!("Menu Default")).clicked() {
+                        chosen = Some(true);
+                    }
+                });
+            if let Some(own_set) = chosen.filter(|own_set| *own_set != own) {
+                let set = if own_set {
+                    serde_json::to_value(menu.color_set_or_default())
+                        .unwrap_or(serde_json::Value::Null)
+                } else {
+                    serde_json::Value::Null
+                };
+                let _ = self.run_command(
+                    "menu.replaceColorSet",
+                    serde_json::json!({ "menu": id.0, "colorSet": set }),
+                );
+            }
+        });
         // Encore の「ボタンのルートを自動設定」: 外すとボタンのシートで上下左右の行き先を選べる。
         let mut auto_route = menu.auto_route;
         ui.horizontal(|ui| {
@@ -634,12 +700,12 @@ impl DiscCraftApp {
                 );
             }
         });
+        self.user_ops_row(
+            ui,
+            crate::user_ops::UserOpsTarget::Menu(id),
+            &menu.prohibited_ops,
+        );
         ui.separator();
-
-        self.menu_look_rows(ui, &menu);
-        ui.separator();
-
-        text_row(ui, tl!("Buttons:"), &menu.buttons.len().to_string());
         // Encore と同じ 4:3 / 16:9 のラジオボタン。DVD のメニューはすべて最初のメニューの縦横比になる。
         if let Some(wide) = radio_row(
             ui,
@@ -654,6 +720,311 @@ impl DiscCraftApp {
                 serde_json::json!({ "menu": id.0, "aspect": aspect }),
             );
         }
+        ui.separator();
+        // Encore の ハイライトをリッチカラーで書き出し（Blu-ray のハイライトを 256 色の絵に）。
+        let mut rich = menu.rich_highlights;
+        let changed = ui
+            .horizontal(|ui| {
+                prop_label(ui, "");
+                ui.checkbox(&mut rich, tl!("Export Highlights in Rich Color"))
+                    .on_hover_text(tl!(
+                        "When enabled, rich color highlights are exported for Blu-ray as 256-color images."
+                    ))
+                    .changed()
+            })
+            .inner;
+        if changed {
+            let _ = self.run_command(
+                "menu.setRichHighlights",
+                serde_json::json!({ "menu": id.0, "on": rich }),
+            );
+        }
+        // ここから下は Encore ではレイヤーやパネルで決める DiscCraft の項目（ボタンの文字のフォント、背景、
+        // ハイライトの色）。
+        ui.separator();
+        if let Some(font) = self.font_row(ui, "menu_label_font", menu.label_font.as_deref()) {
+            let _ = self.run_command(
+                "menu.setLabelFont",
+                serde_json::json!({ "menu": id.0, "font": font }),
+            );
+        }
+        self.menu_look_rows(ui, &menu);
+        ui.separator();
+        text_row(ui, tl!("Buttons:"), &menu.buttons.len().to_string());
+    }
+
+    /// The menu sheet's モーション tab (Encore): the background video, its loop, the menu's audio and duration.
+    fn menu_motion_rows(&mut self, ui: &mut Ui, menu: &disccraft_project::Menu) {
+        use disccraft_project::MenuBackground;
+        let videos = self.assets_of(disccraft_project::AssetKind::Video);
+        let current = match menu.background {
+            MenuBackground::Video { asset, .. } => Some(asset),
+            _ => None,
+        };
+        let shown = current
+            .and_then(|asset| videos.iter().find(|(video, _)| *video == asset))
+            .map_or_else(|| tl!("None").to_owned(), |(_, name)| name.clone());
+        let mut chosen: Option<Option<AssetId>> = None;
+        ui.horizontal(|ui| {
+            prop_label(ui, tl!("Video:"));
+            egui::ComboBox::from_id_salt(("menu_motion_video", menu.id.0))
+                .width(FIELD_WIDTH)
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(current.is_none(), tl!("None"))
+                        .clicked()
+                    {
+                        chosen = Some(None);
+                    }
+                    for (asset, name) in &videos {
+                        if ui.selectable_label(current == Some(*asset), name).clicked() {
+                            chosen = Some(Some(*asset));
+                        }
+                    }
+                });
+        });
+        match chosen.filter(|choice| *choice != current) {
+            Some(Some(asset)) => {
+                let seconds = match menu.background {
+                    MenuBackground::Video { seconds, .. } => seconds,
+                    _ => DEFAULT_LOOP_SECONDS,
+                };
+                self.set_background_video(menu.id, asset, seconds);
+            }
+            // なし: 動かない背景（色）に戻す。
+            Some(None) => self.set_background_color(menu.id),
+            _ => {}
+        }
+        if let MenuBackground::Video { asset, seconds } = menu.background {
+            self.loop_row(ui, menu.id, asset, seconds);
+        }
+        self.menu_audio_row(ui, menu);
+        self.duration_row(ui, menu);
+        ui.separator();
+        self.motion_buttons_row(ui, menu);
+        self.loop_point_row(ui, menu);
+        self.loops_row(ui, menu);
+    }
+
+    /// Encore の モーションボタン: ビデオサムネールのボタンを動かす（メニューの全部のボタン）。
+    fn motion_buttons_row(&mut self, ui: &mut Ui, menu: &disccraft_project::Menu) {
+        let mut on = menu.animate_buttons;
+        let changed = ui
+            .horizontal(|ui| {
+                prop_label(ui, "");
+                ui.checkbox(&mut on, tl!("Motion Buttons"))
+                    .on_hover_text(tl!("Set menu buttons to motion buttons"))
+                    .changed()
+            })
+            .inner;
+        if changed {
+            let _ = self.run_command(
+                "menu.setAnimateButtons",
+                serde_json::json!({ "menu": menu.id.0, "on": on }),
+            );
+        }
+    }
+
+    /// Encore の ループポイント: 2 回目からはここから流す（空ならはじめから）。ビデオの背景か、モーションボタンの
+    /// とき。
+    fn loop_point_row(&mut self, ui: &mut Ui, menu: &disccraft_project::Menu) {
+        let video = matches!(
+            menu.background,
+            disccraft_project::MenuBackground::Video { .. }
+        ) || menu.animate_buttons;
+        let text = menu.loop_point.map_or_else(String::new, |point| {
+            disccraft_project::format_time(point, &self.session.project.settings)
+        });
+        let mut typed = None;
+        ui.add_enabled_ui(video, |ui| {
+            ui.horizontal(|ui| {
+                prop_label(ui, tl!("Loop Point:"));
+                typed =
+                    committed_text(ui, &format!("menu_loop_point_{}", menu.id.0), &text, false).1;
+            });
+        });
+        if let Some(text) = typed.filter(|typed| typed.trim() != text) {
+            let value = if text.trim().is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(text.trim().to_owned())
+            };
+            let _ = self.run_command(
+                "menu.setLoopPoint",
+                serde_json::json!({ "menu": menu.id.0, "timecode": value }),
+            );
+        }
+    }
+
+    /// Encore の ループ回数: なし / 2 / 3 / 17 / 20 / 40 / 128 / 1024 / 無限（数は打ち込める）。モーションメニュー
+    /// （ビデオか音声のあるメニュー）のときだけ選べる。
+    fn loops_row(&mut self, ui: &mut Ui, menu: &disccraft_project::Menu) {
+        use disccraft_project::MenuLoops;
+        let motion = matches!(
+            menu.background,
+            disccraft_project::MenuBackground::Video { .. }
+        ) || menu.audio.is_some()
+            || menu.animate_buttons;
+        let current = menu.effective_loops();
+        let label = |loops: MenuLoops| match loops {
+            MenuLoops::Once => tl!("None").to_owned(),
+            MenuLoops::Times(n) => n.to_string(),
+            MenuLoops::Forever => tl!("Infinite").to_owned(),
+        };
+        let mut chosen: Option<MenuLoops> = None;
+        ui.add_enabled_ui(motion, |ui| {
+            ui.horizontal(|ui| {
+                prop_label(ui, tl!("Loop #:"));
+                egui::ComboBox::from_id_salt(("menu_loops", menu.id.0))
+                    .width(90.0)
+                    .selected_text(label(current))
+                    .show_ui(ui, |ui| {
+                        let choices = [
+                            MenuLoops::Once,
+                            MenuLoops::Times(2),
+                            MenuLoops::Times(3),
+                            MenuLoops::Times(17),
+                            MenuLoops::Times(20),
+                            MenuLoops::Times(40),
+                            MenuLoops::Times(128),
+                            MenuLoops::Times(1024),
+                            MenuLoops::Forever,
+                        ];
+                        for choice in choices {
+                            if ui
+                                .selectable_label(current == choice, label(choice))
+                                .clicked()
+                            {
+                                chosen = Some(choice);
+                            }
+                        }
+                    });
+                // Encore と同じく、ほかの回数も打ち込める。
+                if let MenuLoops::Times(times) = current {
+                    let mut value = times;
+                    let response = ui.add(
+                        egui::DragValue::new(&mut value)
+                            .range(2..=disccraft_project::MAX_MENU_LOOPS),
+                    );
+                    if (response.drag_stopped() || (response.changed() && !response.dragged()))
+                        && value != times
+                    {
+                        chosen = Some(MenuLoops::Times(value));
+                    }
+                }
+            });
+        });
+        if menu.end_action == Link::NotSet && motion {
+            ui.weak(tl!(
+                "Without an end action the menu repeats (None: it stops on the last picture)."
+            ));
+        }
+        if let Some(loops) = chosen.filter(|loops| *loops != current) {
+            let value = match loops {
+                MenuLoops::Once => serde_json::json!("once"),
+                MenuLoops::Forever => serde_json::json!("forever"),
+                MenuLoops::Times(n) => serde_json::json!(n),
+            };
+            let _ = self.run_command(
+                "menu.setLoops",
+                serde_json::json!({ "menu": menu.id.0, "loops": value }),
+            );
+        }
+    }
+
+    /// The menu sheet's ポップアップ tab (Encore): "Set as Blu-ray Pop-up Menu".
+    fn menu_popup_rows(&mut self, ui: &mut Ui, menu: &disccraft_project::Menu) {
+        let mut popup = menu.popup;
+        ui.horizontal(|ui| {
+            prop_label(ui, "");
+            if ui
+                .checkbox(&mut popup, tl!("Set as Blu-ray Pop-up Menu"))
+                .changed()
+            {
+                let _ = self.run_command(
+                    "menu.setPopup",
+                    serde_json::json!({ "menu": menu.id.0, "on": popup }),
+                );
+            }
+        });
+        ui.separator();
+        // Encore の 背景 タイムライン / 背景フレーム: ビューアでポップアップをそのタイムラインの絵の上に見せる。
+        let timelines: Vec<(disccraft_project::TimelineId, String)> = self
+            .session
+            .project
+            .timelines
+            .iter()
+            .map(|(id, timeline)| (*id, timeline.name.clone()))
+            .collect();
+        let current = menu.popup_background.map(|background| background.timeline);
+        let shown = current
+            .and_then(|id| timelines.iter().find(|(timeline, _)| *timeline == id))
+            .map_or_else(|| tl!("None").to_owned(), |(_, name)| name.clone());
+        let mut chosen: Option<Option<disccraft_project::TimelineId>> = None;
+        let mut typed: Option<String> = None;
+        ui.add_enabled_ui(menu.popup, |ui| {
+            ui.horizontal(|ui| {
+                prop_label(ui, tl!("Background Timeline:"));
+                egui::ComboBox::from_id_salt(("menu_popup_timeline", menu.id.0))
+                    .width(FIELD_WIDTH)
+                    .selected_text(shown)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(current.is_none(), tl!("None"))
+                            .clicked()
+                        {
+                            chosen = Some(None);
+                        }
+                        for (timeline, name) in &timelines {
+                            if ui
+                                .selectable_label(current == Some(*timeline), name)
+                                .clicked()
+                            {
+                                chosen = Some(Some(*timeline));
+                            }
+                        }
+                    });
+            });
+            ui.add_enabled_ui(current.is_some(), |ui| {
+                ui.horizontal(|ui| {
+                    prop_label(ui, tl!("Background Frame:"));
+                    let text = menu
+                        .popup_background
+                        .map_or_else(String::new, |background| {
+                            disccraft_project::format_time(
+                                background.time,
+                                &self.session.project.settings,
+                            )
+                        });
+                    typed = committed_text(
+                        ui,
+                        &format!("menu_popup_frame_{}", menu.id.0),
+                        &text,
+                        false,
+                    )
+                    .1;
+                });
+            });
+        });
+        if let Some(timeline) = chosen.filter(|timeline| *timeline != current) {
+            let _ = self.run_command(
+                "menu.setPopupBackground",
+                serde_json::json!({ "menu": menu.id.0, "timeline": timeline.map(|id| id.0) }),
+            );
+        }
+        if let (Some(text), Some(timeline)) = (typed, current) {
+            let _ = self.run_command(
+                "menu.setPopupBackground",
+                serde_json::json!({ "menu": menu.id.0, "timeline": timeline.0, "timecode": text.trim() }),
+            );
+        }
+        ui.label(tl!(
+            "A Blu-ray pop-up menu belongs to the timelines whose remote menu it is: it appears over the video while they play. On a DVD, and when this is off, the remote menu goes to the menu instead."
+        ));
+        ui.label(tl!(
+            "To see how the pop-up looks over the video, choose a background timeline and frame above (the viewer only)."
+        ));
     }
 
     /// The disc's aspect ratio (the titles; menus stay 4:3).
@@ -671,19 +1042,28 @@ impl DiscCraftApp {
         }
         let key = egui::Id::unique("menu_duration").with(menu.id.0);
         let mut still = menu.duration_seconds.is_none();
+        // Encore: モーションボタンにすると デュレーション は 15 秒になり、無限に保持する は選べなくなる（チェックは残る）。
+        let animated = menu.animate_buttons;
         // ドラッグ中の値は画面のメモリーに置き、離したときに 1 回だけ確定する（取り消しが 1 回で済むように）。
         let mut seconds = ui
             .ctx()
             .data(|data| data.get_temp::<u32>(key))
             .or(menu.duration_seconds)
-            .unwrap_or(DEFAULT_MENU_SECONDS);
+            .unwrap_or(if animated {
+                disccraft_project::MOTION_BUTTONS_SECONDS
+            } else {
+                DEFAULT_MENU_SECONDS
+            });
         let mut chosen = None;
         ui.horizontal(|ui| {
             prop_label(ui, tl!("Duration:"));
-            if ui.checkbox(&mut still, tl!("Still")).changed() {
+            if ui
+                .add_enabled(!animated, egui::Checkbox::new(&mut still, tl!("Still")))
+                .changed()
+            {
                 chosen = Some((!still).then_some(seconds));
             }
-            if !still {
+            if !still || animated {
                 let response = ui.add(
                     egui::DragValue::new(&mut seconds)
                         .range(1..=disccraft_project::MAX_MENU_SECONDS)
@@ -697,7 +1077,7 @@ impl DiscCraftApp {
                 }
             }
         });
-        if !still && menu.end_action == Link::NotSet {
+        if !still && !animated && menu.end_action == Link::NotSet {
             ui.weak(tl!(
                 "Set an end action to leave the menu when the time is up."
             ));
@@ -711,7 +1091,6 @@ impl DiscCraftApp {
     fn menu_look_rows(&mut self, ui: &mut Ui, menu: &disccraft_project::Menu) {
         self.sync_menu_colors(menu);
         self.background_rows(ui, menu);
-        self.menu_audio_row(ui, menu);
 
         // カラーセット（Encore）: ハイライトグループ 1〜3 の選択時 / アクティベート時の色。グループ 1 の選択時が
         // 従来のハイライトの色。
@@ -760,6 +1139,89 @@ impl DiscCraftApp {
         }
     }
 
+    /// ボタンのシートの 文字 タブ: ボタンの文字のフォントスタイルと書式（Encore の文字パネル）。フォントは
+    /// メニューのボタンの文字のフォント（基本 タブ）。
+    fn button_character_rows(
+        &mut self,
+        ui: &mut Ui,
+        id: MenuId,
+        index: usize,
+        button: &disccraft_project::Button,
+    ) {
+        let family = self
+            .session
+            .project
+            .menu(id)
+            .and_then(|menu| menu.label_font.clone());
+        if let Some(style) = crate::menu_text::font_style_row(
+            ui,
+            "button_label_font_style",
+            family.as_deref(),
+            button.label_font_style.as_deref(),
+        ) {
+            let _ = self.run_command(
+                "button.setLabelFormat",
+                serde_json::json!({ "menu": id.0, "button": index, "fontStyle": style }),
+            );
+        }
+        if let Some(fields) = self.format_rows(ui, button.label_format) {
+            let mut params = serde_json::json!({ "menu": id.0, "button": index });
+            if let (Some(params), Some(fields)) = (params.as_object_mut(), fields.as_object()) {
+                for (key, value) in fields {
+                    let _ = params.insert(key.clone(), value.clone());
+                }
+            }
+            let _ = self.run_command("button.setLabelFormat", params);
+        }
+    }
+
+    /// ボタンのシートの トランジション タブ（Encore）: ボタンを押したあと、リンク先の前に再生するビデオ。
+    fn button_transition_rows(
+        &mut self,
+        ui: &mut Ui,
+        id: MenuId,
+        index: usize,
+        button: &disccraft_project::Button,
+    ) {
+        let videos = self.assets_of(disccraft_project::AssetKind::Video);
+        let current = button
+            .transition
+            .and_then(|asset| videos.iter().find(|(video, _)| *video == asset))
+            .map_or_else(|| tl!("None").to_owned(), |(_, name)| name.clone());
+        let mut chosen: Option<Option<disccraft_project::AssetId>> = None;
+        ui.horizontal(|ui| {
+            prop_label(ui, tl!("Asset:"));
+            egui::ComboBox::from_id_salt(("button_transition", id.0, index))
+                .width(FIELD_WIDTH)
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(button.transition.is_none(), tl!("None"))
+                        .clicked()
+                    {
+                        chosen = Some(None);
+                    }
+                    for (asset, name) in &videos {
+                        if ui
+                            .selectable_label(button.transition == Some(*asset), name)
+                            .clicked()
+                        {
+                            chosen = Some(Some(*asset));
+                        }
+                    }
+                });
+        });
+        if let Some(asset) = chosen.filter(|asset| *asset != button.transition) {
+            let _ = self.run_command(
+                "button.setTransition",
+                serde_json::json!({ "menu": id.0, "button": index, "asset": asset.map(|asset| asset.0) }),
+            );
+        }
+        ui.small(tl!(
+            "Played after the button is activated, before its link."
+        ));
+    }
+
     /// ボタンの番号（Encore と同じく選んで変えられる。ほかのボタンは詰めて並べ直す）。
     fn number_row(&mut self, ui: &mut Ui, id: MenuId, index: usize) {
         let count = self
@@ -796,6 +1258,8 @@ impl DiscCraftApp {
             MenuBackground::Video { .. } => 2,
         };
         let kinds = [tl!("Color"), tl!("Image"), tl!("Video")];
+        // ビデオ（モーションメニュー）は モーション タブで選ぶ。ここでは今の状態を見せるだけ。
+        let video_tab = kind == 2;
         let images = self.image_assets();
         let videos = self.assets_of(disccraft_project::AssetKind::Video);
         let mut chosen_kind = None;
@@ -809,7 +1273,7 @@ impl DiscCraftApp {
                         // 画像と動画は、そのアセットがあるときだけ選べる。
                         let available = match index {
                             1 => !images.is_empty(),
-                            2 => !videos.is_empty(),
+                            2 => false,
                             _ => true,
                         };
                         if ui
@@ -822,6 +1286,9 @@ impl DiscCraftApp {
                 });
             if kind == 0 && ui.color_edit_button_rgb(&mut self.bg_color).changed() {
                 self.set_background_color(menu.id);
+            }
+            if video_tab {
+                ui.weak(tl!("(Motion tab)"));
             }
         });
         match chosen_kind.filter(|chosen| *chosen != kind) {
@@ -851,19 +1318,7 @@ impl DiscCraftApp {
                     self.set_background_image(menu.id, chosen);
                 }
             }
-            MenuBackground::Video { asset, seconds } => {
-                if let Some(chosen) = asset_choice(
-                    ui,
-                    "menu_background_video",
-                    tl!("Video:"),
-                    &videos,
-                    Some(*asset),
-                ) {
-                    self.set_background_video(menu.id, chosen, *seconds);
-                }
-                self.loop_row(ui, menu.id, *asset, *seconds);
-            }
-            MenuBackground::Color { .. } => {}
+            MenuBackground::Video { .. } | MenuBackground::Color { .. } => {}
         }
     }
 
@@ -949,6 +1404,34 @@ impl DiscCraftApp {
         else {
             return;
         };
+
+        // Encore の 基本 / トランジション のタブ。文字 は Encore の文字パネル（ボタンの文字のレイヤー）に当たる。
+        let tab_id = egui::Id::unique("button_sheet_tab");
+        let mut tab = ui.data(|data| data.get_temp::<u8>(tab_id)).unwrap_or(0);
+        ui.horizontal(|ui| {
+            for (number, label) in [tl!("Basic"), tl!("Transition"), tl!("Character")]
+                .into_iter()
+                .enumerate()
+            {
+                let number = u8::try_from(number).unwrap_or(0);
+                if ui.selectable_label(tab == number, label).clicked() {
+                    tab = number;
+                }
+            }
+        });
+        ui.data_mut(|data| data.insert_temp(tab_id, tab));
+        ui.separator();
+        match tab {
+            1 => {
+                self.button_transition_rows(ui, id, index, &button);
+                return;
+            }
+            2 => {
+                self.button_character_rows(ui, id, index, &button);
+                return;
+            }
+            _ => {}
+        }
 
         // 名前（Encore の「名前」。ボタンテキストと同期しているときはテキストに従う）。
         let name_key = format!("button_name_{}_{}", id.0, index);
@@ -1090,6 +1573,20 @@ impl DiscCraftApp {
                 self.run_command(
                     "button.setAutoActivate",
                     crate::gui_params::auto_activate(id.0, index, auto),
+                );
+            }
+        });
+        // Encore の「テキストサブピクチャを作成」: ハイライトをボタンの文字の形にする（外すと枠）。
+        let mut text_subpicture = button.text_subpicture;
+        ui.horizontal(|ui| {
+            prop_label(ui, "");
+            if ui
+                .checkbox(&mut text_subpicture, tl!("Create Text Subpicture"))
+                .changed()
+            {
+                let _ = self.run_command(
+                    "button.setTextSubpicture",
+                    serde_json::json!({ "menu": id.0, "button": index, "on": text_subpicture }),
                 );
             }
         });
@@ -1790,33 +2287,51 @@ impl DiscCraftApp {
 
         let project = self.session.project.clone();
         // メニュー: 初期設定のボタンと、ボタンごと。
+        // Encore と同じく、後のページはそのメニューの下に「ページ N ▸」。
+        let page_items = |ui: &mut Ui, id: MenuId, menu: &disccraft_project::Menu| {
+            let mut picked = None;
+            if ui.button(tl!("Default")).clicked() {
+                picked = Some(Link::Menu { id, button: None });
+            }
+            for (index, button) in menu.buttons.iter().enumerate() {
+                let Ok(number) = u32::try_from(index) else {
+                    continue;
+                };
+                let text = if button.label.trim().is_empty() {
+                    tlf!("Button {n}", n = index.saturating_add(1))
+                } else {
+                    button.label.clone()
+                };
+                if ui.button(text).clicked() {
+                    picked = Some(Link::Menu {
+                        id,
+                        button: Some(number),
+                    });
+                }
+            }
+            picked
+        };
         for (id, menu) in &project.menus {
             let whole = Link::Menu {
                 id: *id,
                 button: None,
             };
-            if !allowed(&whole) {
+            if !allowed(&whole) || project.is_menu_page(*id) {
                 continue;
             }
             ui.menu_button(menu.name.as_str(), |ui| {
-                if ui.button(tl!("Default")).clicked() {
-                    chosen = Some(whole.clone());
+                if let Some(link) = page_items(ui, *id, menu) {
+                    chosen = Some(link);
                 }
-                for (index, button) in menu.buttons.iter().enumerate() {
-                    let Ok(number) = u32::try_from(index) else {
+                for (number, page) in project.menu_pages(*id).into_iter().enumerate().skip(1) {
+                    let Some(page_menu) = project.menu(page) else {
                         continue;
                     };
-                    let text = if button.label.trim().is_empty() {
-                        tlf!("Button {n}", n = index.saturating_add(1))
-                    } else {
-                        button.label.clone()
-                    };
-                    if ui.button(text).clicked() {
-                        chosen = Some(Link::Menu {
-                            id: *id,
-                            button: Some(number),
-                        });
-                    }
+                    ui.menu_button(tlf!("Page {n}", n = number), |ui| {
+                        if let Some(link) = page_items(ui, page, page_menu) {
+                            chosen = Some(link);
+                        }
+                    });
                 }
             });
         }
@@ -2023,6 +2538,31 @@ pub(crate) fn prop_label(ui: &mut Ui, text: &str) {
     ui.allocate_ui_with_layout(size, Layout::right_to_left(Align::Center), |ui| {
         ui.label(text);
     });
+}
+
+/// Blu-ray のタイトルの映像の表示名。
+fn bd_video_name(video: disccraft_project::BdVideo) -> &'static str {
+    match video {
+        disccraft_project::BdVideo::Sd => tl!("SD (MPEG-2)"),
+        disccraft_project::BdVideo::Hd1080p23 => "1920x1080 23.976p (H.264)",
+        disccraft_project::BdVideo::Hd1080p24 => "1920x1080 24p (H.264)",
+        disccraft_project::BdVideo::Hd1080p25 => {
+            tl!("1920x1080 25p (H.264, outside the Blu-ray standard)")
+        }
+        disccraft_project::BdVideo::Hd1080p29 => {
+            tl!("1920x1080 29.97p (H.264, outside the Blu-ray standard)")
+        }
+        disccraft_project::BdVideo::Hd1080p50 => {
+            tl!("1920x1080 50p (H.264, outside the Blu-ray standard)")
+        }
+        disccraft_project::BdVideo::Hd1080p59 => {
+            tl!("1920x1080 59.94p (H.264, outside the Blu-ray standard)")
+        }
+        disccraft_project::BdVideo::Hd720p59 => "1280x720 59.94p (H.264)",
+        disccraft_project::BdVideo::Hd720p50 => "1280x720 50p (H.264)",
+        disccraft_project::BdVideo::Hd720p23 => "1280x720 23.976p (H.264)",
+        disccraft_project::BdVideo::Hd720p24 => "1280x720 24p (H.264)",
+    }
 }
 
 /// ディスク容量の表示名（BDXL は層の数も）。

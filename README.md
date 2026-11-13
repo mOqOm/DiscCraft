@@ -23,8 +23,7 @@ DiscCraft は映像・音声・静止画から DVD-Video / Blu-ray（BDMV）を�
 
 ## 状態
 
-M0〜M7 は完了、M8（Blu-ray）と M9（PhotoCraft / SoundCraft 連携）は作業中、画面を Encore に寄せる UI パリティは M6.44 まで
-進んでいる（ROADMAP.md、docs/ui-parity.md）。
+開発中（0.1.0）。今できること:
 
 - MP4 / MOV などの素材から、メニュー付きの DVD（`VIDEO_TS` フォルダ、ISO）と Blu-ray（BDMV フォルダ、ISO）を作れる。
   規格に合わない素材はビルド時に自動で変換する（出力先の `disccraft-cache` に保存）。
@@ -32,44 +31,10 @@ M0〜M7 は完了、M8（Blu-ray）と M9（PhotoCraft / SoundCraft 連携）は
   モニター・メニュービューア・フローチャート、プロパティ、レイヤー / ライブラリ、タイムラインビューア。
 - メニュー: ボタンの配置（複数選択、整列、均等配置、アレンジ、コピーと貼り付け）、リンク（ピックウィップ）、初期設定ボタン、
   自動アクティベート、背景（色 / 画像 / 動画）とメニューの音声、エンドアクションとデュレーション、チャプターインデックス、ライブラリのプリセット。
-- タイムライン: チャプターポイント、オーディオ / 字幕トラック、エンドアクション、リモートメニュー、再生（Space、映像のみ）。
+- タイムライン: チャプターポイント、オーディオ / 字幕トラック、エンドアクション、リモートメニュー、再生（Space、音も）。
 - ナビゲーション: ファーストプレイ、タイトルボタン、スライドショー、再生リスト。ビルドしたディスクを自前の VM でプレビューできる
   （リモコンの十字キー、タイトル / メニューボタン）。
 - すべての操作はエンジンのコマンドで、GUI、CLI、MCP から同じことができる。1 回の操作は 1 回で取り消せる。
-
-## 試し方（Windows）
-
-ffmpeg と VLC は比較用（出来上がったディスクを外のプレーヤーで確かめる、テスト素材を作る）で、DiscCraft 自体は使わない
-（AGENTS.md ルール 9）。ffmpeg があればテスト素材を作れ、VLC で再生して確かめられる。
-
-```
-winget install Gyan.FFmpeg              # 未導入なら。新しいターミナルで ffmpeg が使える
-cargo test -p disccraft-dvd             # ffmpeg で target/fixtures にテスト素材（20 秒の映像と AC-3）を作る
-cargo run -p disccraft-cli -- run demo.dcproj docs/examples/menu-demo.jsonl
-cargo run -p disccraft-cli -- inspect demo.dcproj
-cargo run -p disccraft-cli -- build demo.dcproj --out out
-cargo run -p disccraft-cli -- build demo.dcproj --iso demo.iso   # ISO イメージ（エクスプローラーでダブルクリックするとマウントできる）
-```
-
-VLC で「メディア」→「ディスクを開く」→「DVD」を選び、`out` フォルダを開く。メニューが出たら上下キーと Enter で操作する。
-
-まとめて確かめるときは、リリースビルドと DVD / Blu-ray のデモ（フォルダと ISO）を一度に作るスクリプトを使う:
-
-```
-powershell -ExecutionPolicy Bypass -File scripts\build-demo.ps1
-```
-
-`target\demo` に GUI（`bin\disccraft.exe`）、CLI、各デモと `確認方法.txt` ができる。
-デモは DVD（メニュー、M7 の全部入り、16:9）と Blu-ray（4:3、16:9）。16:9 のデモは中央の白い枠が正方形に見えれば縦横比が正しい。
-確認した結果は docs/hardware-compat.md に記録する。
-
-スライドショー、プレイリスト、モーションメニューのデモ（素材は `cargo test -p disccraft-dvd` と ffmpeg で作る）:
-
-```
-ffmpeg -i target/fixtures/h264_aac.mp4 -vf fps=1 -frames:v 3 target/fixtures/slide%d.png
-cargo run -p disccraft-cli -- run m7.dcproj docs/examples/m7-demo.jsonl
-cargo run -p disccraft-cli -- build m7.dcproj --out out7
-```
 
 ## 機能
 
@@ -77,7 +42,10 @@ cargo run -p disccraft-cli -- build m7.dcproj --out out7
 
 - DVD: MPEG-2 / LPCM / AC-3 のパススルーと MPEG-2 への再エンコード、VIDEO_TS フォルダと ISO イメージ（2 層のレイヤーブレイク）
 - DVD: タイトル、チャプター、複数の音声トラック、SRT 字幕、16:9、リージョンコード
-- Blu-ray: BDMV フォルダと ISO イメージ、PG 字幕、IG メニュー（HDMV）
+- Blu-ray: BDMV フォルダと ISO イメージ、PG 字幕、IG メニュー（HDMV。常時表示 / ポップアップ、モーションメニュー）、
+  ユーザー操作（UO マスク）。映像は SD（720×480 / 720×576）の MPEG-2 か、HD（1080p 23.976 / 24 / 25 / 29.97 /
+  50 / 59.94、720p 59.94 / 50 / 23.976 / 24）の H.264（タイトル、字幕、メニューとポップアップも HD の大きさ。1080p の 25 / 29.97 /
+  50 / 59.94 は Blu-ray の規格外で、パソコンのプレーヤー向け）
 - メニュー: 静止メニュー、ボタンとハイライト、モーションメニュー、タイムアウト（デュレーションとエンドアクション）、
   自動アクティベート、PSD 読み込みとレイヤー名によるボタン認識、チャプターインデックス
 - 素材: 映像（MP4 / MOV / MKV / m2v など）、音声（WAV / AC-3 / MP3 / FLAC など）、画像（PNG / JPEG / PSD / TIFF）、
@@ -87,39 +55,54 @@ cargo run -p disccraft-cli -- build m7.dcproj --out out7
 - 出力: DVD-5 / DVD-9、BD-25 / BD-50、BDXL（100 GB の 3 層、128 GB の片面 4 層）、容量メーター
 - 検証: プロジェクトチェック、VM シミュレータとプレビュー、読み戻し検証
 
-予定:
-
-- ディスクへの書き込み、Blu-ray の HD（H.264）と ポップアップメニュー
-- メニュー: カラーセット、ループポイント、Blu-ray の動くメニューとメニューの音声
-- タイムライン: 再生時の音、上書き、チャプタープレイリスト
-- トランスコード: 品質プリセット、2 パス、3:2 プルダウン
-
 ## 必要なもの
 
-Rust stable 1.95 以上（rustup）。Windows を最優先、macOS / Linux も対象。
+Rust stable 1.95 以上（rustup）。Windows を最優先、macOS / Linux も対象。Linux では再生の音（cpal）のために
+ALSA の開発用パッケージ（Debian / Ubuntu の `libasound2-dev`、Fedora の `alsa-lib-devel`）が要る。
 
-## 開発
+## ビルドと使い方
 
 ```
-cargo build
-cargo xtask ci
-cargo xtask fmt
-cargo xtask layers
-cargo xtask assets
+cargo build --release
 ```
 
-`cargo xtask ci` は品質ゲートで、コミット前に必ず通す。詳細なルールは AGENTS.md を読む。
+`target/release` に GUI（`disccraft`）と CLI（`disccraft-cli`）ができる。
+
+GUI は `disccraft` を起動し、ようこそ画面かファイルメニューから新規プロジェクトを作る。素材を読み込み、タイムラインと
+メニューを作ってリンクし、ビルドパネルからフォルダか ISO イメージに書き出す。
+
+CLI は、1 行に 1 つのコマンド（JSON）を順に実行してプロジェクトを作り、ビルドする:
+
+```
+disccraft-cli commands                           # コマンドの一覧
+disccraft-cli run project.dcproj commands.jsonl  # コマンドを順に実行する（なければプロジェクトを作る）
+disccraft-cli inspect project.dcproj             # プロジェクトとチェックの結果
+disccraft-cli build project.dcproj --out out     # VIDEO_TS / BDMV フォルダに書き出す
+disccraft-cli build project.dcproj --iso disc.iso
+```
+
+`commands.jsonl` の例（映像 1 本とメニュー 1 枚の DVD）:
+
+```
+{"command": "file.new", "params": {"kind": "dvd", "standard": "ntsc"}}
+{"command": "asset.import", "params": {"path": "movie.mp4"}}
+{"command": "timeline.create", "params": {"asset": 1, "name": "本編"}}
+{"command": "menu.create", "params": {"name": "メイン"}}
+{"command": "menu.addButton", "params": {"menu": 3, "label": "再生", "target": {"timeline": 2}}}
+{"command": "timeline.setEndAction", "params": {"timeline": 2, "target": "lastMenu"}}
+{"command": "nav.setFirstPlay", "params": {"target": {"menu": 3}}}
+```
+
+規格に合わない素材はビルドのときに変換し、出力先の `disccraft-cache` に残す（2 回目からは変換を飛ばす）。
 
 ## AI エージェントから使う（MCP）
 
 `disccraft-cli mcp` は MCP サーバー（標準入出力の JSON-RPC）として動く。ツールは `disccraft_commands`（コマンド一覧）、
 `disccraft_execute`（エンジンのコマンドを実行）、`disccraft_inspect`（プロジェクトとチェック結果）の 3 つ。
 
-```
-claude mcp add disccraft -- <リポジトリのパス>\target\release\disccraft-cli.exe mcp
-```
+MCP クライアントには、コマンドに `<リポジトリのパス>/target/release/disccraft-cli`、引数に `mcp` を登録する（標準入出力でつなぐ）。
 
-## リポジトリ構成
+## 構成
 
 ```
 DiscCraft/
@@ -152,21 +135,8 @@ DiscCraft/
 │  ├─ ui-egui/
 │  ├─ automation/
 │  └─ platform/
-├─ assets/
-├─ docs/
-└─ xtask/
+└─ assets/
 ```
-
-## ドキュメント
-
-- AGENTS.md（ルール）
-- ROADMAP.md
-- docs/architecture.md
-- docs/testing.md
-- docs/target-app-parity.md
-- docs/ui-parity.md（Encore の画面との対応、コマンドの一覧）
-- docs/hardware-compat.md（プレーヤーでの確認の記録）
-- docs/adr/0001-initial-design.md（初期設計書）
 
 ## FilmCraft の再利用
 

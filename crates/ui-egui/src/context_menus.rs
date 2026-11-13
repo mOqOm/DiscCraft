@@ -152,12 +152,7 @@ impl DiscCraftApp {
         }
         ui.separator();
         ui.menu_button(tl!("New"), |ui| self.new_items(ui, None, None));
-        ui.menu_button(tl!("Import"), |ui| {
-            if ui.button(tl!("Asset…")).clicked() {
-                self.import_assets();
-                ui.close();
-            }
-        });
+        ui.menu_button(tl!("Import"), |ui| self.import_items(ui));
         ui.separator();
         if crate::actions::menu_item(ui, crate::actions::Action::Preview, true) {
             self.run_action(ui, crate::actions::Action::Preview);
@@ -339,14 +334,33 @@ impl DiscCraftApp {
         }
     }
 
+    /// 読み込み ▸ の項目（Encore のプロジェクトパネル・フローチャート: アセット… / メニュー… / ポップアップメニュー…）。
+    fn import_items(&mut self, ui: &mut Ui) {
+        if ui.button(tl!("Asset…")).clicked() {
+            self.import_assets();
+            ui.close();
+        }
+        if ui.button(tl!("Menu…")).clicked() {
+            ui.close();
+            self.import_menu_file(crate::menu_commands::MenuImport::Menu);
+        }
+        if ui.button(tl!("Pop-up Menu…")).clicked() {
+            ui.close();
+            self.import_menu_file(crate::menu_commands::MenuImport::Popup);
+        }
+        if ui.button(tl!("Timeline…")).clicked() {
+            ui.close();
+            self.import_timeline_files();
+        }
+        if ui.button(tl!("Slideshow…")).clicked() {
+            ui.close();
+            self.import_slideshow_files();
+        }
+    }
+
     /// The right-click menu of an empty part of the Project panel (Encore: 読み込み ▸ / 新規 ▸).
     pub(crate) fn project_background_menu(&mut self, ui: &mut Ui) {
-        ui.menu_button(tl!("Import"), |ui| {
-            if ui.button(tl!("Asset…")).clicked() {
-                self.import_assets();
-                ui.close();
-            }
-        });
+        ui.menu_button(tl!("Import"), |ui| self.import_items(ui));
         ui.separator();
         ui.menu_button(tl!("New"), |ui| self.new_items(ui, None, None));
     }

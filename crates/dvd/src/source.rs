@@ -148,11 +148,12 @@ fn subtitle_unit(cue: &Cue, first_pts: i64, height: u16) -> Result<SubpictureUni
             u32::try_from(duration_90k).unwrap_or(u32::MAX),
         )),
     };
-    let spu = Bitmap {
+    let mut spu = Bitmap {
         width: bitmap.width,
         height: bitmap.height,
         pixels: bitmap.pixels,
     };
+    crate::fit_subpicture(&mut spu, params.y, height);
     let data =
         encode_spu(&spu, &params).map_err(|e| DvdError::Invalid(format!("subtitle: {e}")))?;
     let pts = first_pts

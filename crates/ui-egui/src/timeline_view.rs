@@ -731,8 +731,38 @@ impl DiscCraftApp {
                 at(HEADER_WIDTH, top + BAR_HEIGHT + ROW_GAP),
             );
             painter.rect_filled(row, 0.0, crate::theme::HEADER);
+            let mut label_x = row.min.x + 6.0;
+            if track.subtitle {
+                // Encore と同じく、見出しの左の四角でモニターに出す字幕トラックを切り替える（0 本か 1 本）。
+                let toggle = Rect::from_center_size(
+                    egui::pos2(row.min.x + 12.0, row.center().y),
+                    egui::vec2(14.0, 14.0),
+                );
+                let response = ui
+                    .interact(
+                        toggle,
+                        Id::unique("subtitle_shown").with((id.0, track.index)),
+                        egui::Sense::click(),
+                    )
+                    .on_hover_text(tl!("Show Subtitles in Monitor"));
+                let shown = self.shown_subtitle(id) == Some(track.index);
+                let visuals = ui.style().interact(&response);
+                painter.rect_stroke(
+                    toggle,
+                    1.0,
+                    egui::Stroke::new(1.0, visuals.fg_stroke.color),
+                    egui::StrokeKind::Inside,
+                );
+                if shown {
+                    subtitle_glyph(&painter, toggle.shrink(3.0), text);
+                }
+                if response.clicked() {
+                    self.toggle_shown_subtitle(id, track.index);
+                }
+                label_x = toggle.max.x + 6.0;
+            }
             painter.text(
-                egui::pos2(row.min.x + 6.0, row.center().y),
+                egui::pos2(label_x, row.center().y),
                 egui::Align2::LEFT_CENTER,
                 track.label.clone(),
                 egui::FontId::proportional(12.0),
@@ -1358,6 +1388,21 @@ fn draw_track_bars(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
             );
         }
         top += TRACK_PITCH;
+    }
+}
+
+/// The mark of a subtitle track shown in the monitor: a frame with two lines of text at its foot.
+fn subtitle_glyph(painter: &egui::Painter, area: Rect, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.0, color);
+    painter.rect_stroke(area, 0.0, stroke, egui::StrokeKind::Inside);
+    for (y, inset) in [(area.max.y - 5.0, 2.0), (area.max.y - 2.5, 3.0)] {
+        painter.line_segment(
+            [
+                egui::pos2(area.min.x + inset, y),
+                egui::pos2(area.max.x - inset, y),
+            ],
+            stroke,
+        );
     }
 }
 

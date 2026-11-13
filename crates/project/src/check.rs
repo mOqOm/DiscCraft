@@ -334,80 +334,12 @@ impl Project {
                 ));
             }
         }
-
-        // User operations are written into DVD PGCs; a Blu-ray build leaves them out for now.
-        let restricted = self
-            .timelines
-            .values()
-            .any(|timeline| !timeline.prohibited_ops.is_empty())
-            || self
-                .menus
-                .values()
-                .any(|menu| !menu.prohibited_ops.is_empty())
-            || !self.settings.prohibited_ops.is_empty();
-        if restricted && self.settings.kind == crate::model::DiscKind::BluRay {
-            problems.push(warning(
-                "bluRayUserOps",
-                "Blu-ray discs do not apply user operations yet (they are DVD only)".to_string(),
-            ));
-        }
-        let selects_streams = self
-            .menus
-            .values()
-            .any(|menu| menu.buttons.iter().any(|button| button.selects_streams()));
-        if selects_streams && self.settings.kind == crate::model::DiscKind::BluRay {
-            problems.push(warning(
-                "bluRayButtonStreams",
-                "Blu-ray discs do not select audio or subtitles from buttons yet (DVD only)"
-                    .to_string(),
-            ));
-        }
-        let overridden = self.settings.first_play_override.is_some()
-            || self
-                .timelines
-                .values()
-                .any(|timeline| timeline.override_link.is_some())
-            || self
-                .chapter_playlists
-                .values()
-                .any(|playlist| playlist.override_link.is_some())
-            || self.menus.values().any(|menu| {
-                menu.override_link.is_some()
-                    || menu
-                        .buttons
-                        .iter()
-                        .any(|button| button.override_link.is_some())
-            });
-        if overridden && self.settings.kind == crate::model::DiscKind::BluRay {
-            problems.push(warning(
-                "bluRayOverride",
-                "Blu-ray discs do not apply overrides yet (they are DVD only)".to_string(),
-            ));
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
 
-    #[test]
-    fn user_ops_on_blu_ray_are_a_warning() -> Result<(), Box<dyn std::error::Error>> {
-        let mut project = crate::Project::default();
-        let menu = project.add_menu(None)?;
-        if let Some(menu) = project.menu_mut(menu) {
-            menu.prohibited_ops = vec![crate::UserOp::ButtonSelect];
-        }
-        let has = |project: &crate::Project| {
-            project
-                .check()
-                .iter()
-                .any(|problem| problem.code == "bluRayUserOps")
-        };
-        assert!(!has(&project));
-        project.settings.kind = crate::DiscKind::BluRay;
-        assert!(has(&project));
-        Ok(())
-    }
     use super::{Problem, Severity, has_errors};
     use crate::model::{Chapter, Project};
     use crate::{AssetId, DiscKind, Link, Tick, TimelineId};

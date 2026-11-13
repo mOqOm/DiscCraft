@@ -857,3 +857,63 @@
 	Kind:	種類:
 	Main	メイン
 	Button Kind	ボタンの種類
+	Create Text Subpicture	テキストサブピクチャを作成
+	Transition	トランジション
+	Played after the button is activated, before its link.	ボタンを押したあと、リンク先の前に再生します。
+	Motion	モーション
+	Pop-up	ポップアップ
+	Set as Blu-ray Pop-up Menu	Blu-ray ポップアップメニューとして設定
+	A Blu-ray pop-up menu belongs to the timelines whose remote menu it is: it appears over the video while they play. On a DVD, and when this is off, the remote menu goes to the menu instead.	Blu-ray ポップアップメニューは、リモートメニューにこのメニューを選んだタイムラインに結び付き、その再生中にビデオの上に出ます。DVD では、またこれを外すと、リモートメニューはこのメニューへ移ります。
+	(Motion tab)	（モーション タブ）
+	Background Timeline:	背景 タイムライン:
+	Background Frame:	背景フレーム:
+	To see how the pop-up looks over the video, choose a background timeline and frame above (the viewer only).	ビデオの上でのポップアップの見え方は、上の背景タイムラインと背景フレームで確かめられます（ビューアだけ。ディスクには入りません）。
+	Loop #:	ループ回数:
+	Infinite	無限
+	Without an end action the menu repeats (None: it stops on the last picture).	エンドアクションがないと繰り返します（なし: 最後の絵で止まります）。
+	Exclude Next and Previous Buttons	「次へ」および「前へ」ボタンを除外
+	Character	文字
+	Loop Point:	ループポイント:
+	Show Subtitles in Monitor	モニターに字幕を表示
+	Replace Menu…	メニューを置き換え…
+	Import as Menu	メニューとして読み込み
+	Menu files	メニューファイル
+	Replaced the menu	メニューを置き換えました
+	Replace	置換
+	Replace the open menu with the selected menu, keeping its links	開いているメニューを選んだメニューで置き換える（リンクは残す）
+	Add New Page	新規ページを追加
+	{name}: page {n}	{name}:ページ {n}
+	Show Previous Page	前のページを表示
+	Show Next Page	次のページを表示
+	Current page number: {n}	現在のページ番号 :{n}
+	Page Number	ページ番号
+	Page {n}	ページ {n}
+	Menu…	メニュー…
+	Pop-up Menu…	ポップアップメニュー…
+	Menu Page…	メニューページ…
+	Import as Pop-up Menu	ポップアップメニューとして読み込み
+	Import as Menu Page	メニューページとして読み込み
+	Imported the menu	メニューを読み込みました
+	Thumbnail Grid	サムネールの一覧
+	Video Thumbnail	ビデオサムネール
+	Motion Buttons	モーションボタン
+	Set menu buttons to motion buttons	メニューボタンをモーションボタンに設定
+	Export Highlights in Rich Color	ハイライトをリッチカラーで書き出し
+	When enabled, rich color highlights are exported for Blu-ray as 256-color images.	有効にすると、Blu-ray 用にリッチカラーハイライトが書き出されます（256 カラー画像）。
+	Timeline…	タイムライン…
+	Slideshow…	スライドショー…
+	Import as Timeline	タイムラインとして読み込み
+	Import as Slideshow	スライドショーとして読み込み
+	Video files	ビデオファイル
+	Image files	画像ファイル
+	Imported as timelines	タイムラインとして読み込みました
+	Imported as a slideshow	スライドショーとして読み込みました
+	Could not create the chapter index. Link at least one chapter button of the current menu to a timeline.	チャプターインデックスを作成できませんでした。現在のメニューの最低 1 つのチャプターボタンをタイムラインにリンクする必要があります。
+	Blu-ray video:	Blu-ray の映像：
+	SD (MPEG-2)	SD（MPEG-2）
+	1920x1080 25p (H.264, outside the Blu-ray standard)	1920x1080 25p（H.264、Blu-ray の規格外）
+	1920x1080 29.97p (H.264, outside the Blu-ray standard)	1920x1080 29.97p（H.264、Blu-ray の規格外）
+	1920x1080 50p (H.264, outside the Blu-ray standard)	1920x1080 50p（H.264、Blu-ray の規格外）
+	1920x1080 59.94p (H.264, outside the Blu-ray standard)	1920x1080 59.94p（H.264、Blu-ray の規格外）
+	Playing without sound: {message}	音なしで再生しています: {message}
+	Cannot play the sound: {message}	音を再生できません: {message}

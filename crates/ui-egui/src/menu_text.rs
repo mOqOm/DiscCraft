@@ -334,9 +334,24 @@ impl DiscCraftApp {
             self.set_text_field(menu, index, json!({ "fontStyle": style }));
         }
 
+        let change = self.format_rows(ui, text.format);
+        if let Some(fields) = change {
+            self.set_text_field(menu, index, fields);
+        }
+
+        crate::properties::text_row(ui, tl!("Position:"), &format!("{}, {}", text.x, text.y));
+    }
+
+    /// Encore の文字パネルのうち DiscCraft が描けるもの（テキストとボタンの文字で共通）: スタイル、行揃えと
+    /// アンチエイリアス、トラッキング、行送り、カーニング、垂直比率 / 水平比率、ベースライン。変えた項目を
+    /// コマンドの引数（`menu.setText` / `button.setLabelFormat`）で返す。
+    pub(crate) fn format_rows(
+        &mut self,
+        ui: &mut Ui,
+        format: disccraft_project::TextFormat,
+    ) -> Option<serde_json::Value> {
         // Encore の文字パネルのうち DiscCraft が描けるもの: 太字 / 斜体 / 下線 / 打ち消し線 / 大文字、行揃え、
         // トラッキング、行送り。
-        let format = text.format;
         let mut change: Option<serde_json::Value> = None;
         ui.horizontal(|ui| {
             crate::properties::prop_label(ui, tl!("Style:"));
@@ -509,11 +524,7 @@ impl DiscCraftApp {
                 change = Some(json!({ "baseline": baseline }));
             }
         });
-        if let Some(fields) = change {
-            self.set_text_field(menu, index, fields);
-        }
-
-        crate::properties::text_row(ui, tl!("Position:"), &format!("{}, {}", text.x, text.y));
+        change
     }
 
     /// The font families on this computer (read once).
@@ -596,6 +607,58 @@ impl DiscCraftApp {
     }
 
     /// The tool buttons at the left of the toolbar, and their keys (V, T, Z) when no text field has the keyboard.
+    /// Encore のツールバーの「メニューを Photoshop で編集」に当たるボタン。ビューアにメニューがあるときだけ押せる。
+    /// 絵は DiscCraft の簡単な図形（額縁の中の山と、右下の鉛筆）。
+    fn edit_in_photocraft_button(&mut self, ui: &mut Ui) {
+        let enabled = self.viewer_menu().is_some();
+        let sense = if enabled {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        };
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 22.0), sense);
+        let response = response.on_hover_text(crate::actions::Action::EditMenuInPhotoCraft.label());
+        let visuals = ui.style().interact(&response);
+        if enabled && response.hovered() {
+            ui.painter().rect(
+                rect,
+                2.0,
+                visuals.weak_bg_fill,
+                visuals.bg_stroke,
+                egui::StrokeKind::Inside,
+            );
+        }
+        let color = if enabled {
+            visuals.fg_stroke.color
+        } else {
+            ui.visuals().weak_text_color()
+        };
+        let stroke = egui::Stroke::new(1.2, color);
+        let c = rect.center();
+        let frame = egui::Rect::from_center_size(c, egui::vec2(16.0, 12.0));
+        ui.painter()
+            .rect_stroke(frame, 1.0, stroke, egui::StrokeKind::Inside);
+        ui.painter().add(egui::Shape::line(
+            vec![
+                egui::pos2(frame.min.x + 2.0, frame.max.y - 2.5),
+                egui::pos2(c.x - 2.0, c.y - 1.0),
+                egui::pos2(c.x + 1.0, c.y + 1.5),
+                egui::pos2(c.x + 3.0, c.y),
+            ],
+            stroke,
+        ));
+        ui.painter().line_segment(
+            [
+                egui::pos2(frame.max.x + 2.0, frame.min.y + 1.0),
+                egui::pos2(c.x + 3.0, frame.max.y + 1.0),
+            ],
+            egui::Stroke::new(2.0, color),
+        );
+        if enabled && response.clicked() {
+            self.run_action(ui, crate::actions::Action::EditMenuInPhotoCraft);
+        }
+    }
+
     pub(crate) fn tool_buttons(&mut self, ui: &mut Ui) {
         let typing = ui.ctx().egui_wants_keyboard_input();
         for (tool, key) in Tool::ALL {
@@ -622,6 +685,7 @@ impl DiscCraftApp {
             tool_glyph(ui.painter(), rect, tool, visuals.fg_stroke.color);
         }
         ui.separator();
+        self.edit_in_photocraft_button(ui);
         // プレビュー（ビルド結果をモニターで開く）。
         let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 22.0), egui::Sense::click());
         let response = response.on_hover_text(crate::actions::Action::Preview.label());
@@ -653,10 +717,9 @@ impl DiscCraftApp {
     }
 }
 
-/// Our own simple pictures for the tools: an arrow, a "T" and a magnifier.
 /// The font style list under the font (Encore's second font list: R, B, ...). Lists the family's styles when it
 /// is opened; `Some(None)` chooses the regular face.
-fn font_style_row(
+pub(crate) fn font_style_row(
     ui: &mut Ui,
     salt: &str,
     family: Option<&str>,
@@ -682,6 +745,7 @@ fn font_style_row(
     chosen.filter(|choice: &Option<String>| choice.as_deref() != current)
 }
 
+/// Our own simple pictures for the tools: an arrow, a "T" and a magnifier.
 fn tool_glyph(painter: &egui::Painter, rect: egui::Rect, tool: Tool, color: egui::Color32) {
     let c = rect.center();
     match tool {

@@ -217,6 +217,79 @@ pub fn frame_at(input: &Path, seconds: f64) -> Result<(u32, u32, Vec<u8>), Trans
     FrameReader::open(input)?.frame(seconds)
 }
 
+/// How far apart [`FrameReader::first_bright_time`] looks.
+pub const BRIGHT_STEP_SECONDS: f64 = 0.25;
+/// How far [`FrameReader::first_bright_time`] looks.
+pub const BRIGHT_SEARCH_SECONDS: f64 = 10.0;
+
+/// Whether an RGB24 picture is bright (not black): more than 2 % of its pixels have a channel above 40 (a fade from
+/// black, letterbox bars and a dark scene with something in it are told apart from a black frame).
+pub fn is_bright(rgb: &[u8]) -> bool {
+    const LEVEL: u8 = 40;
+    let pixels = rgb.len() / 3;
+    if pixels == 0 {
+        return false;
+    }
+    let lit = rgb
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .filter(|pixel| pixel.iter().any(|channel| *channel > LEVEL))
+        .count();
+    lit.saturating_mul(50) > pixels
+}
+
+/// An audio file (or a video file's sound) held open for playback: read in order as interleaved stereo at the
+/// output's rate.
+pub struct AudioReader {
+    source: source::Source,
+}
+
+impl AudioReader {
+    /// The most frames one read returns (ten seconds at 48 kHz), so a read's buffer is bounded.
+    pub const MAX_READ_FRAMES: usize = 480_000;
+
+    /// Opens a file with sound.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be read or has no audio stream.
+    pub fn open(input: &Path) -> Result<Self, TranscodeError> {
+        Ok(Self {
+            source: source::Source::open_audio(input)?,
+        })
+    }
+
+    /// The length of the file in seconds.
+    pub fn duration_seconds(&self) -> f64 {
+        self.source.info().duration.0 as f64 / TICKS_PER_SECOND as f64
+    }
+
+    /// Up to `frames` stereo frames from frame `start` (counted at `rate`), interleaved left and right and
+    /// downmixed as the disc's audio is; fewer (none) at the end.
+    ///
+    /// # Errors
+    ///
+    /// When the audio cannot be decoded.
+    pub fn read_stereo(
+        &self,
+        start: u64,
+        frames: usize,
+        rate: u32,
+    ) -> Result<Vec<f32>, TranscodeError> {
+        let start = i64::try_from(start)
+            .map_err(|_| TranscodeError::Unsupported("audio position too large".to_string()))?;
+        let frames = frames.min(Self::MAX_READ_FRAMES);
+        if frames == 0 || rate == 0 {
+            return Ok(Vec::new());
+        }
+        let buffer = self.source.audio(start, frames, rate)?;
+        let mut samples = audio::interleaved_stereo(&buffer);
+        samples.truncate(frames.saturating_mul(2));
+        Ok(samples)
+    }
+}
+
 /// A video file held open for playback in the monitor: asking for the frames in order reuses the decoder, so the
 /// next frame is cheap.
 pub struct FrameReader {
@@ -236,8 +309,37 @@ impl FrameReader {
         self.source.info().duration.0 as f64 / TICKS_PER_SECOND as f64
     }
 
-    /// The frame at `seconds` (clamped to the file) as letterboxed RGB24, 720 x 480.
-    pub fn frame(&self, seconds: f64) -> Result<(u32, u32, Vec<u8>), TranscodeError> {
+    /// When the first bright (non-black) picture from `seconds` is (Encore's still video thumbnail without a poster
+    /// frame), looking every [`BRIGHT_STEP_SECONDS`] for up to [`BRIGHT_SEARCH_SECONDS`]; `seconds` when none is
+    /// bright.
+    pub fn first_bright_time(&self, seconds: f64) -> Result<f64, TranscodeError> {
+        let start = if seconds.is_finite() {
+            seconds.max(0.0)
+        } else {
+            0.0
+        };
+        let end = (start + BRIGHT_SEARCH_SECONDS).min(self.duration_seconds());
+        let mut step = 0_u32;
+        loop {
+            let time = start + f64::from(step) * BRIGHT_STEP_SECONDS;
+            if step > 0 && time >= end {
+                return Ok(start);
+            }
+            if is_bright(&self.picture(time)?.2) {
+                return Ok(time);
+            }
+            step = step.saturating_add(1);
+        }
+    }
+
+    /// The picture at `seconds` (clamped to the file) without letterbox or pillarbox bars, as RGB24: (width,
+    /// height, pixels). A video thumbnail stretches it over its area, as Encore shows the whole picture there.
+    pub fn picture(&self, seconds: f64) -> Result<(u32, u32, Vec<u8>), TranscodeError> {
+        picture::rgb_picture_at(&self.source, self.tick_at(seconds))
+    }
+
+    /// `seconds` as a time inside the file.
+    fn tick_at(&self, seconds: f64) -> filmcraft_time::Tick {
         let duration = self.source.info().duration.0;
         let wanted = if seconds.is_finite() && seconds > 0.0 {
             // `as` saturates at the i64 range.
@@ -246,7 +348,12 @@ impl FrameReader {
             0
         };
         let last = duration.saturating_sub(1).max(0);
-        let rgb = picture::rgb_frame_at(&self.source, filmcraft_time::Tick(wanted.clamp(0, last)))?;
+        filmcraft_time::Tick(wanted.clamp(0, last))
+    }
+
+    /// The frame at `seconds` (clamped to the file) as letterboxed RGB24, 720 x 480.
+    pub fn frame(&self, seconds: f64) -> Result<(u32, u32, Vec<u8>), TranscodeError> {
+        let rgb = picture::rgb_frame_at(&self.source, self.tick_at(seconds))?;
         Ok((720, 480, rgb))
     }
 }
@@ -286,4 +393,31 @@ pub fn for_each_frame(
 ) -> Result<(), TranscodeError> {
     let source = source::Source::open(input)?;
     picture::for_each_rgb_frame(&source, standard, frames, f)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_bright;
+
+    #[test]
+    fn a_black_frame_is_not_bright_but_a_dark_scene_with_something_in_it_is() {
+        // 100 pixels: all black (video black may be a little above 0).
+        let black = vec![16_u8; 300];
+        assert!(!is_bright(&black));
+        // One lit pixel in a hundred: still black (noise, a logo's corner).
+        let mut speck = black.clone();
+        if let Some(pixel) = speck.get_mut(0..3) {
+            pixel.copy_from_slice(&[200, 200, 200]);
+        }
+        assert!(!is_bright(&speck));
+        // Three lit pixels in a hundred: something is there.
+        let mut lit = black.clone();
+        for index in [0_usize, 30, 60] {
+            if let Some(pixel) = lit.get_mut(index..index + 3) {
+                pixel.copy_from_slice(&[0, 90, 0]);
+            }
+        }
+        assert!(is_bright(&lit));
+        assert!(!is_bright(&[]));
+    }
 }

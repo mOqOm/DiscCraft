@@ -50,6 +50,16 @@ pub(crate) enum Action {
     SaveAs,
     /// Import a file as an asset.
     ImportAsset,
+    /// Import a layered PSD as a new menu (File ▸ Import ▸ Menu…).
+    ImportMenu,
+    /// Import a layered PSD as a new Blu-ray pop-up menu (File ▸ Import ▸ Pop-up Menu…).
+    ImportPopupMenu,
+    /// Import a layered PSD as a new page of the open menu (File ▸ Import ▸ Menu Page…).
+    ImportMenuPage,
+    /// Import video files, each as an asset and a timeline (File ▸ Import ▸ Timeline…).
+    ImportTimeline,
+    /// Import images as the slides of a new slideshow (File ▸ Import ▸ Slideshow…).
+    ImportSlideshow,
     /// Edit the authoring mode, aspect ratio and capacity of the open project.
     ProjectSettings,
     /// Make the selected timeline, menu, slideshow or playlist the disc's First Play.
@@ -138,6 +148,10 @@ pub(crate) enum Action {
     CreateChapterIndex,
     /// Create a chapter index spread over several menus.
     CreateMultiPageChapterIndex,
+    /// Replace the open menu's design with a layered PSD, keeping its links (Menu ▸ Replace Menu…).
+    ReplaceMenu,
+    /// Add an empty page to the open menu (Menu ▸ Add New Page).
+    AddMenuPage,
     /// Add a chapter point.
     AddChapterPoint,
     /// Add chapter points at a fixed interval.
@@ -227,7 +241,7 @@ pub(crate) enum Trigger {
 
 impl Action {
     /// Every action, in menu order.
-    pub(crate) const ALL: [Action; 102] = [
+    pub(crate) const ALL: [Action; 109] = [
         Action::NewProject,
         Action::NewMenu,
         Action::NewTimeline,
@@ -248,6 +262,11 @@ impl Action {
         Action::Save,
         Action::SaveAs,
         Action::ImportAsset,
+        Action::ImportMenu,
+        Action::ImportPopupMenu,
+        Action::ImportMenuPage,
+        Action::ImportTimeline,
+        Action::ImportSlideshow,
         Action::ProjectSettings,
         Action::SetFirstPlay,
         Action::DiscUserOps,
@@ -292,6 +311,8 @@ impl Action {
         Action::AddButton,
         Action::CreateChapterIndex,
         Action::CreateMultiPageChapterIndex,
+        Action::ReplaceMenu,
+        Action::AddMenuPage,
         Action::AddChapterPoint,
         Action::AddChapterPointsAtInterval,
         Action::Play,
@@ -357,7 +378,13 @@ impl Action {
             Self::DiscUserOps => tl!("Set Disc User Operations…"),
             Self::Save => tl!("Save"),
             Self::SaveAs => tl!("Save As…"),
-            Self::ImportAsset => tl!("Import as Asset…"),
+            // Encore の ファイル ▸ 読み込み ▸ の項目名（アセット… / メニュー… / ポップアップメニュー… / メニューページ…）。
+            Self::ImportAsset => tl!("Asset…"),
+            Self::ImportMenu => tl!("Menu…"),
+            Self::ImportPopupMenu => tl!("Pop-up Menu…"),
+            Self::ImportMenuPage => tl!("Menu Page…"),
+            Self::ImportTimeline => tl!("Timeline…"),
+            Self::ImportSlideshow => tl!("Slideshow…"),
             Self::CheckProject => tl!("Check Project…"),
             Self::Preview => tl!("Preview"),
             Self::BuildFolder => tl!("Folder…"),
@@ -399,6 +426,8 @@ impl Action {
             Self::AddButton => tl!("Add Button"),
             Self::CreateChapterIndex => tl!("Create Chapter Index"),
             Self::CreateMultiPageChapterIndex => tl!("Create Multi-Page Chapter Index"),
+            Self::ReplaceMenu => tl!("Replace Menu…"),
+            Self::AddMenuPage => tl!("Add New Page"),
             Self::AddChapterPoint => tl!("Add Chapter Point"),
             Self::AddChapterPointsAtInterval => tl!("Add Chapter Points at Interval…"),
             Self::Play => tl!("Play"),
@@ -454,6 +483,8 @@ impl Action {
             | Self::AddButton
             | Self::CreateChapterIndex
             | Self::CreateMultiPageChapterIndex
+            | Self::ReplaceMenu
+            | Self::AddMenuPage
             | Self::AddChapterPointsAtInterval
             | Self::AddAudioTrack
             | Self::AddSubtitleTrack
@@ -481,6 +512,15 @@ impl Action {
             Self::Save => key_shortcut(Modifiers::COMMAND, Key::S),
             Self::SaveAs => key_shortcut(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S),
             Self::ImportAsset => key_shortcut(Modifiers::COMMAND, Key::I),
+            Self::ImportMenu => key_shortcut(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::I),
+            Self::ImportPopupMenu => {
+                key_shortcut(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::K)
+            }
+            Self::ImportMenuPage => key_shortcut(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::U),
+            Self::ImportTimeline => key_shortcut(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::T),
+            Self::ImportSlideshow => {
+                key_shortcut(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::G)
+            }
             Self::CheckProject => key_shortcut(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::L),
             Self::Preview => key_shortcut(Modifiers::COMMAND.plus(Modifiers::ALT), Key::Space),
             Self::Exit => key_shortcut(Modifiers::COMMAND, Key::Q),
