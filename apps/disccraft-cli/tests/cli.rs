@@ -3,7 +3,7 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{self, Command};
+use std::process::{self, Command, Stdio};
 
 struct RunResult {
     success: bool,
@@ -33,6 +33,44 @@ fn error_exit() -> Result<(), Box<dyn Error>> {
     let result = error_exit_inner(&dir);
     let _ = fs::remove_dir_all(&dir);
     result
+}
+
+/// The reader going away (`disccraft-cli commands | head`) ends the output, not the program: `println!` panicked
+/// there (exit 101), and a script stopped at its first line without saving.
+#[test]
+fn a_closed_output_is_not_a_crash() -> Result<(), Box<dyn Error>> {
+    let closed = |args: &[&str]| -> Result<process::Output, Box<dyn Error>> {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_disccraft-cli"))
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        // Close the reading end before the program writes.
+        drop(child.stdout.take());
+        Ok(child.wait_with_output()?)
+    };
+    let listed = closed(&["commands"])?;
+    let stderr = String::from_utf8_lossy(&listed.stderr);
+    assert!(listed.status.success(), "{:?}: {stderr}", listed.status);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+
+    // A script runs to the end and is saved though nobody reads its output.
+    let dir = temp_dir("closed_output")?;
+    let project = dir.join("closed.dcproj");
+    let script = dir.join("script.jsonl");
+    fs::write(
+        &script,
+        "{\"command\": \"menu.create\", \"params\": {\"name\": \"A\"}}
+{\"command\": \"menu.create\", \"params\": {\"name\": \"B\"}}
+",
+    )?;
+    let ran = closed(&["run", &path_arg(&project), &path_arg(&script)])?;
+    let stderr = String::from_utf8_lossy(&ran.stderr);
+    let saved = fs::read_to_string(&project).unwrap_or_default();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(ran.status.success(), "{:?}: {stderr}", ran.status);
+    assert!(saved.contains("\"B\""), "the second command was not saved");
+    Ok(())
 }
 
 #[test]

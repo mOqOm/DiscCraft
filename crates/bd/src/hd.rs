@@ -163,6 +163,8 @@ fn cached_paths(
     metadata.len().hash(&mut hasher);
     modified.hash(&mut hasher);
     format.hash(&mut hasher);
+    // The encode's version (2: frame counts round to the nearest frame).
+    2u8.hash(&mut hasher);
     HD_TARGET_KBPS.hash(&mut hasher);
     HD_MAX_KBPS.hash(&mut hasher);
     let key = hasher.finish();

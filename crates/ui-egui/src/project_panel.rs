@@ -29,6 +29,8 @@ pub(crate) struct ProbeInfo {
     pub(crate) size: Option<u64>,
     /// ファイルの最終変更日時（UNIX 秒）。
     pub(crate) modified: Option<i64>,
+    /// 映像に音声があるか（映像のアセットだけ。読めなければ `false`）。
+    pub(crate) audio: bool,
 }
 
 /// プロジェクトの表の列（Encore の「列の表示 / 非表示」の並び。名前は常に出る）。
@@ -530,13 +532,27 @@ impl DiscCraftApp {
             .into_iter()
             .filter(|column| self.project_column_shown(*column))
             .collect();
+        // 見出しの右端をドラッグして決めた列の幅（ない列は中身に合わせる）。
+        let widths: Vec<Option<f32>> = columns
+            .iter()
+            .map(|column| self.column_width("project_grid", column.index()))
+            .collect();
+        let mut edges = Vec::new();
         let table = crate::theme::table_selecting("project_grid", selected)
             .num_columns(columns.len().saturating_add(1))
-            .min_col_width(64.0)
+            .min_col_width(32.0)
             .show(ui, |ui| {
-                for column in &columns {
-                    let response =
-                        crate::theme::sort_header(ui, &mut sort, column.index(), column.label());
+                for (column, width) in columns.iter().zip(&widths) {
+                    let (response, edge) = crate::theme::resizable_header(
+                        ui,
+                        &mut sort,
+                        column.index(),
+                        column.label(),
+                        *width,
+                    );
+                    if let Some(edge) = edge {
+                        edges.push((column.index(), edge));
+                    }
                     // Encore の見出しの右クリック: 表示しない / 列の表示 / 非表示 ▸。
                     let _ = response.context_menu(|ui| self.column_menu(ui, *column));
                 }
@@ -545,22 +561,23 @@ impl DiscCraftApp {
 
                 for (index, row) in rows.iter().enumerate() {
                     if let Some(folder) = row.folder {
-                        self.folder_row(ui, &fill, &columns, row, folder, index);
+                        self.folder_row(ui, &fill, (&columns, &widths), row, folder, index);
                         continue;
                     }
                     // 行のどこを押しても選べる（名前の文字だけでなく、種類やデュレーションの列も）。
                     // Encore と同じく、名前の前に種類の小さな絵。フォルダーの中は字下げ。
-                    let first = ui
-                        .horizontal(|ui| {
-                            ui.add_space(indent(row.depth));
-                            row_glyph(ui, row.icon);
-                            ui.label(&row.name);
+                    let first =
+                        crate::theme::fixed_cell(ui, widths.first().copied().flatten(), |ui| {
+                            ui.horizontal(|ui| {
+                                ui.add_space(indent(row.depth));
+                                row_glyph(ui, row.icon);
+                                ui.label(&row.name);
+                            });
                         })
-                        .response
-                        .rect;
+                        .1;
                     let mut last = first;
-                    for column in columns.iter().skip(1) {
-                        last = self.project_cell(ui, row, *column, kind);
+                    for (column, width) in columns.iter().zip(&widths).skip(1) {
+                        last = self.project_cell(ui, row, *column, kind, *width);
                     }
                     let id = egui::Id::unique("project_row").with(index);
                     let response =
@@ -582,6 +599,64 @@ impl DiscCraftApp {
             });
         fill.store(ui, table.response.rect);
         let _ = self.table_sorts.insert("project_grid", sort);
+        for (column, edge) in edges {
+            self.set_column_width("project_grid", column, edge);
+        }
+        self.save_column_widths_when_idle(ui.ctx());
+    }
+
+    /// 表 `table` の `count` 列の、幅を変えられる列。
+    pub(crate) fn table_columns(&self, table: &str, count: usize) -> crate::theme::Columns {
+        crate::theme::Columns::new(
+            (0..count)
+                .map(|column| self.column_width(table, column))
+                .collect(),
+        )
+    }
+
+    /// 表を描いたあとで、見出しの右端の操作を当てて保存する。
+    pub(crate) fn finish_columns(&mut self, ui: &Ui, table: &str, columns: crate::theme::Columns) {
+        for (column, edge) in columns.edges {
+            self.set_column_width(table, column, edge);
+        }
+        self.save_column_widths_when_idle(ui.ctx());
+    }
+
+    /// 表 `table` の列 `column` の決めた幅（なければ中身に合わせる）。
+    pub(crate) fn column_width(&self, table: &str, column: usize) -> Option<f32> {
+        self.column_widths
+            .get(&format!("{table}:{column}"))
+            .copied()
+    }
+
+    /// 見出しの右端の操作を当てる。
+    pub(crate) fn set_column_width(
+        &mut self,
+        table: &str,
+        column: usize,
+        edge: crate::theme::ColumnEdge,
+    ) {
+        let key = format!("{table}:{column}");
+        match edge {
+            crate::theme::ColumnEdge::Width(width) => {
+                let _ = self.column_widths.insert(key, width);
+            }
+            crate::theme::ColumnEdge::Fit => {
+                let _ = self.column_widths.remove(&key);
+            }
+        }
+        self.column_widths_dirty = true;
+    }
+
+    /// 列の幅が変わっていれば設定に保存する（ドラッグを離してから 1 回）。
+    pub(crate) fn save_column_widths_when_idle(&mut self, ctx: &egui::Context) {
+        if !self.column_widths_dirty || ctx.input(|input| input.pointer.any_down()) {
+            return;
+        }
+        self.column_widths_dirty = false;
+        if let Err(error) = crate::workspace::save_column_widths(&self.column_widths) {
+            self.status = error;
+        }
     }
 
     /// フォルダーの行: ▸ / ▾ で畳む、名前（入力中なら欄）、右クリックで 新規 ▸ / 新規フォルダー / 名前の変更… / 消去。
@@ -589,7 +664,7 @@ impl DiscCraftApp {
         &mut self,
         ui: &mut Ui,
         fill: &crate::theme::TableFill,
-        columns: &[ProjectColumn],
+        (columns, widths): (&[ProjectColumn], &[Option<f32>]),
         row: &ProjectRow,
         folder: u64,
         index: usize,
@@ -598,8 +673,8 @@ impl DiscCraftApp {
         let mut toggle = false;
         let mut committed_name: Option<String> = None;
         let mut cancel_rename = false;
-        let first = ui
-            .horizontal(|ui| {
+        let first = crate::theme::fixed_cell(ui, widths.first().copied().flatten(), |ui| {
+            ui.horizontal(|ui| {
                 ui.add_space(indent(row.depth));
                 let arrow = if collapsed { "▸" } else { "▾" };
                 if ui
@@ -632,12 +707,12 @@ impl DiscCraftApp {
                         ui.label(&row.name);
                     }
                 }
-            })
-            .response
-            .rect;
+            });
+        })
+        .1;
         let mut last = first;
-        for _ in columns.iter().skip(1) {
-            last = ui.label("").rect;
+        for width in widths.iter().take(columns.len()).skip(1) {
+            last = crate::theme::fixed_cell(ui, *width, |ui| ui.label("")).1;
         }
         if let Some(name) = committed_name {
             self.renaming_folder = None;
@@ -716,6 +791,7 @@ impl DiscCraftApp {
         row: &ProjectRow,
         column: ProjectColumn,
         kind: DiscKind,
+        width: Option<f32>,
     ) -> egui::Rect {
         let transcode = row.transcode.map(|state| state.by_kind(kind));
         let text = match column {
@@ -750,7 +826,7 @@ impl DiscCraftApp {
             ProjectColumn::Modified => row.modified.map(modified_text).unwrap_or_default(),
             ProjectColumn::Path => row.path.clone(),
         };
-        ui.label(text).rect
+        crate::theme::fixed_cell(ui, width, |ui| ui.label(text)).1
     }
 
     /// その列を出しているか（名前は常に）。
@@ -1018,7 +1094,8 @@ impl DiscCraftApp {
             .collect();
 
         for (id, name, kind, offline, description, path) in assets {
-            let mut name = name;
+            // Encore と同じく、ファイル名は拡張子まで（名前を変えた素材は名前に拡張子を足す）。
+            let mut name = name_with_extension(&name, &path);
             if offline {
                 name.push_str(tl!(" [offline]"));
             }
@@ -1226,6 +1303,10 @@ impl DiscCraftApp {
                     .filter(|fps| fps.is_finite() && *fps > 0.0),
                 size,
                 modified,
+                audio: value
+                    .get("audio")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
             },
             None => ProbeInfo {
                 size,
@@ -1316,6 +1397,7 @@ impl DiscCraftApp {
     fn menus_table(&mut self, ui: &mut Ui, menus: &[MenuRow], selected: Option<usize>) {
         let fill = crate::theme::TableFill::new(ui, "menus_grid");
         let mut sort = self.table_sort("menus_grid");
+        let mut columns = self.table_columns("menus_grid", 5);
         // Encore と同じ 名前 / エンドアクション / 上書き / 縦横比 / 説明。
         let table = crate::theme::table_selecting("menus_grid", selected)
             .num_columns(6)
@@ -1330,18 +1412,18 @@ impl DiscCraftApp {
                 .into_iter()
                 .enumerate()
                 {
-                    let _ = crate::theme::sort_header(ui, &mut sort, column, label);
+                    let _ = columns.header(ui, &mut sort, column, label);
                 }
                 fill.cell(ui);
                 ui.end_row();
 
                 for row in menus {
                     let id = &row.id;
-                    let first = ui.label(&row.name).rect;
-                    ui.label(row.end_action.as_str());
-                    ui.label(row.override_link.as_str());
-                    ui.label(row.aspect);
-                    let last = ui.label(row.description.as_str()).rect;
+                    let first = columns.label(ui, 0, row.name.as_str());
+                    let _ = columns.label(ui, 1, row.end_action.as_str());
+                    let _ = columns.label(ui, 2, row.override_link.as_str());
+                    let _ = columns.label(ui, 3, row.aspect);
+                    let last = columns.label(ui, 4, row.description.as_str());
                     let row_id = egui::Id::unique("menus_row").with(id.0);
                     let response =
                         crate::theme::table_row(ui, row_id, first, fill.row_end(first, last));
@@ -1357,6 +1439,7 @@ impl DiscCraftApp {
             });
         fill.store(ui, table.response.rect);
         let _ = self.table_sorts.insert("menus_grid", sort);
+        self.finish_columns(ui, "menus_grid", columns);
     }
 
     fn menu_buttons_table(&mut self, ui: &mut Ui) {
@@ -1424,6 +1507,7 @@ impl DiscCraftApp {
             &self.session.project,
             self.session.project.menu_root(id),
         );
+        let mut columns = self.table_columns("menu_buttons_grid", 8);
         let table = crate::theme::table_selecting("menu_buttons_grid", selected_row)
             .num_columns(9)
             .show(ui, |ui| {
@@ -1440,7 +1524,7 @@ impl DiscCraftApp {
                 .into_iter()
                 .enumerate()
                 {
-                    let _ = crate::theme::sort_header(ui, &mut sort, column, label);
+                    let _ = columns.header(ui, &mut sort, column, label);
                 }
                 fill.cell(ui);
                 ui.end_row();
@@ -1450,14 +1534,16 @@ impl DiscCraftApp {
                     let selected =
                         self.selection == Selection::Menu(id) && self.button_selected(index);
                     // 名前の欄は選択の表示だけ（いくつも選んだときも分かるように）。押すのは行全体。
-                    let first = ui.selectable_label(selected, row.name.as_str()).rect;
-                    ui.label(index.saturating_add(1).to_string());
-                    ui.label(page.to_string());
-                    ui.label(row.kind);
-                    ui.label(menu_name.as_str());
-                    ui.label(row.link.as_str());
-                    ui.label(row.override_link.as_str());
-                    let last = ui.label(row.label.as_str()).rect;
+                    let first = columns
+                        .cell(ui, 0, |ui| ui.selectable_label(selected, row.name.as_str()))
+                        .1;
+                    let _ = columns.label(ui, 1, index.saturating_add(1).to_string());
+                    let _ = columns.label(ui, 2, page.to_string());
+                    let _ = columns.label(ui, 3, row.kind);
+                    let _ = columns.label(ui, 4, menu_name.as_str());
+                    let _ = columns.label(ui, 5, row.link.as_str());
+                    let _ = columns.label(ui, 6, row.override_link.as_str());
+                    let last = columns.label(ui, 7, row.label.as_str());
                     let row_id = egui::Id::unique("menu_buttons_row").with(index);
                     if crate::theme::table_row(ui, row_id, first, fill.row_end(first, last))
                         .clicked()
@@ -1474,6 +1560,7 @@ impl DiscCraftApp {
             });
         fill.store(ui, table.response.rect);
         let _ = self.table_sorts.insert("menu_buttons_grid", sort);
+        self.finish_columns(ui, "menu_buttons_grid", columns);
     }
 
     /// タイムラインのタブ: タイムラインの表（Encore と同じ 名前 / エンドアクション / 上書き / デュレーション /
@@ -1529,6 +1616,7 @@ impl DiscCraftApp {
             .position(|row| self.selection == Selection::Timeline(row.id));
         let fill = crate::theme::TableFill::new(ui, "timelines_grid");
         let mut sort = self.table_sort("timelines_grid");
+        let mut columns = self.table_columns("timelines_grid", 7);
         let table = crate::theme::table_selecting("timelines_grid", selected)
             .num_columns(8)
             .show(ui, |ui| {
@@ -1544,32 +1632,35 @@ impl DiscCraftApp {
                 .into_iter()
                 .enumerate()
                 {
-                    let _ = crate::theme::sort_header(ui, &mut sort, column, label);
+                    let _ = columns.header(ui, &mut sort, column, label);
                 }
                 fill.cell(ui);
                 ui.end_row();
 
                 for row in &rows {
                     let selection = Selection::Timeline(row.id);
-                    let first = ui.label(&row.name).rect;
-                    ui.label(row.end_action.as_str());
-                    ui.label(row.override_link.as_str());
-                    match row.seconds {
+                    let first = columns.label(ui, 0, row.name.as_str());
+                    let _ = columns.label(ui, 1, row.end_action.as_str());
+                    let _ = columns.label(ui, 2, row.override_link.as_str());
+                    let duration = match row.seconds {
                         Some(seconds) => {
                             let fps = self.asset_probe(row.video).fps;
-                            ui.label(self.duration_text_at(seconds, fps))
+                            self.duration_text_at(seconds, fps)
                         }
-                        None => ui.label(NO_VALUE),
+                        None => NO_VALUE.to_owned(),
                     };
+                    let _ = columns.label(ui, 3, duration);
                     let size = self
                         .usage
                         .as_ref()
                         .and_then(|usage| usage.timelines.get(&row.id.0))
                         .map_or_else(|| NO_VALUE.to_owned(), |bytes| format_bytes(*bytes));
-                    ui.label(size)
-                        .on_hover_text(tl!("Estimated size on the disc after the build"));
-                    ui.label(row.remote.as_str());
-                    let last = ui.label(row.chapters.to_string()).rect;
+                    let _ = columns.cell(ui, 4, |ui| {
+                        ui.label(size)
+                            .on_hover_text(tl!("Estimated size on the disc after the build"))
+                    });
+                    let _ = columns.label(ui, 5, row.remote.as_str());
+                    let last = columns.label(ui, 6, row.chapters.to_string());
                     let row_id = egui::Id::unique("timelines_row").with(row.id.0);
                     let response =
                         crate::theme::table_row(ui, row_id, first, fill.row_end(first, last));
@@ -1584,6 +1675,7 @@ impl DiscCraftApp {
             });
         fill.store(ui, table.response.rect);
         let _ = self.table_sorts.insert("timelines_grid", sort);
+        self.finish_columns(ui, "timelines_grid", columns);
     }
 
     /// ビルドのタブ: 出力、容量、チェック。
@@ -1684,6 +1776,24 @@ fn project_sort_key(row: &ProjectRow, column: usize, kind: DiscKind) -> crate::t
             .map_or(SortKey::None, |secs| SortKey::Number(secs as f64)),
         Some(ProjectColumn::Path) => text(row.path.clone()),
         Some(ProjectColumn::Name) | None => SortKey::Text(row.name.clone()),
+    }
+}
+
+/// プロジェクトパネルの素材の名前: 名前に、ファイルの拡張子がまだ付いていなければ足す（`bd_long` と
+/// `C:/x/bd_long.m2v` で `bd_long.m2v`）。
+pub(crate) fn name_with_extension(name: &str, path: &str) -> String {
+    let Some(extension) = std::path::Path::new(path)
+        .extension()
+        .map(|extension| extension.to_string_lossy().into_owned())
+        .filter(|extension| !extension.is_empty())
+    else {
+        return name.to_owned();
+    };
+    let suffix = format!(".{extension}");
+    if name.to_lowercase().ends_with(&suffix.to_lowercase()) {
+        name.to_owned()
+    } else {
+        format!("{name}{suffix}")
     }
 }
 
@@ -1897,5 +2007,30 @@ pub(crate) fn asset_kind_label(kind: AssetKind) -> &'static str {
         AssetKind::Image => tl!("Image file"),
         AssetKind::Subtitle => tl!("Subtitle file"),
         AssetKind::Other => tl!("Other file"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::name_with_extension;
+
+    #[test]
+    fn asset_names_show_their_extension() {
+        assert_eq!(
+            name_with_extension("bd_long", "C:/x/bd_long.m2v"),
+            "bd_long.m2v"
+        );
+        // Already there (any case), or a renamed asset: the extension is added once.
+        assert_eq!(
+            name_with_extension("Intro.MP4", "C:/x/intro.mp4"),
+            "Intro.MP4"
+        );
+        assert_eq!(
+            name_with_extension("オープニング", "C:/x/op.mov"),
+            "オープニング.mov"
+        );
+        // No extension, no path.
+        assert_eq!(name_with_extension("still", "C:/x/still"), "still");
+        assert_eq!(name_with_extension("still", ""), "still");
     }
 }

@@ -1,7 +1,8 @@
-//! DVD VM simulator for written VIDEO_TS folders.
+//! DVD VM simulator for written VIDEO_TS folders, and the HDMV interpreter for written BDMV folders.
 //!
 //! This crate loads a VIDEO_TS folder through the project IFO readers and
-//! executes the navigation subset documented in `docs/formats/dvd-video.md`.
+//! executes the navigation subset documented in `docs/formats/dvd-video.md`; a BDMV folder ([`load_bdmv`]) runs in
+//! [`BdVm`], the HDMV subset documented in `docs/formats/bdmv.md` (プレビューでの読み戻し).
 #![deny(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -16,10 +17,12 @@
 
 use thiserror::Error;
 
+mod bd;
 mod exec;
 mod explore;
 mod model;
 
+pub use bd::{BdDisc, BdLocation, BdMenu, BdMenuView, BdPlaylist, BdState, BdVm, load_bdmv};
 pub use exec::{Key, Location, Registers, Vm};
 pub use explore::{Report, explore};
 pub use model::{ButtonModel, Cmd, DiscModel, MenuPgcModel, TitleModel, load_video_ts};

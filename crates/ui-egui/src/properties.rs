@@ -25,6 +25,11 @@ impl DiscCraftApp {
     /// プロパティのシート。
     pub(crate) fn property_sheet(&mut self, ui: &mut Ui) {
         match self.selection {
+            // 何も選んでいなければディスクの設定。ディスクのパネルが別のグループで見えているときは、同じ欄を
+            // 2 つ出さない（欄の id が重なる）。
+            Selection::None if self.panel_front(crate::workspace::Panel::Disc) => {
+                ui.label(tl!("Nothing selected"));
+            }
             Selection::None => self.disc_sheet(ui),
             Selection::Asset(id) => self.asset_sheet(ui, id),
             Selection::Timeline(id) => match self.focused_chapter(id) {
@@ -150,6 +155,34 @@ impl DiscCraftApp {
             settings.audio_default,
         ) {
             let _ = self.run_command("disc.setAudio", serde_json::json!({ "track": track }));
+        }
+        // 言語を持たない音声（素材の音、スライドショーの音、言語が空のトラック）の言語。初期値は表示言語。
+        let display = tlf!(
+            "Display language ({code})",
+            code = crate::i18n::current().code()
+        );
+        let own = settings
+            .audio_language
+            .as_deref()
+            .filter(|code| !crate::timeline_view::LANGUAGES.contains(code));
+        let mut languages: Vec<(Option<&str>, &str)> = vec![(None, display.as_str())];
+        for code in own
+            .into_iter()
+            .chain(crate::timeline_view::LANGUAGES.iter().copied())
+        {
+            languages.push((Some(code), code));
+        }
+        if let Some(language) = choice_row(
+            ui,
+            tl!("Audio language:"),
+            "disc_audio_language",
+            settings.audio_language.as_deref(),
+            &languages,
+        ) {
+            let _ = self.run_command(
+                "disc.setAudioLanguage",
+                serde_json::json!({ "language": language }),
+            );
         }
         if let Some(choice) = subtitle_choice_row(
             ui,
@@ -1027,7 +1060,8 @@ impl DiscCraftApp {
         ));
     }
 
-    /// The disc's aspect ratio (the titles; menus stay 4:3).
+    /// The disc's aspect ratio: every title takes it (the timelines' own aspects are reset to follow it; the
+    /// monitor shows the new shape at once). Menus keep theirs.
     fn set_widescreen(&mut self, wide: bool) {
         let aspect = if wide { "16:9" } else { "4:3" };
         let _ = self.run_command("disc.setAspect", serde_json::json!({ "aspect": aspect }));

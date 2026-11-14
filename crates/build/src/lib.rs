@@ -24,6 +24,9 @@ use disccraft_dvd::{DvdBuildReport, DvdError, build_video_ts_with};
 pub use disccraft_dvd::{TranscodeStatus, transcode_status};
 use disccraft_project::{DiscKind, Project};
 
+mod layer;
+pub use layer::{LayerBreak, LayerBreakPlace, frame_90k, millis, time_text};
+
 /// Supported build output kinds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputKind {
@@ -44,6 +47,9 @@ pub struct BuildOptions {
     /// [`cache_dir`]). A cache of its own lets a folder and an image of the same project, or builds into a fresh
     /// output, share their transcodes.
     pub cache: Option<PathBuf>,
+    /// DiscCraft's display language (ISO 639-1): the language of audio without its own when the project names
+    /// none (`DiscSettings::audio_language`). `None` leaves such audio without a language.
+    pub audio_language: Option<String>,
 }
 
 /// Build result.
@@ -59,8 +65,9 @@ pub struct BuildReport {
     pub total_bytes: u64,
     /// Wall-clock build time in seconds.
     pub seconds: f64,
-    /// Layer-break sector of a dual-layer ISO (DVD-9), written next to it as `<name>.layerbreak.txt`.
-    pub layer_break: Option<u32>,
+    /// The layer break of a dual-layer DVD image (DVD-9), read back from the image and written next to it as
+    /// `<name>.layerbreak.txt`.
+    pub layer_break: Option<LayerBreak>,
 }
 
 /// The transcode cache a build with `options` uses: `disccraft-cache` inside the disc folder (for an image,
@@ -86,20 +93,43 @@ pub fn cache_dir(options: &BuildOptions) -> PathBuf {
 
 /// Build a disc output from a project.
 pub fn build(project: &Project, options: &BuildOptions) -> Result<BuildReport, String> {
+    build_with_progress(project, options, &mut |_, _| {})
+}
+
+/// The step [`build_with_progress`] names while it writes the disc image (after the folder).
+pub const STEP_IMAGE: &str = "disc image";
+
+/// Like [`build`], telling `progress` what it is doing as it goes: the name of the media it is transcoding (or
+/// [`STEP_IMAGE`]) and how far that is, from 0 to 1. `progress` is called on the calling thread.
+pub fn build_with_progress(
+    project: &Project,
+    options: &BuildOptions,
+    progress: &mut dyn FnMut(&str, f32),
+) -> Result<BuildReport, String> {
     let started = Instant::now();
     // Button transitions become hidden titles (Encore's button Transition).
-    let expanded = project
+    let mut expanded = project
         .with_transitions_expanded()
         .map_err(|error| error.to_string())?;
+    if expanded.settings.audio_language.is_none() {
+        expanded
+            .settings
+            .audio_language
+            .clone_from(&options.audio_language);
+    }
     let project = &expanded;
 
     let cache = cache_dir(options);
     let at = (cache.as_path(), started);
     match (project.settings.kind, options.output) {
-        (DiscKind::Dvd, OutputKind::Folder) => build_dvd_folder(project, &options.path, at),
-        (DiscKind::Dvd, OutputKind::Iso) => build_dvd_iso(project, &options.path, at),
-        (DiscKind::BluRay, OutputKind::Folder) => build_bd_folder(project, &options.path, at),
-        (DiscKind::BluRay, OutputKind::Iso) => build_bd_iso(project, &options.path, at),
+        (DiscKind::Dvd, OutputKind::Folder) => {
+            build_dvd_folder(project, &options.path, at, progress)
+        }
+        (DiscKind::Dvd, OutputKind::Iso) => build_dvd_iso(project, &options.path, at, progress),
+        (DiscKind::BluRay, OutputKind::Folder) => {
+            build_bd_folder(project, &options.path, at, progress)
+        }
+        (DiscKind::BluRay, OutputKind::Iso) => build_bd_iso(project, &options.path, at, progress),
     }
 }
 
@@ -107,9 +137,10 @@ fn build_bd_folder(
     project: &Project,
     path: &Path,
     (cache, started): (&Path, Instant),
+    progress: &mut dyn FnMut(&str, f32),
 ) -> Result<BuildReport, String> {
     match catch_unwind(AssertUnwindSafe(|| {
-        build_bdmv_with(project, path, cache, &mut |_, _| {})
+        build_bdmv_with(project, path, cache, &mut *progress)
     })) {
         Ok(Ok(report)) => Ok(report_from_bd(report, started)),
         Ok(Err(err)) => Err(err.to_string()),
@@ -122,10 +153,12 @@ fn build_bd_iso(
     project: &Project,
     iso: &Path,
     (cache, started): (&Path, Instant),
+    progress: &mut dyn FnMut(&str, f32),
 ) -> Result<BuildReport, String> {
     let stem = iso.file_stem().and_then(|s| s.to_str()).unwrap_or("disc");
     let folder = iso.with_file_name(format!("{stem}.files"));
-    let mut report = build_bd_folder(project, &folder, (cache, started))?;
+    let mut report = build_bd_folder(project, &folder, (cache, started), progress)?;
+    progress(STEP_IMAGE, 0.0);
     let mut files = Vec::new();
     collect_tree(&folder, &folder.join("BDMV"), &mut files)?;
     files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -137,6 +170,7 @@ fn build_bd_iso(
     }))
     .map_err(|_| "internal error while writing the ISO image".to_string())?
     .map_err(|e| format!("ISO: {e}"))?;
+    progress(STEP_IMAGE, 1.0);
     report.output = iso.to_path_buf();
     report.total_bytes = u64::from(iso_report.sectors) * 2048;
     report.seconds = started.elapsed().as_secs_f64();
@@ -167,13 +201,15 @@ fn collect_tree(root: &Path, dir: &Path, out: &mut Vec<TreeFile>) -> Result<(), 
     Ok(())
 }
 
-/// The volume label of an image: the disc name when it has ASCII letters or digits, otherwise the file name.
+/// The volume label of an image: the disc name as it is, Japanese included (the UDF volume identifier keeps its
+/// case, spaces and characters, as Encore writes it; the image writer makes the ISO 9660 one of d-characters from it,
+/// or from the file name), at most 30 characters; the file name when the disc has no name.
 fn disc_label(project: &Project, stem: &str) -> String {
-    let from_name = volume_label(project.settings.name.trim());
-    if from_name.chars().any(|c| c.is_ascii_alphanumeric()) {
-        from_name
-    } else {
+    let name = project.settings.name.trim();
+    if name.is_empty() {
         volume_label(stem)
+    } else {
+        name.chars().take(30).collect()
     }
 }
 
@@ -211,13 +247,24 @@ fn build_dvd_folder(
     project: &Project,
     path: &Path,
     (cache, started): (&Path, Instant),
+    progress: &mut dyn FnMut(&str, f32),
 ) -> Result<BuildReport, String> {
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        build_video_ts_with(project, path, cache, &mut |_, _| {})
-    }));
+    let report = build_video_ts_checked(project, path, cache, progress)?;
+    Ok(report_from_dvd(&report, started))
+}
 
+/// The VIDEO_TS build, with a panic reported as an error.
+fn build_video_ts_checked(
+    project: &Project,
+    path: &Path,
+    cache: &Path,
+    progress: &mut dyn FnMut(&str, f32),
+) -> Result<DvdBuildReport, String> {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        build_video_ts_with(project, path, cache, &mut *progress)
+    }));
     match result {
-        Ok(Ok(report)) => Ok(report_from_dvd(report, started)),
+        Ok(Ok(report)) => Ok(report),
         Ok(Err(err)) => Err(dvd_error_message(project, &err)),
         Err(_) => Err("internal error during build".to_string()),
     }
@@ -227,10 +274,13 @@ fn build_dvd_iso(
     project: &Project,
     iso: &Path,
     (cache, started): (&Path, Instant),
+    progress: &mut dyn FnMut(&str, f32),
 ) -> Result<BuildReport, String> {
     let stem = iso.file_stem().and_then(|s| s.to_str()).unwrap_or("disc");
     let folder = iso.with_file_name(format!("{stem}.files"));
-    let mut report = build_dvd_folder(project, &folder, (cache, started))?;
+    let dvd = build_video_ts_checked(project, &folder, cache, progress)?;
+    let mut report = report_from_dvd(&dvd, started);
+    progress(STEP_IMAGE, 0.0);
     let video_ts = folder.join("VIDEO_TS");
     let names: Vec<String> = std::fs::read_dir(&video_ts)
         .map_err(|e| format!("{}: {e}", video_ts.display()))?
@@ -251,35 +301,19 @@ fn build_dvd_iso(
     let iso_report = catch_unwind(AssertUnwindSafe(|| write_dvd_iso(&files, &label, iso, now)))
         .map_err(|_| "internal error while writing the ISO image".to_string())?
         .map_err(|e| format!("ISO: {e}"))?;
+    progress(STEP_IMAGE, 1.0);
     report.output = iso.to_path_buf();
     report.total_bytes = u64::from(iso_report.sectors) * 2048;
-    if iso_report.sectors > SINGLE_LAYER_SECTORS {
-        let starts = iso_cell_starts(iso, &video_ts)?;
-        let lb = choose_layer_break(iso_report.sectors, &starts).ok_or_else(|| {
-            "the image needs a dual-layer disc but no cell boundary fits the layer break (add chapters near the middle)".to_string()
-        })?;
-        let note = iso.with_extension("layerbreak.txt");
-        std::fs::write(
-            &note,
-            format!(
-                "LayerBreak={lb}
-TotalSectors={}
-",
-                iso_report.sectors
-            ),
-        )
-        .map_err(|e| format!("{}: {e}", note.display()))?;
-        report.layer_break = Some(lb);
-    }
+    report.layer_break = layer::layer_break(project, &dvd, iso, iso_report.sectors)?;
     report.seconds = started.elapsed().as_secs_f64();
     Ok(report)
 }
 
-fn report_from_dvd(report: DvdBuildReport, started: Instant) -> BuildReport {
+fn report_from_dvd(report: &DvdBuildReport, started: Instant) -> BuildReport {
     let chapters = report.titles.iter().map(|title| title.chapters).sum();
 
     BuildReport {
-        output: report.video_ts,
+        output: report.video_ts.clone(),
         titles: report.titles.len(),
         chapters,
         total_bytes: report.total_bytes,
@@ -303,13 +337,18 @@ mod tests {
     fn the_volume_label_comes_from_the_disc_name() {
         let mut project = Project::default();
         assert_eq!(disc_label(&project, "my-disc"), "MY_DISC");
+        // The disc name as it is (the UDF volume identifier; the ISO 9660 one is made from it by the image writer).
         project.settings.name = "Summer Trip 2026".to_owned();
-        assert_eq!(disc_label(&project, "my-disc"), "SUMMER_TRIP_2026");
-        // A name without ASCII letters or digits falls back to the file name.
+        assert_eq!(disc_label(&project, "my-disc"), "Summer Trip 2026");
+        // A Japanese name is kept (UDF holds it; ISO 9660 takes the file name).
         project.settings.name = "夏の旅行".to_owned();
+        assert_eq!(disc_label(&project, "trip"), "夏の旅行");
+        // No name: the file name.
+        project.settings.name = "  ".to_owned();
         assert_eq!(disc_label(&project, "trip"), "TRIP");
+        // At most 30 characters (a UDF dstring of 32 bytes).
         project.settings.name = "x".repeat(40);
-        assert_eq!(disc_label(&project, "trip").len(), 32);
+        assert_eq!(disc_label(&project, "trip").len(), 30);
     }
 
     #[test]
@@ -318,12 +357,14 @@ mod tests {
             output: OutputKind::Folder,
             path: PathBuf::from("out"),
             cache: None,
+            audio_language: None,
         };
         assert_eq!(cache_dir(&folder), Path::new("out").join("disccraft-cache"));
         let iso = BuildOptions {
             output: OutputKind::Iso,
             path: Path::new("out").join("movie.iso"),
             cache: None,
+            audio_language: None,
         };
         // A cache of its own (shared by builds).
         let shared = BuildOptions {
@@ -346,6 +387,7 @@ mod tests {
             output: OutputKind::Folder,
             path: dir.clone(),
             cache: None,
+            audio_language: None,
         };
         let result = build(&project, &options);
         let _ = std::fs::remove_dir_all(&dir);
@@ -370,31 +412,6 @@ pub fn choose_layer_break(total_sectors: u32, cell_starts: &[u32]) -> Option<u32
         .copied()
         .filter(|&s| s >= half && s <= LAYER0_MAX_SECTORS)
         .min()
-}
-
-/// Absolute cell start sectors of every title VOBS in a written ISO (from the VTS IFOs and the UDF file listing).
-fn iso_cell_starts(iso: &Path, video_ts: &Path) -> Result<Vec<u32>, String> {
-    let listing = disccraft_udf::read::list_udf(iso).map_err(|e| format!("ISO: {e}"))?;
-    let mut starts = Vec::new();
-    for vts in 1..=99u8 {
-        let ifo = video_ts.join(format!("VTS_{vts:02}_0.IFO"));
-        if !ifo.is_file() {
-            break;
-        }
-        let bytes = std::fs::read(&ifo).map_err(|e| format!("{}: {e}", ifo.display()))?;
-        let vtsi =
-            disccraft_ifo::read_vtsi(&bytes).map_err(|e| format!("{}: {e}", ifo.display()))?;
-        let vob = format!("VIDEO_TS/VTS_{vts:02}_1.VOB");
-        let Some(first) = listing.iter().find(|f| f.path == vob) else {
-            continue;
-        };
-        starts.extend(
-            vtsi.address_cells()
-                .iter()
-                .map(|c| first.sector.saturating_add(c.first_sector)),
-        );
-    }
-    Ok(starts)
 }
 
 #[cfg(test)]

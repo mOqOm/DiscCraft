@@ -66,11 +66,14 @@ pub(crate) fn build_title_set(
     let pgc = build_pgc(
         &layout,
         duration,
-        audio_attrs.len(),
-        loaded.subpictures.len(),
+        (audio_attrs.len(), loaded.subpictures.len()),
         standard,
         nav,
-        loaded.cell_still,
+        (
+            loaded.cell_still,
+            &loaded.program_cells,
+            loaded.layer_break_cell,
+        ),
     )?;
     let (tmap_unit, tmap) = build_tmap(&layout)?;
     let vobu_starts = layout.vobus.iter().map(|vobu| vobu.start_sector).collect();
@@ -88,8 +91,9 @@ pub(crate) fn build_title_set(
             return Err(invalid("chapter playlist title numbers are out of order"));
         }
         let master = pgcs.first().ok_or_else(|| invalid("missing master PGC"))?;
-        let (pgc, duration) = build_playlist_pgc(&layout, master, extra, standard)?;
-        let (unit, entries) = build_playlist_tmap(&layout, &extra.programs)?;
+        let cells = program_cell_lists(&loaded.program_cells, layout.cells.len(), &extra.programs)?;
+        let (pgc, duration) = build_playlist_pgc(&layout, master, extra, &cells, standard)?;
+        let (unit, entries) = build_playlist_tmap(&layout, &cells)?;
         built_extras.push(BuiltExtraTitle {
             chapters: extra.programs.len(),
             chapters_u16: u16::try_from(extra.programs.len())
@@ -127,6 +131,7 @@ pub(crate) fn build_title_set(
     let title_set_sectors = ifo_sectors
         .checked_mul(2)
         .and_then(|x| x.checked_add(layout.total_sectors))
+        .and_then(|x| x.checked_add(disccraft_ifo::BUP_GAP_SECTORS))
         .ok_or_else(|| invalid("title set sector overflow"))?;
 
     let total_bytes = vob_bytes
@@ -134,7 +139,8 @@ pub(crate) fn build_title_set(
         .and_then(|x| x.checked_add(bup_bytes))
         .ok_or_else(|| invalid("title byte count overflow"))?;
 
-    let chapters = layout.cells.len();
+    // The chapters are the programs (a layer break's own cell is not one).
+    let chapters = loaded.program_cells.len();
     let chapters_u16 =
         u16::try_from(chapters).map_err(|_| DvdError::Invalid("too many cells".to_string()))?;
 
@@ -150,6 +156,31 @@ pub(crate) fn build_title_set(
     })
 }
 
+/// The cells (0-based) each program of `programs` (1-based, a chapter playlist's entries) plays: from the program's
+/// entry cell to the next program's (a chapter with a layer break inside has two cells).
+fn program_cell_lists(
+    program_cells: &[usize],
+    cell_count: usize,
+    programs: &[u16],
+) -> Result<Vec<Vec<usize>>, DvdError> {
+    programs
+        .iter()
+        .map(|&program| {
+            let index = usize::from(program)
+                .checked_sub(1)
+                .ok_or_else(|| invalid("chapter playlist entry is zero"))?;
+            let first = *program_cells
+                .get(index)
+                .ok_or_else(|| invalid("chapter playlist entry is out of range"))?;
+            let end = program_cells.get(index + 1).copied().unwrap_or(cell_count);
+            if first >= end || end > cell_count {
+                return Err(invalid("chapter playlist entry has no cells"));
+            }
+            Ok((first..end).collect())
+        })
+        .collect()
+}
+
 /// The PGC of a chapter playlist: the master's cells in the playlist's order (a cell may repeat). Every cell that
 /// does not directly follow the previous one in the VOB starts with an STC discontinuity, so the player resets
 /// its clock at the jump. Returns the PGC and its playback time in 90 kHz ticks.
@@ -157,6 +188,7 @@ fn build_playlist_pgc(
     layout: &VobsLayout,
     master: &Pgc,
     nav: &ChapterPlaylistNav,
+    program_cells: &[Vec<usize>],
     standard: Standard,
 ) -> Result<(Pgc, u32), DvdError> {
     if nav.programs.is_empty() {
@@ -167,39 +199,45 @@ fn build_playlist_pgc(
     }
 
     let mut cells = Vec::with_capacity(nav.programs.len());
+    let mut programs = Vec::with_capacity(nav.programs.len());
     let mut duration = 0u32;
     let mut previous: Option<u8> = None;
-    for &program in &nav.programs {
-        let index = usize::from(program)
-            .checked_sub(1)
-            .ok_or_else(|| invalid("chapter playlist entry is zero"))?;
-        let cell = master
-            .cells
-            .get(index)
-            .copied()
-            .ok_or_else(|| invalid("chapter playlist entry is out of range"))?;
-        let span = layout
-            .cells
-            .get(index)
-            .ok_or_else(|| invalid("chapter playlist entry is out of range"))?;
-        let cell_duration = span
-            .end_ptm
-            .checked_sub(span.start_ptm)
-            .ok_or_else(|| invalid("cell duration underflow"))?;
-        duration = duration
-            .checked_add(cell_duration)
-            .ok_or_else(|| invalid("chapter playlist duration overflow"))?;
-        let follows = previous.is_some_and(|last| last.checked_add(1) == Some(cell.cell_id));
-        cells.push(Cell {
-            stc_discontinuity: !follows,
-            ..cell
-        });
-        previous = Some(cell.cell_id);
+    for indices in program_cells {
+        // Each entry is a program of the playlist's chain, starting at its first cell.
+        programs.push(
+            u8::try_from(cells.len().saturating_add(1))
+                .map_err(|_| invalid("too many programs"))?,
+        );
+        for &index in indices {
+            let cell = master
+                .cells
+                .get(index)
+                .copied()
+                .ok_or_else(|| invalid("chapter playlist entry is out of range"))?;
+            let span = layout
+                .cells
+                .get(index)
+                .ok_or_else(|| invalid("chapter playlist entry is out of range"))?;
+            let cell_duration = span
+                .end_ptm
+                .checked_sub(span.start_ptm)
+                .ok_or_else(|| invalid("cell duration underflow"))?;
+            duration = duration
+                .checked_add(cell_duration)
+                .ok_or_else(|| invalid("chapter playlist duration overflow"))?;
+            let follows = previous.is_some_and(|last| last.checked_add(1) == Some(cell.cell_id));
+            cells.push(Cell {
+                stc_discontinuity: !follows,
+                // A layer break's cell keeps its pause where it follows its cell in the VOB.
+                seamless: follows && cell.seamless,
+                ..cell
+            });
+            previous = Some(cell.cell_id);
+        }
     }
-
-    let programs = (1..=cells.len())
-        .map(|i| u8::try_from(i).map_err(|_| invalid("too many programs")))
-        .collect::<Result<Vec<_>, DvdError>>()?;
+    if cells.len() > 255 {
+        return Err(invalid("chapter playlist has too many cells"));
+    }
 
     let pgc = Pgc {
         prohibited_ops: nav.prohibited_ops,
@@ -228,13 +266,13 @@ fn playback_mode(order: PlaybackOrder, count: usize) -> u8 {
 }
 
 /// The time map of a chapter playlist PGC: its VOBUs in play order, with the playlist's own running time.
-fn build_playlist_tmap(layout: &VobsLayout, programs: &[u16]) -> Result<(u8, Vec<u32>), DvdError> {
+fn build_playlist_tmap(
+    layout: &VobsLayout,
+    program_cells: &[Vec<usize>],
+) -> Result<(u8, Vec<u32>), DvdError> {
     let mut points = Vec::new();
     let mut offset = 0u64;
-    for &program in programs {
-        let index = usize::from(program)
-            .checked_sub(1)
-            .ok_or_else(|| invalid("chapter playlist entry is zero"))?;
+    for &index in program_cells.iter().flatten() {
         let span = layout
             .cells
             .get(index)
@@ -265,7 +303,7 @@ fn root_menu(nav: &TitleNav) -> Option<VtsRootMenu> {
         // Same language unit as the VMGM menus.
         language: *b"en",
         pgc: Pgc {
-            prohibited_ops: 0,
+            prohibited_ops: crate::UOP_TIME_PLAY,
             pre: vm_commands(&nav.menu_remote),
             ..Pgc::default()
         },
@@ -387,15 +425,13 @@ fn build_audio_attrs(audio: &[LoadedAudio]) -> Result<Vec<AudioAttr>, DvdError> 
 
 /// Build the title PGC from mux layout and compiled navigation. `cell_still` is every cell's still time
 /// (`0xFF` for a manual-advance slideshow).
-#[allow(clippy::too_many_arguments)]
 fn build_pgc(
     layout: &VobsLayout,
     duration: u32,
-    audio_streams: usize,
-    subtitle_streams: usize,
+    (audio_streams, subtitle_streams): (usize, usize),
     standard: Standard,
     nav: &TitleNav,
-    cell_still: u8,
+    (cell_still, program_cells, layer_break_cell): (u8, &[usize], Option<usize>),
 ) -> Result<Pgc, DvdError> {
     if layout.cells.is_empty() {
         return Err(invalid("no cells"));
@@ -417,6 +453,8 @@ fn build_pgc(
                 vob_id: 1,
                 cell_id: cell.cell_id,
                 stc_discontinuity: idx == 0,
+                // The layer break's cell is not seamless: the player may pause there to change layers.
+                seamless: idx != 0 && Some(idx) != layer_break_cell,
                 still_time: cell_still,
                 playback_time: BcdTime::from_90k(u64::from(cell_duration), standard),
                 first_sector: cell.first_sector,
@@ -426,9 +464,16 @@ fn build_pgc(
         })
         .collect::<Result<Vec<_>, DvdError>>()?;
 
-    let programs = (1..=cells.len())
-        .map(|i| u8::try_from(i).map_err(|_| invalid("too many programs")))
+    // The program map: the cells that start chapters (1-based).
+    let programs = program_cells
+        .iter()
+        .map(|index| {
+            u8::try_from(index.saturating_add(1)).map_err(|_| invalid("too many programs"))
+        })
         .collect::<Result<Vec<_>, DvdError>>()?;
+    if programs.is_empty() {
+        return Err(invalid("no programs"));
+    }
 
     Ok(Pgc {
         prohibited_ops: nav.prohibited_ops,
@@ -495,7 +540,9 @@ fn invalid(msg: &str) -> DvdError {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_playlist_pgc, build_playlist_tmap, build_tmap, playback_mode};
+    use super::{
+        build_playlist_pgc, build_playlist_tmap, build_tmap, playback_mode, program_cell_lists,
+    };
     use crate::DvdError;
     use disccraft_ifo::{BcdTime, Cell, Pgc, Standard};
     use disccraft_nav::ChapterPlaylistNav;
@@ -542,6 +589,7 @@ mod tests {
                     vob_id: 1,
                     cell_id: c.cell_id,
                     stc_discontinuity: i == 0,
+                    seamless: i != 0,
                     playback_time: BcdTime::from_90k(90_000, Standard::Ntsc),
                     first_sector: c.first_sector,
                     last_vobu_start: c.last_vobu_start,
@@ -577,7 +625,8 @@ mod tests {
             post: Vec::new(),
             prohibited_ops: 0,
         };
-        let (pgc, duration) = build_playlist_pgc(&layout, &master, &nav, Standard::Ntsc)?;
+        let cells = program_cell_lists(&[0, 1, 2], 3, &nav.programs)?;
+        let (pgc, duration) = build_playlist_pgc(&layout, &master, &nav, &cells, Standard::Ntsc)?;
         assert_eq!(duration, 360_000);
         let ids: Vec<u8> = pgc.cells.iter().map(|c| c.cell_id).collect();
         assert_eq!(ids, vec![3, 1, 2, 3]);
@@ -588,10 +637,39 @@ mod tests {
         assert_eq!(pgc.playback_mode, 0xC3);
         assert_eq!(pgc.playback_time.to_90k().ok(), Some(360_000));
 
-        let (unit, tmap) = build_playlist_tmap(&layout, &nav.programs)?;
+        let (unit, tmap) = build_playlist_tmap(&layout, &cells)?;
         assert_eq!(unit, 1);
         // Seconds 1..=4 of the playlist start in cells 1, 2, 3, 3 (the last VOBU at or before each second).
         assert_eq!(tmap, vec![0, 10, 20, 20]);
+        Ok(())
+    }
+
+    /// M14.2: with a layer break's cell (cell 2) inside chapter 1, a chapter playlist plays both of the chapter's
+    /// cells as one program; the program map points at each program's first cell.
+    #[test]
+    fn a_chapter_with_a_layer_break_plays_both_cells() -> Result<(), DvdError> {
+        let (layout, master) = three_cell_layout();
+        // Programs start at cells 1 and 3 (0-based 0 and 2); cell 2 is the layer break's.
+        let cells = program_cell_lists(&[0, 2], 3, &[2, 1])?;
+        assert_eq!(cells, vec![vec![2], vec![0, 1]]);
+        let nav = ChapterPlaylistNav {
+            chapter_playlist: 7,
+            timeline: TimelineId(1),
+            title: 2,
+            vts_ttn: 2,
+            programs: vec![2, 1],
+            order: PlaybackOrder::Sequential,
+            pre: Vec::new(),
+            post: Vec::new(),
+            prohibited_ops: 0,
+        };
+        let (pgc, duration) = build_playlist_pgc(&layout, &master, &nav, &cells, Standard::Ntsc)?;
+        assert_eq!(duration, 270_000);
+        let ids: Vec<u8> = pgc.cells.iter().map(|c| c.cell_id).collect();
+        assert_eq!(ids, vec![3, 1, 2]);
+        assert_eq!(pgc.program_entry_cells, vec![1, 2]);
+        assert!(program_cell_lists(&[0, 2], 3, &[3]).is_err());
+        assert!(program_cell_lists(&[0, 2], 3, &[0]).is_err());
         Ok(())
     }
 

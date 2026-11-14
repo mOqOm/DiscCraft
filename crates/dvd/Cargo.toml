@@ -8,6 +8,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+disccraft-ac3enc.workspace = true
 disccraft-transcode.workspace = true
 disccraft-nav.workspace = true
 disccraft-menu.workspace = true
@@ -16,11 +17,12 @@ disccraft-spu.workspace = true
 disccraft-project.workspace = true
 disccraft-psmux.workspace = true
 disccraft-ifo.workspace = true
+disccraft-vm.workspace = true
 thiserror.workspace = true
 
 [lints]
 workspace = true
 
 [dev-dependencies]
-filmcraft-mpeg2v.workspace = true
-disccraft-vm.workspace = true
+craft-video.workspace = true
+png.workspace = true

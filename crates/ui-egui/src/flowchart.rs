@@ -4,7 +4,10 @@ use crate::app::{DiscCraftApp, Selection};
 use crate::gui_params::with_target;
 use crate::i18n::{tl, tlf};
 use crate::menu_editor::link_label;
-use disccraft_project::{AssetId, Link, Menu, MenuBackground, MenuId, Project, TimelineId};
+use disccraft_project::{
+    AssetId, FLOWCHART_DISC, FLOWCHART_LIMIT, FlowPoint, Link, Menu, MenuBackground, MenuId,
+    Project, TimelineId,
+};
 use egui::{
     Align2, FontId, Id, Painter, Pos2, Rect, Response, ScrollArea, Sense, Stroke, StrokeKind,
     TextureHandle, Ui, Vec2, Visuals, vec2,
@@ -139,6 +142,49 @@ pub(crate) struct Edge {
 struct FlowDrag {
     /// Port being dragged from.
     port: Port,
+}
+
+/// A node being moved by hand (Encore: drag a node anywhere on the flowchart).
+#[derive(Clone, Copy)]
+struct NodeDrag {
+    /// The node.
+    node: NodeId,
+    /// Where the node was grabbed, from its top-left.
+    grab: Vec2,
+    /// The node's top-left when the drag started, from the flowchart's top-left.
+    start: Vec2,
+}
+
+/// The key of `node` in the project's moved flowchart nodes.
+pub(crate) fn node_key(node: NodeId) -> u64 {
+    match node {
+        NodeId::FirstPlay => FLOWCHART_DISC,
+        NodeId::Menu(id) => id.0,
+        NodeId::Timeline(id) => id.0,
+        NodeId::Slideshow(id) | NodeId::Playlist(id) | NodeId::ChapterPlaylist(id) => id,
+    }
+}
+
+/// Put the nodes that were moved by hand where they were left (`origin` is the flowchart's top-left).
+pub(crate) fn place_moved(
+    rects: &mut [(NodeId, Rect)],
+    moved: &BTreeMap<u64, FlowPoint>,
+    origin: Pos2,
+) {
+    for (id, rect) in rects.iter_mut() {
+        if let Some(point) = moved.get(&node_key(*id)) {
+            let min = origin + vec2(point.x as f32, point.y as f32);
+            *rect = Rect::from_min_size(min, rect.size());
+        }
+    }
+}
+
+/// The top-left of a node dragged by `grab` to `pointer`: never left of or above the flowchart, nor past
+/// [`FLOWCHART_LIMIT`].
+fn dragged_min(pointer: Pos2, grab: Vec2, origin: Pos2) -> Pos2 {
+    let limit = FLOWCHART_LIMIT as f32;
+    let offset = pointer - grab - origin;
+    origin + vec2(offset.x.clamp(0.0, limit), offset.y.clamp(0.0, limit))
 }
 
 /// Build nodes and edges from the project.
@@ -699,6 +745,7 @@ fn draw_edges(
         .iter()
         .map(|(_, rect)| rect.max.y)
         .fold(0.0_f32, f32::max);
+    let entries = entry_points(edges, centers, rects);
 
     for (index, edge) in edges.iter().enumerate() {
         let Some((_, from)) = centers.iter().find(|(port, _)| *port == edge.from) else {
@@ -711,10 +758,20 @@ fn draw_edges(
         };
         let target = *target;
 
-        let to = Pos2::new(target.min.x, target.center().y);
-        // Back links (to a column on the left) go around below the nodes; each gets its own lane.
-        let lane = bottom
-            + BACK_LANE_GAP * (1.0 + f32::from(u16::try_from(index).unwrap_or(u16::MAX) % 8));
+        // Each link comes into its own place on the target's left side (`entry_points`).
+        let Some(to) = entries.get(index).copied().flatten() else {
+            continue;
+        };
+        // Back links (to a node on the left) turn in the gap between the two nodes when one is clearly above the
+        // other (nodes moved by hand); otherwise they go around below the nodes, each in its own lane.
+        let source = rects
+            .iter()
+            .map(|(_, rect)| *rect)
+            .find(|rect| (rect.max.x - from.x).abs() < 0.5 && rect.y_range().contains(from.y));
+        let lane = between(source, target).unwrap_or(
+            bottom
+                + BACK_LANE_GAP * (1.0 + f32::from(u16::try_from(index).unwrap_or(u16::MAX) % 8)),
+        );
         let path = edge_path(from, to, lane);
         let stroke = Stroke::new(1.0, color);
 
@@ -727,17 +784,55 @@ fn draw_edges(
             arrow_head(painter, *before, *tip, stroke);
         }
 
+        // The label (a chapter) just before the arrow, above its line, on the canvas colour so lines under it do
+        // not cross the text. Links into one node come in at different heights, so their labels do not overlap.
         if !edge.label.is_empty() {
-            let mid = Pos2::new((from.x + to.x) * 0.5, (from.y + to.y) * 0.5);
-            painter.text(
-                mid,
-                Align2::CENTER_CENTER,
-                &edge.label,
-                FontId::proportional(11.0),
-                color,
-            );
+            let galley =
+                painter.layout_no_wrap(edge.label.clone(), FontId::proportional(11.0), color);
+            let anchor = Pos2::new(to.x - ARROW_HEAD - 3.0, to.y - 1.0);
+            let rect = Align2::RIGHT_BOTTOM.anchor_size(anchor, galley.size());
+            painter.rect_filled(rect.expand(1.0), 2.0, ui.visuals().panel_fill);
+            painter.galley(rect.min, galley, color);
         }
     }
+}
+
+/// Where each link comes into its target: the links into a node spread down its left side, in the order of the
+/// heights they come from (so they do not cross on the way in), evenly between its top and bottom; one alone comes
+/// into the middle. `None` for a link whose port or target is not drawn.
+fn entry_points(
+    edges: &[Edge],
+    centers: &[(Port, Pos2)],
+    rects: &[(NodeId, Rect)],
+) -> Vec<Option<Pos2>> {
+    let source_y = |edge: &Edge| {
+        centers
+            .iter()
+            .find(|(port, _)| *port == edge.from)
+            .map(|(_, at)| at.y)
+    };
+    let mut out = vec![None; edges.len()];
+    for (target, rect) in rects {
+        let mut incoming: Vec<(usize, f32)> = edges
+            .iter()
+            .enumerate()
+            .filter(|(_, edge)| edge.to == *target)
+            .filter_map(|(index, edge)| source_y(edge).map(|y| (index, y)))
+            .collect();
+        incoming.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+        let count = incoming.len();
+        // `as` is exact for the small counts of links into one node.
+        let step = rect.height() / (count as f32 + 1.0);
+        for (place, (index, _)) in incoming.into_iter().enumerate() {
+            if let Some(slot) = out.get_mut(index) {
+                *slot = Some(Pos2::new(
+                    rect.min.x,
+                    rect.min.y + step * (place as f32 + 1.0),
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// Vertical distance between the lanes of back links below the nodes.
@@ -746,6 +841,19 @@ const BACK_LANE_GAP: f32 = 10.0;
 const BACK_STUB: f32 = 12.0;
 /// Length of an arrow head.
 const ARROW_HEAD: f32 = 8.0;
+
+/// The middle of the free band between a link's source node and its target when one is clearly above the other.
+fn between(source: Option<Rect>, target: Rect) -> Option<f32> {
+    let source = source?;
+    let room = BACK_STUB * 2.0;
+    if target.min.y > source.max.y + room {
+        Some((source.max.y + target.min.y) * 0.5)
+    } else if target.max.y + room < source.min.y {
+        Some((target.max.y + source.min.y) * 0.5)
+    } else {
+        None
+    }
+}
 
 /// The polyline of a link: straight when the target is to the right, otherwise out to the right, down to `lane`,
 /// left past the target and up into its left edge.
@@ -873,6 +981,80 @@ fn finish_flow_drag(
     });
 
     None
+}
+
+/// Temporary-memory id of the node being moved.
+fn node_drag_id() -> Id {
+    Id::unique("disccraft_flowchart_node_drag")
+}
+
+/// The node being moved, if any.
+fn node_drag_state(ui: &Ui) -> Option<NodeDrag> {
+    ui.data(|data| data.get_temp::<NodeDrag>(node_drag_id()))
+}
+
+/// Forget a node move whose release this flowchart did not see (the pointer is up).
+fn clear_stale_node_drag(ui: &Ui) {
+    if !ui.input(|input| input.pointer.any_down()) {
+        ui.data_mut(|data| data.remove::<NodeDrag>(node_drag_id()));
+    }
+}
+
+/// Start moving the node under the place the button was pressed (a press on a port drags a link instead).
+fn begin_node_drag(ui: &Ui, response: &Response, rects: &[(NodeId, Rect)], origin: Pos2) {
+    if !response.drag_started_by(egui::PointerButton::Primary) {
+        return;
+    }
+    let Some(point) = ui
+        .input(|input| input.pointer.press_origin())
+        .or_else(|| response.interact_pointer_pos())
+    else {
+        return;
+    };
+    // The topmost node (drawn last) wins.
+    let Some((node, rect)) = rects.iter().rev().find(|(_, rect)| rect.contains(point)) else {
+        return;
+    };
+    let drag = NodeDrag {
+        node: *node,
+        grab: point - rect.min,
+        start: rect.min - origin,
+    };
+    ui.data_mut(|data| data.insert_temp(node_drag_id(), drag));
+}
+
+/// Leave a moved node where it was dropped (one undoable step).
+fn finish_node_drag(
+    app: &mut DiscCraftApp,
+    ui: &Ui,
+    response: &Response,
+    rects: &[(NodeId, Rect)],
+    origin: Pos2,
+) {
+    if !response.drag_stopped() {
+        return;
+    }
+    let Some(drag) = ui.data(|data| data.get_temp::<NodeDrag>(node_drag_id())) else {
+        return;
+    };
+    ui.data_mut(|data| data.remove::<NodeDrag>(node_drag_id()));
+    let Some((_, rect)) = rects.iter().find(|(id, _)| *id == drag.node) else {
+        return;
+    };
+    let offset = rect.min - origin;
+    // Let go where it started (a click that wobbled): nothing to undo.
+    if (offset - drag.start).length() < 0.5 {
+        return;
+    }
+    // `as` saturates; `dragged_min` keeps the offset within 0..=FLOWCHART_LIMIT.
+    let point = FlowPoint {
+        x: offset.x.round() as i32,
+        y: offset.y.round() as i32,
+    };
+    let _ = app.run_command(
+        "flowchart.moveNode",
+        serde_json::json!({ "node": node_key(drag.node), "x": point.x, "y": point.y }),
+    );
 }
 
 /// Clear a stale drag if the pointer is no longer down.
@@ -1083,7 +1265,7 @@ impl DiscCraftApp {
     /// Draw the flowchart and handle clicks and link dragging.
     pub(crate) fn flowchart_view(&mut self, ui: &mut Ui) {
         ui.label(tl!(
-            "Drag from a button or an end action to a menu, timeline, slideshow or playlist to link it."
+            "Drag a node to move it, or drag from a button or an end action to a menu, timeline, slideshow or playlist to link it."
         ));
 
         let _ = ScrollArea::both().show(ui, |ui| {
@@ -1111,11 +1293,26 @@ impl DiscCraftApp {
                 }
             }
         }
-        let (preview, _) = layout_split(&nodes, &edges, Pos2::ZERO);
-        let size = content_size(&preview);
+        let (mut preview, _) = layout_split(&nodes, &edges, Pos2::ZERO);
+        place_moved(&mut preview, &self.session.project.flowchart, Pos2::ZERO);
+        // At least the visible area, so nodes can be dragged anywhere in it.
+        let size = content_size(&preview).max(ui.available_size());
 
         let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
-        let (rects, divider) = layout_split(&nodes, &edges, response.rect.min);
+        let origin = response.rect.min;
+        let (mut rects, divider) = layout_split(&nodes, &edges, origin);
+        place_moved(&mut rects, &self.session.project.flowchart, origin);
+        // The node being moved follows the pointer, drawn over the others, with its links.
+        let node_drag = node_drag_state(ui);
+        if let Some(drag) = node_drag
+            && let Some(pointer) = ui.ctx().pointer_interact_pos()
+            && let Some(index) = rects.iter().position(|(id, _)| *id == drag.node)
+        {
+            let (id, rect) = rects.remove(index);
+            let min = dragged_min(pointer, drag.grab, origin);
+            rects.push((id, Rect::from_min_size(min, rect.size())));
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
         let mut centers = port_centers(&nodes, &rects);
         for edge in &edges {
             if let Port::Button { menu, .. } = edge.from
@@ -1136,8 +1333,13 @@ impl DiscCraftApp {
 
         let mut drag = flow_drag_state(ui);
         drag = begin_flow_drag(ui, &response, &centers, drag);
+        if drag.is_none() {
+            begin_node_drag(ui, &response, &rects, origin);
+        }
         drag = finish_flow_drag(self, ui, &response, drag, &rects);
         drag = clear_stale_flow_drag(ui, drag);
+        finish_node_drag(self, ui, &response, &rects, origin);
+        clear_stale_node_drag(ui);
 
         if let Some(state) = drag {
             draw_drag_line(&painter, ui, &centers, state, ui.ctx().pointer_hover_pos());
@@ -1180,12 +1382,109 @@ mod tests {
     //! Tests for the flowchart graph and layout.
 
     use super::{
-        Node, NodeId, Port, build_graph, column_of, command_for_port, edge_path, layout,
-        layout_split, link_to, port_accepts,
+        Edge, Node, NodeId, Port, build_graph, column_of, command_for_port, dragged_min, edge_path,
+        entry_points, layout, layout_split, link_to, node_key, place_moved, port_accepts,
     };
     use disccraft_project::{Link, MenuId, Project, TimelineId};
     use egui::Pos2;
     use std::path::Path;
+
+    /// Links into one node come in at their own heights, in the order of where they come from (they do not
+    /// cross or share an arrow); one alone comes into the middle.
+    #[test]
+    fn links_into_a_node_spread_down_its_side() {
+        use egui::{Rect, vec2};
+        let menu = MenuId(8);
+        let main = NodeId::Timeline(TimelineId(5));
+        let other = NodeId::Timeline(TimelineId(9));
+        let port = |index| Port::Button { menu, index };
+        let edges: Vec<Edge> = [(2, main), (0, main), (1, main), (3, other)]
+            .into_iter()
+            .map(|(index, to)| Edge {
+                from: port(index),
+                to,
+                label: String::new(),
+            })
+            .collect();
+        let centers: Vec<(Port, Pos2)> = (0..4)
+            .map(|index| (port(index), Pos2::new(100.0, 10.0 + 20.0 * index as f32)))
+            .collect();
+        let rects = vec![
+            (
+                main,
+                Rect::from_min_size(Pos2::new(300.0, 0.0), vec2(180.0, 100.0)),
+            ),
+            (
+                other,
+                Rect::from_min_size(Pos2::new(300.0, 200.0), vec2(180.0, 60.0)),
+            ),
+        ];
+        let entries = entry_points(&edges, &centers, &rects);
+        let y = |index: usize| entries.get(index).copied().flatten().map(|at| at.y);
+        // Into `main`: button 0 at the top quarter, 1 in the middle, 2 at the bottom quarter.
+        assert_eq!(y(1), Some(25.0));
+        assert_eq!(y(2), Some(50.0));
+        assert_eq!(y(0), Some(75.0));
+        // Alone: the middle of `other`, on its left side.
+        assert_eq!(
+            entries.get(3).copied().flatten(),
+            Some(Pos2::new(300.0, 230.0))
+        );
+    }
+
+    /// Nodes moved by hand are drawn where they were left; the others keep the automatic layout, and a drag
+    /// cannot take a node off the top or left of the flowchart.
+    #[test]
+    fn moved_nodes_keep_their_place() {
+        use disccraft_project::FlowPoint;
+        use egui::{Rect, vec2};
+        use std::collections::BTreeMap;
+
+        let menu = NodeId::Menu(MenuId(4));
+        let timeline = NodeId::Timeline(TimelineId(5));
+        let origin = Pos2::new(10.0, 20.0);
+        let mut rects = vec![
+            (
+                NodeId::FirstPlay,
+                Rect::from_min_size(origin, vec2(180.0, 60.0)),
+            ),
+            (
+                menu,
+                Rect::from_min_size(Pos2::new(270.0, 20.0), vec2(180.0, 80.0)),
+            ),
+            (
+                timeline,
+                Rect::from_min_size(Pos2::new(530.0, 20.0), vec2(180.0, 90.0)),
+            ),
+        ];
+        let mut moved = BTreeMap::new();
+        moved.insert(node_key(menu), FlowPoint { x: 600, y: 400 });
+        moved.insert(node_key(NodeId::FirstPlay), FlowPoint { x: 0, y: 200 });
+        place_moved(&mut rects, &moved, origin);
+        let at = |index: usize| rects.get(index).map(|(_, rect)| *rect);
+        assert_eq!(at(0).map(|rect| rect.min), Some(Pos2::new(10.0, 220.0)));
+        assert_eq!(
+            at(1),
+            Some(Rect::from_min_size(
+                Pos2::new(610.0, 420.0),
+                vec2(180.0, 80.0)
+            ))
+        );
+        assert_eq!(at(2).map(|rect| rect.min), Some(Pos2::new(530.0, 20.0)));
+
+        assert_eq!(node_key(NodeId::FirstPlay), 0);
+        assert_eq!(node_key(NodeId::Slideshow(9)), 9);
+        let grab = vec2(30.0, 10.0);
+        assert_eq!(
+            dragged_min(Pos2::new(100.0, 100.0), grab, origin),
+            Pos2::new(70.0, 90.0)
+        );
+        assert_eq!(dragged_min(Pos2::new(0.0, 0.0), grab, origin), origin);
+        assert_eq!(
+            dragged_min(Pos2::new(1.0e9, 50.0), grab, origin),
+            Pos2::new(10.0 + 100_000.0, 40.0)
+        );
+    }
 
     /// Build a small project and check graph nodes and edges.
     #[test]

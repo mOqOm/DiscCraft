@@ -17,7 +17,7 @@ resvg.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-photocraft-psd.workspace = true
+craft-psd.workspace = true
 
 [lints]
 workspace = true

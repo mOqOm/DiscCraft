@@ -71,7 +71,7 @@ pub(crate) fn build_menus(
 
     for hidden in &nav.hidden {
         let pgc = Pgc {
-            prohibited_ops: 0,
+            prohibited_ops: crate::UOP_TIME_PLAY,
             pre: vm_commands(&hidden.pre),
             ..Pgc::default()
         };
@@ -200,6 +200,7 @@ fn build_still_menu_vob(
         vob_id,
         cell_id: 1,
         stc_discontinuity: true,
+        seamless: false,
         still_time: still_time(menu, nav_menu),
         playback_time,
         first_sector: layout.first_sector,
@@ -208,7 +209,7 @@ fn build_still_menu_vob(
     };
 
     let pgc = Pgc {
-        prohibited_ops: nav_menu.prohibited_ops,
+        prohibited_ops: nav_menu.prohibited_ops | crate::UOP_TIME_PLAY,
         playback_time,
         audio_streams: 0,
         subpicture_streams: 1,
@@ -812,6 +813,7 @@ fn build_motion_pgc(
             vob_id,
             cell_id: cell_layout.cell_id,
             stc_discontinuity: index == 0,
+            seamless: index != 0,
             still_time: 0,
             playback_time: BcdTime::from_90k(duration, standard),
             first_sector: cell_layout.first_sector,
@@ -856,7 +858,7 @@ fn build_motion_pgc(
     let programs: Vec<u8> = (1..=u8::try_from(cells.len()).unwrap_or(1)).collect();
 
     let pgc = Pgc {
-        prohibited_ops: nav_menu.prohibited_ops,
+        prohibited_ops: nav_menu.prohibited_ops | crate::UOP_TIME_PLAY,
         playback_time,
         audio_streams: u8::from(audio),
         subpicture_streams: 1,

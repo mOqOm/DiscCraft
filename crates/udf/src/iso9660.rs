@@ -15,10 +15,8 @@ pub const PATH_TABLE_L_SECTOR: u32 = 257;
 pub const PATH_TABLE_M_SECTOR: u32 = 258;
 /// Root directory extent sector.
 pub const ROOT_DIR_SECTOR: u32 = 259;
-/// AUDIO_TS directory extent sector.
-pub const AUDIO_DIR_SECTOR: u32 = 260;
-/// VIDEO_TS directory extent sector.
-pub const VIDEO_DIR_SECTOR: u32 = 261;
+/// VIDEO_TS directory extent sector (a DVD-Video disc has no AUDIO_TS directory: it belongs to DVD-Audio).
+pub const VIDEO_DIR_SECTOR: u32 = 260;
 
 /// Offset of the root directory record in the PVD used by this bridge.
 pub const PVD_ROOT_RECORD_OFFSET: usize = 156;

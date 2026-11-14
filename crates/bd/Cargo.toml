@@ -19,5 +19,8 @@ disccraft-psmux.workspace = true
 disccraft-transcode.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+disccraft-vm.workspace = true
+
 [lints]
 workspace = true

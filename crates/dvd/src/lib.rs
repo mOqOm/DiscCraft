@@ -14,7 +14,9 @@ mod thumbnails;
 pub use thumbnails::{ThumbnailFrame, still_thumbnails};
 mod output;
 mod prepare;
+mod preview;
 pub use prepare::{Estimate, TranscodeStatus, encode_hd_slideshow, estimate, transcode_status};
+pub use preview::preview_model;
 mod source;
 pub mod streams;
 pub use streams::{
@@ -22,6 +24,10 @@ pub use streams::{
     subtitle_tracks_sized,
 };
 mod parallel;
+
+/// UOP0, Time play / Time search: prohibited in the first play PGC and in menus (it means nothing there), as
+/// Encore writes them.
+pub(crate) const UOP_TIME_PLAY: u32 = 0x0000_0001;
 mod vmg;
 mod vts;
 
@@ -33,7 +39,7 @@ use disccraft_nav::{ChapterPlaylistNav, Cmd, CompiledNav, NavError, TitleNav, co
 use disccraft_project::{
     DiscKind, Project, Slideshow, Tick, Timeline, TimelineId, VideoStandard, has_errors,
 };
-use disccraft_psmux::es::{LpcmStream, VideoStream, parse_video, parse_wav};
+use disccraft_psmux::es::{VideoStream, parse_video};
 use disccraft_psmux::mux::MuxError;
 use thiserror::Error;
 
@@ -110,6 +116,21 @@ pub struct TitleReport {
     pub sectors: u32,
     /// Title duration in 90 kHz ticks.
     pub duration_90k: u32,
+    /// The cell (1-based, in the title's program chain) that starts at the manual layer break, when it is in this
+    /// title.
+    pub layer_break_cell: Option<u8>,
+}
+
+/// The frame (at the disc's rate) nearest to `ticks` from a title's start, and that frame's time in 90 kHz ticks:
+/// where the build puts a chapter or the manual layer break.
+#[must_use]
+pub fn frame_of(ticks: i64, standard: disccraft_project::VideoStandard) -> (u64, u64) {
+    let frame = prepare::frame_at(ticks, standard);
+    let per_frame: u64 = match standard {
+        disccraft_project::VideoStandard::Ntsc => 3_003,
+        disccraft_project::VideoStandard::Pal => 3_600,
+    };
+    (frame, frame.saturating_mul(per_frame))
 }
 
 /// Complete VIDEO_TS build result.
@@ -257,13 +278,17 @@ pub fn build_video_ts_with(
 
 /// Validate project-level constraints. Returns the title count (timelines, slideshows and chapter playlists)
 /// and the title set count (timelines and slideshows: a chapter playlist shares its master's title set).
-fn validate_project(project: &Project) -> Result<(usize, usize), DvdError> {
+pub(crate) fn validate_project(project: &Project) -> Result<(usize, usize), DvdError> {
     if project.settings.kind != DiscKind::Dvd {
         return Err(DvdError::Unsupported(
             "only DVD-Video projects are supported".to_string(),
         ));
     }
+    validate_contents(project)
+}
 
+/// [`validate_project`] without the disc kind: the project passes its check and has 1 to 99 titles.
+pub(crate) fn validate_contents(project: &Project) -> Result<(usize, usize), DvdError> {
     let problems = project.check();
     if has_errors(&problems) {
         let mut message = String::from("project check failed:");
@@ -408,6 +433,12 @@ fn build_timeline_titles(
             built.vts_attr_block,
             built.total_bytes,
         )?;
+        // The title's report (just recorded) says where the manual layer break's cell is.
+        if let Some(report) = acc.reports.last_mut() {
+            report.layer_break_cell = loaded
+                .layer_break_cell
+                .and_then(|cell| u8::try_from(cell.saturating_add(1)).ok());
+        }
         for (extra, nav_extra) in built.extras.iter().zip(&extras) {
             acc.reports.push(TitleReport {
                 timeline: nav_extra.chapter_playlist,
@@ -416,6 +447,7 @@ fn build_timeline_titles(
                 chapters: extra.chapters,
                 sectors: built.vobs_sectors,
                 duration_90k: extra.duration_90k,
+                layer_break_cell: None,
             });
             acc.entries.push((
                 nav_extra.title,
@@ -514,6 +546,7 @@ fn record_built(
         chapters,
         sectors: vobs_sectors,
         duration_90k,
+        layer_break_cell: None,
     });
 
     acc.entries.push((
@@ -583,24 +616,24 @@ pub(crate) fn load_slideshow_title(
     let durations = prepare::effective_slide_durations(project, slideshow)?;
     let cell_starts = slideshow_cell_starts(&durations)?;
 
-    let mut audio = Vec::new();
-    let wav = prepared
+    let soundtrack = prepared
         .transcoded_audio
         .as_ref()
         .ok_or_else(|| DvdError::Invalid("slideshow audio missing".to_string()))?;
-    let stream = parse_wav(&read_path(wav)?)
-        .map_err(|err| DvdError::Invalid(format!("slideshow audio: {err}")))?;
-    validate_lpcm(&stream)?;
-    audio.push(source::LoadedAudio::Lpcm {
-        stream,
-        language: None,
-    });
+    let audio = vec![source::load_soundtrack(
+        soundtrack,
+        first_pts,
+        source::audio_language(project),
+    )?];
 
+    let program_cells = (0..cell_starts.len()).collect();
     Ok(source::LoadedTitle {
         video,
         video_data,
         audio,
         cell_starts,
+        program_cells,
+        layer_break_cell: None,
         first_pts,
         ntsc: standard == VideoStandard::Ntsc,
         wide: project.settings.widescreen,
@@ -705,32 +738,6 @@ fn first_pts(video: &VideoStream) -> Result<i64, DvdError> {
         .map(|picture| picture.pts)
         .min()
         .ok_or_else(|| DvdError::Invalid("video has no pictures".to_string()))
-}
-
-fn validate_lpcm(stream: &LpcmStream) -> Result<(), DvdError> {
-    if stream.sample_rate != 48_000 {
-        return Err(DvdError::Unsupported(format!(
-            "LPCM sample rate {} is not 48 kHz",
-            stream.sample_rate
-        )));
-    }
-    if stream.bits != 16 {
-        return Err(DvdError::Unsupported(
-            "M2 supports only 16-bit LPCM".to_string(),
-        ));
-    }
-
-    let channels = source::channels_u8(stream.channels)?;
-    if channels == 0 || channels > 8 {
-        return Err(DvdError::Unsupported(
-            "LPCM channel count must be 1..=8".to_string(),
-        ));
-    }
-    if stream.frame_bytes == 0 {
-        return Err(DvdError::Invalid("LPCM frame size is zero".to_string()));
-    }
-
-    Ok(())
 }
 
 fn read_path(path: &Path) -> Result<Vec<u8>, DvdError> {

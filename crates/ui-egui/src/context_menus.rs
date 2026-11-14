@@ -154,14 +154,38 @@ impl DiscCraftApp {
         ui.menu_button(tl!("New"), |ui| self.new_items(ui, None, None));
         ui.menu_button(tl!("Import"), |ui| self.import_items(ui));
         ui.separator();
+        // Encore の「すべて自動レイアウト」: 手で動かしたノードを、すべて自動の配置に戻す。
+        let moved = !self.session.project.flowchart.is_empty();
+        if ui
+            .add_enabled(moved, egui::Button::new(tl!("Auto Layout All")))
+            .clicked()
+        {
+            let _ = self.run_command("flowchart.arrange", serde_json::json!({}));
+            ui.close();
+        }
+        ui.separator();
         if crate::actions::menu_item(ui, crate::actions::Action::Preview, true) {
             self.run_action(ui, crate::actions::Action::Preview);
             ui.close();
         }
     }
 
-    /// The right-click menu of a flowchart node (Encore: 開く / ボタンを表示 / メニューを Photoshop で編集 /
-    /// リンクの指定… / ここからプレビューする). The disc node only gets リンクの指定 (the first play).
+    /// Encore の「自動レイアウト」: 手で動かしたノードを自動の配置に戻す（動かしていなければ選べない）。
+    fn flow_auto_layout_item(&mut self, ui: &mut Ui, node: NodeId) {
+        let key = crate::flowchart::node_key(node);
+        let moved = self.session.project.flowchart.contains_key(&key);
+        if ui
+            .add_enabled(moved, egui::Button::new(tl!("Auto Layout")))
+            .clicked()
+        {
+            let _ = self.run_command("flowchart.arrange", serde_json::json!({ "node": key }));
+            ui.close();
+        }
+    }
+
+    /// The right-click menu of a flowchart node (Encore: 開く / 自動レイアウト / ボタンを表示 / メニューを Photoshop
+    /// で編集 / リンクの指定… / ここからプレビューする). The disc node gets 自動レイアウト and リンクの指定 (the
+    /// first play).
     pub(crate) fn flow_node_menu(&mut self, ui: &mut Ui, node: NodeId) {
         let selection = node_selection(node);
         if selection != Selection::None {
@@ -169,6 +193,7 @@ impl DiscCraftApp {
                 self.select(selection);
                 ui.close();
             }
+            self.flow_auto_layout_item(ui, node);
             if ui.button(tl!("Rename…")).clicked() {
                 self.select(selection);
                 self.start_rename();
@@ -192,6 +217,10 @@ impl DiscCraftApp {
                     ui.close();
                 }
             }
+            ui.separator();
+        }
+        if selection == Selection::None {
+            self.flow_auto_layout_item(ui, node);
             ui.separator();
         }
         // リンクの指定: ディスクはファーストプレイ、ほかはエンドアクション。

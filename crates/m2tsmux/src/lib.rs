@@ -1,4 +1,5 @@
-//! BDAV TS（m2ts）の多重化。
+//! BDAV TS（m2ts）の多重化と、1 つのストリームの PES の読み戻し（[`pes_payloads`]。ISO/IEC 13818-1 の
+//! トランスポートパケットと PES の形）。
 //!
 //! 層: L0（docs/architecture.md §5）。資料は crate の README を参照。
 #![deny(
@@ -14,9 +15,11 @@ mod lpcm;
 mod mux;
 mod packet;
 mod psi;
+mod read;
 
 pub use lpcm::bd_lpcm_units;
 pub use mux::mux_m2ts;
+pub use read::pes_payloads;
 
 use std::fmt;
 

@@ -460,10 +460,11 @@ fn frame_count(duration: Tick, options: &HdOptions) -> Result<u64, TranscodeErro
             "frame count denominator is zero".to_string(),
         ));
     }
+    // The nearest frame: a 6.0 s clip at 23.976 is 144 frames (143.86), all of the source.
     let count = if numerator == 0 {
         1
     } else {
-        numerator / denominator
+        numerator.saturating_add(denominator / 2) / denominator
     };
     u64::try_from(count)
         .map_err(|_| TranscodeError::Unsupported("frame count too large".to_string()))
@@ -578,6 +579,26 @@ fn finish_encoder<W: Write>(
     Ok(())
 }
 
+/// `frame` as RGB24 at `width` x `height` with square pixels, the picture fitted in with bars: the HD transcode's
+/// rendering, for showing a frame at the disc's HD size.
+pub(crate) fn render_fit(
+    frame: &VideoFrame,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, TranscodeError> {
+    render_rgb_frame(
+        frame,
+        &HdOptions {
+            width,
+            height,
+            fps_num: 1,
+            fps_den: 1,
+            target_kbps: 0,
+            max_kbps: 0,
+        },
+    )
+}
+
 /// Render a source frame into an RGB24 HD frame.
 fn render_rgb_frame(frame: &VideoFrame, options: &HdOptions) -> Result<Vec<u8>, TranscodeError> {
     let geometry = target_geometry(
@@ -681,7 +702,11 @@ fn clamp_u128(value: u128, max: u32) -> u32 {
     }
 }
 
-/// Render RGBA source into RGB24 output with bilinear sampling.
+/// Render RGBA source into RGB24 output with bilinear sampling, the picture in `geometry` and black around it.
+///
+/// The arithmetic is [`sample_bilinear`]'s, pixel for pixel: each source pixel composited onto black once, the
+/// columns' and rows' source positions and weights worked out once, and the rows shared out between the CPU's
+/// cores (a 1920 x 1080 frame for the HD transcode and the preview's HD titles).
 fn render_rgb(
     rgba: &[u8],
     source_width: u32,
@@ -694,17 +719,80 @@ fn render_rgb(
     let height = usize::try_from(output_height).ok()?;
     let size = width.checked_mul(height)?.checked_mul(3)?;
     let mut rgb = vec![0u8; size];
-
     let end_x = geometry.x.checked_add(geometry.width)?;
     let end_y = geometry.y.checked_add(geometry.height)?;
-    for y in geometry.y..end_y {
-        for x in geometry.x..end_x {
-            let sx = source_coordinate(x, geometry.x, geometry.width, source_width);
-            let sy = source_coordinate(y, geometry.y, geometry.height, source_height);
-            let pixel = sample_bilinear(rgba, source_width, source_height, sx, sy)?;
-            write_rgb(&mut rgb, output_width, y, x, pixel)?;
-        }
+    if geometry.width == 0 || geometry.height == 0 {
+        return Some(rgb);
     }
+    let sw = usize::try_from(source_width).ok()?;
+    let sh = usize::try_from(source_height).ok()?;
+    if sw == 0 || sh == 0 || end_x > output_width || end_y > output_height {
+        return None;
+    }
+    let source_pixels = sw.checked_mul(sh)?;
+    let (pixels, _) = rgba.as_chunks::<4>();
+    let pixels = pixels.get(..source_pixels)?;
+    // Composited onto black once (exact: an opaque pixel keeps its colour).
+    let composited: Vec<[u8; 3]> = pixels.iter().map(|pixel| composite_pixel(*pixel)).collect();
+
+    let axis = |position: u32, origin: u32, content: u32, source: u32, last: usize| {
+        let at = source_coordinate(position, origin, content, source);
+        let first = usize::try_from(at >> FIXED_POINT_SHIFT)
+            .unwrap_or(last)
+            .min(last);
+        let second = first.saturating_add(1).min(last);
+        let weight = u32::try_from(at & (FIXED_POINT_ONE - 1)).unwrap_or(0);
+        (first, second, weight)
+    };
+    let columns: Vec<(usize, usize, u32)> = (geometry.x..end_x)
+        .map(|x| axis(x, geometry.x, geometry.width, source_width, sw - 1))
+        .collect();
+    let rows: Vec<(usize, usize, u32)> = (geometry.y..end_y)
+        .map(|y| axis(y, geometry.y, geometry.height, source_height, sh - 1))
+        .collect();
+
+    let stride = width.checked_mul(3)?;
+    let left = usize::try_from(geometry.x).ok()?.checked_mul(3)?;
+    let top = usize::try_from(geometry.y).ok()?;
+    let content_rows = rgb.get_mut(top.checked_mul(stride)?..)?;
+    let render_row = |row: &mut [u8], (y0, y1, fy): (usize, usize, u32)| {
+        let (Some(above), Some(below)) = (
+            composited.get(y0 * sw..(y0 + 1) * sw),
+            composited.get(y1 * sw..(y1 + 1) * sw),
+        ) else {
+            return;
+        };
+        let Some(out) = row.get_mut(left..) else {
+            return;
+        };
+        let (out, _) = out.as_chunks_mut::<3>();
+        for (slot, &(x0, x1, fx)) in out.iter_mut().zip(&columns) {
+            let (Some(c00), Some(c01), Some(c10), Some(c11)) =
+                (above.get(x0), above.get(x1), below.get(x0), below.get(x1))
+            else {
+                continue;
+            };
+            *slot = interpolate_rgb(*c00, *c01, *c10, *c11, fx, fy);
+        }
+    };
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .clamp(1, rows.len().max(1));
+    let per_worker = rows.len().div_ceil(workers).max(1);
+    std::thread::scope(|scope| {
+        let mut rest: &mut [u8] = content_rows;
+        for block in rows.chunks(per_worker) {
+            let bytes = block.len().saturating_mul(stride).min(rest.len());
+            let (mine, after) = std::mem::take(&mut rest).split_at_mut(bytes);
+            rest = after;
+            let render_row = &render_row;
+            let _ = scope.spawn(move || {
+                for (row, weights) in mine.chunks_mut(stride).zip(block) {
+                    render_row(row, *weights);
+                }
+            });
+        }
+    });
     Some(rgb)
 }
 
@@ -727,7 +815,8 @@ fn source_coordinate(output_pos: u32, origin: u32, content_size: u32, source_siz
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
-/// Sample RGBA bilinearly and composite alpha onto black.
+/// Sample RGBA bilinearly and composite alpha onto black (the reference [`render_rgb`] matches).
+#[cfg(test)]
 fn sample_bilinear(
     rgba: &[u8],
     source_width: u32,
@@ -769,6 +858,7 @@ fn sample_bilinear(
 }
 
 /// Read one RGBA pixel.
+#[cfg(test)]
 fn pixel_at(rgba: &[u8], width: usize, x: usize, y: usize) -> Option<[u8; 4]> {
     let index = y.checked_mul(width)?.checked_add(x)?.checked_mul(4)?;
     let end = index.checked_add(4)?;
@@ -829,6 +919,7 @@ fn interpolate_channel(c00: u8, c01: u8, c10: u8, c11: u8, fx: u32, fy: u32) -> 
 }
 
 /// Write one RGB pixel into the output buffer.
+#[cfg(test)]
 fn write_rgb(rgb: &mut [u8], output_width: u32, y: u32, x: u32, pixel: [u8; 3]) -> Option<()> {
     let width = usize::try_from(output_width).ok()?;
     let row = usize::try_from(y).ok()?.checked_mul(width)?;
@@ -1223,7 +1314,7 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
-    /// Six seconds at 24000/1001 yields 143 frames.
+    /// Six seconds at 24000/1001 yields 144 frames (143.86, the nearest).
     #[test]
     fn frame_count_six_seconds() {
         let ticks = 6 * TICKS_PER_SECOND;
@@ -1235,7 +1326,7 @@ mod tests {
             target_kbps: 1000,
             max_kbps: 2000,
         };
-        assert_eq!(frame_count(Tick(ticks), &options).unwrap(), 143);
+        assert_eq!(frame_count(Tick(ticks), &options).unwrap(), 144);
     }
 
     /// Direct encoder smoke test produces at least one keyframe.
@@ -1282,5 +1373,83 @@ mod tests {
             }
         }
         assert!(keyframes >= 1);
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::{Geometry, render_rgb, sample_bilinear, source_coordinate, write_rgb};
+
+    /// The per-pixel renderer [`render_rgb`] replaced, as the reference.
+    fn reference_render(
+        rgba: &[u8],
+        source_width: u32,
+        source_height: u32,
+        geometry: Geometry,
+        output_width: u32,
+        output_height: u32,
+    ) -> Option<Vec<u8>> {
+        let width = usize::try_from(output_width).ok()?;
+        let height = usize::try_from(output_height).ok()?;
+        let size = width.checked_mul(height)?.checked_mul(3)?;
+        let mut rgb = vec![0u8; size];
+
+        let end_x = geometry.x.checked_add(geometry.width)?;
+        let end_y = geometry.y.checked_add(geometry.height)?;
+        for y in geometry.y..end_y {
+            for x in geometry.x..end_x {
+                let sx = source_coordinate(x, geometry.x, geometry.width, source_width);
+                let sy = source_coordinate(y, geometry.y, geometry.height, source_height);
+                let pixel = sample_bilinear(rgba, source_width, source_height, sx, sy)?;
+                write_rgb(&mut rgb, output_width, y, x, pixel)?;
+            }
+        }
+        Some(rgb)
+    }
+
+    /// The fast renderer gives the per-pixel one's bytes: scaled up and down, letterboxed and pillarboxed, with
+    /// see-through pixels, and with the odd sizes of one row or column.
+    #[test]
+    fn the_fast_renderer_matches_the_per_pixel_one() {
+        let mut seed = 7_u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            (seed >> 16) as u8
+        };
+        for &(sw, sh, ow, oh, geometry) in &[
+            (
+                64_u32,
+                36_u32,
+                192_u32,
+                108_u32,
+                (0_u32, 0_u32, 192_u32, 108_u32),
+            ),
+            (200, 150, 96, 54, (12, 0, 72, 54)),
+            (50, 20, 80, 60, (0, 14, 80, 32)),
+            (1, 1, 7, 5, (1, 1, 5, 3)),
+            (9, 1, 3, 3, (0, 1, 3, 1)),
+        ] {
+            let pixels = usize::try_from(sw * sh * 4).unwrap_or(0);
+            let rgba: Vec<u8> = (0..pixels).map(|_| next()).collect();
+            let (x, y, width, height) = geometry;
+            let geometry = Geometry {
+                x,
+                y,
+                width,
+                height,
+            };
+            let fast = render_rgb(&rgba, sw, sh, geometry, ow, oh);
+            let reference = reference_render(&rgba, sw, sh, geometry, ow, oh);
+            assert!(fast.is_some());
+            assert_eq!(fast, reference, "{sw}x{sh} into {ow}x{oh}");
+        }
+        // Too little source data is refused, not read past.
+        let geometry = Geometry {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 4,
+        };
+        assert_eq!(render_rgb(&[0; 12], 4, 4, geometry, 4, 4), None);
     }
 }

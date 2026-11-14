@@ -89,6 +89,7 @@ impl DiscCraftApp {
     pub(crate) fn build_view(&mut self, ui: &mut Ui) {
         self.build_top_row(ui);
         self.build_description_row(ui);
+        self.build_progress_section(ui);
 
         ui.strong(tlf!(
             "{kind} Settings",
@@ -100,6 +101,7 @@ impl DiscCraftApp {
         self.disc_info_section(ui);
 
         if self.session.project.settings.kind == DiscKind::Dvd {
+            self.layer_break_section(ui);
             self.region_section(ui);
         }
 
@@ -107,8 +109,13 @@ impl DiscCraftApp {
         self.result_section(ui);
     }
 
-    /// Draws the format and output row with the Build button at the right (Encore's layout).
+    /// Draws the format and output row with the Build button at the right (Encore's layout). In a narrow panel the
+    /// Build button gets a row of its own above them, so it is never cut off.
     fn build_top_row(&mut self, ui: &mut Ui) {
+        let narrow = ui.available_width() < 420.0;
+        if narrow {
+            self.build_button(ui);
+        }
         ui.horizontal(|ui| {
             ui.label(tl!("Format:"));
             self.format_combo(ui);
@@ -116,18 +123,42 @@ impl DiscCraftApp {
             ui.label(tl!("Output:"));
             self.output_combo(ui);
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let can_build = !self.build_job.is_running() && !self.build_path.trim().is_empty();
-                if ui
-                    .add_enabled(
-                        can_build,
-                        egui::Button::new(tl!("Build")).min_size(BUTTON_SIZE),
-                    )
-                    .clicked()
-                {
-                    self.start_build();
-                }
-            });
+            if !narrow {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.build_button(ui);
+                });
+            }
+        });
+    }
+
+    /// The Build button: usable whenever no build runs (an empty Location builds next to the project).
+    fn build_button(&mut self, ui: &mut Ui) {
+        if ui
+            .add_enabled(
+                !self.build_job.is_running(),
+                egui::Button::new(tl!("Build")).min_size(BUTTON_SIZE),
+            )
+            .clicked()
+        {
+            self.start_build();
+        }
+    }
+
+    /// While a build runs: what it is doing, a progress bar and the time so far (Encore's build progress).
+    fn build_progress_section(&mut self, ui: &mut Ui) {
+        if !self.build_job.is_running() {
+            return;
+        }
+        let (step, fraction) = self.build_step();
+        let elapsed = crate::build_panel::elapsed_text(self.build_job.elapsed_seconds());
+        crate::theme::group_box(ui, "build_progress", tl!("Building…"), |ui| {
+            ui.label(step);
+            ui.add(
+                egui::ProgressBar::new(fraction)
+                    .show_percentage()
+                    .animate(true),
+            );
+            ui.label(tlf!("Elapsed: {time}", time = elapsed));
         });
     }
 
@@ -252,8 +283,12 @@ impl DiscCraftApp {
 
                     ui.horizontal(|ui| {
                         let width = (ui.available_width() - 80.0).max(120.0);
+                        // Empty: the build goes next to the project; the box shows where.
+                        let hint = self.default_build_path().to_string_lossy().into_owned();
                         ui.add(
-                            egui::TextEdit::singleline(&mut self.build_path).desired_width(width),
+                            egui::TextEdit::singleline(&mut self.build_path)
+                                .desired_width(width)
+                                .hint_text(hint),
                         );
 
                         if ui.button(tl!("Browse…")).clicked() {

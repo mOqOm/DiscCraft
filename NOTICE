@@ -7,10 +7,6 @@ filmcraft-time
 filmcraft-geom
 filmcraft-color
 filmcraft-bitstream
-filmcraft-mpeg2v
-filmcraft-mpegts
-filmcraft-ac3
-filmcraft-h264
 filmcraft-h264enc
 filmcraft-frame
 filmcraft-media
@@ -18,23 +14,39 @@ filmcraft-text
 filmcraft-audio-dsp
 filmcraft-codecs
 
-Pinned revision: da535c18433dbe046553733b0ab08ce9bd736a51
+Pinned revision: 19d46c0748cf5c0ef5b0b2a421b85e8ae6d99db6
 
-Source files ported from FilmCraft (same license and revision):
+Source files ported from FilmCraft (same license; ported at da535c18433dbe046553733b0ab08ce9bd736a51, unchanged in
+FilmCraft up to the pinned revision above):
 crates/ui-egui/src/i18n.rs (from FilmCraft crates/ui-egui/src/i18n.rs)
 crates/ui-egui/src/i18n/catalog.rs (from FilmCraft crates/ui-egui/src/i18n/catalog.rs)
+crates/ui-egui/src/icons.rs (from FilmCraft crates/ui-egui/src/icons.rs at 19d46c0748cf5c0ef5b0b2a421b85e8ae6d99db6, the
+code-drawn icons the Craft apps share; FilmCraft's theme-bound `button` left out)
+crates/ui-egui/src/craft_timeline.rs (from FilmCraft crates/ui-egui/src/panels/timeline/ruler.rs, layout.rs, scrollbars.rs,
+interact.rs, panels/timeline.rs, src/widgets.rs and src/theme.rs at 19d46c0748cf5c0ef5b0b2a421b85e8ae6d99db6: the Timeline's
+ruler strides, marker flag, playhead, zoom scroll bar, wheel, view easing and Medium theme colours, adapted to a title;
+and, from panels/timeline/clips.rs, headers.rs and panels/timeline_captions.rs, the clip body, name band and corner marks,
+the track header badges and the caption colours)
+crates/ui-egui/src/monitor_controls.rs (from FilmCraft crates/ui-egui/src/panels/monitor.rs at
+19d46c0748cf5c0ef5b0b2a421b85e8ae6d99db6: the Program monitor's controls row, mini timeline and transport layout,
+adapted to a DiscCraft timeline's chapter points and playhead)
 
 This product includes software from PhotoCraft (https://github.com/storytold/photocraft), licensed under the MIT License or the Apache License 2.0, at your option.
-Crates used: photocraft-io, photocraft-doc, photocraft-compose, photocraft-geom, photocraft-raster (photocraft-psd in tests).
-Pinned revision: aae9b7ea61195eba0c43877d59654aefdc7c5576
+Crates used: photocraft-io, photocraft-doc, photocraft-compose, photocraft-geom, photocraft-raster.
+Pinned revision: 0fb40c534a8f2ca2e1aa6182f7ab06ae9fbed32e
 
 This product includes software from EffectCraft (https://github.com/storytold/effectcraft), licensed under the MIT License or the Apache License 2.0, at your option.
 Crates used: effectcraft-project, effectcraft-render, effectcraft-media, effectcraft-time, effectcraft-raster.
-Pinned revision: 3e0c77ca6860b94d13f73d96c2a5222e4e353102
+Pinned revision: 69bce0ec66f4cb2b9a169b6a19f4d2363faadad3
 
 This product includes software from SoundCraft (https://github.com/storytold/soundcraft), licensed under the MIT License or the Apache License 2.0, at your option.
 Crates used: soundcraft-engine, soundcraft-dsp.
-Pinned revision: 76cc2aeac657aa971303ee522f36cafe86b3ef93
+Pinned revision: 1775ce506103248e96886c502c582ee7047e9c26
 
-PhotoCraft and EffectCraft pull in craft-libs (https://github.com/storytold/craft-libs, MIT OR Apache-2.0); its vendored
-Hayro crates are patched to revision c5a1cbfb5f9049f9270955caffb5bee5997aebf7 in Cargo.toml.
+This product includes software from craft-libs (https://github.com/storytold/craft-libs), licensed under the MIT License
+or the Apache License 2.0, at your option. FilmCraft, PhotoCraft, EffectCraft and SoundCraft pull in its crates at their own
+revisions. DiscCraft uses directly craft-audio (its AC-3 encoder, which makes the transcoded soundtracks Dolby Digital;
+revision 47107f660191de2f0b425569506f4daa4faadac9) and craft-ui (its docking, which arranges the panels and workspaces;
+same revision), and in tests only craft-video (MPEG-2 decoder, revision
+47107f660191de2f0b425569506f4daa4faadac9) and craft-psd (PSD writer, revision 09dcbc225b95232998498a40ca56e24716571d53). Its vendored Hayro crates are patched to
+revision 47107f660191de2f0b425569506f4daa4faadac9 in Cargo.toml.

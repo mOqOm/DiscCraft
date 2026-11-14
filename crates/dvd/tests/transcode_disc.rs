@@ -1,5 +1,5 @@
 //! M4 completion check: an H.264 + AAC MP4 becomes a menu DVD that fits DVD-5, navigates correctly, and decodes cleanly
-//! (ffmpeg's DVD navigation and filmcraft-mpeg2v). Skipped when ffmpeg is not available.
+//! (ffmpeg's DVD navigation and craft-video's MPEG-2 decoder). Skipped when ffmpeg is not available.
 
 use disccraft_dvd::build_video_ts_with;
 use disccraft_project::{Link, Project, Tick};
@@ -82,6 +82,8 @@ fn project(mp4: &Path) -> Project {
         id: m,
         button: None,
     };
+    // The language of audio without its own (the build fills it with the display language when unset).
+    p.settings.audio_language = Some("ja".to_string());
     p
 }
 
@@ -107,8 +109,16 @@ fn mp4_becomes_a_clean_menu_dvd() {
     assert!(report.total_bytes < 4_700_000_000);
     let video_ts = dir.join("out").join("VIDEO_TS");
 
+    // The video's own soundtrack has no language of its own: it takes the disc's (Japanese), as Encore writes it.
+    let vtsi =
+        disccraft_ifo::read_vtsi(&std::fs::read(video_ts.join("VTS_01_0.IFO")).unwrap()).unwrap();
+    assert_eq!(vtsi.audio.len(), 1);
+    assert_eq!(vtsi.audio[0].language, Some(*b"ja"));
+
     // Navigation: all three chapters reachable from the menu, no dead ends or loops.
     let model = load_video_ts(&video_ts).unwrap();
+    // The project preview's model (made without building) is the disc's.
+    assert_eq!(disccraft_dvd::preview_model(&project).unwrap(), model);
     let r = explore(&model);
     assert_eq!(r.chapters_reached.len(), 3, "{:?}", r.chapters_reached);
     assert!(
@@ -132,9 +142,38 @@ fn mp4_becomes_a_clean_menu_dvd() {
         .output()
         .unwrap();
     let codecs = String::from_utf8_lossy(&out.stdout);
+    // The soundtrack is transcoded to Dolby Digital (AC-3), as Encore makes it.
     assert!(
-        codecs.contains("mpeg2video") && codecs.contains("pcm_dvd"),
+        codecs.contains("mpeg2video") && codecs.contains("ac3"),
         "{codecs}"
+    );
+
+    // At 192 kbit/s, starting with the picture (the encoder's priming is taken off the front).
+    let out = Command::new(&ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_name,start_time,bit_rate",
+        ])
+        .args(["-of", "csv=p=0"])
+        .arg(video_ts.join("VTS_01_1.VOB"))
+        .output()
+        .unwrap();
+    let streams = String::from_utf8_lossy(&out.stdout);
+    let field = |codec: &str, index: usize| -> String {
+        streams
+            .lines()
+            .find(|line| line.starts_with(codec))
+            .and_then(|line| line.split(',').nth(index))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert_eq!(field("ac3", 2), "192000", "{streams}");
+    let start = |codec: &str| field(codec, 1).parse::<f64>().unwrap();
+    assert!(
+        (start("ac3") - start("mpeg2video")).abs() < 0.034,
+        "{streams}"
     );
 
     // Full decode through ffmpeg's DVD navigation (libdvdnav) reports no errors.
@@ -159,7 +198,7 @@ fn mp4_becomes_a_clean_menu_dvd() {
         "{real_errors:?}"
     );
 
-    // The cached MPEG-2 decodes cleanly in filmcraft-mpeg2v, and a second build reuses the cache.
+    // The cached MPEG-2 decodes cleanly in craft-video's MPEG-2 decoder, and a second build reuses the cache.
     let m2v = std::fs::read_dir(&cache)
         .unwrap()
         .filter_map(Result::ok)
@@ -167,9 +206,12 @@ fn mp4_becomes_a_clean_menu_dvd() {
         .find(|p| p.extension().is_some_and(|e| e == "m2v"))
         .unwrap();
     let es = std::fs::read(&m2v).unwrap();
-    let mut dec = filmcraft_mpeg2v::Decoder::new();
+    let mut dec = craft_video::mpeg2::Decoder::new();
     let mut pictures = 0usize;
-    for (i, range) in filmcraft_mpeg2v::access_units(&es).into_iter().enumerate() {
+    for (i, range) in craft_video::mpeg2::access_units(&es)
+        .into_iter()
+        .enumerate()
+    {
         pictures += dec.decode(&es[range], i as i64).unwrap().len();
     }
     pictures += dec.flush().len();

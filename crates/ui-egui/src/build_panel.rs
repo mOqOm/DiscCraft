@@ -1,7 +1,7 @@
 use crate::app::DiscCraftApp;
 use crate::i18n::{tl, tlf};
 
-use disccraft_build::{BuildOptions, BuildReport, OutputKind, build};
+use disccraft_build::{BuildOptions, BuildReport, OutputKind, STEP_IMAGE, build_with_progress};
 use disccraft_project::Project;
 use disccraft_vm::{Report, explore, load_video_ts};
 
@@ -10,7 +10,9 @@ use rfd::FileDialog;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(crate) enum BuildState {
@@ -26,6 +28,10 @@ pub(crate) struct BuildJob {
     pub(crate) result: Option<Result<BuildReport, String>>,
     rx: Option<Receiver<Result<BuildReport, String>>>,
     pub(crate) output_kind: Option<OutputKind>,
+    /// What the running build last said it was doing: the step (a media name, or `STEP_IMAGE`) and how far (0 to 1).
+    progress: Arc<Mutex<Option<(String, f32)>>>,
+    /// When the running build started.
+    started: Option<Instant>,
 }
 
 impl BuildJob {
@@ -33,6 +39,19 @@ impl BuildJob {
         self.state = BuildState::Running;
         self.result = None;
         self.rx = None;
+        self.started = Some(Instant::now());
+        self.progress = Arc::new(Mutex::new(None));
+    }
+
+    /// The running build's step and how far it is, if it has said.
+    pub(crate) fn current_progress(&self) -> Option<(String, f32)> {
+        self.progress.lock().ok().and_then(|guard| guard.clone())
+    }
+
+    /// How long the running build has taken, in whole seconds.
+    pub(crate) fn elapsed_seconds(&self) -> u64 {
+        self.started
+            .map_or(0, |started| started.elapsed().as_secs())
     }
 
     pub(crate) fn finish(&mut self, result: Result<BuildReport, String>) {
@@ -52,21 +71,33 @@ impl BuildJob {
         runner: F,
         background: bool,
     ) where
-        F: FnOnce(&Project, &BuildOptions) -> Result<BuildReport, String> + Send + 'static,
+        F: FnOnce(
+                &Project,
+                &BuildOptions,
+                &mut dyn FnMut(&str, f32),
+            ) -> Result<BuildReport, String>
+            + Send
+            + 'static,
     {
         self.begin();
         self.output_kind = Some(options.output);
+        let shared = Arc::clone(&self.progress);
+        let mut report = move |step: &str, fraction: f32| {
+            if let Ok(mut guard) = shared.lock() {
+                *guard = Some((step.to_owned(), fraction.clamp(0.0, 1.0)));
+            }
+        };
 
         if background {
             let (tx, rx) = channel();
             self.rx = Some(rx);
 
             let _ = thread::spawn(move || {
-                let result = runner(&project, &options);
+                let result = runner(&project, &options, &mut report);
                 let _ = tx.send(result);
             });
         } else {
-            self.finish(runner(&project, &options));
+            self.finish(runner(&project, &options, &mut report));
         }
     }
 
@@ -306,22 +337,82 @@ impl DiscCraftApp {
         }
     }
 
-    pub(crate) fn start_build(&mut self) {
-        let path = self.build_path.trim();
-
-        if path.is_empty() {
-            self.status = tl!("Enter an output path").to_string();
-            return;
+    /// Where a build goes when the Location box is empty: next to the saved project (else in the home folder),
+    /// named after the project — a `<name>_DVD` / `<name>_BD` folder, or `<name>.iso`.
+    pub(crate) fn default_build_path(&self) -> PathBuf {
+        let saved = self.session.path.as_deref();
+        let stem = saved
+            .and_then(Path::file_stem)
+            .and_then(|stem| stem.to_str())
+            .map(str::to_owned)
+            .or_else(|| Some(self.session.project.settings.name.trim().to_owned()))
+            .filter(|stem| !stem.trim().is_empty())
+            .map_or_else(|| "DiscCraft".to_owned(), |stem| file_safe(&stem));
+        let folder = saved
+            .and_then(Path::parent)
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .or_else(|| std::env::var_os("HOME"))
+                    .map(PathBuf::from)
+            })
+            .unwrap_or_else(|| PathBuf::from("."));
+        let kind = match self.session.project.settings.kind {
+            disccraft_project::DiscKind::Dvd => "DVD",
+            disccraft_project::DiscKind::BluRay => "BD",
+        };
+        match self.build_output {
+            OutputKind::Folder => folder.join(format!("{stem}_{kind}")),
+            OutputKind::Iso => folder.join(format!("{stem}.iso")),
         }
+    }
+
+    /// What the running build is doing, for the Build panel and the status bar: the step and how far (0 to 1).
+    pub(crate) fn build_step(&self) -> (String, f32) {
+        match self.build_job.current_progress() {
+            None => (tl!("Preparing…").to_owned(), 0.0),
+            Some((step, fraction)) if step == STEP_IMAGE => {
+                (tl!("Writing the disc image").to_owned(), fraction)
+            }
+            Some((step, fraction)) => (tlf!("Transcoding {name}", name = step), fraction),
+        }
+    }
+
+    /// The status bar while a build runs: the step, how far and how long so far.
+    pub(crate) fn build_status_text(&self) -> Option<String> {
+        if !self.build_job.is_running() {
+            return None;
+        }
+        let (step, fraction) = self.build_step();
+        Some(tlf!(
+            "Building: {step} {percent}% ({time})",
+            step = step,
+            // `as` saturates; the fraction is within 0..=1.
+            percent = (fraction * 100.0).round() as u32,
+            time = elapsed_text(self.build_job.elapsed_seconds())
+        ))
+    }
+
+    pub(crate) fn start_build(&mut self) {
+        // An empty Location builds next to the project (Encore always has a location; a build never silently
+        // does nothing).
+        if self.build_path.trim().is_empty() {
+            self.build_path = self.default_build_path().to_string_lossy().into_owned();
+        }
+        let path = self.build_path.trim().to_owned();
 
         let project = self.session.project.clone();
         let options = BuildOptions {
             output: self.build_output,
             path: PathBuf::from(path),
             cache: None,
+            // Audio without a language of its own is in DiscCraft's display language (unless the disc says).
+            audio_language: Some(crate::i18n::current().code().to_owned()),
         };
 
-        self.build_job.start(project, options, build, true);
+        self.build_job
+            .start(project, options, build_with_progress, true);
 
         self.status = tl!("Build started").to_string();
         self.simulate = None;
@@ -345,5 +436,41 @@ impl DiscCraftApp {
             }
             Err(error) => self.status = error,
         }
+    }
+}
+
+/// `name` with the characters a file name cannot hold replaced by "_".
+fn file_safe(name: &str) -> String {
+    name.trim()
+        .chars()
+        .map(|c| match c {
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect()
+}
+
+/// `seconds` as "m:ss" (or "h:mm:ss").
+pub(crate) fn elapsed_text(seconds: u64) -> String {
+    let (hours, minutes, secs) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{secs:02}")
+    } else {
+        format!("{minutes}:{secs:02}")
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::{elapsed_text, file_safe};
+
+    #[test]
+    fn elapsed_time_and_file_names() {
+        assert_eq!(elapsed_text(0), "0:00");
+        assert_eq!(elapsed_text(75), "1:15");
+        assert_eq!(elapsed_text(3_725), "1:02:05");
+        assert_eq!(file_safe(" a/b:c? "), "a_b_c_");
+        assert_eq!(file_safe("映画"), "映画");
     }
 }

@@ -1,5 +1,5 @@
+use craft_video::mpeg2::{Decoder, Picture};
 use disccraft_mpeg2venc::{Frame420, Standard, StillOptions, encode_still};
-use filmcraft_mpeg2v::{Decoder, Picture};
 
 fn default_options(standard: Standard) -> StillOptions {
     StillOptions {

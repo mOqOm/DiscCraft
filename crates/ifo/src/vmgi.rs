@@ -311,6 +311,7 @@ fn finish_vmgi(
         .ok_or_else(|| IfoError("VMG set size overflow".to_string()))?;
     let last_set = base_last_set
         .checked_add(vobs_sectors)
+        .and_then(|x| x.checked_add(crate::BUP_GAP_SECTORS as usize))
         .ok_or_else(|| IfoError("VMG set size overflow".to_string()))?;
 
     w.put_u32(0x00C, u32_from_usize(last_set)?);
@@ -664,6 +665,7 @@ fn read_vmgi_pointers(
     let expected_base = (ifo_sectors as u64)
         .checked_mul(2)
         .and_then(|x| x.checked_sub(1))
+        .and_then(|x| x.checked_add(u64::from(crate::BUP_GAP_SECTORS)))
         .ok_or_else(|| IfoError("VMG set size overflow".to_string()))?;
     let last_set_u64 = u64::from(last_set);
 
@@ -1301,6 +1303,7 @@ mod tests {
                 vob_id,
                 cell_id,
                 stc_discontinuity: false,
+                seamless: true,
                 playback_time: BcdTime([0, 0, 0, 0]),
                 first_sector: first,
                 last_vobu_start: first,

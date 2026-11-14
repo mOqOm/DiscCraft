@@ -1,6 +1,6 @@
 [package]
 name = "disccraft-ac3enc"
-description = "AC-3 エンコーダ（2.0 / 5.1）"
+description = "AC-3 エンコーダ（モノラル / ステレオ。craft-audio の AC-3 エンコーダで WAV を AC-3 に）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+craft-audio.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

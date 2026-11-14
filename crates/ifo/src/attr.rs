@@ -25,8 +25,10 @@ impl VideoAttr {
             Standard::Ntsc => 0x40,
             Standard::Pal => 0x50,
         };
-        // byte 0: coding (MPEG-2) << 6 | standard << 4 | aspect << 2 | pan/scan disallowed << 1 | letterbox disallowed
-        let aspect = if self.wide { 0x0C | 0x02 } else { 0x00 };
+        // byte 0: coding (MPEG-2) << 6 | standard << 4 | aspect << 2 | pan/scan disallowed << 1 | letterbox disallowed.
+        // 16:9: no pan/scan vectors, letterbox allowed. 4:3: neither display conversion applies, both disallowed
+        // (as Encore and other authoring tools write it).
+        let aspect = if self.wide { 0x0C | 0x02 } else { 0x03 };
         [standard | aspect, 0x00]
     }
 
@@ -38,7 +40,7 @@ impl VideoAttr {
             _ => return Err(IfoError("unsupported video attributes".to_string())),
         };
         let wide = match b[0] & 0x0F {
-            0x00 => false,
+            0x00 | 0x03 => false,
             0x0E => true,
             _ => return Err(IfoError("unsupported video aspect flags".to_string())),
         };

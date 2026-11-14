@@ -1,7 +1,7 @@
 //! Translation catalogs (`*.tsv`).
 //!
 //! Ported from FilmCraft's `crates/ui-egui/src/i18n/catalog.rs`
-//! (https://github.com/storytold/filmcraft, rev `da535c18433dbe046553733b0ab08ce9bd736a51`,
+//! (https://github.com/storytold/filmcraft, rev `da535c18433dbe046553733b0ab08ce9bd736a51`, unchanged up to `19d46c07`,
 //! MIT OR Apache-2.0). See `NOTICE`.
 
 use std::collections::HashMap;

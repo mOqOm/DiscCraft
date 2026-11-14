@@ -21,6 +21,10 @@ pub struct Cell {
     pub cell_id: u8,
     /// Whether this cell starts with an STC discontinuity.
     pub stc_discontinuity: bool,
+    /// The seamless playback flag: the cell goes on from the one before without a pause. Off (with no STC
+    /// discontinuity either) for the cell at a dual-layer disc's layer break, where the player may pause to change
+    /// layers.
+    pub seamless: bool,
     /// Cell playback time.
     pub playback_time: BcdTime,
     /// First VOBU start sector, relative to the title VOBS.
@@ -418,7 +422,15 @@ fn write_program_map(w: &mut Writer, offset: usize, pgc: &Pgc) -> Result<(), Ifo
 fn write_cell_playback(w: &mut Writer, offset: usize, pgc: &Pgc) -> Result<(), IfoError> {
     let mut pos = offset;
     for cell in &pgc.cells {
-        let category = if cell.stc_discontinuity { 0x02 } else { 0x00 };
+        // C_CAT byte 0: STC discontinuity (bit 1) at a new stream, else the seamless playback flag (bit 3) when the
+        // cell goes on from the one before in the same stream without a pause; neither at a layer break.
+        let category = if cell.stc_discontinuity {
+            0x02
+        } else if cell.seamless {
+            0x08
+        } else {
+            0x00
+        };
         w.put_u8(pos, category);
         w.put_u8(off(pos, 1)?, 0);
         w.put_u8(off(pos, 2)?, cell.still_time);
@@ -677,7 +689,7 @@ fn read_cells(
 
 fn read_cell_at(r: &Reader<'_>, p: usize, q: usize) -> Result<Cell, IfoError> {
     let category = r.u8(p)?;
-    if category != 0x00 && category != 0x02 {
+    if category != 0x00 && category != 0x02 && category != 0x08 {
         return Err(IfoError("invalid cell category".to_string()));
     }
     if r.u8(off(p, 1)?)? != 0 || r.u8(off(p, 3)?)? != 0 {
@@ -706,6 +718,7 @@ fn read_cell_at(r: &Reader<'_>, p: usize, q: usize) -> Result<Cell, IfoError> {
         vob_id,
         cell_id,
         stc_discontinuity: category == 0x02,
+        seamless: category == 0x08,
         playback_time,
         first_sector,
         last_vobu_start,
@@ -773,6 +786,7 @@ mod tests {
             vob_id: 1,
             cell_id: 1,
             stc_discontinuity: false,
+            seamless: true,
             playback_time: BcdTime([0, 0, 0, 0]),
             first_sector: 0,
             last_vobu_start: 0,

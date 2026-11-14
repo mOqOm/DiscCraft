@@ -4,7 +4,7 @@
 //! channel, the CLI and MCP stay English.
 //!
 //! Ported from FilmCraft's `crates/ui-egui/src/i18n.rs`
-//! (https://github.com/storytold/filmcraft, rev `da535c18433dbe046553733b0ab08ce9bd736a51`,
+//! (https://github.com/storytold/filmcraft, rev `da535c18433dbe046553733b0ab08ce9bd736a51`, unchanged up to `19d46c07`,
 //! MIT OR Apache-2.0). See `NOTICE` and [docs/architecture.md](../../../docs/architecture.md) §5.3.
 //!
 //! # Looking strings up
@@ -74,8 +74,7 @@ impl Language {
         }
     }
 
-    /// Stable code, the value saved in the workspace file.
-    #[cfg(test)]
+    /// Stable code (ISO 639-1), the value saved in the workspace file and the language of audio without its own.
     pub(crate) fn code(self) -> &'static str {
         match self {
             Self::En => "en",

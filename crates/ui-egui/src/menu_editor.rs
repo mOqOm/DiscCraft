@@ -487,21 +487,30 @@ impl DiscCraftApp {
             .and_then(|index| pages.get(index).copied());
         let next = pages.get(number.saturating_add(1)).copied();
         let mut go = None;
-        if ui
-            .add_enabled(previous.is_some(), egui::Button::new("◀"))
-            .on_hover_text(tl!("Show Previous Page"))
-            .clicked()
-        {
+        // The Craft apps' shared chevrons.
+        let page_button = |ui: &mut Ui, enabled: bool, icon: crate::icons::Icon, tip: &str| {
+            ui.add_enabled_ui(enabled, |ui| crate::icons::icon_button(ui, icon, false))
+                .inner
+                .on_hover_text(tip)
+                .clicked()
+        };
+        if page_button(
+            ui,
+            previous.is_some(),
+            crate::icons::Icon::ChevronLeft,
+            tl!("Show Previous Page"),
+        ) {
             go = previous;
         }
         let _ = ui
             .label(number.to_string())
             .on_hover_text(tlf!("Current page number: {n}", n = number));
-        if ui
-            .add_enabled(next.is_some(), egui::Button::new("▶"))
-            .on_hover_text(tl!("Show Next Page"))
-            .clicked()
-        {
+        if page_button(
+            ui,
+            next.is_some(),
+            crate::icons::Icon::ChevronRight,
+            tl!("Show Next Page"),
+        ) {
             go = next;
         }
         if let Some(page) = go {
@@ -536,7 +545,7 @@ impl DiscCraftApp {
         }
     }
 
-    fn draw_buttons(
+    pub(crate) fn draw_buttons(
         &self,
         ui: &Ui,
         menu: &Menu,
@@ -571,8 +580,15 @@ impl DiscCraftApp {
 
             // The disc's own highlight (the frame, the text of a text subpicture, or a subpicture's layers) in the
             // state's colours 1 to 3.
+            // A preview (the monitor, the project preview) shows the remote's highlight in its selected look,
+            // whatever the editor's 標準 / 選択時 / アクティベート時 shows.
+            let look = if highlight.is_some() {
+                HighlightPreview::Selected
+            } else {
+                self.highlight_preview
+            };
             let tint = |n: u8| {
-                let (color, opacity) = match self.highlight_preview {
+                let (color, opacity) = match look {
                     HighlightPreview::Selected if active => group.selected_color(n),
                     HighlightPreview::Activated if active => group.activated_color(n),
                     _ => {
@@ -610,7 +626,7 @@ impl DiscCraftApp {
                 }
             }
 
-            let color = match self.highlight_preview {
+            let color = match look {
                 HighlightPreview::Selected if active => {
                     egui::Color32::from_rgba_unmultiplied(r, g, b, selected_alpha)
                 }
@@ -975,7 +991,7 @@ impl DiscCraftApp {
         None
     }
 
-    fn render_menu_texture(&mut self, ctx: &Context, menu: &Menu, hash: u64) {
+    pub(crate) fn render_menu_texture(&mut self, ctx: &Context, menu: &Menu, hash: u64) {
         match self.render_menu_picture(menu) {
             Ok(rendered) => {
                 let width = usize::from(rendered.width);

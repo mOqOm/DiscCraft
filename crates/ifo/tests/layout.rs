@@ -12,7 +12,8 @@ fn video_attributes() {
             wide: false
         }
         .to_bytes(),
-        [0x40, 0x00]
+        // 4:3: neither automatic pan/scan nor letterbox (they apply to 16:9 only).
+        [0x43, 0x00]
     );
     assert_eq!(
         VideoAttr {
@@ -20,8 +21,18 @@ fn video_attributes() {
             wide: false
         }
         .to_bytes(),
-        [0x50, 0x00]
+        [0x53, 0x00]
     );
+    assert_eq!(
+        VideoAttr {
+            standard: Standard::Ntsc,
+            wide: true
+        }
+        .to_bytes(),
+        [0x4e, 0x00]
+    );
+    // Discs written before (4:3 with both allowed) still read.
+    assert!(!VideoAttr::from_bytes([0x40, 0]).unwrap().wide);
     assert_eq!(
         VideoAttr::from_bytes([0x50, 0]).unwrap().standard,
         Standard::Pal
@@ -68,6 +79,7 @@ fn cell(id: u8, first: u32, last: u32) -> Cell {
         vob_id: 1,
         cell_id: id,
         stc_discontinuity: id == 1,
+        seamless: id != 1,
         still_time: 0,
         playback_time: BcdTime::from_90k(5 * 90_000, Standard::Ntsc),
         first_sector: first,

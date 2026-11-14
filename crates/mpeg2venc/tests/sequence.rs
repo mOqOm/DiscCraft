@@ -1,8 +1,8 @@
-//! I/P sequences from the encoder must decode without errors in filmcraft-mpeg2v and match the source closely.
+//! I/P sequences from the encoder must decode without errors in craft-video's MPEG-2 decoder and match the source closely.
 
+use craft_video::mpeg2::Decoder;
 use disccraft_mpeg2venc::encoder::{Encoder, EncoderConfig};
 use disccraft_mpeg2venc::{Frame420, Standard};
-use filmcraft_mpeg2v::Decoder;
 
 /// A smooth gradient with a textured 64×64 square moving by (+3, +2) px per frame and light deterministic noise.
 fn synthetic(w: usize, h: usize, t: usize) -> Frame420 {
@@ -89,7 +89,10 @@ fn run(standard: Standard, w: usize, h: usize, frames: usize, gop: u16, check_si
 
     let mut dec = Decoder::new();
     let mut pics = Vec::new();
-    for (i, range) in filmcraft_mpeg2v::access_units(&es).into_iter().enumerate() {
+    for (i, range) in craft_video::mpeg2::access_units(&es)
+        .into_iter()
+        .enumerate()
+    {
         pics.extend(dec.decode(&es[range], i as i64).unwrap());
     }
     pics.extend(dec.flush());
@@ -155,4 +158,38 @@ fn gop_header_is_closed() {
     assert_eq!((bits >> (31 - 12)) & 1, 1, "marker bit");
     assert_eq!((bits >> (31 - 25)) & 1, 1, "closed_gop");
     assert_eq!((bits >> (31 - 26)) & 1, 0, "broken_link");
+}
+
+/// M14.1: a GOP starts at the frame the caller asks for (a chapter or a layer break, where a DVD cell must begin
+/// exactly), the GOPs after it count from there, and no GOP grows past what a DVD allows (18 frames NTSC) even when
+/// the caller asks for none.
+#[test]
+fn a_gop_starts_where_asked() {
+    let config = EncoderConfig {
+        standard: Standard::Ntsc,
+        gop_size: 15,
+        bitrate: 6_000_000,
+        max_bitrate: 9_800_000,
+        wide: false,
+    };
+    let starts_of = |forced: &[usize], frames: usize, regular: bool| -> Vec<usize> {
+        let mut enc = Encoder::new(config.clone()).unwrap();
+        (0..frames)
+            .filter(|&index| {
+                let frame = synthetic(720, 480, index);
+                let au = if regular {
+                    enc.encode_frame(&frame).unwrap()
+                } else {
+                    enc.encode_frame_gop(&frame, forced.contains(&index))
+                        .unwrap()
+                };
+                au.windows(4).any(|w| w == [0, 0, 1, 0xB8])
+            })
+            .collect()
+    };
+    // The regular cadence, then a forced start at 7 that the next GOPs count from.
+    assert_eq!(starts_of(&[], 40, true), vec![0, 15, 30]);
+    assert_eq!(starts_of(&[7, 22], 40, false), vec![0, 7, 22]);
+    // Asked for nothing: still a GOP every 18 frames at the most.
+    assert_eq!(starts_of(&[], 40, false), vec![0, 18, 36]);
 }

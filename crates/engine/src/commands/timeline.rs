@@ -215,6 +215,7 @@ fn run_import(session: &mut Session, params: &Value) -> CommandResult {
             .project
             .add_timeline(asset, None)
             .map_err(|error| error.to_string())?;
+        take_source_streams(session, timeline);
         assets.push(Value::from(asset.0));
         timelines.push(Value::from(timeline.0));
     }
@@ -258,8 +259,36 @@ fn run_create(session: &mut Session, params: &Value) -> CommandResult {
         .project
         .add_timeline(asset, name)
         .map_err(|error| error.to_string())?;
+    take_source_streams(session, id);
 
     Ok(object(&[("timeline", Value::from(id.0))]))
+}
+
+/// A new timeline takes from its video what Encore's timelines do: the aspect (16:9 for a wide picture, 4:3
+/// otherwise), and the file's sound as its own track, Audio 1 (Encore lays a video's picture and sound out as
+/// separate tracks, so more audio and subtitle tracks go beside them). Nothing changes when the file cannot be read
+/// (an offline asset): the timeline follows the disc's aspect and plays the video's sound, if any.
+fn take_source_streams(session: &mut Session, timeline: TimelineId) {
+    let video = session
+        .project
+        .timelines
+        .get(&timeline)
+        .map(|timeline| timeline.video);
+    let probe = video
+        .and_then(|video| session.project.assets.get(&video))
+        .filter(|asset| asset.kind == AssetKind::Video)
+        .and_then(|asset| disccraft_transcode::probe_video(std::path::Path::new(&asset.path)).ok());
+    if let (Some(probe), Some(video), Some(timeline)) =
+        (probe, video, session.project.timelines.get_mut(&timeline))
+    {
+        timeline.widescreen = Some(probe.wide);
+        if probe.has_audio && timeline.audio.is_empty() {
+            timeline.audio.push(disccraft_project::AudioTrack {
+                asset: video,
+                language: String::new(),
+            });
+        }
+    }
 }
 
 fn run_add_chapter(session: &mut Session, params: &Value) -> CommandResult {
@@ -436,13 +465,22 @@ fn run_add_audio_track(session: &mut Session, params: &Value) -> CommandResult {
     let asset = AssetId(req_u64(params, "asset")?);
     let language = opt_str(params, "language")?.unwrap_or_default();
 
-    let (asset_id, asset_kind) = match session.project.assets.get(&asset) {
-        Some(asset) => (asset.id, asset.kind),
+    let (asset_id, asset_kind, path) = match session.project.assets.get(&asset) {
+        Some(asset) => (asset.id, asset.kind, asset.path.clone()),
         None => return Err(format!("asset {} does not exist", asset.0)),
     };
 
-    if asset_kind != AssetKind::Audio {
-        return Err(format!("asset {} is not an audio asset", asset_id.0));
+    // An audio file, or a video file's own sound (Encore lays a video's picture and sound out as separate tracks).
+    match asset_kind {
+        AssetKind::Audio => {}
+        AssetKind::Video => {
+            let has_audio = disccraft_transcode::probe_video(std::path::Path::new(&path))
+                .is_ok_and(|probe| probe.has_audio);
+            if !has_audio {
+                return Err(format!("video asset {} has no sound", asset_id.0));
+            }
+        }
+        _ => return Err(format!("asset {} is not an audio asset", asset_id.0)),
     }
 
     let is_dvd = session.project.settings.kind == DiscKind::Dvd;
@@ -569,6 +607,90 @@ mod tests {
     use std::error::Error;
     use std::fs;
     use std::path::{Path, PathBuf};
+
+    /// A new timeline takes its video's aspect, as in Encore: 16:9 for a 16:9 source, 4:3 for a 4:3 one, whatever
+    /// the disc's (needs the fixtures the ffmpeg tests make).
+    #[test]
+    fn a_timeline_takes_its_video_aspect() -> Result<(), Box<dyn Error>> {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures");
+        let wide = fixtures.join("h264_aac.mp4");
+        let narrow = fixtures.join("ntsc.m2v");
+        if !wide.is_file() || !narrow.is_file() {
+            println!("skipped: no fixtures");
+            return Ok(());
+        }
+        let mut session = Session::default();
+        let mut aspect = |path: &Path| -> Result<Option<bool>, Box<dyn Error>> {
+            let imported = session.execute(
+                "timeline.import",
+                &serde_json::json!({"paths": [path.to_string_lossy()]}),
+            )?;
+            let id = imported["timelines"][0].as_u64().ok_or("no timeline")?;
+            let asset = imported["assets"][0].as_u64().ok_or("no asset")?;
+            let created =
+                session.execute("timeline.create", &serde_json::json!({"asset": asset}))?;
+            let second = created["timeline"].as_u64().ok_or("no timeline")?;
+            let of = |id: u64| {
+                session
+                    .project
+                    .timelines
+                    .get(&disccraft_project::TimelineId(id))
+                    .and_then(|timeline| timeline.widescreen)
+            };
+            assert_eq!(of(id), of(second));
+            Ok(of(id))
+        };
+        assert_eq!(aspect(&wide)?, Some(true));
+        assert_eq!(aspect(&narrow)?, Some(false));
+        Ok(())
+    }
+
+    /// A timeline made from a video with sound lays the sound out as Audio 1, the video file itself (Encore
+    /// separates a video's picture and sound into tracks). Uses the transcode tests' fixture when it is there.
+    #[test]
+    fn a_new_timeline_takes_its_videos_sound_as_audio_1() -> Result<(), Box<dyn Error>> {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/h264_aac.mp4");
+        if !fixture.is_file() {
+            println!(
+                "skipped: no target/fixtures/h264_aac.mp4 (made by the transcode tests with ffmpeg)"
+            );
+            return Ok(());
+        }
+        let mut session = Session::new();
+        let video = value_u64(
+            &session.execute("asset.import", &obj(&[("path", string_value(&fixture))]))?,
+            "asset",
+        )?;
+        let timeline = value_u64(
+            &session.execute("timeline.create", &obj(&[("asset", Value::from(video))]))?,
+            "timeline",
+        )?;
+        let made = session
+            .project
+            .timeline(disccraft_project::TimelineId(timeline))
+            .ok_or("no timeline")?;
+        assert_eq!(made.audio.len(), 1);
+        assert_eq!(made.audio.first().map(|track| track.asset.0), Some(video));
+        assert_eq!(
+            made.audio.first().map(|track| track.language.as_str()),
+            Some("")
+        );
+        assert_eq!(made.widescreen, Some(true));
+        let probe = session.execute("asset.probe", &obj(&[("asset", Value::from(video))]))?;
+        assert_eq!(probe.get("audio"), Some(&Value::from(true)));
+        // The same sound again, as a second track (another language, say).
+        let added = session.execute(
+            "timeline.addAudioTrack",
+            &obj(&[
+                ("timeline", Value::from(timeline)),
+                ("asset", Value::from(video)),
+                ("language", Value::from("en")),
+            ]),
+        )?;
+        assert_eq!(added.get("track"), Some(&Value::from(1)));
+        Ok(())
+    }
 
     fn temp_dir(name: &str) -> Result<PathBuf, Box<dyn Error>> {
         let mut path = std::env::temp_dir();
@@ -701,7 +823,11 @@ mod tests {
             ]),
         )?;
         assert_eq!(wide(&session), Some((Some(true), true)));
+        // The disc's aspect is every title's: the timeline follows it again.
+        session.execute("disc.setAspect", &obj(&[("aspect", Value::from("4:3"))]))?;
+        assert_eq!(wide(&session), Some((None, false)));
         session.execute("disc.setAspect", &obj(&[("aspect", Value::from("16:9"))]))?;
+        assert_eq!(wide(&session), Some((None, true)));
         session.execute(
             "timeline.setAspect",
             &obj(&[
@@ -721,6 +847,10 @@ mod tests {
                 )
                 .is_err()
         );
+        session.undo()?;
+        assert_eq!(wide(&session), Some((None, true)));
+        // Undoing the disc's aspect gives the timeline its own back.
+        session.undo()?;
         session.undo()?;
         assert_eq!(wide(&session), Some((Some(true), true)));
         Ok(())
@@ -1107,8 +1237,10 @@ mod tests {
         Ok(())
     }
 
+    /// A video's sound can be an audio track (see `a_new_timeline_takes_its_videos_sound_as_audio_1`); a video
+    /// with no sound it can read cannot.
     #[test]
-    fn add_audio_track_rejects_video_asset() -> Result<(), Box<dyn Error>> {
+    fn add_audio_track_rejects_a_video_without_sound() -> Result<(), Box<dyn Error>> {
         let dir = temp_dir("add_audio_track_video")?;
         let video = dir.join("movie.mp4");
         fs::write(&video, b"fake")?;
@@ -1132,7 +1264,7 @@ mod tests {
 
         fs::remove_dir_all(dir)?;
         let message = result.err().ok_or("expected video asset rejection")?;
-        assert!(message.contains("not an audio asset"), "{message}");
+        assert!(message.contains("has no sound"), "{message}");
         Ok(())
     }
 }

@@ -14,9 +14,11 @@ disccraft-build.workspace = true
 disccraft-menu.workspace = true
 disccraft-vm.workspace = true
 egui.workspace = true
+craft-ui.workspace = true
 rfd.workspace = true
 cpal.workspace = true
 chrono.workspace = true
+png.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

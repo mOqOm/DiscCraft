@@ -6,7 +6,7 @@
 
 use egui::{
     Color32, Context, CornerRadius, FontFamily, FontId, Frame, Margin, Sense, Stroke, TextStyle,
-    Theme, Ui, Visuals,
+    Theme, Visuals,
 };
 
 /// パネルの間の溝。
@@ -15,8 +15,6 @@ pub(crate) const GUTTER: Color32 = Color32::from_gray(16);
 pub(crate) const PANEL: Color32 = Color32::from_gray(60);
 /// タブの帯。
 pub(crate) const TAB_STRIP: Color32 = Color32::from_gray(43);
-/// マウスが乗ったタブ。
-const TAB_HOVER: Color32 = Color32::from_gray(52);
 /// 表の列見出しの帯。
 pub(crate) const HEADER: Color32 = Color32::from_gray(76);
 /// 表の 1 行おきの帯。
@@ -26,7 +24,7 @@ const FIELD: Color32 = Color32::from_gray(38);
 /// ダイアログとポップアップの地。
 const WINDOW: Color32 = Color32::from_gray(66);
 /// 枠線。
-const BORDER: Color32 = Color32::from_gray(28);
+pub(crate) const BORDER: Color32 = Color32::from_gray(28);
 /// 文字。
 pub(crate) const TEXT: Color32 = Color32::from_gray(216);
 /// 見出しや選択中のタブの文字。
@@ -40,8 +38,6 @@ const SELECTION_ROW: Color32 = Color32::from_rgb(44, 78, 116);
 
 /// タブの帯の高さ。
 pub(crate) const TAB_HEIGHT: f32 = 24.0;
-/// タブの文字の左右の余白。
-const TAB_PADDING: f32 = 12.0;
 /// パネルの内側の余白（左右と下。上はタブの帯がパネルの縁に付くように 0）。
 pub(crate) const GROUP_MARGIN: i8 = 6;
 /// 隣のパネルとの間の溝の半分の幅。
@@ -115,92 +111,12 @@ fn visuals() -> Visuals {
     visuals
 }
 
-/// タブのグループ（プロジェクト、モニター、プロパティなど）のパネルの枠。外側の余白が隣との溝になる。
-pub(crate) fn group_frame() -> Frame {
-    Frame::new()
-        .fill(PANEL)
-        .inner_margin(Margin {
-            left: GROUP_MARGIN,
-            right: GROUP_MARGIN,
-            top: 0,
-            bottom: GROUP_MARGIN,
-        })
-        .outer_margin(Margin::same(GUTTER_HALF))
-}
-
 /// ツールバーとステータスバーの枠。
 pub(crate) fn bar_frame() -> Frame {
     Frame::new()
         .fill(PANEL)
         .inner_margin(Margin::symmetric(GROUP_MARGIN, 3))
         .outer_margin(Margin::same(GUTTER_HALF))
-}
-
-/// 中身を持たず、溝だけを作る枠（右の列のように、パネルを入れ子にする入れ物）。
-pub(crate) fn container_frame() -> Frame {
-    Frame::new()
-}
-
-/// パネルの上端のタブの帯。選択中のタブは地と同じ明るさにして、下の中身とつなげる。
-pub(crate) fn tab_bar<T: Copy + PartialEq>(ui: &mut Ui, current: &mut T, tabs: &[(T, String)]) {
-    let (row, _) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), TAB_HEIGHT), Sense::hover());
-    // 帯はパネルの内側の余白の分だけ左右に広げ、パネルの幅いっぱいにする。
-    let margin = f32::from(GROUP_MARGIN);
-    let strip = egui::Rect::from_min_max(
-        egui::pos2(row.left() - margin, row.top()),
-        egui::pos2(row.right() + margin, row.bottom()),
-    );
-    let painter = ui.painter().clone();
-    painter.rect_filled(strip, 0.0, TAB_STRIP);
-    painter.hline(
-        strip.x_range(),
-        strip.bottom() - 0.5,
-        Stroke::new(1.0, BORDER),
-    );
-
-    let font = TextStyle::Button.resolve(ui.style());
-    let mut x = strip.left();
-    for (index, (tab, label)) in tabs.iter().enumerate() {
-        let selected = *current == *tab;
-        let galley = painter.layout_no_wrap(label.clone(), font.clone(), TEXT);
-        let width = galley.size().x + TAB_PADDING * 2.0;
-        let rect = egui::Rect::from_min_size(
-            egui::pos2(x, strip.top() + 2.0),
-            egui::vec2(width, TAB_HEIGHT - 2.0),
-        );
-        let response = ui.interact(rect, ui.make_persistent_id(("tab", index)), Sense::click());
-        let (fill, color) = if selected {
-            (Some(PANEL), TEXT_STRONG)
-        } else if response.hovered() {
-            (Some(TAB_HOVER), TEXT)
-        } else {
-            (None, TEXT_WEAK)
-        };
-        if let Some(fill) = fill {
-            painter.rect_filled(
-                rect,
-                CornerRadius {
-                    nw: 3,
-                    ne: 3,
-                    sw: 0,
-                    se: 0,
-                },
-                fill,
-            );
-        }
-        let galley = painter.layout_no_wrap(label.clone(), font.clone(), color);
-        let text_pos = egui::pos2(
-            rect.left() + TAB_PADDING,
-            rect.center().y - galley.size().y / 2.0,
-        );
-        painter.galley(text_pos, galley, color);
-        if response.clicked() {
-            *current = *tab;
-        }
-        x = rect.right() + 1.0;
-    }
-    ui.add_space(4.0);
 }
 
 /// 列見出しのある表。1 行目（見出し）に明るい帯、本体は 1 行おきに薄い帯。
@@ -291,6 +207,154 @@ pub(crate) fn sort_header(
         }
     }
     response
+}
+
+/// 表の列の幅（見出しの右端をドラッグして決めたもの）。キーは「表:列」。ない列は中身に合わせる。
+pub(crate) type ColumnWidths = std::collections::BTreeMap<String, f32>;
+/// ドラッグで決められるいちばん狭い列の幅。
+const COLUMN_MIN: f32 = 32.0;
+/// いちばん広い列の幅。
+const COLUMN_MAX: f32 = 2000.0;
+
+/// 見出しの右端のつまみの操作。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ColumnEdge {
+    /// ドラッグした: 列の幅をこの値に。
+    Width(f32),
+    /// ダブルクリックした: 中身に合わせる幅に戻す。
+    Fit,
+}
+
+/// 幅を変えられる列の見出し（Encore の表と同じく、見出しの右端の境目をドラッグすると列の幅が変わり、
+/// ダブルクリックで中身に合わせた幅に戻る）。押すと [`sort_header`] と同じく並べ替える。`width` は決めた幅
+/// （`None` は中身に合わせる）。見出しの応答と、このフレームでのつまみの操作を返す。
+pub(crate) fn resizable_header(
+    ui: &mut egui::Ui,
+    sort: &mut TableSort,
+    column: usize,
+    label: &str,
+    width: Option<f32>,
+) -> (egui::Response, Option<ColumnEdge>) {
+    let left = ui.cursor().min.x;
+    // 中身に合わせる列は、前のフレームで表が決めた列の幅（グリッドのセルの幅）から始める。
+    let current = width.unwrap_or_else(|| ui.available_width());
+    let (response, cell) = fixed_cell(ui, width, |ui| sort_header(ui, sort, column, label));
+    let gap = ui.spacing().item_spacing.x;
+    let right = left + current.max(cell.width());
+    let edge_x = right + gap / 2.0;
+    let handle = egui::Rect::from_min_max(
+        egui::pos2(edge_x - 4.0, cell.top()),
+        egui::pos2(edge_x + 4.0, cell.bottom()),
+    );
+    let edge = ui.interact(
+        handle,
+        ui.make_persistent_id(("column_edge", column)),
+        Sense::click_and_drag(),
+    );
+    let color = if edge.hovered() || edge.dragged() {
+        TEXT
+    } else {
+        BORDER
+    };
+    ui.painter()
+        .vline(edge_x, cell.y_range(), Stroke::new(1.0, color));
+    if edge.hovered() || edge.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+    let action = if edge.double_clicked() {
+        Some(ColumnEdge::Fit)
+    } else if edge.dragged() && edge.drag_delta().x != 0.0 {
+        Some(ColumnEdge::Width(
+            (current + edge.drag_delta().x).clamp(COLUMN_MIN, COLUMN_MAX),
+        ))
+    } else {
+        None
+    };
+    (response, action)
+}
+
+/// 1 つの表の、幅を変えられる列（1 フレームぶん）: 決めた幅と、表を描いたあとで当てる見出しの右端の操作。
+pub(crate) struct Columns {
+    widths: Vec<Option<f32>>,
+    /// このフレームの見出しの右端の操作（列の番号と操作）。
+    pub(crate) edges: Vec<(usize, ColumnEdge)>,
+}
+
+impl Columns {
+    /// 列ごとの決めた幅（`None` は中身に合わせる）。
+    pub(crate) fn new(widths: Vec<Option<f32>>) -> Self {
+        Self {
+            widths,
+            edges: Vec::new(),
+        }
+    }
+
+    fn width(&self, column: usize) -> Option<f32> {
+        self.widths.get(column).copied().flatten()
+    }
+
+    /// 列 `column` の見出し（[`resizable_header`]）。
+    pub(crate) fn header(
+        &mut self,
+        ui: &mut egui::Ui,
+        sort: &mut TableSort,
+        column: usize,
+        label: &str,
+    ) -> egui::Response {
+        let (response, edge) = resizable_header(ui, sort, column, label, self.width(column));
+        if let Some(edge) = edge {
+            self.edges.push((column, edge));
+        }
+        response
+    }
+
+    /// 列 `column` のセルに文字を置き、セルの範囲を返す。
+    pub(crate) fn label(
+        &self,
+        ui: &mut egui::Ui,
+        column: usize,
+        text: impl Into<egui::WidgetText>,
+    ) -> egui::Rect {
+        fixed_cell(ui, self.width(column), |ui| ui.label(text)).1
+    }
+
+    /// 列 `column` のセルに `add` で描き、その結果とセルの範囲を返す。
+    pub(crate) fn cell<R>(
+        &self,
+        ui: &mut egui::Ui,
+        column: usize,
+        add: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> (R, egui::Rect) {
+        fixed_cell(ui, self.width(column), add)
+    }
+}
+
+/// 表のセル。`width` があればその幅ちょうどにし、入りきらない文字は「…」で切る。`None` は中身の大きさ。
+/// `add` の結果と、セルの範囲を返す。
+pub(crate) fn fixed_cell<R>(
+    ui: &mut egui::Ui,
+    width: Option<f32>,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> (R, egui::Rect) {
+    match width {
+        None => {
+            let response = ui.scope(add);
+            (response.inner, response.response.rect)
+        }
+        Some(width) => {
+            let height = ui.spacing().interact_size.y;
+            let response = ui.allocate_ui_with_layout(
+                egui::vec2(width, height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_width(width);
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                    add(ui)
+                },
+            );
+            (response.inner, response.response.rect)
+        }
+    }
 }
 
 /// `rows` を `sort` の列と向きで並べ替える（同じ鍵の行は元の順のまま）。

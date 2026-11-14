@@ -1,4 +1,5 @@
-//! BD の PG / IG セグメントの符号化。
+//! BD の PG / IG セグメントの符号化と、IG の読み取り（[`read`]: プレビューがビルドしたクリップのメニューの
+//! ボタンとコマンドを読む。書き出しと同じグラフィックスストリームの形の逆）。
 //!
 //! 層: L0（docs/architecture.md §5）。
 #![deny(
@@ -14,6 +15,7 @@ use std::error::Error;
 use std::fmt;
 
 pub mod ig;
+pub mod read;
 mod rle;
 mod segment;
 

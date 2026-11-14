@@ -44,8 +44,12 @@ pub(crate) fn frame_count(duration: Tick, standard: Standard) -> Option<u64> {
     let ticks_per_second = u64::try_from(TICKS_PER_SECOND).ok()?;
     let numerator = u128::from(ticks).checked_mul(u128::from(fps_num))?;
     let denominator = u128::from(ticks_per_second).checked_mul(u128::from(fps_den))?;
+    if denominator == 0 {
+        return None;
+    }
 
-    u64::try_from(numerator / denominator).ok()
+    // The nearest frame: a 6.0 s clip is 180 frames at 29.97 (179.82), all of the source, as Encore makes it.
+    u64::try_from(numerator.checked_add(denominator / 2)? / denominator).ok()
 }
 
 /// Encode all output frames into an MPEG-2 video elementary stream.
@@ -97,12 +101,17 @@ pub(crate) fn encode_video(
                 }
             }
         });
+        let mut gops = GopPlanner::new(
+            u64::from(encoder_config(options, max_bitrate).gop_size),
+            disccraft_mpeg2venc::encoder::max_gop_frames(standard),
+            &options.gop_starts,
+        );
         for index in 0..frames {
             let frame420 = receiver
                 .recv()
                 .map_err(|_| TranscodeError::Encode("the decoder stopped early".to_string()))??;
             let access_unit = encoder
-                .encode_frame(&frame420)
+                .encode_frame_gop(&frame420, gops.starts(index))
                 .map_err(|error| TranscodeError::Encode(error.to_string()))?;
             writer
                 .write_all(&access_unit)
@@ -125,6 +134,64 @@ pub(crate) fn encode_video(
     }
 
     Ok(())
+}
+
+/// Where the GOPs start: every `gop` frames, and at each frame of `forced` (a chapter or a layer break) so a DVD
+/// cell can begin exactly there; the regular count starts again from a forced start. A regular start that would
+/// leave a GOP of at most [`SHORT_GOP`] frames before the next forced start is left out when the GOP can reach that
+/// start within `max` frames (no needlessly tiny GOP just before a chapter).
+pub(crate) struct GopPlanner {
+    gop: u64,
+    max: u64,
+    forced: Vec<u64>,
+    next_forced: usize,
+    since_start: u64,
+}
+
+/// The shortest GOP worth keeping before a forced start, in frames.
+const SHORT_GOP: u64 = 3;
+
+impl GopPlanner {
+    pub(crate) fn new(gop: u64, max: u64, forced: &[u64]) -> Self {
+        let mut forced = forced.to_vec();
+        forced.sort_unstable();
+        forced.dedup();
+        Self {
+            gop: gop.max(1),
+            max: max.max(gop.max(1)),
+            forced,
+            next_forced: 0,
+            since_start: 0,
+        }
+    }
+
+    /// Whether frame `index` (asked for in order, from 0) starts a GOP.
+    pub(crate) fn starts(&mut self, index: u64) -> bool {
+        while self
+            .forced
+            .get(self.next_forced)
+            .is_some_and(|&frame| frame < index)
+        {
+            self.next_forced += 1;
+        }
+        let next_forced = self.forced.get(self.next_forced).copied();
+        let start = if index == 0 || next_forced == Some(index) {
+            true
+        } else if self.since_start >= self.gop {
+            // Stretch the GOP to a forced start a few frames away, rather than start a tiny one.
+            !next_forced.is_some_and(|frame| {
+                frame - index <= SHORT_GOP && self.since_start + (frame - index) <= self.max
+            })
+        } else {
+            false
+        };
+        if start {
+            self.since_start = 1;
+        } else {
+            self.since_start += 1;
+        }
+        start
+    }
 }
 
 /// How many converted pictures the decoding thread keeps ready ahead of the encoder.
@@ -488,7 +555,26 @@ pub(crate) fn for_each_rgb_frame(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
-    use super::{FOUR_THREE, SIXTEEN_NINE, target_geometry};
+    use super::{FOUR_THREE, GopPlanner, SIXTEEN_NINE, target_geometry};
+
+    fn starts(gop: u64, max: u64, forced: &[u64], frames: u64) -> Vec<u64> {
+        let mut planner = GopPlanner::new(gop, max, forced);
+        (0..frames).filter(|&index| planner.starts(index)).collect()
+    }
+
+    /// M14.1: GOPs every 15 frames, a forced start (a chapter) wherever it is with the count starting again from
+    /// it, no tiny GOP just before a forced start when the GOP can stretch to it, and forced starts out of order or
+    /// repeated are taken once.
+    #[test]
+    fn gops_start_at_the_forced_frames() {
+        assert_eq!(starts(15, 18, &[], 46), vec![0, 15, 30, 45]);
+        assert_eq!(starts(15, 18, &[37], 70), vec![0, 15, 30, 37, 52, 67]);
+        // 47 is two frames after the regular start at 45: GOP 30 stretches to 17 frames instead.
+        assert_eq!(starts(15, 18, &[47], 70), vec![0, 15, 30, 47, 62]);
+        // Too far to stretch within 18 frames: the regular start stays.
+        assert_eq!(starts(15, 16, &[47], 50), vec![0, 15, 30, 45, 47]);
+        assert_eq!(starts(15, 18, &[37, 0, 37], 40), vec![0, 15, 30, 37]);
+    }
 
     #[test]
     fn geometry_16_9_ntsc() -> Result<(), String> {

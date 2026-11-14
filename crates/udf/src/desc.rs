@@ -2,6 +2,9 @@
 
 const CS0_IDENTIFIER: &[u8] = b"OSTA Compressed Unicode";
 const UDF_SUFFIX: [u8; 8] = [0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+/// The domain identifier's suffix (UDF 2.1.5.3): UDF 1.02, then the domain flags: hard and soft write-protected
+/// (a pressed or finalised disc is read-only), as Encore writes it.
+const DOMAIN_SUFFIX: [u8; 8] = [0x02, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00];
 
 /// A byte extent described by a partition-relative logical block number and a length in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,12 +97,13 @@ pub fn finish_tag_version(
     put_u8(buf, 4, (sum & 0xFF) as u8);
 }
 
-/// Build an OSTA CS0 d-string.
+/// Build a dstring field of `field_len` bytes in OSTA CS0 (UDF 2.1.1, 2.1.3).
 ///
-/// Byte 0 is the compression byte `8`. ASCII characters are copied, non-ASCII
-/// characters are replaced by `_`, the field is zero padded, and the last byte
-/// is the number of used bytes including the compression byte. Empty text
-/// produces an all-zero field.
+/// Byte 0 is the compression ID: `8` (one byte a character) when every character is in Latin-1 (U+0000 to U+00FF),
+/// else `16` (UCS-2, two bytes a character, big-endian), so a Japanese disc name keeps its characters; a character
+/// outside the Basic Multilingual Plane becomes `_`. Characters that do not fit are dropped, the field is zero padded,
+/// and the last byte is the number of used bytes including the compression byte. Empty text produces an all-zero
+/// field.
 pub fn dstring(text: &str, field_len: usize) -> Vec<u8> {
     if field_len == 0 {
         return Vec::new();
@@ -112,23 +116,27 @@ pub fn dstring(text: &str, field_len: usize) -> Vec<u8> {
     }
 
     let mut out = vec![0u8; field_len];
-    put_bytes(&mut out, 0, &[8]);
-
-    let fill_len = field_len.saturating_sub(2);
+    // Room for characters: all but the compression byte and the length byte.
+    let room = field_len - 2;
+    let latin1 = text.chars().all(|ch| u32::from(ch) <= 0xFF);
     let mut used = 1usize;
-    if fill_len > 0 {
-        let end = 1usize.checked_add(fill_len);
-        if let Some(end) = end
-            && let Some(body) = out.get_mut(1..end)
-        {
-            for (slot, ch) in body.iter_mut().zip(text.chars()) {
-                *slot = if ch.is_ascii() { ch as u8 } else { b'_' };
-                used = used.saturating_add(1);
-            }
+    if latin1 {
+        put_bytes(&mut out, 0, &[8]);
+        for (index, ch) in text.chars().take(room).enumerate() {
+            let byte = u8::try_from(u32::from(ch)).unwrap_or(b'_');
+            put_bytes(&mut out, 1 + index, &[byte]);
+            used = used.saturating_add(1);
+        }
+    } else {
+        put_bytes(&mut out, 0, &[16]);
+        for (index, ch) in text.chars().take(room / 2).enumerate() {
+            let unit = u16::try_from(u32::from(ch)).unwrap_or(u16::from(b'_'));
+            put_bytes(&mut out, 1 + 2 * index, &unit.to_be_bytes());
+            used = used.saturating_add(2);
         }
     }
 
-    let len_byte = if used > 255 { 255 } else { used as u8 };
+    let len_byte = u8::try_from(used).unwrap_or(u8::MAX);
     put_bytes(&mut out, field_len - 1, &[len_byte]);
     out
 }
@@ -240,14 +248,15 @@ pub fn primary_volume_descriptor(
     out
 }
 
-/// Build an implementation use volume descriptor sector.
-pub fn implementation_use_volume_descriptor(location: u32) -> [u8; 2048] {
+/// Build an implementation use volume descriptor sector (UDF 2.2.7: the logical volume information, whose
+/// identifier is the logical volume's, `label`).
+pub fn implementation_use_volume_descriptor(location: u32, label: &str) -> [u8; 2048] {
     let mut out = [0u8; 2048];
 
     put_u32(&mut out, 16, 1);
     put_entity_at(&mut out, 20, "*UDF LV Info", &UDF_SUFFIX);
     put_charspec_cs0_at(&mut out, 52);
-    put_dstring_at(&mut out, 116, "", 128);
+    put_dstring_at(&mut out, 116, label, 128);
     put_dstring_at(&mut out, 244, "", 36);
     put_dstring_at(&mut out, 280, "", 36);
     put_dstring_at(&mut out, 316, "", 36);
@@ -287,7 +296,7 @@ pub fn logical_volume_descriptor(
     put_charspec_cs0_at(&mut out, 20);
     put_dstring_at(&mut out, 84, label, 128);
     put_u32(&mut out, 212, 2048);
-    put_entity_at(&mut out, 216, "*OSTA UDF Compliant", &UDF_SUFFIX);
+    put_entity_at(&mut out, 216, "*OSTA UDF Compliant", &DOMAIN_SUFFIX);
     put_long_ad_at(&mut out, 248, 2048, fsd_lbn, 0);
     put_u32(&mut out, 264, 6);
     put_u32(&mut out, 268, 1);
@@ -382,7 +391,7 @@ pub fn file_set_descriptor(lbn: u32, unix_time: i64, label: &str, root_icb_lbn: 
     put_dstring_at(&mut out, 336, "", 32);
     put_dstring_at(&mut out, 368, "", 32);
     put_long_ad_at(&mut out, 400, 2048, root_icb_lbn, 0);
-    put_entity_at(&mut out, 416, "*OSTA UDF Compliant", &UDF_SUFFIX);
+    put_entity_at(&mut out, 416, "*OSTA UDF Compliant", &DOMAIN_SUFFIX);
     put_long_ad_at(&mut out, 448, 0, 0, 0);
 
     finish_tag(&mut out, 256, lbn, 496);
@@ -749,6 +758,27 @@ mod tests {
     }
 
     #[test]
+    fn dstrings_keep_latin1_and_japanese() {
+        // Latin-1 stays one byte a character.
+        let d = dstring("Café", 32);
+        assert_eq!(&d[0..5], &[8, b'C', b'a', b'f', 0xE9]);
+        assert_eq!(d[31], 5);
+        // Anything else is UCS-2, big-endian: 夏の旅行 (U+590F U+306E U+65C5 U+884C).
+        let d = dstring("夏の旅行 2026", 32);
+        assert_eq!(d[0], 16);
+        assert_eq!(&d[1..9], &[0x59, 0x0F, 0x30, 0x6E, 0x65, 0xC5, 0x88, 0x4C]);
+        assert_eq!(&d[9..11], &[0x00, b' ']);
+        assert_eq!(d[31], 1 + 2 * 9);
+        // At most 15 characters fit a 32-byte field; one outside the BMP becomes `_`.
+        let d = dstring(&"あ".repeat(20), 32);
+        assert_eq!(d[31], 31);
+        assert_eq!(&d[29..31], &[0x30, 0x42]);
+        let d = dstring("🎬映画", 32);
+        assert_eq!(&d[1..3], &[0x00, b'_']);
+        assert_eq!(&d[3..5], &[0x66, 0x20]);
+    }
+
+    #[test]
     fn dstring_layout() {
         let d = dstring("DVD", 32);
         assert_eq!(d.len(), 32);
@@ -851,7 +881,7 @@ mod tests {
     #[test]
     #[allow(clippy::cognitive_complexity)]
     fn implementation_use_volume_descriptor_offsets() {
-        let i = implementation_use_volume_descriptor(1);
+        let i = implementation_use_volume_descriptor(1, "DVD");
 
         assert_eq!(le16(&i, 0), 4);
         assert_eq!(le16(&i, 10), 496);
@@ -861,7 +891,9 @@ mod tests {
         assert_eq!(&i[21..33], b"*UDF LV Info");
         assert_eq!(i[52], 0);
         assert_eq!(&i[53..76], b"OSTA Compressed Unicode");
-        assert_eq!(i[116], 0);
+        // The logical volume identifier: the volume's name (8-bit compressed, its length in the last byte).
+        assert_eq!(&i[116..120], b"DVD");
+        assert_eq!(i[243], 4);
         assert_eq!(i[244], 0);
         assert_eq!(i[280], 0);
         assert_eq!(i[316], 0);
