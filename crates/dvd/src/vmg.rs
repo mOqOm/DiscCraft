@@ -48,6 +48,7 @@ pub(crate) fn vmg_set_sectors(
     sectors
         .checked_mul(2)
         .and_then(|x| x.checked_add(vobs))
+        .and_then(|x| x.checked_add(disccraft_ifo::BUP_GAP_SECTORS))
         .ok_or_else(|| DvdError::Invalid("VMG set sector overflow".to_string()))
 }
 
@@ -77,7 +78,7 @@ pub(crate) fn write_vmg(
             wide: menus_wide,
         },
         first_play: Pgc {
-            prohibited_ops: first_play.1,
+            prohibited_ops: first_play.1 | crate::UOP_TIME_PLAY,
             pre: first_play.0.to_vec(),
             ..Pgc::default()
         },

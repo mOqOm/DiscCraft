@@ -28,6 +28,15 @@ impl Tool {
         (Tool::Zoom, egui::Key::Z),
     ];
 
+    /// The Craft apps' shared icon for the tool (FilmCraft's Selection, Type and Zoom tools).
+    pub(crate) fn icon(self) -> crate::icons::Icon {
+        match self {
+            Tool::Selection => crate::icons::Icon::Selection,
+            Tool::Text => crate::icons::Icon::Type,
+            Tool::Zoom => crate::icons::Icon::Zoom,
+        }
+    }
+
     pub(crate) fn label(self) -> &'static str {
         match self {
             Tool::Selection => tl!("Selection Tool"),
@@ -608,7 +617,7 @@ impl DiscCraftApp {
 
     /// The tool buttons at the left of the toolbar, and their keys (V, T, Z) when no text field has the keyboard.
     /// Encore のツールバーの「メニューを Photoshop で編集」に当たるボタン。ビューアにメニューがあるときだけ押せる。
-    /// 絵は DiscCraft の簡単な図形（額縁の中の山と、右下の鉛筆）。
+    /// 絵は PhotoCraft のアプリのアイコン（assets/icons/photocraft-48.png。押せないときは薄く）。
     fn edit_in_photocraft_button(&mut self, ui: &mut Ui) {
         let enabled = self.viewer_menu().is_some();
         let sense = if enabled {
@@ -628,32 +637,22 @@ impl DiscCraftApp {
                 egui::StrokeKind::Inside,
             );
         }
-        let color = if enabled {
-            visuals.fg_stroke.color
-        } else {
-            ui.visuals().weak_text_color()
-        };
-        let stroke = egui::Stroke::new(1.2, color);
-        let c = rect.center();
-        let frame = egui::Rect::from_center_size(c, egui::vec2(16.0, 12.0));
-        ui.painter()
-            .rect_stroke(frame, 1.0, stroke, egui::StrokeKind::Inside);
-        ui.painter().add(egui::Shape::line(
-            vec![
-                egui::pos2(frame.min.x + 2.0, frame.max.y - 2.5),
-                egui::pos2(c.x - 2.0, c.y - 1.0),
-                egui::pos2(c.x + 1.0, c.y + 1.5),
-                egui::pos2(c.x + 3.0, c.y),
-            ],
-            stroke,
-        ));
-        ui.painter().line_segment(
-            [
-                egui::pos2(frame.max.x + 2.0, frame.min.y + 1.0),
-                egui::pos2(c.x + 3.0, frame.max.y + 1.0),
-            ],
-            egui::Stroke::new(2.0, color),
-        );
+        if self.photocraft_icon.is_none() {
+            self.photocraft_icon = photocraft_icon(ui.ctx());
+        }
+        if let Some(icon) = &self.photocraft_icon {
+            let tint = if enabled {
+                egui::Color32::WHITE
+            } else {
+                egui::Color32::from_white_alpha(90)
+            };
+            ui.painter().image(
+                icon.id(),
+                egui::Rect::from_center_size(rect.center(), egui::vec2(18.0, 18.0)),
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                tint,
+            );
+        }
         if enabled && response.clicked() {
             self.run_action(ui, crate::actions::Action::EditMenuInPhotoCraft);
         }
@@ -682,35 +681,19 @@ impl DiscCraftApp {
                     egui::StrokeKind::Inside,
                 );
             }
-            tool_glyph(ui.painter(), rect, tool, visuals.fg_stroke.color);
+            let side = rect.height() - 6.0;
+            crate::icons::paint(
+                ui.painter(),
+                egui::Rect::from_center_size(rect.center(), egui::vec2(side, side)),
+                tool.icon(),
+                visuals.fg_stroke.color,
+            );
         }
         ui.separator();
         self.edit_in_photocraft_button(ui);
-        // プレビュー（ビルド結果をモニターで開く）。
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 22.0), egui::Sense::click());
-        let response = response.on_hover_text(crate::actions::Action::Preview.label());
-        let visuals = ui.style().interact(&response);
-        if response.hovered() {
-            ui.painter().rect(
-                rect,
-                2.0,
-                visuals.weak_bg_fill,
-                visuals.bg_stroke,
-                egui::StrokeKind::Inside,
-            );
-        }
-        let c = rect.center();
-        ui.painter()
-            .circle_stroke(c, 7.0, egui::Stroke::new(1.2, visuals.fg_stroke.color));
-        ui.painter().add(egui::Shape::convex_polygon(
-            vec![
-                egui::pos2(c.x - 2.5, c.y - 4.0),
-                egui::pos2(c.x + 4.0, c.y),
-                egui::pos2(c.x - 2.5, c.y + 4.0),
-            ],
-            visuals.fg_stroke.color,
-            egui::Stroke::NONE,
-        ));
+        // プレビュー（ビルド結果をモニターで開く）: Craft の共通の再生のアイコン。
+        let response = crate::icons::icon_button(ui, crate::icons::Icon::Play, false)
+            .on_hover_text(crate::actions::Action::Preview.label());
         if response.clicked() {
             self.run_action(ui, crate::actions::Action::Preview);
         }
@@ -745,47 +728,62 @@ pub(crate) fn font_style_row(
     chosen.filter(|choice: &Option<String>| choice.as_deref() != current)
 }
 
-/// Our own simple pictures for the tools: an arrow, a "T" and a magnifier.
-fn tool_glyph(painter: &egui::Painter, rect: egui::Rect, tool: Tool, color: egui::Color32) {
-    let c = rect.center();
-    match tool {
-        Tool::Selection => {
-            painter.add(egui::Shape::convex_polygon(
-                vec![
-                    egui::pos2(c.x - 4.0, c.y - 7.0),
-                    egui::pos2(c.x + 5.0, c.y + 2.0),
-                    egui::pos2(c.x + 0.5, c.y + 2.0),
-                    egui::pos2(c.x - 4.0, c.y + 7.0),
-                ],
-                color,
-                egui::Stroke::NONE,
-            ));
-        }
-        Tool::Text => {
-            painter.text(
-                c,
-                egui::Align2::CENTER_CENTER,
-                "T",
-                egui::FontId::proportional(16.0),
-                color,
-            );
-        }
-        Tool::Zoom => {
-            let lens = egui::pos2(c.x - 1.5, c.y - 1.5);
-            painter.circle_stroke(lens, 5.0, egui::Stroke::new(1.5, color));
-            painter.line_segment(
-                [
-                    egui::pos2(c.x + 2.0, c.y + 2.0),
-                    egui::pos2(c.x + 6.5, c.y + 6.5),
-                ],
-                egui::Stroke::new(2.5, color),
-            );
-        }
+/// PhotoCraft's app icon (48 px, MIT OR Apache-2.0; see ATTRIBUTION.md) as a texture; `None` if it cannot be read.
+fn photocraft_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let (width, height, rgba) = decode_rgba_png(PHOTOCRAFT_ICON)?;
+    let image = egui::ColorImage::from_rgba_unmultiplied([width, height], &rgba);
+    Some(ctx.load_texture("photocraft_icon", image, egui::TextureOptions::LINEAR))
+}
+
+/// The PhotoCraft app icon, built in.
+const PHOTOCRAFT_ICON: &[u8] = include_bytes!("../../../assets/icons/photocraft-48.png");
+
+/// An 8-bit RGBA (or RGB) PNG as (width, height, RGBA); `None` for anything else or a picture over 256 px.
+fn decode_rgba_png(bytes: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::EXPAND);
+    let mut reader = decoder.read_info().ok()?;
+    let (color, depth) = reader.output_color_type();
+    if depth != png::BitDepth::Eight {
+        return None;
     }
+    let info = reader.info();
+    let (width, height) = (
+        usize::try_from(info.width).ok()?,
+        usize::try_from(info.height).ok()?,
+    );
+    if width == 0 || height == 0 || width > 256 || height > 256 {
+        return None;
+    }
+    let mut data = vec![0_u8; reader.output_buffer_size()];
+    let frame = reader.next_frame(&mut data).ok()?;
+    let data = data.get(..frame.buffer_size())?;
+    let rgba = match color {
+        png::ColorType::Rgba => data.to_vec(),
+        png::ColorType::Rgb => data
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|&[r, g, b]| [r, g, b, 255])
+            .collect(),
+        _ => return None,
+    };
+    (rgba.len() == width * height * 4).then_some((width, height, rgba))
 }
 
 #[cfg(test)]
 mod tests {
+    /// The built-in PhotoCraft icon reads as a 48 px RGBA picture; other bytes do not.
+    #[test]
+    fn the_photocraft_icon_is_built_in() {
+        let decoded = super::decode_rgba_png(super::PHOTOCRAFT_ICON);
+        assert_eq!(
+            decoded.as_ref().map(|(w, h, rgba)| (*w, *h, rgba.len())),
+            Some((48, 48, 48 * 48 * 4))
+        );
+        assert!(super::decode_rgba_png(b"not a png").is_none());
+    }
+
     use super::{TextDrag, dragged_position};
     use disccraft_project::MenuId;
 

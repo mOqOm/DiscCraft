@@ -15,8 +15,12 @@ use disccraft_transcode::{Standard, TranscodeOptions, probe_seconds, transcode, 
 
 use crate::DvdError;
 
-/// LPCM stereo bitrate used for default transcoded audio.
+/// LPCM stereo bitrate (a WAV audio track, used as it is).
 pub(crate) const LPCM_STEREO_BITRATE: u32 = 1_536_000;
+/// The bitrate of transcoded audio: AC-3 stereo at 192 kbit/s (Dolby Digital, as Encore transcodes a soundtrack).
+pub(crate) const AC3_STEREO_BITRATE: u32 = disccraft_ac3enc::STEREO_KBPS * 1000;
+/// The version of the AC-3 soundtracks in the cache (made from the cached WAVs).
+const AC3_CACHE_VERSION: &str = "ac3-1";
 
 /// Maximum video bitrate accepted by the program stream muxer.
 pub(crate) const MAX_MUX_VIDEO_BITRATE: u32 = 9_800_000;
@@ -28,7 +32,7 @@ const HEAD_BYTES: usize = 65_536;
 const SEQUENCE_HEADER_BYTES: usize = 11;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-const CACHE_VERSION: &str = "disccraft-mpeg2venc-1";
+const CACHE_VERSION: &str = "disccraft-mpeg2venc-2";
 const SLIDE_RENDER_VERSION: &str = "slides-2";
 const TICKS_PER_SECOND: i64 = 254_016_000_000;
 
@@ -194,15 +198,20 @@ pub(crate) fn prepare_title(
     }
 
     let wide = timeline.wide(&project.settings);
-    let key = cache_key(project, input, budget, wide)?;
+    let gop_starts = asset_gop_starts(project, input);
+    let key = cache_key(project, input, budget, (wide, &gop_starts))?;
     let video_out = cache_dir.join(format!("{key}.m2v"));
     let marker = cache_dir.join(format!("{key}.ok"));
 
     if marker.is_file() && video_out.is_file() {
         let audio_out = cache_dir.join(format!("{key}.wav"));
+        let transcoded_audio = match audio_out.is_file() {
+            true => Some(ac3_soundtrack(&audio_out)?),
+            false => None,
+        };
         return Ok(PreparedTitle {
             video_path: video_out,
-            transcoded_audio: audio_out.is_file().then_some(audio_out),
+            transcoded_audio,
             transcoded: true,
             audio_tracks,
         });
@@ -213,6 +222,7 @@ pub(crate) fn prepare_title(
         video_bitrate: budget.video_bitrate,
         max_bitrate: budget.max_bitrate,
         wide,
+        gop_starts,
     };
     let (video_path, transcoded_audio) = transcode_to_cache(
         asset.name.as_str(),
@@ -222,6 +232,9 @@ pub(crate) fn prepare_title(
         &options,
         progress,
     )?;
+    let transcoded_audio = transcoded_audio
+        .map(|wav| ac3_soundtrack(&wav))
+        .transpose()?;
 
     Ok(PreparedTitle {
         video_path,
@@ -252,7 +265,7 @@ pub(crate) fn prepare_slideshow(
     if marker.is_file() && video_out.is_file() && audio_out.is_file() {
         return Ok(PreparedTitle {
             video_path: video_out,
-            transcoded_audio: Some(audio_out),
+            transcoded_audio: Some(ac3_soundtrack(&audio_out)?),
             transcoded: true,
             audio_tracks: Vec::new(),
         });
@@ -260,6 +273,9 @@ pub(crate) fn prepare_slideshow(
 
     let (video_path, transcoded_audio) =
         transcode_slideshow_to_cache(project, slideshow, cache_dir, &key, budget, progress)?;
+    let transcoded_audio = transcoded_audio
+        .map(|wav| ac3_soundtrack(&wav))
+        .transpose()?;
 
     Ok(PreparedTitle {
         video_path,
@@ -400,7 +416,7 @@ fn scan_passthrough(
                     }
                 };
 
-                let bits = lpcm_bits_for_seconds(secs)?;
+                let bits = ac3_bits_for_seconds(secs)?;
                 scan.passthrough_bits = add_bits(scan.passthrough_bits, bits)?;
             }
         }
@@ -458,8 +474,8 @@ fn scan_slideshows(project: &Project, scan: &mut Scan) -> Result<(), DvdError> {
             .checked_add(1)
             .ok_or_else(|| DvdError::Invalid("too many slideshows".to_string()))?;
 
-        scan.largest_audio_bitrate = scan.largest_audio_bitrate.max(LPCM_STEREO_BITRATE);
-        scan.audio_bits += f64::from(LPCM_STEREO_BITRATE) * seconds;
+        scan.largest_audio_bitrate = scan.largest_audio_bitrate.max(AC3_STEREO_BITRATE);
+        scan.audio_bits += f64::from(AC3_STEREO_BITRATE) * seconds;
 
         if !scan.audio_bits.is_finite() {
             return Err(DvdError::Invalid("audio bitrate overflow".to_string()));
@@ -500,8 +516,9 @@ fn audio_bitrate_for_title(
     timeline: &Timeline,
     seconds: f64,
 ) -> Result<u32, DvdError> {
+    // The video's own soundtrack, transcoded to AC-3.
     if timeline.audio.is_empty() {
-        return Ok(LPCM_STEREO_BITRATE);
+        return Ok(AC3_STEREO_BITRATE);
     }
 
     let mut total = 0u64;
@@ -533,19 +550,20 @@ fn track_audio_bitrate(path: &Path, seconds: f64) -> Result<u32, DvdError> {
             u32::try_from(per_second_f64 as u64)
                 .map_err(|_| DvdError::Invalid("audio bitrate exceeds u32".to_string()))
         }
-        AudioKind::Wav | AudioKind::Transcode => Ok(LPCM_STEREO_BITRATE),
+        AudioKind::Wav => Ok(LPCM_STEREO_BITRATE),
+        AudioKind::Transcode => Ok(AC3_STEREO_BITRATE),
     }
 }
 
-/// Estimate LPCM bits for a duration in seconds.
-fn lpcm_bits_for_seconds(seconds: f64) -> Result<u64, DvdError> {
+/// Estimate the bits of transcoded (AC-3) audio for a duration in seconds.
+fn ac3_bits_for_seconds(seconds: f64) -> Result<u64, DvdError> {
     if !seconds.is_finite() || seconds < 0.0 {
         return Err(DvdError::Invalid(
             "audio duration must be finite".to_string(),
         ));
     }
 
-    let bits = f64::from(LPCM_STEREO_BITRATE) * seconds;
+    let bits = f64::from(AC3_STEREO_BITRATE) * seconds;
     if !bits.is_finite() || bits > u64::MAX as f64 {
         return Err(DvdError::Invalid("audio bitrate overflow".to_string()));
     }
@@ -640,7 +658,8 @@ fn prepare_audio_tracks(
             AudioKind::Wav => PreparedAudio::Wav(path.to_path_buf()),
             AudioKind::Transcode => {
                 let key = audio_cache_key(path)?;
-                PreparedAudio::Wav(transcode_audio_to_cache(path, cache_dir, &key)?)
+                let wav = transcode_audio_to_cache(path, cache_dir, &key)?;
+                PreparedAudio::Ac3(ac3_soundtrack(&wav)?)
             }
         };
 
@@ -747,12 +766,13 @@ fn sequence_header_matches(slice: &[u8], standard: VideoStandard) -> bool {
             .is_some_and(|bits| bits <= MAX_MUX_VIDEO_BITRATE)
 }
 
-/// Compute a 16 hex digit cache key for a transcode (`wide`: the title's aspect, part of the output).
+/// Compute a 16 hex digit cache key for a transcode (`wide`: the title's aspect, and `gop_starts`: the frames its
+/// GOPs must start at; both part of the output).
 fn cache_key(
     project: &Project,
     input: &Path,
     budget: &Budget,
-    wide: bool,
+    (wide, gop_starts): (bool, &[u64]),
 ) -> Result<String, DvdError> {
     let metadata = fs::metadata(input).map_err(|err| crate::io_error(input, err))?;
     let (secs, nanos) = modified_time(&metadata)?;
@@ -766,9 +786,68 @@ fn cache_key(
     seed = fnv1a64(budget.video_bitrate.to_string().as_bytes(), seed);
     seed = fnv1a64(budget.max_bitrate.to_string().as_bytes(), seed);
     seed = fnv1a64(if wide { b"16:9" } else { b"4:3" }, seed);
+    // Only a video with chapters past its start has GOP starts: the keys of the others stay as they were.
+    if !gop_starts.is_empty() {
+        let frames: Vec<String> = gop_starts.iter().map(u64::to_string).collect();
+        seed = fnv1a64(format!("gop:{}", frames.join(",")).as_bytes(), seed);
+    }
     seed = fnv1a64(CACHE_VERSION.as_bytes(), seed);
 
     Ok(format!("{seed:016x}"))
+}
+
+/// Ticks (254,016,000,000 a second) of one frame at the disc's rate: 1001/30000 s for NTSC, 1/25 s for PAL.
+fn frame_ticks(standard: VideoStandard) -> u64 {
+    match standard {
+        VideoStandard::Ntsc => 8_475_667_200,
+        VideoStandard::Pal => 10_160_640_000,
+    }
+}
+
+/// The frame (at the disc's rate) nearest to `ticks` from the start of a title.
+pub(crate) fn frame_at(ticks: i64, standard: VideoStandard) -> u64 {
+    let per_frame = frame_ticks(standard);
+    u64::try_from(ticks).map_or(0, |ticks| ticks.saturating_add(per_frame / 2) / per_frame)
+}
+
+/// The manual layer break's time in `timeline`, when the disc is a dual-layer DVD (DVD9) and the break is in it.
+pub(crate) fn layer_break_time(project: &Project, timeline: &Timeline) -> Option<Tick> {
+    project
+        .settings
+        .layer_break
+        .filter(|point| point.timeline == timeline.id)
+        .filter(|_| project.settings.capacity == Capacity::Dvd9)
+        .map(|point| point.time)
+}
+
+/// The output frames where the transcode of video `path` must start a GOP: every chapter past the start of every
+/// timeline that plays it, so each chapter's cell begins exactly at its frame (the GOPs otherwise fall every 15 or 12
+/// frames, and a cell would start at the nearest of them).
+fn asset_gop_starts(project: &Project, path: &Path) -> Vec<u64> {
+    let mut frames: Vec<u64> = project
+        .timelines
+        .values()
+        .filter(|timeline| {
+            project
+                .assets
+                .get(&timeline.video)
+                .is_some_and(|asset| Path::new(&asset.path) == path)
+        })
+        .flat_map(|timeline| {
+            // The manual layer break of a dual-layer DVD gets its own cell, so its own GOP.
+            let layer_break = layer_break_time(project, timeline);
+            timeline
+                .chapters
+                .iter()
+                .map(|chapter| chapter.time)
+                .chain(layer_break)
+        })
+        .map(|time| frame_at(time.0, project.settings.standard))
+        .filter(|frame| *frame > 0)
+        .collect();
+    frames.sort_unstable();
+    frames.dedup();
+    frames
 }
 
 /// The aspect a video asset is transcoded with: the first timeline that plays it (else the disc's).
@@ -992,6 +1071,7 @@ fn transcode_slideshow_to_cache(
         video_bitrate: budget.video_bitrate,
         max_bitrate: budget.max_bitrate,
         wide: budget.wide,
+        gop_starts: Vec::new(),
     };
 
     let slide_inputs = slideshow_inputs(project, slideshow)?;
@@ -1242,6 +1322,39 @@ fn transcode_audio_to_cache(
     Ok(wav_out)
 }
 
+/// The AC-3 soundtrack made from a cached transcode's WAV (Dolby Digital, as Encore transcodes audio), cached next to
+/// it: `{wav stem}.ac3-1.ac3`, written through a part file so an interrupted encode is never taken for a finished one.
+///
+/// # Errors
+///
+/// [`DvdError::Unsupported`] when the WAV cannot be encoded, and I/O errors.
+pub(crate) fn ac3_soundtrack(wav: &Path) -> Result<PathBuf, DvdError> {
+    let stem = wav
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let out = wav.with_file_name(format!("{stem}.{AC3_CACHE_VERSION}.ac3"));
+    if out.is_file() {
+        return Ok(out);
+    }
+    let part = wav.with_file_name(format!(
+        "{stem}.{AC3_CACHE_VERSION}.{}.ac3.part",
+        part_number()
+    ));
+    if let Err(err) = disccraft_ac3enc::encode_wav(wav, &part) {
+        fs::remove_file(&part).unwrap_or(());
+        return Err(DvdError::Unsupported(format!(
+            "AC-3 {}: {err}",
+            wav.display()
+        )));
+    }
+    if let Err(err) = fs::rename(&part, &out) {
+        fs::remove_file(&part).unwrap_or(());
+        return Err(crate::io_error(&part, err));
+    }
+    Ok(out)
+}
+
 /// Remove transcode part files, ignoring missing files.
 fn remove_parts(video_part: &Path, audio_part: &Path) {
     fs::remove_file(video_part).unwrap_or(());
@@ -1271,10 +1384,10 @@ fn fnv1a64(bytes: &[u8], seed: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioKind, Budget, LPCM_STEREO_BITRATE, MAX_MUX_VIDEO_BITRATE, TICKS_PER_SECOND,
-        TranscodeStatus, VideoStandard, audio_cache_key, audio_kind, budget_with_probe,
-        estimate_with_probe, fnv1a64, is_passthrough, max_bitrate_for_audio_bitrate,
-        slideshow_cache_key, transcode_status,
+        AC3_STEREO_BITRATE, AudioKind, Budget, LPCM_STEREO_BITRATE, MAX_MUX_VIDEO_BITRATE,
+        TICKS_PER_SECOND, TranscodeStatus, VideoStandard, audio_cache_key, audio_kind,
+        budget_with_probe, estimate_with_probe, fnv1a64, is_passthrough,
+        max_bitrate_for_audio_bitrate, slideshow_cache_key, transcode_status,
     };
     use crate::DvdError;
     use disccraft_project::{Capacity, Project, Tick};
@@ -1328,9 +1441,9 @@ mod tests {
 
         let sizes: Vec<_> = estimate.timelines.clone();
         assert_eq!(sizes.first(), Some(&(as_is, size)));
-        // 60 seconds at the video bitrate plus LPCM stereo audio.
+        // 60 seconds at the video bitrate plus its AC-3 soundtrack.
         let expected =
-            (60 * (u64::from(estimate.video_bitrate) + u64::from(LPCM_STEREO_BITRATE))) / 8;
+            (60 * (u64::from(estimate.video_bitrate) + u64::from(AC3_STEREO_BITRATE))) / 8;
         assert_eq!(sizes.get(1), Some(&(transcoded, expected)));
         Ok(())
     }
@@ -1387,7 +1500,7 @@ mod tests {
         assert_eq!(budget.video_bitrate, 8_000_000);
         assert_eq!(
             budget.max_bitrate,
-            MAX_MUX_VIDEO_BITRATE - LPCM_STEREO_BITRATE
+            MAX_MUX_VIDEO_BITRATE - AC3_STEREO_BITRATE
         );
 
         Ok(())
@@ -1615,7 +1728,14 @@ fn video_status(
     let cached = cache_dir
         .zip(budget)
         .and_then(|(dir, budget)| {
-            let key = cache_key(project, path, budget, asset_wide(project, path)).ok()?;
+            let gop_starts = asset_gop_starts(project, path);
+            let key = cache_key(
+                project,
+                path,
+                budget,
+                (asset_wide(project, path), &gop_starts),
+            )
+            .ok()?;
             Some(cached(dir, &key, "m2v"))
         })
         .unwrap_or(false);

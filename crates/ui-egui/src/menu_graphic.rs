@@ -389,7 +389,7 @@ impl DiscCraftApp {
             .and_then(|index| usize::try_from(index).ok())
         {
             self.select_menu_graphic(menu, index);
-            self.tab = crate::workspace::CenterTab::Menu;
+            self.show_panel(crate::workspace::Panel::MenuViewer);
         }
     }
 

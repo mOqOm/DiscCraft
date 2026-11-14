@@ -14,6 +14,14 @@ const P_F_CODE: u8 = 2;
 
 const INV_SQRT2: f64 = 1.0 / std::f64::consts::SQRT_2;
 
+/// The longest GOP a DVD allows, in frames: 18 for NTSC (36 fields), 15 for PAL (30 fields).
+pub fn max_gop_frames(standard: Standard) -> u64 {
+    match standard {
+        Standard::Ntsc => 18,
+        Standard::Pal => 15,
+    }
+}
+
 static COS_TABLE: OnceLock<[[f64; 8]; 8]> = OnceLock::new();
 
 /// Encoder configuration for an I/P MPEG-2 sequence.
@@ -57,6 +65,8 @@ impl Predictors {
 pub struct Encoder {
     config: EncoderConfig,
     frames_encoded: u64,
+    /// Frames encoded since the current GOP started.
+    frames_in_gop: u64,
     reference: Option<Frame420>,
     reconstruction: Option<Frame420>,
     quant_i: u8,
@@ -88,6 +98,7 @@ impl Encoder {
         Ok(Self {
             config,
             frames_encoded: 0,
+            frames_in_gop: 0,
             reference: None,
             reconstruction: None,
             quant_i: 6,
@@ -96,18 +107,36 @@ impl Encoder {
         })
     }
 
-    /// Encode one frame as one access unit.
+    /// Encode one frame as one access unit, a closed GOP starting every `gop_size` frames.
     pub fn encode_frame(&mut self, frame: &Frame420) -> Result<Vec<u8>, EncodeError> {
+        let start = self.frames_in_gop >= u64::from(self.config.gop_size);
+        self.encode_frame_gop(frame, start)
+    }
+
+    /// Encode one frame as one access unit, starting a new closed GOP with it when `start_gop` (a chapter or a
+    /// layer break, where a DVD cell must begin exactly). The first frame always starts one, and so does a frame
+    /// that would make the GOP longer than a DVD allows (18 frames NTSC, 15 PAL); otherwise the GOP goes on, past
+    /// `gop_size` too, as the caller decides.
+    pub fn encode_frame_gop(
+        &mut self,
+        frame: &Frame420,
+        start_gop: bool,
+    ) -> Result<Vec<u8>, EncodeError> {
         validate_frame(frame, self.config.standard)?;
 
-        let gop_size = u64::from(self.config.gop_size);
-        let is_gop_start = self.frames_encoded.is_multiple_of(gop_size);
+        let is_gop_start = start_gop
+            || self.frames_encoded == 0
+            || self.frames_in_gop >= max_gop_frames(self.config.standard);
+        if is_gop_start {
+            self.frames_in_gop = 0;
+        }
         let picture_type = if is_gop_start {
             PictureType::I
         } else {
             PictureType::P
         };
-        let temporal_reference = (self.frames_encoded % gop_size) as u32;
+        // At most `max_gop_frames`, so it fits the 10-bit field.
+        let temporal_reference = u32::try_from(self.frames_in_gop).unwrap_or(0);
         let target_bits = self.target_bits(picture_type);
 
         let mut code = match picture_type {
@@ -149,6 +178,7 @@ impl Encoder {
         }
 
         self.frames_encoded += 1;
+        self.frames_in_gop += 1;
         self.reference = Some(recon.clone());
         self.reconstruction = Some(recon);
 

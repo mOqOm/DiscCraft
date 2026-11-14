@@ -64,6 +64,10 @@ enum Sub {
         /// Keep transcoded media in this folder (shared between builds) instead of next to the output
         #[arg(long)]
         cache: Option<PathBuf>,
+        /// Language (ISO 639-1, e.g. ja) of audio without its own when the project names none; else the
+        /// system's language
+        #[arg(long)]
+        audio_language: Option<String>,
     },
 }
 
@@ -71,7 +75,9 @@ fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("error: {message}");
+            use std::io::Write;
+            // Like the output, a closed error stream is not a reason to panic.
+            let _ = writeln!(std::io::stderr(), "error: {message}");
             ExitCode::FAILURE
         }
     }
@@ -95,9 +101,20 @@ fn run(cli: Cli) -> Result<(), String> {
             out,
             iso,
             cache,
+            audio_language,
         } => match (iso, out) {
-            (Some(iso), _) => build_project(&project, &iso, "iso", cache.as_deref()),
-            (None, Some(out)) => build_project(&project, &out, "folder", cache.as_deref()),
+            (Some(iso), _) => build_project(
+                &project,
+                &iso,
+                "iso",
+                (cache.as_deref(), audio_language.as_deref()),
+            ),
+            (None, Some(out)) => build_project(
+                &project,
+                &out,
+                "folder",
+                (cache.as_deref(), audio_language.as_deref()),
+            ),
             (None, None) => Err("--out or --iso is required".to_string()),
         },
     }
@@ -144,14 +161,14 @@ fn list_commands(json: bool) -> Result<(), String> {
             .fold(0usize, |acc, spec| acc.max(spec.label.chars().count()));
 
         for spec in specs {
-            println!(
+            say(&format!(
                 "{id:<id_width$}  {label:<label_width$}  {params}",
                 id = spec.id,
                 label = spec.label,
                 params = spec.params,
                 id_width = id_width,
                 label_width = label_width
-            );
+            ))?;
         }
     }
 
@@ -205,7 +222,7 @@ fn run_script(project: &Path, script: &Path) -> Result<(), String> {
 
         let text = serde_json::to_string(&result)
             .map_err(|error| format!("line {line}: serialization failed: {error}"))?;
-        println!("{text}");
+        say(&text)?;
     }
 
     save_if_dirty(&mut session, project)?;
@@ -220,7 +237,7 @@ fn inspect_project(project: &Path, json: bool) -> Result<(), String> {
         print_json_pretty(&result)?;
     } else {
         let summary = inspect::human_summary(&session.project)?;
-        println!("{summary}");
+        say(&summary)?;
     }
 
     Ok(())
@@ -230,7 +247,7 @@ fn build_project(
     project: &Path,
     out: &Path,
     output: &str,
-    cache: Option<&Path>,
+    (cache, audio_language): (Option<&Path>, Option<&str>),
 ) -> Result<(), String> {
     if !project.exists() {
         return Err(format!(
@@ -250,6 +267,12 @@ fn build_project(
         params.insert(
             "cache".to_string(),
             Value::String(cache.to_string_lossy().into_owned()),
+        );
+    }
+    if let Some(language) = audio_language {
+        params.insert(
+            "audioLanguage".to_string(),
+            Value::String(language.to_string()),
         );
     }
 
@@ -288,11 +311,10 @@ fn print_build_summary(result: &Value) -> Result<(), String> {
         megabytes_tenth = 0;
     }
 
-    println!("書き出した: {output}");
-    println!(
+    say(&format!("書き出した: {output}"))?;
+    say(&format!(
         "タイトル {titles} / チャプター {chapters} / {megabytes_whole}.{megabytes_tenth} MB / {seconds:.1} 秒"
-    );
-    Ok(())
+    ))
 }
 
 fn open_session(project: &Path) -> Result<Session, String> {
@@ -325,6 +347,18 @@ fn parse_params(params: Option<&str>) -> Result<Value, String> {
 
 fn print_json_pretty(value: &Value) -> Result<(), String> {
     let text = serde_json::to_string_pretty(value).map_err(|error| error.to_string())?;
-    println!("{text}");
-    Ok(())
+    say(&text)
+}
+
+/// Writes one line to standard output. When the reader has gone (`disccraft-cli commands | head`), the rest of the
+/// output is dropped and the command carries on (a script still runs and saves); `println!` would panic there.
+fn say(text: &str) -> Result<(), String> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    match writeln!(out, "{text}").and_then(|()| out.flush()) {
+        Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => {
+            Err(format!("cannot write the output: {error}"))
+        }
+        _ => Ok(()),
+    }
 }

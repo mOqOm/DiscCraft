@@ -30,5 +30,4 @@ Adobe Encore の素材（テンプレート、ボタン、背景、アイコン�
 
 | パス | 作者 | ライセンス | 出典 |
 |---|---|---|---|
-
-まだ素材はない。
+| assets/icons/photocraft-48.png | PhotoCraft のオーナー（ArtCraft で描いた原画をベクター化した PhotoCraft のアプリのアイコン） | MIT OR Apache-2.0 | [PhotoCraft の assets/app-icon（0fb40c5）](https://github.com/storytold/photocraft/blob/0fb40c534a8f2ca2e1aa6182f7ab06ae9fbed32e/assets/app-icon/hicolor/48x48/apps/ai.storyteller.photocraft.png)。改変なし。ツールバーの「メニューを PhotoCraft で編集」 |

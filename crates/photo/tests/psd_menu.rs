@@ -1,4 +1,4 @@
-//! A menu PSD written with PhotoCraft's PSD writer is read back with Encore-compatible layer naming: `(+)` groups become
+//! A menu PSD written with the Craft PSD writer (craft-psd, which PhotoCraft uses) is read back with Encore-compatible layer naming: `(+)` groups become
 //! buttons, `(=1)` layers their highlights, and the background leaves the highlights out.
 
 #![allow(
@@ -8,8 +8,8 @@
     clippy::indexing_slicing
 )]
 
+use craft_psd::{GroupSpec, LayerSpec, PixelData, PsdBuilder};
 use disccraft_photo::{Image8, load_image, load_psd_menu};
-use photocraft_psd::{GroupSpec, LayerSpec, PixelData, PsdBuilder};
 
 const W: u32 = 64;
 const H: u32 = 48;

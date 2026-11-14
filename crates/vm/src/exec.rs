@@ -216,6 +216,47 @@ impl<'a> Vm<'a> {
         (shown, track)
     }
 
+    /// The player's chapter keys and number entry (|◀◀ ▶▶| and a chapter number): go to `chapter` of the title being
+    /// played. No commands run (a PTT jump within the title). A chapter past either end stays at the first or last.
+    pub fn jump_chapter(&mut self, chapter: u16) -> Result<&Location, VmError> {
+        let Location::Title { title, .. } = self.location else {
+            return Err(invalid("not in a title"));
+        };
+        let chapters = self.title_model(title)?.chapters;
+        if chapters == 0 {
+            return Err(invalid("title has no chapters"));
+        }
+        self.location = Location::Title {
+            title,
+            chapter: chapter.clamp(1, chapters),
+        };
+        Ok(&self.location)
+    }
+
+    /// The player's audio key: play audio track `track` (1 to 8; SPRM1).
+    pub fn set_audio_track(&mut self, track: u8) -> Result<(), VmError> {
+        if !(1..=8).contains(&track) {
+            return Err(invalid("audio track out of range"));
+        }
+        if let Some(sprm) = self.sprm.get_mut(1) {
+            *sprm = u16::from(track - 1);
+        }
+        Ok(())
+    }
+
+    /// The player's subtitle key: show subtitle track `track` (1 to 32), or none (SPRM2; the track is kept).
+    pub fn set_subtitle_track(&mut self, track: Option<u8>) -> Result<(), VmError> {
+        let Some(sprm) = self.sprm.get_mut(2) else {
+            return Ok(());
+        };
+        match track {
+            Some(track) if (1..=32).contains(&track) => *sprm = 0x40 | u16::from(track - 1),
+            Some(_) => return Err(invalid("subtitle track out of range")),
+            None => *sprm &= !0x40,
+        }
+        Ok(())
+    }
+
     fn validate_location(&mut self) -> Result<(), VmError> {
         match self.location {
             Location::Stopped => Ok(()),
@@ -953,6 +994,46 @@ mod tests {
             right,
             auto_action: false,
         }
+    }
+
+    #[test]
+    fn chapter_keys_and_stream_keys_act_like_a_player() -> Result<(), VmError> {
+        let model = test_model();
+        let mut vm = Vm::restore(
+            &model,
+            Location::Title {
+                title: 1,
+                chapter: 1,
+            },
+        )?;
+        let chapters = model.titles.first().map_or(1, |title| title.chapters);
+        // Past either end stays at the first or last chapter.
+        assert_eq!(
+            *vm.jump_chapter(u16::MAX)?,
+            Location::Title {
+                title: 1,
+                chapter: chapters
+            }
+        );
+        assert_eq!(
+            *vm.jump_chapter(0)?,
+            Location::Title {
+                title: 1,
+                chapter: 1
+            }
+        );
+        // Streams: audio 2, subtitle 3 shown, then hidden (the track kept).
+        vm.set_audio_track(2)?;
+        assert_eq!(vm.audio_track(), Some(2));
+        vm.set_subtitle_track(Some(3))?;
+        assert_eq!(vm.subtitle_track(), (true, Some(3)));
+        vm.set_subtitle_track(None)?;
+        assert_eq!(vm.subtitle_track(), (false, Some(3)));
+        assert!(vm.set_audio_track(9).is_err() && vm.set_subtitle_track(Some(33)).is_err());
+        // Not in a title: no chapters to go to.
+        let mut menu = Vm::start(&model)?;
+        assert!(menu.jump_chapter(2).is_err());
+        Ok(())
     }
 
     fn test_model() -> DiscModel {

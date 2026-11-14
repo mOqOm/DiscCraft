@@ -23,6 +23,12 @@ impl fmt::Display for IfoError {
 
 impl Error for IfoError {}
 
+/// Unused sectors between the last VOB of a set (or its IFO, when it has none) and its BUP, counted in the set's
+/// last sector. The IFO and its backup must not share an ECC block (16 sectors): a gap of a whole block keeps
+/// them apart whatever the VOBs between them, as Encore lays sets out. The disc image leaves the same gap
+/// (`disccraft_udf`'s `BUP_GAP_SECTORS`).
+pub const BUP_GAP_SECTORS: u32 = 16;
+
 mod attr;
 mod bytes;
 mod pgc;

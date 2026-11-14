@@ -6,7 +6,6 @@
 use crate::DiscCraftApp;
 use crate::app::Selection;
 use crate::i18n::tl;
-use crate::workspace::CenterTab;
 
 use disccraft_project::{
     Align, Arrange, Axis, Link, Menu, MenuId, Rect, arranged_order, bounds, frame_size,
@@ -136,7 +135,9 @@ impl DiscCraftApp {
     /// 編集の対象になるメニュー（メニュービューアが前面で、そのメニューを選んでいるとき）。
     pub(crate) fn edit_menu_target(&self) -> Option<MenuId> {
         match self.selection {
-            Selection::Menu(id) if self.tab == CenterTab::Menu => Some(id),
+            Selection::Menu(id) if self.panel_front(crate::workspace::Panel::MenuViewer) => {
+                Some(id)
+            }
             _ => None,
         }
     }

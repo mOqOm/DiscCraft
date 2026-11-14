@@ -20,8 +20,9 @@ mod commands;
 mod params;
 mod player;
 mod session;
+pub mod waveform;
 
-pub use player::{AudioFeed, Player, PlayerAudio, PlayerFrame, PlayerStatus};
+pub use player::{AudioFeed, FrameSource, Player, PlayerAudio, PlayerFrame, PlayerStatus};
 pub use session::{Session, UNDO_LIMIT};
 
 /// Result type returned by engine commands.

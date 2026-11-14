@@ -54,9 +54,39 @@ impl Project {
         self.check_links(&mut problems);
         self.check_dvd_limits(&mut problems);
         self.check_warnings(&mut problems);
+        self.check_layer_break(&mut problems);
         crate::check_menu::check_menus(self, &mut problems);
         crate::check_lists::check_lists(self, &mut problems);
         problems
+    }
+
+    /// The manual layer break: its timeline must exist; it is used only by a dual-layer DVD (DVD9).
+    fn check_layer_break(&self, problems: &mut Vec<Problem>) {
+        let Some(point) = self.settings.layer_break else {
+            return;
+        };
+        if self.timeline(point.timeline).is_none() {
+            problems.push(error(
+                "layerBreakTimeline",
+                format!(
+                    "the layer break's timeline {} does not exist",
+                    point.timeline.0
+                ),
+            ));
+        } else if point.time.0 < 0 {
+            problems.push(error(
+                "layerBreakTime",
+                "the layer break time is before the timeline's start".to_string(),
+            ));
+        }
+        if self.settings.kind != crate::DiscKind::Dvd
+            || self.settings.capacity != crate::Capacity::Dvd9
+        {
+            problems.push(warning(
+                "layerBreakUnused",
+                "the manual layer break is used only for a dual-layer DVD (DVD9)".to_string(),
+            ));
+        }
     }
 
     fn check_ids(&self, problems: &mut Vec<Problem>) {
@@ -472,6 +502,37 @@ mod tests {
         p.settings.regions = vec![9];
         let problems = p.check();
         assert!(has_code(&problems, "badRegion"));
+        Ok(())
+    }
+
+    /// M14.2: the manual layer break's timeline must exist; on a single-layer disc it is unused (a warning). It
+    /// round-trips through the project file and is left out of it when automatic.
+    #[test]
+    fn layer_break_is_checked_and_saved() -> Result<(), Box<dyn Error>> {
+        let mut p = valid_project()?;
+        let timeline = p.timelines.keys().next().copied().ok_or("no timeline")?;
+        p.settings.capacity = crate::Capacity::Dvd9;
+        p.settings.layer_break = Some(crate::LayerBreakPoint {
+            timeline,
+            time: Tick(5),
+        });
+        let problems = p.check();
+        assert!(!has_errors(&problems));
+        assert!(!has_code(&problems, "layerBreakUnused"));
+        let text = serde_json::to_string(&p.settings)?;
+        assert!(text.contains(r#""layerBreak":{"timeline":"#), "{text}");
+        let back: crate::DiscSettings = serde_json::from_str(&text)?;
+        assert_eq!(back.layer_break, p.settings.layer_break);
+
+        p.settings.capacity = crate::Capacity::Dvd5;
+        assert!(has_warning_code(&p.check(), "layerBreakUnused"));
+        p.settings.layer_break = Some(crate::LayerBreakPoint {
+            timeline: TimelineId(999),
+            time: Tick(5),
+        });
+        assert!(has_code(&p.check(), "layerBreakTimeline"));
+        p.settings.layer_break = None;
+        assert!(!serde_json::to_string(&p.settings)?.contains("layerBreak"));
         Ok(())
     }
 

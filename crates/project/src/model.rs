@@ -123,6 +123,16 @@ pub struct DiscSettings {
     /// "Set Audio").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_default: Option<u8>,
+    /// The language (ISO 639-1, `ja`) of audio that has none of its own: a video's own soundtrack, a slideshow's
+    /// audio and an audio track whose language is empty (Encore writes the language of every audio stream).
+    /// `None` follows DiscCraft's display language when the disc is built (the build is told it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_language: Option<String>,
+    /// Where a dual-layer DVD (DVD-9) goes from layer 0 to layer 1 (Encore's ブレークポイント 手動): a point of a
+    /// timeline, where the build starts a cell (and a GOP) so the break can fall there. `None` lets the build
+    /// choose (自動: the first cell boundary past the middle of the image).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer_break: Option<LayerBreakPoint>,
     /// The subtitle the disc selects when it starts (Encore's "Set Subtitle").
     #[serde(default, skip_serializing_if = "SubtitleDefault::is_no_change")]
     pub subtitle_default: SubtitleDefault,
@@ -416,7 +426,8 @@ pub struct Timeline {
     /// Remote operations prohibited while the timeline plays (DVD).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prohibited_ops: Vec<crate::UserOp>,
-    /// 16:9 (anamorphic) instead of 4:3 for this timeline; `None` follows the disc (Encore's timeline aspect).
+    /// 16:9 (anamorphic) instead of 4:3 for this timeline (Encore's timeline aspect). A timeline made by a command
+    /// takes its video's aspect; `None` follows the disc.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub widescreen: Option<bool>,
 }
@@ -462,6 +473,10 @@ pub struct Project {
     /// Which folder each item sits in (item id → folder id); items not listed are at the root.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub placements: BTreeMap<u64, u64>,
+    /// Where the Flowchart panel draws the nodes that were moved by hand (item id, [`FLOWCHART_DISC`] for the
+    /// disc → the node's top-left). Nodes not listed are laid out automatically.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub flowchart: BTreeMap<u64, FlowPoint>,
     #[serde(default = "default_next_id")]
     pub next_id: u64,
 }
@@ -478,6 +493,7 @@ impl Default for Project {
             chapter_playlists: BTreeMap::new(),
             folders: BTreeMap::new(),
             placements: BTreeMap::new(),
+            flowchart: BTreeMap::new(),
             next_id: 1,
         }
     }
@@ -485,6 +501,41 @@ impl Default for Project {
 
 fn default_next_id() -> u64 {
     1
+}
+
+/// A manual layer break: the time of a timeline where layer 1 begins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayerBreakPoint {
+    /// The timeline.
+    pub timeline: TimelineId,
+    /// The time in the timeline (the build takes the frame nearest to it).
+    pub time: Tick,
+}
+
+/// The key of the disc node (First Play / Title button) in [`Project::flowchart`]; item ids start at 1.
+pub const FLOWCHART_DISC: u64 = 0;
+/// The largest coordinate of a moved flowchart node, in points.
+pub const FLOWCHART_LIMIT: i32 = 100_000;
+
+/// A moved flowchart node's top-left, in points from the top-left of the flowchart (0 to [`FLOWCHART_LIMIT`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowPoint {
+    pub x: i32,
+    pub y: i32,
+}
+
+impl Project {
+    /// Whether `id` names a node of the flowchart: the disc ([`FLOWCHART_DISC`]), a menu, timeline, slideshow,
+    /// playlist or chapter playlist.
+    pub fn flowchart_node_exists(&self, id: u64) -> bool {
+        id == FLOWCHART_DISC
+            || self.menus.contains_key(&MenuId(id))
+            || self.timelines.contains_key(&TimelineId(id))
+            || self.slideshows.contains_key(&id)
+            || self.playlists.contains_key(&id)
+            || self.chapter_playlists.contains_key(&id)
+    }
 }
 
 impl Project {
@@ -769,6 +820,45 @@ impl Project {
     /// Mutably borrow a timeline.
     pub fn timeline_mut(&mut self, id: TimelineId) -> Option<&mut Timeline> {
         self.timelines.get_mut(&id)
+    }
+}
+
+#[cfg(test)]
+mod flowchart_tests {
+    use super::{FLOWCHART_DISC, FlowPoint, Project};
+    use std::path::Path;
+
+    #[test]
+    fn moved_flowchart_nodes_are_saved_only_when_there_are_any()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::default();
+        let text = serde_json::to_string(&project)?;
+        assert!(!text.contains("flowchart"), "{text}");
+
+        let asset = project.add_asset(Path::new("movie.m2v"))?;
+        let timeline = project.add_timeline(asset, None)?;
+        assert!(project.flowchart_node_exists(FLOWCHART_DISC));
+        assert!(project.flowchart_node_exists(timeline.0));
+        assert!(!project.flowchart_node_exists(asset.0));
+        assert!(!project.flowchart_node_exists(999));
+
+        project
+            .flowchart
+            .insert(timeline.0, FlowPoint { x: 40, y: 300 });
+        let text = serde_json::to_string(&project)?;
+        assert!(
+            text.contains(&format!(
+                "\"flowchart\":{{\"{}\":{{\"x\":40,\"y\":300}}}}",
+                timeline.0
+            )),
+            "{text}"
+        );
+        let back: Project = serde_json::from_str(&text)?;
+        assert_eq!(
+            back.flowchart.get(&timeline.0),
+            Some(&FlowPoint { x: 40, y: 300 })
+        );
+        Ok(())
     }
 }
 

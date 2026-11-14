@@ -14,7 +14,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "ビルド",
         menu: &["ファイル"],
         shortcut: None,
-        params: r#"{"output": "folder" | "iso", "path": string, "cache"?: string}"#,
+        params: r#"{"output": "folder" | "iso", "path": string, "cache"?: string, "audioLanguage"?: "ja"}"#,
         enabled: always_enabled,
         run: run_build,
         journal: false,
@@ -43,6 +43,7 @@ fn run_transcode_status(session: &mut Session, params: &Value) -> CommandResult 
                 output,
                 path: PathBuf::from(path),
                 cache: None,
+                audio_language: None,
             }))
             .filter(|dir| dir.is_dir())
         }
@@ -58,6 +59,22 @@ fn run_transcode_status(session: &mut Session, params: &Value) -> CommandResult 
         })
         .collect();
     Ok(object(&[("assets", Value::Array(assets))]))
+}
+
+/// The system's language as ISO 639-1 (`ja` from `ja_JP.UTF-8`), from the usual environment variables, as the GUI
+/// starts its display language; `None` when none says (Windows sets none of them).
+fn system_language() -> Option<String> {
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .find_map(|variable| {
+            let value = std::env::var(variable).ok()?;
+            let primary = value
+                .split(['-', '_', '.', '@'])
+                .next()?
+                .to_ascii_lowercase();
+            (primary.len() == 2 && primary.bytes().all(|b| b.is_ascii_lowercase()))
+                .then_some(primary)
+        })
 }
 
 fn status_name(status: TranscodeStatus) -> &'static str {
@@ -76,10 +93,15 @@ fn run_build(session: &mut Session, params: &Value) -> CommandResult {
     let cache = crate::params::opt_str(params, "cache")?
         .filter(|cache| !cache.trim().is_empty())
         .map(PathBuf::from);
+    // The language of audio without its own, when the project names none: the one given, else the system's.
+    let audio_language = crate::params::opt_str(params, "audioLanguage")?
+        .filter(|code| !code.trim().is_empty())
+        .or_else(system_language);
     let options = BuildOptions {
         output,
         path,
         cache,
+        audio_language,
     };
 
     let report = disccraft_build::build(&session.project, &options)?;
@@ -99,9 +121,52 @@ fn run_build(session: &mut Session, params: &Value) -> CommandResult {
         ("seconds", Value::from(report.seconds)),
         (
             "layerBreak",
-            report.layer_break.map_or(Value::Null, Value::from),
+            report
+                .layer_break
+                .as_ref()
+                .map_or(Value::Null, |found| Value::from(found.sector)),
+        ),
+        (
+            "layerBreakDetail",
+            report
+                .layer_break
+                .as_ref()
+                .map_or(Value::Null, layer_break_json),
         ),
     ]))
+}
+
+/// The layer break as read back from the image: the sectors, the mode, where it is and whether it is where asked.
+fn layer_break_json(found: &disccraft_build::LayerBreak) -> Value {
+    let place = found.place.as_ref().map_or(Value::Null, |place| {
+        object(&[
+            ("timeline", Value::from(place.timeline)),
+            ("title", Value::from(place.title)),
+            ("vts", Value::from(place.vts)),
+            ("cell", Value::from(place.cell)),
+            ("time90k", Value::from(place.time_90k)),
+            (
+                "milliseconds",
+                Value::from(disccraft_build::millis(place.time_90k)),
+            ),
+        ])
+    });
+    object(&[
+        ("sector", Value::from(found.sector)),
+        ("totalSectors", Value::from(found.total_sectors)),
+        ("layer0Sectors", Value::from(found.sector)),
+        ("layer1Sectors", Value::from(found.layer1_sectors())),
+        ("manual", Value::from(found.manual)),
+        ("place", place),
+        (
+            "requested90k",
+            found.requested_90k.map_or(Value::Null, Value::from),
+        ),
+        (
+            "asRequested",
+            found.as_requested().map_or(Value::Null, Value::from),
+        ),
+    ])
 }
 
 fn parse_output(text: &str) -> Result<OutputKind, String> {

@@ -13,4 +13,4 @@ publish.workspace = true
 workspace = true
 
 [dev-dependencies]
-filmcraft-mpeg2v.workspace = true
+craft-video.workspace = true

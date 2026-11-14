@@ -1,11 +1,13 @@
 //! タイムライン ▸ オーディオトラックを追加… / 字幕トラックを追加… / オーディオトラックを削除 / 字幕トラックを削除
 //! （Encore のタイムラインメニューと同じ項目。[docs/ui-parity.md](../../../docs/ui-parity.md) §3.1）。
 //!
-//! DiscCraft のトラックは必ずアセットを持つので、追加のときにアセットと言語をダイアログで選ぶ。
+//! DiscCraft のトラックは必ずアセットを持つので、追加のときにアセットと言語をダイアログで選ぶ。オーディオ
+//! トラックには、音声のファイルのほか、音声のある映像のファイル（その音声）も置ける（Encore と同じく、映像と
+//! 音声は別のトラック）。
 
 use crate::app::{DiscCraftApp, Selection};
 use crate::gui_params;
-use crate::i18n::tl;
+use crate::i18n::{tl, tlf};
 
 use disccraft_project::{AssetId, AssetKind, TimelineId};
 use egui::{Context, Id, Modal};
@@ -21,14 +23,6 @@ pub(crate) enum TrackKind {
 }
 
 impl TrackKind {
-    /// このトラックに置けるアセットの種類。
-    fn asset_kind(self) -> AssetKind {
-        match self {
-            Self::Audio => AssetKind::Audio,
-            Self::Subtitle => AssetKind::Subtitle,
-        }
-    }
-
     /// ダイアログの見出し。
     fn title(self) -> &'static str {
         match self {
@@ -74,11 +68,12 @@ pub(crate) struct TrackDialog {
 }
 
 impl DiscCraftApp {
-    /// 選択中のタイムライン（タイムラインメニューの対象）。
+    /// タイムラインメニューの対象: 選択中のタイムライン、なければタイムラインビューアのタイムライン（Encore と
+    /// 同じく、ビューアに出ているタイムラインにトラックを足せる）。
     pub(crate) fn selected_timeline(&self) -> Option<TimelineId> {
         match self.selection {
             Selection::Timeline(id) => Some(id),
-            _ => None,
+            _ => self.viewer_timeline(),
         }
     }
 
@@ -102,11 +97,19 @@ impl DiscCraftApp {
             return;
         };
         let asset = self.track_assets(kind).first().map(|(id, _)| *id);
+        // 言語の初めは、ディスクのオーディオの言語、なければ DiscCraft の表示言語（M13.8 と同じ）。
+        let language = self
+            .session
+            .project
+            .settings
+            .audio_language
+            .clone()
+            .unwrap_or_else(|| crate::i18n::current().code().to_owned());
         self.track_dialog = Some(TrackDialog {
             timeline,
             kind,
             asset,
-            language: "ja".to_owned(),
+            language,
         });
     }
 
@@ -140,15 +143,30 @@ impl DiscCraftApp {
         );
     }
 
-    /// `kind` のトラックに置けるアセット（id と名前、プロジェクトの順）。
-    fn track_assets(&self, kind: TrackKind) -> Vec<(AssetId, String)> {
-        self.session
+    /// `kind` のトラックに置けるアセット（id と名前、プロジェクトの順）。オーディオトラックには音声のファイルと、
+    /// 音声のある映像のファイル（名前に「の音声」を添える）。
+    fn track_assets(&mut self, kind: TrackKind) -> Vec<(AssetId, String)> {
+        let candidates: Vec<(AssetId, AssetKind, String)> = self
+            .session
             .project
             .assets
             .values()
-            .filter(|asset| asset.kind == kind.asset_kind())
-            .map(|asset| (asset.id, asset.name.clone()))
-            .collect()
+            .map(|asset| (asset.id, asset.kind, asset.name.clone()))
+            .collect();
+        let mut out = Vec::new();
+        for (id, asset_kind, name) in candidates {
+            match (kind, asset_kind) {
+                (TrackKind::Audio, AssetKind::Audio)
+                | (TrackKind::Subtitle, AssetKind::Subtitle) => {
+                    out.push((id, name));
+                }
+                (TrackKind::Audio, AssetKind::Video) if self.asset_probe(id).audio => {
+                    out.push((id, tlf!("{name} (sound)", name = name)));
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     /// 「トラックを追加」ダイアログ（開いているときだけ描く）。
@@ -193,7 +211,7 @@ impl DiscCraftApp {
                 });
             if assets.is_empty() {
                 ui.small(match state.kind {
-                    TrackKind::Audio => tl!("Import an audio file first."),
+                    TrackKind::Audio => tl!("Import an audio file or a video with sound first."),
                     TrackKind::Subtitle => tl!("Import a subtitle file (.srt) first."),
                 });
             }

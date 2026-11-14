@@ -274,7 +274,10 @@ impl DiscCraftApp {
                         Some(seconds) => ui.label(self.duration_text_at(seconds, probe.fps)),
                         None => ui.label(""),
                     };
-                    if ui.small_button("×").on_hover_text(tl!("Remove")).clicked() {
+                    if crate::icons::icon_button(ui, crate::icons::Icon::Close, false)
+                        .on_hover_text(tl!("Remove"))
+                        .clicked()
+                    {
                         remove = Some(index);
                     }
                     ui.end_row();

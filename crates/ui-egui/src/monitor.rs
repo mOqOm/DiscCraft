@@ -6,7 +6,6 @@
 
 use crate::app::{DiscCraftApp, Selection};
 use crate::i18n::{tl, tlf};
-use crate::workspace::CenterTab;
 
 use egui::{self, Ui};
 use serde_json::{Value, json};
@@ -25,6 +24,8 @@ pub(crate) enum RemoteKey {
     Menu,
     /// タイトルボタン（タイトルメニューへ）。
     Title,
+    /// Blu-ray のポップアップメニューのボタン（再生中のタイトルの上にポップアップを出す / 閉じる）。
+    Popup,
 }
 
 /// モニターの拡大率（Encore のプレビューと同じ選択肢）。
@@ -102,6 +103,7 @@ impl RemoteKey {
             RemoteKey::Finish => "finish",
             RemoteKey::Menu => "menu",
             RemoteKey::Title => "title",
+            RemoteKey::Popup => "popup",
         }
     }
 }
@@ -112,6 +114,18 @@ pub(crate) struct PreviewState {
     pub(crate) open: bool,
     pub(crate) label: String,
     pub(crate) menu: Option<PreviewMenu>,
+    /// 再生中のタイトルとチャプター（1 から）。
+    pub(crate) title: Option<(u8, u16)>,
+    /// VM が選んでいるオーディオストリーム（1 から）。
+    pub(crate) audio: Option<u8>,
+    /// VM が表示にしている字幕ストリーム（1 から。消しているときは `None`）。
+    pub(crate) subtitle: Option<u8>,
+    /// Blu-ray のプロジェクトのプレビューか。
+    pub(crate) bluray: bool,
+    /// 再生中のタイトルの上に出ている Blu-ray のポップアップメニュー（PGCN とハイライトしているボタン）。
+    pub(crate) popup: Option<PreviewMenu>,
+    /// 再生中のタイトルにポップアップメニューがあるか。
+    pub(crate) popup_available: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -127,7 +141,12 @@ impl DiscCraftApp {
     pub(crate) fn monitor_view(&mut self, ui: &mut Ui) {
         // 状態は開いたときとキー操作のときにだけ更新する（毎フレームのコマンド実行は
         // ステータス欄と dirty フラグを汚すので避ける）。
-        let state = self.preview.clone();
+        // プロジェクトプレビューの窓が開いている間は、プレビューはその窓に出す（モニターはタイムライン）。
+        let state = if self.project_preview.is_some() {
+            PreviewState::default()
+        } else {
+            self.preview.clone()
+        };
         // プレビューしていないときは、Encore と同じくタイムラインの再生ヘッドの位置の映像を映す。
         let timeline_frame = if state.open {
             None
@@ -146,18 +165,50 @@ impl DiscCraftApp {
             _ => None,
         };
 
+        // プレビューでタイトルを再生しているときは、その映像（と VM が出している字幕）。
+        let preview_picture = if state.open && state.menu.is_none() {
+            self.preview_picture()
+        } else {
+            None
+        };
+
+        // タイムラインを映しているときは FilmCraft のプログラムモニターと同じ 3 段の操作部、プレビュー中は
+        // リモコンの操作バー。
+        let timeline = match (state.open, self.viewer_timeline()) {
+            (false, Some(id)) => Some(id),
+            _ => None,
+        };
         egui::Panel::bottom("monitor_controls")
             .resizable(false)
-            .show(ui, |ui| self.monitor_bar(ui, &state, timecode.as_deref()));
+            .show(ui, |ui| match timeline {
+                Some(id) => self.timeline_controls(ui, id),
+                None => self.monitor_bar(ui, &state, timecode.as_deref()),
+            });
 
+        // FilmCraft と同じく、映像のまわりはパネルの地、映像は黒い画面の中に。
+        let surround = if timeline.is_some() {
+            crate::theme::PANEL
+        } else {
+            egui::Color32::BLACK
+        };
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(egui::Color32::BLACK))
+            .frame(egui::Frame::new().fill(surround))
             .show(ui, |ui| {
                 if let Some((texture, _)) = &timeline_frame {
-                    // 4:3 の画面として映す（拡大率に合わせる。はみ出たところは切れる）。
-                    let area = ui.max_rect();
-                    let size = self.monitor_zoom.size(area.size(), 4.0 / 3.0);
-                    let picture = egui::Rect::from_center_size(area.center(), size);
+                    // タイムラインの画面（4:3 か 16:9。拡大率に合わせ、はみ出たところは切れる）に、ディスクと同じく
+                    // 絵をレターボックス / ピラーボックスで収める（FilmCraft のモニターと同じく、まわりはパネルの地）。
+                    // The screen: the frame's own aspect (the timeline's 16:9 or 4:3, or the HD frame).
+                    let [frame_width, frame_height] = texture.size();
+                    let screen_aspect = if frame_width == 0 || frame_height == 0 {
+                        4.0 / 3.0
+                    } else {
+                        frame_width as f32 / frame_height as f32
+                    };
+                    let area = ui.max_rect().shrink(4.0);
+                    let size = self.monitor_zoom.size(area.size(), screen_aspect);
+                    let screen = egui::Rect::from_center_size(area.center(), size);
+                    ui.painter().rect_filled(screen, 0.0, egui::Color32::BLACK);
+                    let picture = fit_picture(screen, screen_aspect);
                     ui.painter().image(
                         texture.id(),
                         picture,
@@ -165,7 +216,27 @@ impl DiscCraftApp {
                         egui::Color32::WHITE,
                     );
                     if let Some(text) = &subtitle {
-                        draw_subtitle(ui.painter(), picture.intersect(area), text);
+                        draw_subtitle(ui.painter(), screen.intersect(area), text);
+                    }
+                    return;
+                }
+                if let Some(picture) = &preview_picture {
+                    let area = ui.max_rect();
+                    let aspect = if picture.wide { 16.0 / 9.0 } else { 4.0 / 3.0 };
+                    let size = self.monitor_zoom.size(area.size(), aspect);
+                    let frame = egui::Rect::from_center_size(area.center(), size);
+                    ui.painter().image(
+                        picture.texture.id(),
+                        frame,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                    if let Some(text) = &picture.subtitle {
+                        draw_subtitle(ui.painter(), frame.intersect(area), text);
+                    }
+                    // Blu-ray のポップアップメニュー（ビルドした Blu-ray のプレビュー）。
+                    if let Some(popup) = &state.popup {
+                        self.draw_popup(ui, popup.pgcn, popup.button, frame);
                     }
                     return;
                 }
@@ -220,12 +291,8 @@ impl DiscCraftApp {
         let center_at = start + (total - center_width) / 2.0;
         ui.add_space((center_at - ui.cursor().min.x).max(gap));
         let center_start = ui.cursor().min.x;
-        match (state.open, self.viewer_timeline()) {
-            (false, Some(id)) => self.timeline_transport(ui, id),
-            _ => {
-                ui.add_enabled_ui(state.open, |ui| self.remote_controls(ui));
-            }
-        }
+        // （タイムラインを映しているときは `timeline_controls` が描く。）
+        ui.add_enabled_ui(state.open, |ui| self.remote_controls(ui));
         let measured_center = ui.cursor().min.x - center_start;
 
         // 右: ビルド結果を開く / プレビューを終了と、今の場所（プレビュー中）か時刻（オレンジ）。
@@ -271,77 +338,6 @@ impl DiscCraftApp {
         }
     }
 
-    /// タイムラインの移動ボタン（Encore のモニターの並び）: 1 フレーム戻す / 再生 / 1 フレーム進める |
-    /// 前のチャプター / 今のチャプターの番号 / 次のチャプター / チャプターを追加（再生ヘッドの位置に）。
-    fn timeline_transport(&mut self, ui: &mut Ui, id: disccraft_project::TimelineId) {
-        let Some(timeline) = self.session.project.timeline(id).cloned() else {
-            return;
-        };
-        let ctx = ui.ctx().clone();
-        let (num, den) = crate::timeline_view::frame_rate(self.session.project.settings.standard);
-        let step = f64::from(den.max(1)) / f64::from(num.max(1));
-        let now = crate::timeline_view::playhead_seconds(&ctx, id);
-        let points: Vec<f64> = timeline
-            .chapters
-            .iter()
-            .map(|chapter| crate::timeline_view::ticks_to_seconds(chapter.time.0))
-            .collect();
-        let end = self.asset_seconds(timeline.video).unwrap_or(now);
-
-        let mut target = None;
-        let mut toggle = false;
-        let playing = self.is_playing();
-        ui.horizontal(|ui| {
-            if ui.button("◀|").on_hover_text(tl!("Previous Frame")).clicked() {
-                target = Some((now - step).max(0.0));
-            }
-            let (play, tip) = if playing {
-                ("■", tl!("Stop"))
-            } else {
-                ("▶", tl!("Play"))
-            };
-            if ui
-                .button(play)
-                .on_hover_text(format!("{tip} (Space)"))
-                .clicked()
-            {
-                toggle = true;
-            }
-            if ui.button("|▶").on_hover_text(tl!("Next Frame")).clicked() {
-                target = Some((now + step).min(end));
-            }
-            ui.separator();
-            if ui.button("|◀◀").on_hover_text(tl!("Previous Chapter")).clicked() {
-                target = Some(prev_point(&points, now));
-            }
-            let _ = ui
-                .label(format!("{:02}", chapter_number(&points, now)))
-                .on_hover_text(tl!("Chapter"));
-            if ui.button("▶▶|").on_hover_text(tl!("Next Chapter")).clicked() {
-                target = Some(next_point(&points, now).unwrap_or(end));
-            }
-            if ui
-                .button("+")
-                .on_hover_text(tl!("Add Chapter at Playhead"))
-                .clicked()
-            {
-                let _ = self.run_command(
-                    "timeline.addChapter",
-                    json!({ "timeline": id.0, "time": crate::timeline_view::seconds_to_ticks(now) }),
-                );
-            }
-        });
-
-        if let Some(seconds) = target {
-            // 動かしたら再生は止める。
-            self.playback = None;
-            crate::timeline_view::set_playhead_seconds(&ctx, id, seconds);
-        }
-        if toggle {
-            self.toggle_playback(&ctx);
-        }
-    }
-
     /// タイムラインビューアのタイムラインの、再生ヘッドの位置のフレームと時刻。フレームが変わったときだけ
     /// `asset.frame` で取り直す（マウスのボタンを押している間は取り直さない）。
     fn timeline_frame(&mut self, ctx: &egui::Context) -> Option<(egui::TextureHandle, String)> {
@@ -368,13 +364,37 @@ impl DiscCraftApp {
             return Some((texture.clone(), timecode));
         }
 
-        let value = self.run_query(
-            "asset.frame",
-            json!({ "asset": video.0, "seconds": f64::from(u32::try_from(frame.max(0)).unwrap_or(u32::MAX)) / fps }),
-        )?;
-        let texture = crate::project_panel::decode_rgb_texture(ctx, "monitor_frame", &value)?;
+        // The frame as the disc shows it, at the monitor's screen size (`monitor_frame_size`): the same pictures
+        // as playback, so stopping and playing show the same.
+        let path = std::path::PathBuf::from(&self.session.project.assets.get(&video)?.path);
+        if self
+            .monitor_source
+            .as_ref()
+            .is_none_or(|source| source.path() != path.as_path())
+        {
+            self.monitor_source = disccraft_engine::FrameSource::open(&path).ok();
+        }
+        let size = self.monitor_frame_size(id);
+        let at = f64::from(u32::try_from(frame.max(0)).unwrap_or(u32::MAX)) / fps;
+        let picture = self.monitor_source.as_ref()?.frame(at, size).ok()?;
+        let texture = rgb_texture(ctx, "monitor_frame", &picture)?;
         self.monitor_frame = Some((video.0, frame, texture.clone()));
         Some((texture, timecode))
+    }
+
+    /// The size the monitor shows timeline `id` at, in square pixels: a Blu-ray HD disc's HD frame, else the SD
+    /// frame at the timeline's aspect (16:9 or 4:3).
+    pub(crate) fn monitor_frame_size(&self, id: disccraft_project::TimelineId) -> (u32, u32) {
+        let settings = &self.session.project.settings;
+        if let Some((width, height, _, _)) = crate::preview_playback::disc_hd(settings) {
+            return (width, height);
+        }
+        let wide = self
+            .session
+            .project
+            .timeline(id)
+            .is_some_and(|timeline| timeline.wide(settings));
+        crate::preview_playback::sd_size(wide, settings.standard)
     }
 
     /// プレビュー中のメニューを、プロジェクトの描画で映す。
@@ -400,7 +420,7 @@ impl DiscCraftApp {
     ///
     /// `disccraft-nav` はメニューを `MenuId` 昇順に PGCN 1..=n へ割り当てるため、
     /// 隠し PGC を除けばこの対応で戻る。
-    fn menu_for_pgcn(&self, pgcn: u16) -> Option<disccraft_project::MenuId> {
+    pub(crate) fn menu_for_pgcn(&self, pgcn: u16) -> Option<disccraft_project::MenuId> {
         let index = usize::from(pgcn).checked_sub(1)?;
         self.session.project.menus.keys().nth(index).copied()
     }
@@ -417,6 +437,17 @@ impl DiscCraftApp {
             .clicked()
         {
             self.send_remote(RemoteKey::Menu);
+        }
+        // Blu-ray のリモコンのポップアップメニューのボタン。
+        if self.preview.bluray
+            && ui
+                .add_enabled(
+                    playing && (self.preview.popup_available || self.preview.popup.is_some()),
+                    egui::Button::new(tl!("Pop-up Menu")),
+                )
+                .clicked()
+        {
+            self.send_remote(RemoteKey::Popup);
         }
         ui.separator();
         for (text, key) in [
@@ -449,7 +480,9 @@ impl DiscCraftApp {
                     RemoteKey::Left => ui.input(|i| i.key_pressed(egui::Key::ArrowLeft)),
                     RemoteKey::Right => ui.input(|i| i.key_pressed(egui::Key::ArrowRight)),
                     RemoteKey::Enter => ui.input(|i| i.key_pressed(egui::Key::Enter)),
-                    RemoteKey::Finish | RemoteKey::Menu | RemoteKey::Title => false,
+                    RemoteKey::Finish | RemoteKey::Menu | RemoteKey::Title | RemoteKey::Popup => {
+                        false
+                    }
                 };
 
                 if pressed {
@@ -466,6 +499,7 @@ impl DiscCraftApp {
         };
 
         let value = json!({ "path": path });
+        self.playback = None;
 
         if let Some(state) = self.run_query("preview.open", value) {
             self.status = tlf!("Preview opened: {path}", path = path);
@@ -473,16 +507,11 @@ impl DiscCraftApp {
         }
     }
 
-    /// Encore の「ここからプレビューする」: ビルド結果をそのメニュー / タイトルから開く（メニューは VMGM の PGCN、
+    /// Encore の「ここからプレビューする」: ビルドせずに、プロジェクトプレビューの窓をそのメニュー / タイトルから開く（メニューは VMGM の PGCN、
     /// タイトルはタイムラインの順、そのあとにスライドショー。ビルドと同じ数え方）。
     pub(crate) fn preview_from(&mut self, selection: Selection) {
-        let Some(path) = self.preview_folder() else {
-            self.status = tl!("Build first").to_string();
-            return;
-        };
         let project = &self.session.project;
         let mut params = serde_json::Map::new();
-        let _ = params.insert("path".to_owned(), Value::from(path.clone()));
         match selection {
             Selection::Menu(id) => {
                 let Some(index) = project.menus.keys().position(|key| *key == id) else {
@@ -528,11 +557,7 @@ impl DiscCraftApp {
             }
             _ => {}
         }
-        self.tab = CenterTab::Monitor;
-        if let Some(state) = self.run_query("preview.open", Value::Object(params)) {
-            self.status = tlf!("Preview opened: {path}", path = path);
-            self.preview = parse_preview_state(&state);
-        }
+        self.open_project_preview(Value::Object(params));
     }
 
     pub(crate) fn close_preview(&mut self) {
@@ -547,26 +572,38 @@ impl DiscCraftApp {
             return;
         };
 
+        let popup_before = self.preview.popup.is_some();
         self.preview = parse_preview_state(&state);
-        if key == RemoteKey::Menu && self.preview.label == before {
+        // Blu-ray のポップアップを出した / 閉じたのは、何も起きなかったのではない。
+        let popup_changed = popup_before != self.preview.popup.is_some();
+        if key == RemoteKey::Menu && self.preview.label == before && !popup_changed {
             // プレーヤーと同じく何も起きない。理由はステータスに出す。
             self.status = tl!("This timeline has no menu remote").to_string();
         }
     }
 
-    /// プレビューするフォルダ。ビルド結果がフォルダのときはその `VIDEO_TS`、
-    /// ISO のときは同じ場所にある `VIDEO_TS` を探す。
+    /// プレビューするフォルダ。ビルド結果がフォルダのときはその `VIDEO_TS`（Blu-ray なら `BDMV` を入れた
+    /// フォルダー）、ISO のときはその隣に書いた `<名前>.files` の中のもの。
     fn preview_folder(&self) -> Option<String> {
         let output = self
             .last_build
             .as_ref()
             .map(|report| report.output.clone())?;
 
-        let candidate = if output.is_dir() {
-            let direct = output.join("VIDEO_TS");
-            if direct.is_dir() { direct } else { output }
+        let folder = if output.is_dir() {
+            output
         } else {
-            output.parent()?.join("VIDEO_TS")
+            let stem = output.file_stem()?.to_string_lossy().into_owned();
+            output.with_file_name(format!("{stem}.files"))
+        };
+        // A Blu-ray: the folder that holds BDMV (the preview reads index.bdmv in it).
+        if folder.join("BDMV").join("index.bdmv").is_file() {
+            return Some(folder.to_string_lossy().into_owned());
+        }
+        let candidate = if folder.join("VIDEO_TS").is_dir() {
+            folder.join("VIDEO_TS")
+        } else {
+            folder
         };
 
         if candidate.is_dir() {
@@ -608,7 +645,7 @@ pub(crate) fn zoom_combo(ui: &mut Ui, id: &str, zoom: &mut MonitorZoom) {
 }
 
 /// 字幕を映像の下の方に、黒い縁取りの白い文字で重ねる。
-fn draw_subtitle(painter: &egui::Painter, picture: egui::Rect, text: &str) {
+pub(crate) fn draw_subtitle(painter: &egui::Painter, picture: egui::Rect, text: &str) {
     let size = (picture.height() / 18.0).clamp(10.0, 40.0);
     let font = egui::FontId::proportional(size);
     let anchor = egui::pos2(picture.center().x, picture.max.y - picture.height() * 0.06);
@@ -632,6 +669,42 @@ fn draw_subtitle(painter: &egui::Painter, picture: egui::Rect, text: &str) {
 
 /// `preview.*` の戻り値を画面表示用にまとめる。
 pub(crate) fn parse_preview_state(value: &Value) -> PreviewState {
+    let mut state = parse_preview_location(value);
+    let small = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_u64)
+            .and_then(|n| u8::try_from(n).ok())
+    };
+    state.audio = small(value.get("audio"));
+    state.bluray = value.get("bluray").and_then(Value::as_bool) == Some(true);
+    state.popup_available = value.get("popupAvailable").and_then(Value::as_bool) == Some(true);
+    state.popup = value.get("popup").and_then(|popup| {
+        let pgcn = popup
+            .get("pgcn")
+            .and_then(Value::as_u64)
+            .and_then(|n| u16::try_from(n).ok())?;
+        let button = small(popup.get("button"))?;
+        Some(PreviewMenu { pgcn, button })
+    });
+    let subtitle = value.get("subtitle");
+    state.subtitle = subtitle
+        .filter(|subtitle| subtitle.get("on").and_then(Value::as_bool) == Some(true))
+        .and_then(|subtitle| small(subtitle.get("track")));
+    state.title = value
+        .get("location")
+        .and_then(|location| location.get("title"))
+        .and_then(|title| {
+            let number = small(title.get("title"))?;
+            let chapter = title
+                .get("chapter")
+                .and_then(Value::as_u64)
+                .and_then(|n| u16::try_from(n).ok())?;
+            Some((number, chapter))
+        });
+    state
+}
+
+fn parse_preview_location(value: &Value) -> PreviewState {
     let open = value.get("open").and_then(Value::as_bool).unwrap_or(false);
 
     if !open {
@@ -643,14 +716,22 @@ pub(crate) fn parse_preview_state(value: &Value) -> PreviewState {
             open: true,
             label: tl!("Stop").to_string(),
             menu: None,
+            ..PreviewState::default()
         };
     };
 
     if let Some(text) = location.as_str() {
+        // The VM says "stopped" when nothing plays.
+        let label = if text == "stopped" {
+            tl!("Stopped").to_string()
+        } else {
+            text.to_string()
+        };
         return PreviewState {
             open: true,
-            label: text.to_string(),
+            label,
             menu: None,
+            ..PreviewState::default()
         };
     }
 
@@ -666,6 +747,7 @@ pub(crate) fn parse_preview_state(value: &Value) -> PreviewState {
                 button = button
             ),
             menu: Some(PreviewMenu { pgcn, button }),
+            ..PreviewState::default()
         };
     }
 
@@ -681,6 +763,7 @@ pub(crate) fn parse_preview_state(value: &Value) -> PreviewState {
                 chapter = chapter
             ),
             menu: None,
+            ..PreviewState::default()
         };
     }
 
@@ -688,11 +771,25 @@ pub(crate) fn parse_preview_state(value: &Value) -> PreviewState {
         open: true,
         label: tl!("Unknown").to_string(),
         menu: None,
+        ..PreviewState::default()
     }
 }
 
+/// The largest rect of `aspect` centred in `screen` (letterbox or pillarbox).
+pub(crate) fn fit_picture(screen: egui::Rect, aspect: f32) -> egui::Rect {
+    if !(aspect.is_finite() && aspect > 0.0) || screen.height() <= 0.0 {
+        return screen;
+    }
+    let size = if screen.width() / screen.height() > aspect {
+        egui::vec2(screen.height() * aspect, screen.height())
+    } else {
+        egui::vec2(screen.width(), screen.width() / aspect)
+    };
+    egui::Rect::from_center_size(screen.center(), size)
+}
+
 /// The number (from 1) of the chapter that contains `now`: how many chapter points are at or before it (at least 1).
-fn chapter_number(points: &[f64], now: f64) -> usize {
+pub(crate) fn chapter_number(points: &[f64], now: f64) -> usize {
     points
         .iter()
         .filter(|point| **point <= now + 1e-6)
@@ -718,10 +815,37 @@ pub(crate) fn next_point(points: &[f64], now: f64) -> Option<f64> {
         .reduce(f64::min)
 }
 
+/// A texture of a frame the engine made (RGB24, row by row); `None` when its size and pixels do not agree.
+pub(crate) fn rgb_texture(
+    ctx: &egui::Context,
+    name: &str,
+    frame: &disccraft_engine::PlayerFrame,
+) -> Option<egui::TextureHandle> {
+    let width = usize::try_from(frame.width).ok()?;
+    let height = usize::try_from(frame.height).ok()?;
+    if width.checked_mul(height)?.checked_mul(3)? != frame.rgb.len() {
+        return None;
+    }
+    let image = egui::ColorImage::from_rgb([width, height], &frame.rgb);
+    Some(ctx.load_texture(name, image, egui::TextureOptions::LINEAR))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{PreviewState, chapter_number, parse_preview_state};
     use serde_json::json;
+
+    #[test]
+    fn pictures_fit_the_screen_as_on_the_disc() {
+        use super::fit_picture;
+        // A 4:3 picture on a 16:9 screen is pillarboxed; a 16:9 one on a 4:3 screen letterboxed.
+        let wide = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(160.0, 90.0));
+        let pillar = fit_picture(wide, 4.0 / 3.0);
+        assert!((pillar.width() - 120.0).abs() < 1e-3 && (pillar.height() - 90.0).abs() < 1e-3);
+        let narrow = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(120.0, 90.0));
+        let letter = fit_picture(narrow, 16.0 / 9.0);
+        assert!((letter.width() - 120.0).abs() < 1e-3 && (letter.height() - 67.5).abs() < 1e-3);
+    }
 
     #[test]
     fn chapter_number_counts_points_at_or_before_now() {
@@ -785,13 +909,39 @@ mod tests {
         let state = parse_preview_state(&json!({ "open": true, "location": "stopped" }));
 
         assert!(state.open);
-        assert_eq!(state.label, "stopped");
+        // Shown in the display language, not the VM's word.
+        assert_eq!(state.label, crate::i18n::tl!("Stopped"));
         assert!(state.menu.is_none());
     }
 
     #[test]
+    fn a_title_location_carries_the_chosen_streams() {
+        let state = parse_preview_state(&json!({
+            "open": true,
+            "location": { "title": { "title": 2, "chapter": 3 } },
+            "audio": 2,
+            "subtitle": { "on": true, "track": 1 }
+        }));
+        assert_eq!(state.title, Some((2, 3)));
+        assert_eq!(state.audio, Some(2));
+        assert_eq!(state.subtitle, Some(1));
+        // A hidden subtitle is none; a menu is no title.
+        let state = parse_preview_state(&json!({
+            "open": true,
+            "location": { "menu": { "pgcn": 1, "button": 1 } },
+            "audio": null,
+            "subtitle": { "on": false, "track": 1 }
+        }));
+        assert_eq!(state.title, None);
+        assert_eq!(state.audio, None);
+        assert_eq!(state.subtitle, None);
+    }
+
+    #[test]
     fn missing_location_defaults_to_stopped_label() {
-        let PreviewState { open, label, menu } = parse_preview_state(&json!({ "open": true }));
+        let PreviewState {
+            open, label, menu, ..
+        } = parse_preview_state(&json!({ "open": true }));
 
         assert!(open);
         assert_eq!(label, "停止");

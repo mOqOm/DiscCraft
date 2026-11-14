@@ -56,33 +56,38 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 
 # FilmCraft（MIT OR Apache-2.0）。crates.io 未公開のため git 依存で rev を固定する。
 # 帰属は NOTICE。
-filmcraft-time = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
-filmcraft-geom = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
-filmcraft-color = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
-filmcraft-bitstream = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
-filmcraft-mpeg2v = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
-filmcraft-mpegts = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
-filmcraft-ac3 = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
-filmcraft-h264 = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
-filmcraft-h264enc = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
-filmcraft-frame = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
-filmcraft-media = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
-filmcraft-text = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
-filmcraft-audio-dsp = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
-filmcraft-codecs = { git = "https://github.com/storytold/filmcraft", rev = "da535c18433dbe046553733b0ab08ce9bd736a51" }
-photocraft-io = { git = "https://github.com/storytold/photocraft", rev = "aae9b7ea61195eba0c43877d59654aefdc7c5576" }
-photocraft-doc = { git = "https://github.com/storytold/photocraft", rev = "aae9b7ea61195eba0c43877d59654aefdc7c5576" }
-photocraft-compose = { git = "https://github.com/storytold/photocraft", rev = "aae9b7ea61195eba0c43877d59654aefdc7c5576" }
-photocraft-geom = { git = "https://github.com/storytold/photocraft", rev = "aae9b7ea61195eba0c43877d59654aefdc7c5576" }
-photocraft-raster = { git = "https://github.com/storytold/photocraft", rev = "aae9b7ea61195eba0c43877d59654aefdc7c5576" }
-photocraft-psd = { git = "https://github.com/storytold/photocraft", rev = "aae9b7ea61195eba0c43877d59654aefdc7c5576" }
-effectcraft-project = { git = "https://github.com/storytold/effectcraft", rev = "3e0c77ca6860b94d13f73d96c2a5222e4e353102" }
-effectcraft-render = { git = "https://github.com/storytold/effectcraft", rev = "3e0c77ca6860b94d13f73d96c2a5222e4e353102" }
-effectcraft-media = { git = "https://github.com/storytold/effectcraft", rev = "3e0c77ca6860b94d13f73d96c2a5222e4e353102" }
-effectcraft-time = { git = "https://github.com/storytold/effectcraft", rev = "3e0c77ca6860b94d13f73d96c2a5222e4e353102" }
-effectcraft-raster = { git = "https://github.com/storytold/effectcraft", rev = "3e0c77ca6860b94d13f73d96c2a5222e4e353102" }
-soundcraft-engine = { git = "https://github.com/storytold/soundcraft", rev = "76cc2aeac657aa971303ee522f36cafe86b3ef93" }
-soundcraft-dsp = { git = "https://github.com/storytold/soundcraft", rev = "76cc2aeac657aa971303ee522f36cafe86b3ef93" }
+filmcraft-time = { git = "https://github.com/storytold/filmcraft", rev = "19d46c0748cf5c0ef5b0b2a421b85e8ae6d99db6" }
+filmcraft-geom = { git = "https://github.com/storytold/filmcraft", rev = "19d46c0748cf5c0ef5b0b2a421b85e8ae6d99db6" }
+filmcraft-color = { git = "https://github.com/storytold/filmcraft", rev = "19d46c0748cf5c0ef5b0b2a421b85e8ae6d99db6" }
+filmcraft-bitstream = { git = "https://github.com/storytold/filmcraft", rev = "19d46c0748cf5c0ef5b0b2a421b85e8ae6d99db6" }
+filmcraft-h264enc = { git = "https://github.com/storytold/filmcraft", rev = "19d46c0748cf5c0ef5b0b2a421b85e8ae6d99db6" }
+filmcraft-frame = { git = "https://github.com/storytold/filmcraft", rev = "19d46c0748cf5c0ef5b0b2a421b85e8ae6d99db6" }
+filmcraft-media = { git = "https://github.com/storytold/filmcraft", rev = "19d46c0748cf5c0ef5b0b2a421b85e8ae6d99db6" }
+filmcraft-text = { git = "https://github.com/storytold/filmcraft", rev = "19d46c0748cf5c0ef5b0b2a421b85e8ae6d99db6" }
+filmcraft-audio-dsp = { git = "https://github.com/storytold/filmcraft", rev = "19d46c0748cf5c0ef5b0b2a421b85e8ae6d99db6" }
+filmcraft-codecs = { git = "https://github.com/storytold/filmcraft", rev = "19d46c0748cf5c0ef5b0b2a421b85e8ae6d99db6" }
+# craft-libs (MIT OR Apache-2.0), the revision FilmCraft uses: its MPEG-2 decoder checks our encoder in tests.
+craft-video = { git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9", default-features = false, features = ["mpeg2"] }
+# craft-libs' AC-3 encoder (ETSI TS 102 366), the same revision: the transcoded soundtracks become Dolby Digital, as
+# Encore makes them. Used through its public API only.
+craft-audio = { git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9", default-features = false, features = ["ac3-encode"] }
+# craft-libs' shared UI (MIT OR Apache-2.0), the revision FilmCraft uses: its docking (tab groups that are dragged,
+# split, floated and closed, saved as workspaces), as the other Craft apps arrange their panels.
+craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9", features = ["serde"] }
+photocraft-io = { git = "https://github.com/storytold/photocraft", rev = "0fb40c534a8f2ca2e1aa6182f7ab06ae9fbed32e" }
+photocraft-doc = { git = "https://github.com/storytold/photocraft", rev = "0fb40c534a8f2ca2e1aa6182f7ab06ae9fbed32e" }
+photocraft-compose = { git = "https://github.com/storytold/photocraft", rev = "0fb40c534a8f2ca2e1aa6182f7ab06ae9fbed32e" }
+photocraft-geom = { git = "https://github.com/storytold/photocraft", rev = "0fb40c534a8f2ca2e1aa6182f7ab06ae9fbed32e" }
+photocraft-raster = { git = "https://github.com/storytold/photocraft", rev = "0fb40c534a8f2ca2e1aa6182f7ab06ae9fbed32e" }
+# PhotoCraft's PSD writer moved to craft-libs: the revision PhotoCraft uses, for writing test PSDs.
+craft-psd = { git = "https://github.com/storytold/craft-libs", rev = "09dcbc225b95232998498a40ca56e24716571d53" }
+effectcraft-project = { git = "https://github.com/storytold/effectcraft", rev = "69bce0ec66f4cb2b9a169b6a19f4d2363faadad3" }
+effectcraft-render = { git = "https://github.com/storytold/effectcraft", rev = "69bce0ec66f4cb2b9a169b6a19f4d2363faadad3" }
+effectcraft-media = { git = "https://github.com/storytold/effectcraft", rev = "69bce0ec66f4cb2b9a169b6a19f4d2363faadad3" }
+effectcraft-time = { git = "https://github.com/storytold/effectcraft", rev = "69bce0ec66f4cb2b9a169b6a19f4d2363faadad3" }
+effectcraft-raster = { git = "https://github.com/storytold/effectcraft", rev = "69bce0ec66f4cb2b9a169b6a19f4d2363faadad3" }
+soundcraft-engine = { git = "https://github.com/storytold/soundcraft", rev = "1775ce506103248e96886c502c582ee7047e9c26" }
+soundcraft-dsp = { git = "https://github.com/storytold/soundcraft", rev = "1775ce506103248e96886c502c582ee7047e9c26" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -97,12 +102,25 @@ needless_range_loop = "allow"
 type_complexity = "allow"
 
 # craft-pdf (pulled in by PhotoCraft and EffectCraft) uses craft-libs' vendored Hayro trees; consumers patch the same
-# craft-libs revision (craft-libs crates/pdf README). c5a1cbf contains the trees of both projects' pins.
+# craft-libs revision (craft-libs crates/pdf README): the one FilmCraft and EffectCraft use.
 [patch.crates-io]
-hayro = { git = "https://github.com/storytold/craft-libs", rev = "c5a1cbfb5f9049f9270955caffb5bee5997aebf7" }
-hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "c5a1cbfb5f9049f9270955caffb5bee5997aebf7" }
-hayro-interpret = { git = "https://github.com/storytold/craft-libs", rev = "c5a1cbfb5f9049f9270955caffb5bee5997aebf7" }
-hayro-jbig2 = { git = "https://github.com/storytold/craft-libs", rev = "c5a1cbfb5f9049f9270955caffb5bee5997aebf7" }
+hayro = { git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9" }
+hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9" }
+hayro-interpret = { git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9" }
+hayro-jbig2 = { git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9" }
+# The Craft suite's egui and winit (the same reviewed fork commits as FilmCraft and the other Craft apps), so the
+# suite's shared UI crates (craft-libs) and the UI ported from them work here as there.
+ecolor = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+emath = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+epaint = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+epaint_default_fonts = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui-winit = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui-wgpu = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_glow = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_system_font_provider = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+eframe = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+winit = { git = "https://github.com/storytold/winit.git", rev = "a517b3846ee8457d84ee4975110bfda6797c44dc" }
 
 # 開発ビルド（テスト、CLI での確かめ）でも、映像・音声の変換、多重化、描画の重いクレートは最適化する。
 # 最適化なしでは何十倍も遅い（デバッグビルドで 20 秒の MP4 の DVD への変換に 444 秒）。最初のコンパイルだけ長くなる。

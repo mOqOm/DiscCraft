@@ -57,6 +57,10 @@ pub struct TranscodeOptions {
     pub max_bitrate: u32,
     /// 16:9 anamorphic output instead of 4:3.
     pub wide: bool,
+    /// Output frames (at the standard's rate, from 0) where a closed GOP must start: the chapters and the layer
+    /// break of the titles that play the video, so their DVD cells begin exactly there. Between them the GOPs keep
+    /// their regular length.
+    pub gop_starts: Vec<u64>,
 }
 
 impl Default for TranscodeOptions {
@@ -67,6 +71,7 @@ impl Default for TranscodeOptions {
             video_bitrate: 6_000_000,
             max_bitrate: 9_800_000,
             wide: false,
+            gop_starts: Vec::new(),
         }
     }
 }
@@ -169,6 +174,20 @@ pub struct VideoProbe {
     pub height: u32,
     /// Frames per second (0.0 when the file does not say).
     pub fps: f64,
+    /// Whether the picture is wide: shown at 16:9 or wider (its frame size times its pixel aspect), not 4:3.
+    pub wide: bool,
+    /// Whether the file also has sound (at least one audio stream).
+    pub has_audio: bool,
+}
+
+/// Whether a `width`×`height` picture with pixel aspect `par` is shown wide (16:9 or wider) rather than 4:3: its
+/// display aspect is above 1.55, between 4:3 (1.33) and 16:9 (1.78). A 720×480 frame of square pixels (1.5) is
+/// 4:3; a pixel aspect of 0 counts as square.
+pub fn is_wide(width: u32, height: u32, par: (u32, u32)) -> bool {
+    let par_num = if par.0 == 0 { 1 } else { par.0 };
+    let par_den = if par.1 == 0 { 1 } else { par.1 };
+    // width·par_num / (height·par_den) > 1.55, in integers: 100·width·par_num > 155·height·par_den.
+    u128::from(width) * u128::from(par_num) * 100 > u128::from(height) * u128::from(par_den) * 155
 }
 
 /// Probe a video file: duration, dimensions and frame rate.
@@ -191,6 +210,8 @@ pub fn probe_video(input: &Path) -> Result<VideoProbe, TranscodeError> {
         width: video.width,
         height: video.height,
         fps,
+        wide: is_wide(video.width, video.height, video.par),
+        has_audio: source.has_audio(),
     })
 }
 
@@ -290,6 +311,11 @@ impl AudioReader {
     }
 }
 
+/// The widest frame [`FrameReader::frame_sized`] renders (UHD).
+pub const MAX_FRAME_WIDTH: u32 = 3840;
+/// The tallest frame [`FrameReader::frame_sized`] renders (UHD).
+pub const MAX_FRAME_HEIGHT: u32 = 2160;
+
 /// A video file held open for playback in the monitor: asking for the frames in order reuses the decoder, so the
 /// next frame is cheap.
 pub struct FrameReader {
@@ -356,6 +382,22 @@ impl FrameReader {
         let rgb = picture::rgb_frame_at(&self.source, self.tick_at(seconds))?;
         Ok((720, 480, rgb))
     }
+
+    /// The frame at `seconds` (clamped to the file) as RGB24 at `width` x `height` with square pixels, the picture
+    /// fitted in with bars as the HD transcode renders it (a Blu-ray HD title in the preview): (width, height,
+    /// pixels). The size is kept within 16 x 16 and [`MAX_FRAME_WIDTH`] x [`MAX_FRAME_HEIGHT`].
+    pub fn frame_sized(
+        &self,
+        seconds: f64,
+        width: u32,
+        height: u32,
+    ) -> Result<(u32, u32, Vec<u8>), TranscodeError> {
+        let width = width.clamp(16, MAX_FRAME_WIDTH);
+        let height = height.clamp(16, MAX_FRAME_HEIGHT);
+        let frame = self.source.video_frame(self.tick_at(seconds))?;
+        let rgb = hd::render_fit(&frame, width, height)?;
+        Ok((width, height, rgb))
+    }
 }
 
 /// Duration of an audio-only media file in seconds. A raw AC-3 elementary stream (which the openers do not
@@ -397,7 +439,26 @@ pub fn for_each_frame(
 
 #[cfg(test)]
 mod tests {
-    use super::is_bright;
+    use super::{is_bright, is_wide};
+
+    #[test]
+    fn a_picture_is_wide_from_its_display_aspect() {
+        // 16:9 in square pixels (HD), anamorphic DVD and HDV.
+        assert!(is_wide(1280, 720, (1, 1)));
+        assert!(is_wide(1920, 1080, (1, 1)));
+        assert!(is_wide(720, 480, (32, 27)));
+        assert!(is_wide(720, 576, (64, 45)));
+        assert!(is_wide(1440, 1080, (4, 3)));
+        // 4:3 DVD, and a 720×480 frame that does not say (1.5: not 16:9).
+        assert!(!is_wide(720, 480, (8, 9)));
+        assert!(!is_wide(720, 576, (16, 15)));
+        assert!(!is_wide(720, 480, (1, 1)));
+        assert!(!is_wide(720, 480, (0, 0)));
+        assert!(!is_wide(640, 480, (1, 1)));
+        // Hostile sizes do not overflow.
+        assert!(is_wide(u32::MAX, 1, (u32::MAX, 1)));
+        assert!(!is_wide(0, 0, (0, 0)));
+    }
 
     #[test]
     fn a_black_frame_is_not_bright_but_a_dark_scene_with_something_in_it_is() {

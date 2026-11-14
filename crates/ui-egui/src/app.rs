@@ -6,10 +6,7 @@ use crate::menu_editor::{CanvasDrag, HighlightPreview, MenuTexture};
 use crate::menubar::ViewRequest;
 use crate::monitor::PreviewState;
 use crate::welcome::{Welcome, WelcomeChoice};
-use crate::workspace::{
-    BottomTab, CenterTab, Layout, RightTab, WorkspacePreset, load_language, load_preset,
-    load_recent,
-};
+use crate::workspace::{Dock, Panel, WorkspaceId, load_language, load_recent, load_workspace};
 
 use disccraft_build::{BuildReport, OutputKind};
 use disccraft_engine::{Session, find_command};
@@ -42,10 +39,18 @@ pub struct DiscCraftApp {
     pub(crate) selection: Selection,
     pub(crate) status: String,
     pub(crate) language: Language,
-    pub(crate) workspace: WorkspacePreset,
-    /// 今のパネル構成（プリセットから始まり、ウィンドウメニューで個別に切り替える）。
-    pub(crate) layout: Layout,
-    pub(crate) tab: CenterTab,
+    /// 使っているワークスペース。
+    pub(crate) workspace: WorkspaceId,
+    /// 今のパネルの並び（craft-ui のドッキング。ワークスペースから始まり、ドラッグやウィンドウメニューで変わる）。
+    pub(crate) dock: Dock,
+    /// 並びが変わって、まだ設定に保存していない。
+    pub(crate) dock_dirty: bool,
+    /// 名前を付けて保存したワークスペース（作った順）。
+    pub(crate) user_workspaces: Vec<String>,
+    /// 「新規ワークスペース…」ダイアログの名前の欄（開いているときだけ）。
+    pub(crate) new_workspace: Option<String>,
+    /// 開いたプロジェクトのタイムラインの波形を、次のフレームで裏で作り始める。
+    pub(crate) preload_waveforms: bool,
     /// 次のフレームで名前の入力欄にフォーカスを移す（名前の変更）。
     pub(crate) focus_rename: bool,
     /// タイムラインのビューへの依頼（ズーム、チャプターポイントの追加と消去）。
@@ -64,6 +69,8 @@ pub struct DiscCraftApp {
     pub(crate) thumbnails: BTreeMap<u64, Option<egui::TextureHandle>>,
     /// 映像アセットの最後のフレーム（タイムラインのビデオトラックの末尾に描く）。
     pub(crate) last_frames: BTreeMap<u64, Option<egui::TextureHandle>>,
+    /// オーディオトラックの波形（アセットごと、別のスレッドで作る）。
+    pub(crate) waveforms: crate::waveforms::Waveforms,
     /// 起動時のようこそ画面と新規プロジェクトダイアログ。
     pub(crate) welcome: Welcome,
     /// 最近使ったプロジェクト（新しい順）。
@@ -84,14 +91,14 @@ pub struct DiscCraftApp {
     pub(crate) chapter_interval: Option<crate::context_menus::ChapterInterval>,
     /// モニターに映しているタイムラインのフレーム（アセット ID、フレーム番号、テクスチャ）。
     pub(crate) monitor_frame: Option<(u64, i64, egui::TextureHandle)>,
+    /// モニターの静止画を読むために開いている映像（スクラブでデコーダーを使い回す）。
+    pub(crate) monitor_source: Option<disccraft_engine::FrameSource>,
+    /// ツールバーの「メニューを PhotoCraft で編集」に描く PhotoCraft のアイコン（初めて描くときに読む）。
+    pub(crate) photocraft_icon: Option<egui::TextureHandle>,
     /// 読んだ字幕ファイルの字幕（アセットの id ごと）。
     pub(crate) subtitle_cache: BTreeMap<u64, std::sync::Arc<Vec<crate::subtitles::SubtitleCue>>>,
     /// タイムライン ▸ 字幕を書き出し で選んだトラックのアセット（メニューを閉じてから保存する）。
     pub(crate) subtitle_export: Option<AssetId>,
-    /// パネルを並べたときのウィンドウの大きさ。変わったら割合どおりに並べ直す。
-    pub(crate) layout_size: egui::Vec2,
-    /// パネルの配置の世代（並べ直すたびに増やし、パネルの id に混ぜて大きさを初期値に戻す）。
-    pub(crate) layout_generation: u32,
     /// モニターの拡大率。
     pub(crate) monitor_zoom: crate::monitor::MonitorZoom,
     /// メニュービューアの拡大率。
@@ -133,6 +140,10 @@ pub struct DiscCraftApp {
     pub(crate) project_filter: crate::project_panel::ProjectFilter,
     /// プロジェクトの表で隠している列（`ProjectColumn::ALL` の番号）。
     pub(crate) hidden_project_columns: Vec<usize>,
+    /// 表の列の幅（見出しの右端をドラッグして決めたもの。設定に保存する）。
+    pub(crate) column_widths: crate::theme::ColumnWidths,
+    /// 列の幅が変わって、まだ設定に保存していない。
+    pub(crate) column_widths_dirty: bool,
     /// プロジェクトの表で畳んでいるフォルダー。
     pub(crate) collapsed_folders: Vec<u64>,
     /// 名前を入力中のフォルダーと、その入力。
@@ -161,7 +172,17 @@ pub struct DiscCraftApp {
     pub(crate) shown_subtitles: std::collections::HashMap<TimelineId, Option<usize>>,
     /// タイムラインの再生（タイムライン ▸ 再生、Space）。
     pub(crate) playback: Option<crate::playback::Playback>,
+    /// ビルド結果のプレビューで再生しているタイトル。
+    pub(crate) preview_playback: Option<crate::preview_playback::PreviewPlayback>,
+    /// プロジェクトプレビューの窓（開いているときだけ）。
+    pub(crate) project_preview: Option<crate::project_preview::ProjectPreview>,
+    /// プレビューのタイトルの再生を一時停止している。
+    pub(crate) preview_paused: bool,
+    /// 次にプレビューのタイトルを再生し始める位置（秒。一時停止からの再生、オーディオ / 字幕の切り替え）。
+    pub(crate) preview_resume: Option<f64>,
     pub(crate) menu_texture: Option<MenuTexture>,
+    /// プロジェクトプレビューで再生中のタイトルに重ねる Blu-ray のポップアップメニューの絵（透明度つき）。
+    pub(crate) popup_texture: Option<crate::project_preview::PopupTexture>,
     /// メニュービューアで選んでいるボタン（選んだ順。最後が主で、プロパティはそのシートを出す）。
     pub(crate) selected_buttons: Vec<usize>,
     /// 編集 ▸ コピー / 切り取りしたボタン。
@@ -239,9 +260,7 @@ impl DiscCraftApp {
     pub fn new(ctx: &Context) -> Self {
         ctx.request_repaint();
 
-        let workspace = load_preset();
-        let layout = workspace.layout();
-        let tab = layout.tab;
+        let (workspace, dock, user_workspaces) = load_workspace();
         let language = load_language();
         crate::i18n::set_current(language);
 
@@ -251,8 +270,11 @@ impl DiscCraftApp {
             status: tl!("DiscCraft started").to_string(),
             language,
             workspace,
-            layout,
-            tab,
+            dock,
+            dock_dirty: false,
+            user_workspaces,
+            new_workspace: None,
+            preload_waveforms: false,
             focus_rename: false,
             view_request: None,
             last_menu: None,
@@ -264,6 +286,7 @@ impl DiscCraftApp {
             durations: BTreeMap::new(),
             thumbnails: BTreeMap::new(),
             last_frames: BTreeMap::new(),
+            waveforms: crate::waveforms::Waveforms::default(),
             welcome: Welcome::opened(),
             recent: load_recent(),
             check_window: crate::check_window::CheckWindow::default(),
@@ -274,9 +297,13 @@ impl DiscCraftApp {
             user_library: crate::user_library::UserLibrary::load(),
             chapter_interval: None,
             monitor_frame: None,
+            monitor_source: None,
+            photocraft_icon: None,
             playback: None,
-            layout_size: egui::Vec2::ZERO,
-            layout_generation: 0,
+            preview_playback: None,
+            project_preview: None,
+            preview_paused: false,
+            preview_resume: None,
             monitor_zoom: crate::monitor::MonitorZoom::Fit,
             menu_zoom: crate::monitor::MonitorZoom::Fit,
             tool: crate::menu_text::Tool::Selection,
@@ -306,6 +333,8 @@ impl DiscCraftApp {
             new_item_folder: None,
             flow_hidden_buttons: Vec::new(),
             correct_pixel_aspect: true,
+            column_widths: crate::workspace::load_settings().column_widths,
+            column_widths_dirty: false,
             hidden_project_columns: crate::project_panel::ProjectColumn::ALL
                 .iter()
                 .enumerate()
@@ -315,6 +344,7 @@ impl DiscCraftApp {
             subtitle_cache: BTreeMap::new(),
             subtitle_export: None,
             menu_texture: None,
+            popup_texture: None,
             selected_buttons: Vec::new(),
             button_clipboard: Vec::new(),
             pasted_text: None,
@@ -371,6 +401,7 @@ impl DiscCraftApp {
         let session = Session::open(path)?;
         self.session = session;
         self.reset_state();
+        self.preload_viewers();
         self.welcome = Welcome::default();
         self.status = tlf!("Opened: {path}", path = path.display());
         self.remember(path);
@@ -406,12 +437,18 @@ impl DiscCraftApp {
         }
 
         self.menu_bar(ui);
+        self.start_preloading_waveforms(ui.ctx());
         self.poll_playback(ui.ctx());
+        self.poll_preview_playback(ui.ctx());
         self.poll_external_edits(ui.ctx());
         self.draw_groups(ui);
+        // パネルが矢印キーを使わなかったときだけ（メニュービューアのボタンを動かすのが先）。
+        self.step_frames_by_keys(ui.ctx());
         self.check_window(ui.ctx());
         self.prefs_window(ui.ctx());
         self.chapter_interval_dialog(ui.ctx());
+        self.new_workspace_dialog(ui.ctx());
+        self.project_preview_window(ui.ctx());
         self.track_dialog_window(ui.ctx());
         self.guide_dialog_window(ui.ctx());
         self.user_ops_window(ui.ctx());
@@ -442,6 +479,10 @@ impl DiscCraftApp {
                 self.confirm_or_run(ui.ctx(), PendingAction::OpenRecent(path));
             }
             WelcomeChoice::Exit => self.confirm_or_run(ui.ctx(), PendingAction::Exit),
+            WelcomeChoice::Forget(path) => match crate::workspace::forget_recent(&path) {
+                Ok(recent) => self.recent = recent,
+                Err(_) => self.recent.retain(|existing| existing != &path),
+            },
         }
     }
 
@@ -514,21 +555,141 @@ impl DiscCraftApp {
         }
     }
 
-    /// ワークスペースプリセットを切り替えて設定に保存する。
-    pub(crate) fn set_workspace(&mut self, preset: WorkspacePreset) {
-        self.workspace = preset;
-        self.layout = preset.layout();
-        // パネルの大きさも、そのワークスペースの割合に戻す。
-        self.layout_generation = self.layout_generation.wrapping_add(1);
-        self.tab = self.layout.tab;
-        self.status = tlf!("Workspace: {name}", name = preset.label());
-
-        if let Err(error) = crate::workspace::save_preset(preset) {
-            self.status = tlf!(
-                "Workspace: {name} (save failed: {error})",
-                name = preset.label(),
-                error = error
+    /// ワークスペースを切り替える。今のワークスペースの並びを覚えてから、切り替え先の覚えている並び（なければ
+    /// その初期の並び）にし、設定に保存する。
+    pub(crate) fn set_workspace(&mut self, id: WorkspaceId) {
+        let mut result =
+            crate::workspace::save_workspace(&self.workspace, &self.dock, &self.user_workspaces);
+        let settings = crate::workspace::load_settings();
+        self.dock = crate::workspace::saved_dock(&settings, &id)
+            .unwrap_or_else(|| crate::workspace::default_dock(&settings, &id));
+        self.workspace = id;
+        if result.is_ok() {
+            result = crate::workspace::save_workspace(
+                &self.workspace,
+                &self.dock,
+                &self.user_workspaces,
             );
+        }
+        self.dock_dirty = false;
+        self.workspace_status(result);
+    }
+
+    /// ワークスペースをリセットする: 名前を付けたものは保存したときの並び、組み込みのものはその初期の並びへ。
+    pub(crate) fn reset_workspace(&mut self) {
+        let default = crate::workspace::reset_layout(&self.workspace);
+        self.dock.reset(&default);
+        let result =
+            crate::workspace::save_workspace(&self.workspace, &self.dock, &self.user_workspaces);
+        self.dock_dirty = false;
+        self.workspace_status(result);
+    }
+
+    /// 今の並びに名前を付けて保存し、そのワークスペースに切り替える。同じ名前があれば置き換える。
+    pub(crate) fn save_new_workspace(&mut self, name: &str) {
+        let name: String = name
+            .trim()
+            .chars()
+            .take(crate::workspace::WORKSPACE_NAME_LIMIT)
+            .collect();
+        if name.is_empty() {
+            return;
+        }
+        if !self.user_workspaces.contains(&name) {
+            if self.user_workspaces.len() >= crate::workspace::USER_WORKSPACE_LIMIT {
+                self.status = tl!("Too many workspaces; delete one first.").to_owned();
+                return;
+            }
+            self.user_workspaces.push(name.clone());
+        }
+        // 離れるワークスペースの並びも覚えておく。
+        let mut result =
+            crate::workspace::save_workspace(&self.workspace, &self.dock, &self.user_workspaces);
+        let mut dock = self.dock.clone();
+        dock.saved = Some(dock.layout.clone());
+        self.dock = dock;
+        self.workspace = WorkspaceId::User(name);
+        if result.is_ok() {
+            result = crate::workspace::save_workspace(
+                &self.workspace,
+                &self.dock,
+                &self.user_workspaces,
+            );
+        }
+        self.dock_dirty = false;
+        self.workspace_status(result);
+    }
+
+    /// 名前を付けたワークスペースを消す。使っていたら初期設定のワークスペースに戻る。
+    pub(crate) fn delete_workspace(&mut self, name: &str) {
+        self.user_workspaces.retain(|other| other != name);
+        if self.workspace == WorkspaceId::User(name.to_owned()) {
+            self.workspace = WorkspaceId::default();
+            let settings = crate::workspace::load_settings();
+            self.dock = crate::workspace::saved_dock(&settings, &self.workspace)
+                .unwrap_or_else(|| crate::workspace::default_dock(&settings, &self.workspace));
+        }
+        let result =
+            crate::workspace::save_workspace(&self.workspace, &self.dock, &self.user_workspaces);
+        self.dock_dirty = false;
+        self.workspace_status(result);
+    }
+
+    fn workspace_status(&mut self, result: Result<(), String>) {
+        let name = self.workspace.label();
+        self.status = match result {
+            Ok(()) => tlf!("Workspace: {name}", name = name),
+            Err(error) => tlf!(
+                "Workspace: {name} (save failed: {error})",
+                name = name,
+                error = error
+            ),
+        };
+    }
+
+    /// 「新規ワークスペース…」ダイアログ（開いているときだけ描く）。
+    fn new_workspace_dialog(&mut self, ctx: &Context) {
+        let Some(mut name) = self.new_workspace.take() else {
+            return;
+        };
+        let mut done = None;
+        let response = egui::Modal::new(egui::Id::unique("new_workspace")).show(ctx, |ui| {
+            ui.set_width(320.0);
+            ui.heading(tl!("New Workspace"));
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(tl!("Name:"));
+                let field = ui.text_edit_singleline(&mut name);
+                if !field.has_focus() && !field.lost_focus() {
+                    field.request_focus();
+                }
+                if field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                    done = Some(true);
+                }
+            });
+            if self.user_workspaces.contains(&name.trim().to_owned()) {
+                ui.small(tl!("A workspace with this name is replaced."));
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!name.trim().is_empty(), egui::Button::new(tl!("OK")))
+                    .clicked()
+                {
+                    done = Some(true);
+                }
+                if ui.button(tl!("Cancel")).clicked() {
+                    done = Some(false);
+                }
+            });
+        });
+        if response.should_close() {
+            done = Some(false);
+        }
+        match done {
+            Some(true) => self.save_new_workspace(&name),
+            Some(false) => {}
+            None => self.new_workspace = Some(name),
         }
     }
 
@@ -625,6 +786,40 @@ impl DiscCraftApp {
         }
     }
 
+    /// 開いたプロジェクトのタイムラインを、選ばずにタイムラインビューアへ読み込んでおく（スライドショーも
+    /// スライドショービューアへ）。ビューアに出たタイムラインは、その映像のフレームとモニターの映像を作り始め、
+    /// 次のフレームでほかのタイムラインのオーディオの波形も裏で作り始める（切り替えたときにすぐ出る）。
+    fn preload_viewers(&mut self) {
+        let project = &self.session.project;
+        self.last_timeline = preload_timeline(project);
+        self.last_slideshow = project.slideshows.keys().next().copied();
+        self.preload_waveforms = true;
+    }
+
+    /// プロジェクトのすべてのタイムラインのオーディオトラックの波形を、裏で作り始める（開いた直後に 1 回）。
+    fn start_preloading_waveforms(&mut self, ctx: &Context) {
+        if !std::mem::take(&mut self.preload_waveforms) {
+            return;
+        }
+        let assets: Vec<(u64, PathBuf)> = self
+            .session
+            .project
+            .timelines
+            .values()
+            .flat_map(|timeline| timeline.audio.iter().map(|track| track.asset))
+            .filter_map(|asset| {
+                self.session
+                    .project
+                    .assets
+                    .get(&asset)
+                    .map(|found| (asset.0, PathBuf::from(&found.path)))
+            })
+            .collect();
+        for (asset, path) in assets {
+            let _ = self.waveforms.get(asset, path, ctx);
+        }
+    }
+
     fn reset_state(&mut self) {
         self.selection = Selection::None;
         self.last_menu = None;
@@ -636,8 +831,10 @@ impl DiscCraftApp {
         self.durations.clear();
         self.thumbnails.clear();
         self.last_frames.clear();
+        self.waveforms.clear();
         self.monitor_frame = None;
         self.playback = None;
+        self.preview_playback = None;
         self.subtitle_cache.clear();
         self.selected_buttons.clear();
         self.button_label_menu = None;
@@ -751,25 +948,20 @@ impl DiscCraftApp {
         // 選択物に合わせてビューアのタブを出す（Encore はダブルクリックでビューアが開く）。
         match selection {
             Selection::Menu(id) => {
-                self.tab = CenterTab::Menu;
+                self.show_panel(Panel::MenuViewer);
                 self.last_menu = Some(id);
             }
             Selection::Timeline(id) => {
-                self.layout.bottom = true;
-                self.layout.bottom_tab = BottomTab::Timeline;
+                self.show_panel(Panel::TimelineViewer);
                 self.last_timeline = Some(id);
             }
             Selection::Slideshow(id) => {
-                self.layout.bottom = true;
-                self.layout.bottom_tab = BottomTab::Slideshow;
+                self.show_panel(Panel::SlideshowViewer);
                 self.last_slideshow = Some(id);
             }
-            Selection::Playlist(_) => {
-                self.layout.right = true;
-                self.layout.right_tab = RightTab::Properties;
-            }
+            Selection::Playlist(_) => self.show_panel(Panel::Properties),
             Selection::ChapterPlaylist(id) => {
-                self.tab = CenterTab::ChapterPlaylist;
+                self.show_panel(Panel::ChapterPlaylist);
                 self.last_chapter_playlist = Some(id);
             }
             Selection::Asset(_) | Selection::None => {}
@@ -1615,4 +1807,42 @@ fn f32_to_u8(value: f32) -> u8 {
     }
 
     u8::try_from(scaled as i32).unwrap_or(0)
+}
+
+/// 開いたプロジェクトでタイムラインビューアに読み込むタイムライン: ファーストプレイがタイムラインならそれ、
+/// なければいちばん初めに作ったもの。タイムラインがなければ `None`。
+pub(crate) fn preload_timeline(
+    project: &disccraft_project::Project,
+) -> Option<disccraft_project::TimelineId> {
+    let first_play = match &project.settings.first_play {
+        disccraft_project::Link::Timeline { id, .. } => Some(*id),
+        _ => None,
+    };
+    first_play
+        .filter(|id| project.timeline(*id).is_some())
+        .or_else(|| project.timelines.keys().next().copied())
+}
+
+#[cfg(test)]
+mod preload_tests {
+    use super::preload_timeline;
+    use disccraft_project::{Link, Project};
+    use std::path::Path;
+
+    #[test]
+    fn the_first_play_timeline_is_preloaded_else_the_first()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::default();
+        assert_eq!(preload_timeline(&project), None);
+        let asset = project.add_asset(Path::new("movie.m2v"))?;
+        let main = project.add_timeline(asset, Some("本編".to_owned()))?;
+        let extra = project.add_timeline(asset, Some("おまけ".to_owned()))?;
+        assert_eq!(preload_timeline(&project), Some(main));
+        project.settings.first_play = Link::Timeline {
+            id: extra,
+            chapter: 0,
+        };
+        assert_eq!(preload_timeline(&project), Some(extra));
+        Ok(())
+    }
 }

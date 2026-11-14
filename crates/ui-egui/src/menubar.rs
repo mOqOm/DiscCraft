@@ -9,7 +9,7 @@ use crate::app::Selection;
 use crate::i18n::{Language, tl, tlf};
 use crate::menu_editor::HighlightPreview;
 use crate::track_dialog::TrackKind;
-use crate::workspace::{BottomTab, CenterTab, LeftTab, LowerTab, RightTab, WorkspacePreset};
+use crate::workspace::Panel;
 
 use crate::orient::OrientChange;
 use disccraft_build::OutputKind;
@@ -508,15 +508,36 @@ impl DiscCraftApp {
     }
 
     fn window_menu(&mut self, ui: &mut Ui, clicked: &mut Vec<Action>) {
+        // Encore と同じく、ワークスペースを選び、名前を付けて保存し、消し、リセットする。
         ui.menu_button(tl!("Workspace"), |ui| {
-            for preset in WorkspacePreset::ALL {
+            for id in self.workspace_ids() {
                 if ui
-                    .selectable_label(self.workspace == preset, preset.label())
+                    .selectable_label(self.workspace == id, id.label())
                     .clicked()
                 {
-                    self.set_workspace(preset);
+                    self.set_workspace(id);
                     ui.close();
                 }
+            }
+            ui.separator();
+            if ui.button(tl!("New Workspace…")).clicked() {
+                self.new_workspace = Some(String::new());
+                ui.close();
+            }
+            ui.add_enabled_ui(!self.user_workspaces.is_empty(), |ui| {
+                ui.menu_button(tl!("Delete Workspace"), |ui| {
+                    for name in self.user_workspaces.clone() {
+                        if ui.button(name.as_str()).clicked() {
+                            self.delete_workspace(&name);
+                            ui.close();
+                        }
+                    }
+                });
+            });
+            let reset = tlf!("Reset “{name}”", name = self.workspace.label());
+            if ui.button(reset).clicked() {
+                self.reset_workspace();
+                ui.close();
             }
         });
         ui.separator();
@@ -539,41 +560,26 @@ impl DiscCraftApp {
         });
     }
 
-    /// ウィンドウメニューの項目が今表示されているか。
+    /// ウィンドウメニューの項目が今表示されているか（パネルはタブグループの前面に出ているか）。
     fn window_shown(&self, action: Action) -> bool {
-        let layout = &self.layout;
-        match action {
-            Action::WindowBuild => layout.left && layout.left_tab == LeftTab::Build,
-            Action::WindowCheck => self.check_window.open,
-            Action::WindowMenus => layout.left && layout.left_tab == LeftTab::Menus,
-            Action::WindowProject => layout.left && layout.left_tab == LeftTab::Project,
-            Action::WindowTimelines => layout.left && layout.left_tab == LeftTab::Timelines,
-            Action::WindowDisc => layout.right && layout.right_tab == RightTab::Disc,
-            Action::WindowProperties => layout.right && layout.right_tab == RightTab::Properties,
-            Action::WindowLayers => layout.lower && layout.lower_tab == LowerTab::Layers,
-            Action::WindowLibrary => layout.lower && layout.lower_tab == LowerTab::Library,
-            Action::WindowSlideshowViewer => {
-                layout.bottom && layout.bottom_tab == BottomTab::Slideshow
-            }
-            Action::WindowTimelineViewer => {
-                layout.bottom && layout.bottom_tab == BottomTab::Timeline
-            }
-            Action::WindowFlowchart => self.tab == CenterTab::Flowchart,
-            Action::WindowMenuViewer => self.tab == CenterTab::Menu,
-            Action::WindowMonitor => self.tab == CenterTab::Monitor,
+        match (action, window_panel(action)) {
+            (Action::WindowCheck, _) => self.check_window.open,
+            (_, Some(panel)) => self.panel_front(panel),
             _ => false,
         }
     }
 
     /// タイムラインビューアが前面に出ているか。
     fn timeline_viewer_shown(&self) -> bool {
-        self.layout.bottom && self.layout.bottom_tab == BottomTab::Timeline
+        self.panel_front(Panel::TimelineViewer)
     }
 
     /// 消去できるもの（メニューの選択中のボタン、タイムラインの選択中のチャプターポイント）があるか。
     fn can_clear(&self) -> bool {
         match self.selection {
-            Selection::Menu(_) => self.tab == CenterTab::Menu && !self.selected_buttons.is_empty(),
+            Selection::Menu(_) => {
+                self.panel_front(Panel::MenuViewer) && !self.selected_buttons.is_empty()
+            }
             Selection::Timeline(_) => self.timeline_viewer_shown(),
             _ => false,
         }
@@ -767,10 +773,8 @@ impl DiscCraftApp {
                 self.check_window.open = true;
                 self.check_project();
             }
-            Action::Preview => {
-                self.tab = CenterTab::Monitor;
-                self.open_preview();
-            }
+            // Encore の ファイル ▸ プレビュー: ビルドせずに、プロジェクトプレビューの窓で。
+            Action::Preview => self.open_project_preview(serde_json::json!({})),
             Action::BuildFolder => {
                 self.show_build_tab();
                 self.build_output = OutputKind::Folder;
@@ -809,8 +813,7 @@ impl DiscCraftApp {
         if self.selection == Selection::None {
             return;
         }
-        self.layout.right = true;
-        self.layout.right_tab = RightTab::Properties;
+        self.show_panel(Panel::Properties);
         self.focus_rename = true;
     }
 
@@ -890,7 +893,7 @@ impl DiscCraftApp {
 
     fn clear_selection(&mut self) {
         match self.selection {
-            Selection::Menu(_) if self.tab == CenterTab::Menu => {
+            Selection::Menu(_) if self.panel_front(Panel::MenuViewer) => {
                 if !self.remove_selected_text() && !self.remove_selected_graphic() {
                     self.remove_selected_buttons();
                 }
@@ -914,8 +917,7 @@ impl DiscCraftApp {
             if !matches!(self.selection, Selection::Timeline(_)) {
                 return;
             }
-            self.layout.bottom = true;
-            self.layout.bottom_tab = BottomTab::Timeline;
+            self.show_panel(Panel::TimelineViewer);
         } else if !self.timeline_viewer_shown() {
             // ズームは今のところタイムラインだけが持つ。
             return;
@@ -942,68 +944,37 @@ impl DiscCraftApp {
 
     /// ビルドのタブを前面に出す。
     fn show_build_tab(&mut self) {
-        self.layout.left = true;
-        self.layout.left_tab = LeftTab::Build;
+        self.show_panel(Panel::Build);
     }
 
-    /// パネルの表示を切り替える。前面に出ているタブならグループを閉じ、そうでなければ前面に出す。
-    /// 中央のタブはそのタブへ切り替える。
+    /// パネルの表示を切り替える: 前面に出ているパネルなら閉じ、そうでなければ前面に出す（閉じていれば開く）。
     fn toggle_window(&mut self, action: Action) {
-        let layout = &mut self.layout;
-        match action {
-            Action::WindowBuild => toggle(&mut layout.left, &mut layout.left_tab, LeftTab::Build),
-            Action::WindowCheck => self.check_window.open = !self.check_window.open,
-            Action::WindowMenus => toggle(&mut layout.left, &mut layout.left_tab, LeftTab::Menus),
-            Action::WindowProject => {
-                toggle(&mut layout.left, &mut layout.left_tab, LeftTab::Project);
-            }
-            Action::WindowTimelines => {
-                toggle(&mut layout.left, &mut layout.left_tab, LeftTab::Timelines);
-            }
-            Action::WindowDisc => toggle(&mut layout.right, &mut layout.right_tab, RightTab::Disc),
-            Action::WindowProperties => {
-                toggle(
-                    &mut layout.right,
-                    &mut layout.right_tab,
-                    RightTab::Properties,
-                );
-            }
-            Action::WindowLayers => {
-                toggle(&mut layout.lower, &mut layout.lower_tab, LowerTab::Layers);
-            }
-            Action::WindowLibrary => {
-                toggle(&mut layout.lower, &mut layout.lower_tab, LowerTab::Library);
-            }
-            Action::WindowSlideshowViewer => {
-                toggle(
-                    &mut layout.bottom,
-                    &mut layout.bottom_tab,
-                    BottomTab::Slideshow,
-                );
-            }
-            Action::WindowTimelineViewer => {
-                toggle(
-                    &mut layout.bottom,
-                    &mut layout.bottom_tab,
-                    BottomTab::Timeline,
-                );
-            }
-            Action::WindowFlowchart => self.tab = CenterTab::Flowchart,
-            Action::WindowMenuViewer => self.tab = CenterTab::Menu,
-            Action::WindowMonitor => self.tab = CenterTab::Monitor,
+        match (action, window_panel(action)) {
+            (Action::WindowCheck, _) => self.check_window.open = !self.check_window.open,
+            (_, Some(panel)) => self.toggle_panel(panel),
             _ => {}
         }
     }
 }
 
-/// グループの `tab` が前面に出ていれば閉じ、そうでなければグループを出して `tab` を前面にする。
-fn toggle<T: Copy + PartialEq>(visible: &mut bool, current: &mut T, tab: T) {
-    if *visible && *current == tab {
-        *visible = false;
-    } else {
-        *visible = true;
-        *current = tab;
-    }
+/// ウィンドウメニューの項目のパネル。
+fn window_panel(action: Action) -> Option<Panel> {
+    Some(match action {
+        Action::WindowBuild => Panel::Build,
+        Action::WindowDisc => Panel::Disc,
+        Action::WindowFlowchart => Panel::Flowchart,
+        Action::WindowMenus => Panel::Menus,
+        Action::WindowMonitor => Panel::Monitor,
+        Action::WindowProject => Panel::Project,
+        Action::WindowProperties => Panel::Properties,
+        Action::WindowTimelines => Panel::Timelines,
+        Action::WindowLayers => Panel::Layers,
+        Action::WindowLibrary => Panel::Library,
+        Action::WindowMenuViewer => Panel::MenuViewer,
+        Action::WindowSlideshowViewer => Panel::SlideshowViewer,
+        Action::WindowTimelineViewer => Panel::TimelineViewer,
+        _ => return None,
+    })
 }
 
 /// ウィンドウメニューに並べるパネル（Encore と同じ順。ディスクは DiscCraft だけのパネルで、英語名の順の位置に置く）。

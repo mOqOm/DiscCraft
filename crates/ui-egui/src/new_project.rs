@@ -370,7 +370,7 @@ fn draw_buttons(ui: &mut Ui, form: &NewProjectForm) -> Option<FormAction> {
 }
 
 /// Lines describing the transcode settings DiscCraft uses for this mode and standard. They follow the actual
-/// pipeline: MPEG-2 progressive frames (`mpeg2venc`), LPCM 48 kHz stereo for transcoded audio and the bitrate budget
+/// pipeline: MPEG-2 progressive frames (`mpeg2venc`), AC-3 192 kbps stereo for transcoded audio and the bitrate budget
 /// that fills the disc with video up to 9.8 Mbps (`dvd::prepare`). Blu-ray currently reuses the same SD video.
 pub(crate) fn transcode_summary(kind: DiscKind, standard: VideoStandard) -> Vec<String> {
     let (width, height, rate) = match standard {
@@ -384,7 +384,8 @@ pub(crate) fn transcode_summary(kind: DiscKind, standard: VideoStandard) -> Vec<
             height = height,
             rate = rate
         ),
-        tl!("Audio: LPCM 48 kHz stereo (AC-3 sources are kept)").to_owned(),
+        tl!("Audio: Dolby Digital (AC-3) 192 kbps stereo (AC-3 and WAV sources are kept)")
+            .to_owned(),
         tl!("Bitrate: automatic, to fit the disc (video up to 9.8 Mbps)").to_owned(),
     ];
     if kind == DiscKind::BluRay {

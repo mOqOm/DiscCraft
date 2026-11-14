@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 disccraft-check.workspace = true
 disccraft-build.workspace = true
+disccraft-dvd.workspace = true
 disccraft-project.workspace = true
 disccraft-vm.workspace = true
 disccraft-transcode.workspace = true

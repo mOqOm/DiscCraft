@@ -52,6 +52,26 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "disc.setAudioLanguage",
+        label: "ディスクのオーディオの言語を設定",
+        menu: &["ディスク"],
+        shortcut: None,
+        params: r#"{"language": "ja" | null}"#,
+        enabled: always_enabled,
+        run: run_set_audio_language,
+        journal: true,
+    },
+    CommandSpec {
+        id: "disc.setLayerBreak",
+        label: "レイヤーブレークを設定",
+        menu: &["ディスク"],
+        shortcut: None,
+        params: r#"{"timeline": id, "time": ticks | "timecode": "00;45;12;15"} | {"timeline": null} (自動)"#,
+        enabled: always_enabled,
+        run: run_set_layer_break,
+        journal: true,
+    },
+    CommandSpec {
         id: "disc.setSubtitle",
         label: "ディスクの字幕を設定",
         menu: &["ディスク"],
@@ -161,6 +181,66 @@ fn run_set_audio(session: &mut Session, params: &Value) -> CommandResult {
     Ok(empty_object())
 }
 
+/// The language (ISO 639-1, two letters) of audio without its own; `null` (or empty) follows DiscCraft's display
+/// language when the disc is built.
+fn run_set_audio_language(session: &mut Session, params: &Value) -> CommandResult {
+    let language = match params.get("language") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(code)) if code.trim().is_empty() => None,
+        Some(Value::String(code)) => {
+            let code = code.trim().to_ascii_lowercase();
+            if code.len() != 2 || !code.bytes().all(|b| b.is_ascii_lowercase()) {
+                return Err(
+                    "parameter \"language\" must be a two-letter ISO 639-1 code or null"
+                        .to_string(),
+                );
+            }
+            Some(code)
+        }
+        Some(_) => {
+            return Err(
+                "parameter \"language\" must be a two-letter ISO 639-1 code or null".to_string(),
+            );
+        }
+    };
+    session.project.settings.audio_language = language;
+    Ok(empty_object())
+}
+
+/// The manual layer break of a dual-layer DVD: a timeline and a time in it (ticks, or a timecode in the disc's
+/// format); `"timeline": null` goes back to the automatic one. The time must be within the timeline's chapters'
+/// range start (0) and is taken at the frame nearest to it when the disc is built.
+fn run_set_layer_break(session: &mut Session, params: &Value) -> CommandResult {
+    let timeline = match params.get("timeline") {
+        None | Some(Value::Null) => {
+            session.project.settings.layer_break = None;
+            return Ok(empty_object());
+        }
+        Some(value) => value
+            .as_u64()
+            .map(disccraft_project::TimelineId)
+            .ok_or_else(|| "parameter \"timeline\" must be a timeline id or null".to_string())?,
+    };
+    if session.project.timeline(timeline).is_none() {
+        return Err(format!("timeline {} does not exist", timeline.0));
+    }
+    let time = match (params.get("time"), params.get("timecode")) {
+        (Some(value), _) => value
+            .as_i64()
+            .filter(|ticks| *ticks >= 0)
+            .map(disccraft_project::Tick)
+            .ok_or_else(|| "parameter \"time\" must be a tick count from 0".to_string())?,
+        (None, Some(Value::String(text))) => {
+            disccraft_project::parse_time(text.trim(), &session.project.settings)
+                .map_err(|error| format!("parameter \"timecode\": {error}"))?
+        }
+        _ => return Err("give \"time\" (ticks) or \"timecode\"".to_string()),
+    };
+    session.project.settings.layer_break =
+        Some(disccraft_project::LayerBreakPoint { timeline, time });
+    Ok(empty_object())
+}
+
 /// The subtitle a disc selects when it starts (`null`: the player's choice; `"off"`: none).
 fn run_set_subtitle(session: &mut Session, params: &Value) -> CommandResult {
     use disccraft_project::SubtitleDefault;
@@ -218,6 +298,8 @@ fn run_set_standard(session: &mut Session, params: &Value) -> CommandResult {
     Ok(empty_object())
 }
 
+/// The disc's aspect ratio, which every title takes: the timelines follow it again (one can still be given its own
+/// afterwards with `timeline.setAspect`), and slideshows always do. Menus keep theirs.
 fn run_set_aspect(session: &mut Session, params: &Value) -> CommandResult {
     let aspect = req_value(params, "aspect")?.as_str().unwrap_or_default();
     session.project.settings.widescreen = match aspect {
@@ -225,6 +307,9 @@ fn run_set_aspect(session: &mut Session, params: &Value) -> CommandResult {
         "16:9" => true,
         _ => return Err("parameter \"aspect\" must be \"4:3\" or \"16:9\"".to_string()),
     };
+    for timeline in session.project.timelines.values_mut() {
+        timeline.widescreen = None;
+    }
     Ok(empty_object())
 }
 
@@ -290,6 +375,88 @@ mod tests {
     use crate::Session;
     use serde_json::json;
     use std::error::Error;
+
+    /// M14.2: the manual layer break takes a timeline and a time (ticks or a timecode), checks them, goes back to
+    /// automatic with `null`, and undoes.
+    #[test]
+    fn the_layer_break_is_set_checked_and_undone() -> Result<(), Box<dyn Error>> {
+        let mut session = Session::new();
+        let asset = session
+            .project
+            .add_asset(std::path::Path::new("movie.m2v"))?;
+        let timeline = session.project.add_timeline(asset, None)?;
+        session.execute(
+            "disc.setLayerBreak",
+            &json!({"timeline": timeline.0, "timecode": "00;00;01;07"}),
+        )?;
+        let point = session
+            .project
+            .settings
+            .layer_break
+            .ok_or("no layer break")?;
+        assert_eq!(point.timeline, timeline);
+        // 1 s and 7 frames of NTSC drop-frame timecode: 37 frames of 1001/30000 s.
+        assert_eq!(point.time.0, 37 * 8_475_667_200);
+        session.execute(
+            "disc.setLayerBreak",
+            &json!({"timeline": timeline.0, "time": 5}),
+        )?;
+        assert_eq!(
+            session.project.settings.layer_break.map(|p| p.time.0),
+            Some(5)
+        );
+        for bad in [
+            json!({"timeline": 999, "time": 0}),
+            json!({"timeline": timeline.0, "time": -1}),
+            json!({"timeline": timeline.0}),
+            json!({"timeline": timeline.0, "timecode": "nonsense"}),
+        ] {
+            assert!(
+                session.execute("disc.setLayerBreak", &bad).is_err(),
+                "{bad}"
+            );
+        }
+        session.execute("disc.setLayerBreak", &json!({"timeline": null}))?;
+        assert_eq!(session.project.settings.layer_break, None);
+        session.execute("edit.undo", &json!({}))?;
+        assert_eq!(
+            session.project.settings.layer_break.map(|p| p.time.0),
+            Some(5)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_audio_language_is_set_checked_and_undone() -> Result<(), Box<dyn Error>> {
+        let mut session = Session::new();
+        // Unset: the display language decides at build time (and nothing goes into the project file).
+        assert_eq!(session.project.settings.audio_language, None);
+        let text = serde_json::to_string(&session.project.settings)?;
+        assert!(!text.contains("audioLanguage"), "{text}");
+
+        session.execute("disc.setAudioLanguage", &json!({"language": " EN "}))?;
+        assert_eq!(
+            session.project.settings.audio_language.as_deref(),
+            Some("en")
+        );
+        let text = serde_json::to_string(&session.project.settings)?;
+        assert!(text.contains("\"audioLanguage\":\"en\""), "{text}");
+        for bad in [
+            json!({"language": "eng"}),
+            json!({"language": "j1"}),
+            json!({"language": 7}),
+        ] {
+            assert!(session.execute("disc.setAudioLanguage", &bad).is_err());
+        }
+        session.execute("disc.setAudioLanguage", &json!({"language": null}))?;
+        assert_eq!(session.project.settings.audio_language, None);
+        session.execute("edit.undo", &json!({}))?;
+        assert_eq!(
+            session.project.settings.audio_language.as_deref(),
+            Some("en")
+        );
+        Ok(())
+    }
 
     #[test]
     fn the_blu_ray_video_is_set_and_undone() -> Result<(), Box<dyn Error>> {

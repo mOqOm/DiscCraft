@@ -10,12 +10,18 @@ use std::path::{Path, PathBuf};
 
 const SECTOR_SIZE: u64 = 2048;
 const SECTOR_SIZE_U32: u32 = 2048;
-const PARTITION_START_BASE: u32 = 262;
+const PARTITION_START_BASE: u32 = 261;
 const MAIN_VDS_SECTOR: u32 = 32;
 const RESERVE_VDS_SECTOR: u32 = 48;
 const LVID_SECTOR: u32 = 64;
 const LVID_TD_SECTOR: u32 = 65;
 const ANCHOR_SECTOR: u32 = 256;
+/// Unused sectors left before each BUP, so that it never shares an ECC block (16 sectors) with its IFO; the IFOs
+/// count them in their sets (`disccraft_ifo::BUP_GAP_SECTORS`).
+pub const BUP_GAP_SECTORS: u32 = 16;
+/// Unique IDs (ECMA-167 4/14.9.11, UDF 3.2.1.1): 0 for the root, 16 for VIDEO_TS (1 to 15 are reserved), then one
+/// for each file.
+const FIRST_FILE_UNIQUE_ID: u64 = 17;
 const VDS_EXTENT_BYTES: u32 = 16 * 2048;
 const LVID_EXTENT_BYTES: u32 = 2 * 2048;
 
@@ -86,7 +92,6 @@ struct VideoItem {
 #[allow(dead_code)] // layout fields kept for diagnostics
 struct IsoSizes {
     root_size: u64,
-    audio_size: u64,
     video_size: u64,
     video_sectors: u32,
     partition_start: u32,
@@ -95,7 +100,6 @@ struct IsoSizes {
 
 struct UdfSizes {
     root_fids_sectors: u32,
-    audio_fids_sectors: u32,
     video_fids_sectors: u32,
 }
 
@@ -105,8 +109,6 @@ struct UdfLbns {
     td: u32,
     root_fe: u32,
     root_fids: u32,
-    audio_fe: u32,
-    audio_fids: u32,
     video_fe: u32,
     video_fids: u32,
     file_data: u32,
@@ -131,7 +133,6 @@ struct IsoBytes {
     path_l: Vec<u8>,
     path_m: Vec<u8>,
     root_dir: Vec<u8>,
-    audio_dir: Vec<u8>,
     video_dir: Vec<u8>,
 }
 
@@ -156,7 +157,14 @@ pub fn write_dvd_iso(
     let iso_sizes = compute_iso_sizes(&metas, date)?;
     let fid_sizes = compute_fid_sizes(&metas)?;
     let plan = allocate_plan(iso_sizes.partition_start, &mut metas, &fid_sizes)?;
-    let iso_bytes = build_iso_bytes(label, &plan, &metas, &iso_sizes, date, unix_time)?;
+    let iso_bytes = build_iso_bytes(
+        &iso_volume_label(label, out),
+        &plan,
+        &metas,
+        &iso_sizes,
+        date,
+        unix_time,
+    )?;
 
     let file = File::create(out).map_err(|e| io_error(&out_path, e))?;
     let mut writer = BufWriter::new(file);
@@ -219,7 +227,6 @@ fn file_size(path: &Path) -> Result<u64, UdfError> {
 }
 
 fn compute_iso_sizes(metas: &[FileMeta], date: [u8; 7]) -> Result<IsoSizes, UdfError> {
-    let audio_entries: Vec<DirEntry> = Vec::new();
     let video_entries: Vec<DirEntry> = metas
         .iter()
         .map(|m| DirEntry {
@@ -229,16 +236,6 @@ fn compute_iso_sizes(metas: &[FileMeta], date: [u8; 7]) -> Result<IsoSizes, UdfE
             is_dir: false,
         })
         .collect();
-
-    let audio_size = iso9660::directory_records(
-        iso9660::AUDIO_DIR_SECTOR,
-        0,
-        iso9660::ROOT_DIR_SECTOR,
-        0,
-        &audio_entries,
-        date,
-    )
-    .len() as u64;
 
     let video_size = iso9660::directory_records(
         iso9660::VIDEO_DIR_SECTOR,
@@ -250,20 +247,12 @@ fn compute_iso_sizes(metas: &[FileMeta], date: [u8; 7]) -> Result<IsoSizes, UdfE
     )
     .len() as u64;
 
-    let root_entries = vec![
-        DirEntry {
-            name: String::from("AUDIO_TS"),
-            extent: iso9660::AUDIO_DIR_SECTOR,
-            size: audio_size,
-            is_dir: true,
-        },
-        DirEntry {
-            name: String::from("VIDEO_TS"),
-            extent: iso9660::VIDEO_DIR_SECTOR,
-            size: video_size,
-            is_dir: true,
-        },
-    ];
+    let root_entries = vec![DirEntry {
+        name: String::from("VIDEO_TS"),
+        extent: iso9660::VIDEO_DIR_SECTOR,
+        size: video_size,
+        is_dir: true,
+    }];
 
     let root_size = iso9660::directory_records(
         iso9660::ROOT_DIR_SECTOR,
@@ -294,11 +283,6 @@ fn compute_iso_sizes(metas: &[FileMeta], date: [u8; 7]) -> Result<IsoSizes, UdfE
             parent: 1,
         },
         PathEntry {
-            name: b"AUDIO_TS".to_vec(),
-            extent: iso9660::AUDIO_DIR_SECTOR,
-            parent: 1,
-        },
-        PathEntry {
             name: b"VIDEO_TS".to_vec(),
             extent: iso9660::VIDEO_DIR_SECTOR,
             parent: 1,
@@ -310,7 +294,6 @@ fn compute_iso_sizes(metas: &[FileMeta], date: [u8; 7]) -> Result<IsoSizes, UdfE
 
     Ok(IsoSizes {
         root_size,
-        audio_size,
         video_size,
         video_sectors,
         partition_start,
@@ -326,22 +309,11 @@ fn compute_fid_sizes(metas: &[FileMeta]) -> Result<UdfSizes, UdfError> {
             icb_lbn: 0,
         },
         Fid {
-            name: Some(String::from("AUDIO_TS")),
-            is_dir: true,
-            icb_lbn: 0,
-        },
-        Fid {
             name: Some(String::from("VIDEO_TS")),
             is_dir: true,
             icb_lbn: 0,
         },
     ];
-
-    let audio_fids = vec![Fid {
-        name: None,
-        is_dir: true,
-        icb_lbn: 0,
-    }];
 
     let mut video_names: Vec<String> = metas.iter().map(|m| m.iso_name.clone()).collect();
     video_names.sort();
@@ -360,12 +332,10 @@ fn compute_fid_sizes(metas: &[FileMeta]) -> Result<UdfSizes, UdfError> {
     }
 
     let root_len = desc::file_identifier_descriptors(0, &root_fids).len();
-    let audio_len = desc::file_identifier_descriptors(0, &audio_fids).len();
     let video_len = desc::file_identifier_descriptors(0, &video_fids).len();
 
     Ok(UdfSizes {
         root_fids_sectors: fid_sector_count(root_len)?,
-        audio_fids_sectors: fid_sector_count(audio_len)?,
         video_fids_sectors: fid_sector_count(video_len)?,
     })
 }
@@ -385,10 +355,6 @@ fn allocate_plan(
     lbn = inc_u32(lbn, "UDF LBN")?;
     let root_fids = lbn;
     lbn = checked_add_u32(lbn, sizes.root_fids_sectors, "UDF LBN")?;
-    let audio_fe = lbn;
-    lbn = inc_u32(lbn, "UDF LBN")?;
-    let audio_fids = lbn;
-    lbn = checked_add_u32(lbn, sizes.audio_fids_sectors, "UDF LBN")?;
     let video_fe = lbn;
     lbn = inc_u32(lbn, "UDF LBN")?;
     let video_fids = lbn;
@@ -406,6 +372,10 @@ fn allocate_plan(
     for meta in metas.iter_mut() {
         let sectors = sectors_for_size(meta.size)?;
         let sectors = u32_from_u64(sectors, "file data sectors")?;
+        if is_backup(&meta.name) {
+            data_lbn = checked_add_u32(data_lbn, BUP_GAP_SECTORS, "file data LBN")?;
+            data_sectors = checked_add_u32(data_sectors, BUP_GAP_SECTORS, "file data sectors")?;
+        }
         meta.data_lbn = data_lbn;
         meta.data_sectors = sectors;
         meta.iso_extent = checked_add_u32(partition_start, data_lbn, "ISO file extent")?;
@@ -426,7 +396,7 @@ fn allocate_plan(
 
     let first_file_sector = checked_add_u32(partition_start, file_data, "first file sector")?;
     let file_count = u32_from_u64(metas.len() as u64, "file count")?;
-    let next_unique_id = 18u64
+    let next_unique_id = FIRST_FILE_UNIQUE_ID
         .checked_add(metas.len() as u64)
         .ok_or_else(|| invalid("unique id overflow"))?;
 
@@ -436,8 +406,6 @@ fn allocate_plan(
             td,
             root_fe,
             root_fids,
-            audio_fe,
-            audio_fids,
             video_fe,
             video_fids,
             file_data,
@@ -464,20 +432,12 @@ fn build_iso_bytes(
     let video_items = build_video_items(metas);
     let video_entries = final_video_entries(&video_items);
 
-    let root_entries = vec![
-        DirEntry {
-            name: String::from("AUDIO_TS"),
-            extent: iso9660::AUDIO_DIR_SECTOR,
-            size: sizes.audio_size,
-            is_dir: true,
-        },
-        DirEntry {
-            name: String::from("VIDEO_TS"),
-            extent: iso9660::VIDEO_DIR_SECTOR,
-            size: sizes.video_size,
-            is_dir: true,
-        },
-    ];
+    let root_entries = vec![DirEntry {
+        name: String::from("VIDEO_TS"),
+        extent: iso9660::VIDEO_DIR_SECTOR,
+        size: sizes.video_size,
+        is_dir: true,
+    }];
 
     let root_dir = iso9660::directory_records(
         iso9660::ROOT_DIR_SECTOR,
@@ -485,15 +445,6 @@ fn build_iso_bytes(
         iso9660::ROOT_DIR_SECTOR,
         sizes.root_size,
         &root_entries,
-        date,
-    );
-
-    let audio_dir = iso9660::directory_records(
-        iso9660::AUDIO_DIR_SECTOR,
-        sizes.audio_size,
-        iso9660::ROOT_DIR_SECTOR,
-        sizes.root_size,
-        &[],
         date,
     );
 
@@ -510,11 +461,6 @@ fn build_iso_bytes(
         PathEntry {
             name: vec![0u8],
             extent: iso9660::ROOT_DIR_SECTOR,
-            parent: 1,
-        },
-        PathEntry {
-            name: b"AUDIO_TS".to_vec(),
-            extent: iso9660::AUDIO_DIR_SECTOR,
             parent: 1,
         },
         PathEntry {
@@ -544,7 +490,6 @@ fn build_iso_bytes(
         path_l,
         path_m,
         root_dir,
-        audio_dir,
         video_dir,
     })
 }
@@ -600,7 +545,7 @@ fn write_vds_regions<W: Write>(
         unix_time,
         plan.next_unique_id,
         plan.file_count,
-        3,
+        2,
         plan.partition_length as u64,
     );
     write_sector(w, cursor, LVID_SECTOR, &lvid, path)?;
@@ -627,10 +572,12 @@ fn write_vds_set<W: Write>(
     unix_time: i64,
     path: &str,
 ) -> Result<(), UdfError> {
-    let pvd = desc::primary_volume_descriptor(start, label, "*DiscCraft", unix_time);
+    let pvd =
+        desc::primary_volume_descriptor(start, label, &volume_set_id(label, unix_time), unix_time);
     write_sector(w, cursor, start, &pvd, path)?;
 
-    let iuvd = desc::implementation_use_volume_descriptor(checked_add_u32(start, 1, "VDS sector")?);
+    let iuvd =
+        desc::implementation_use_volume_descriptor(checked_add_u32(start, 1, "VDS sector")?, label);
     write_sector(
         w,
         cursor,
@@ -666,7 +613,6 @@ fn write_iso_bridge<W: Write>(
     write_bytes_at(w, cursor, iso9660::PATH_TABLE_L_SECTOR, &bytes.path_l, path)?;
     write_bytes_at(w, cursor, iso9660::PATH_TABLE_M_SECTOR, &bytes.path_m, path)?;
     write_bytes_at(w, cursor, iso9660::ROOT_DIR_SECTOR, &bytes.root_dir, path)?;
-    write_bytes_at(w, cursor, iso9660::AUDIO_DIR_SECTOR, &bytes.audio_dir, path)?;
     write_bytes_at(w, cursor, iso9660::VIDEO_DIR_SECTOR, &bytes.video_dir, path)?;
     Ok(())
 }
@@ -683,24 +629,24 @@ fn write_udf_sectors<W: Write>(
     write_zeros_to(w, cursor, sector_bytes(plan.partition_start)?, path)?;
 
     let root_fids = build_root_fids_bytes(plan)?;
-    let audio_fids = build_audio_fids_bytes(plan)?;
     let video_fids = build_video_fids_bytes(plan, metas)?;
 
+    // Descriptors inside the partition carry their logical block number in it as their tag location (ECMA-167
+    // 4/7.2.1), not the image sector they are written at.
     let fsd_loc = checked_add_u32(plan.partition_start, plan.lbns.fsd, "FSD sector")?;
-    let fsd = desc::file_set_descriptor(fsd_loc, unix_time, label, plan.lbns.root_fe);
+    let fsd = desc::file_set_descriptor(plan.lbns.fsd, unix_time, label, plan.lbns.root_fe);
     write_sector(w, cursor, fsd_loc, &fsd, path)?;
 
     let td_loc = checked_add_u32(plan.partition_start, plan.lbns.td, "TD sector")?;
-    let td = desc::terminating_descriptor(td_loc);
+    let td = desc::terminating_descriptor(plan.lbns.td);
     write_sector(w, cursor, td_loc, &td, path)?;
 
     let root_fe_loc = checked_add_u32(plan.partition_start, plan.lbns.root_fe, "root FE sector")?;
     let root_fe = directory_entry_bytes(
-        plan.partition_start,
         plan.lbns.root_fe,
         plan.lbns.root_fids,
         root_fids.len(),
-        0,
+        (0, 2),
         unix_time,
     )?;
     write_sector(w, cursor, root_fe_loc, &root_fe, path)?;
@@ -712,37 +658,13 @@ fn write_udf_sectors<W: Write>(
         path,
     )?;
 
-    let audio_fe_loc =
-        checked_add_u32(plan.partition_start, plan.lbns.audio_fe, "audio FE sector")?;
-    let audio_fe = directory_entry_bytes(
-        plan.partition_start,
-        plan.lbns.audio_fe,
-        plan.lbns.audio_fids,
-        audio_fids.len(),
-        16,
-        unix_time,
-    )?;
-    write_sector(w, cursor, audio_fe_loc, &audio_fe, path)?;
-    write_bytes_at(
-        w,
-        cursor,
-        checked_add_u32(
-            plan.partition_start,
-            plan.lbns.audio_fids,
-            "audio FID sector",
-        )?,
-        &audio_fids,
-        path,
-    )?;
-
     let video_fe_loc =
         checked_add_u32(plan.partition_start, plan.lbns.video_fe, "video FE sector")?;
     let video_fe = directory_entry_bytes(
-        plan.partition_start,
         plan.lbns.video_fe,
         plan.lbns.video_fids,
         video_fids.len(),
-        17,
+        (16, 1),
         unix_time,
     )?;
     write_sector(w, cursor, video_fe_loc, &video_fe, path)?;
@@ -758,10 +680,10 @@ fn write_udf_sectors<W: Write>(
         path,
     )?;
 
-    let mut unique = 18u64;
+    let mut unique = FIRST_FILE_UNIQUE_ID;
     for meta in metas {
         let fe_loc = checked_add_u32(plan.partition_start, meta.fe_lbn, "file FE sector")?;
-        let fe = file_entry_bytes(plan.partition_start, meta, unique, unix_time)?;
+        let fe = file_entry_bytes(meta, unique, unix_time)?;
         write_sector(w, cursor, fe_loc, &fe, path)?;
         unique = unique
             .checked_add(1)
@@ -778,9 +700,9 @@ fn write_file_data<W: Write>(
     metas: &[FileMeta],
     path: &str,
 ) -> Result<(), UdfError> {
-    let mut target = plan.first_file_sector;
-
     for meta in metas {
+        // Each file at its own sector (a BUP after the gap before it).
+        let target = checked_add_u32(plan.partition_start, meta.data_lbn, "file sector")?;
         write_zeros_to(w, cursor, sector_bytes(target)?, path)?;
         copy_file(w, &meta.source, meta.size, path)?;
 
@@ -791,8 +713,6 @@ fn write_file_data<W: Write>(
             .ok_or_else(|| invalid("file padding underflow"))?;
         write_zero_bytes(w, pad, path)?;
         *cursor = cursor.saturating_add(alloc_bytes);
-
-        target = checked_add_u32(target, meta.data_sectors, "next file sector")?;
     }
 
     Ok(())
@@ -818,17 +738,12 @@ fn write_final_anchor<W: Write>(
 }
 
 fn build_root_fids_bytes(plan: &Plan) -> Result<Vec<u8>, UdfError> {
-    let first = checked_add_u32(plan.partition_start, plan.lbns.root_fids, "root FID LBN")?;
+    let first = plan.lbns.root_fids;
     let fids = vec![
         Fid {
             name: None,
             is_dir: true,
             icb_lbn: plan.lbns.root_fe,
-        },
-        Fid {
-            name: Some(String::from("AUDIO_TS")),
-            is_dir: true,
-            icb_lbn: plan.lbns.audio_fe,
         },
         Fid {
             name: Some(String::from("VIDEO_TS")),
@@ -839,18 +754,8 @@ fn build_root_fids_bytes(plan: &Plan) -> Result<Vec<u8>, UdfError> {
     Ok(desc::file_identifier_descriptors(first, &fids))
 }
 
-fn build_audio_fids_bytes(plan: &Plan) -> Result<Vec<u8>, UdfError> {
-    let first = checked_add_u32(plan.partition_start, plan.lbns.audio_fids, "audio FID LBN")?;
-    let fids = vec![Fid {
-        name: None,
-        is_dir: true,
-        icb_lbn: plan.lbns.root_fe,
-    }];
-    Ok(desc::file_identifier_descriptors(first, &fids))
-}
-
 fn build_video_fids_bytes(plan: &Plan, metas: &[FileMeta]) -> Result<Vec<u8>, UdfError> {
-    let first = checked_add_u32(plan.partition_start, plan.lbns.video_fids, "video FID LBN")?;
+    let first = plan.lbns.video_fids;
     let items = build_video_items(metas);
 
     let mut fids = vec![Fid {
@@ -896,15 +801,16 @@ fn final_video_entries(items: &[VideoItem]) -> Vec<DirEntry> {
         .collect()
 }
 
+/// A directory's file entry. `(unique_id, links)`: its unique ID and the number of FIDs that identify it
+/// (ECMA-167 4/14.9.6: its entry in its parent and the parent FIDs of its subdirectories). Its information length
+/// is the size of its FIDs (4/14.9.10).
 fn directory_entry_bytes(
-    partition_start: u32,
-    fe_lbn: u32,
+    lbn: u32,
     fids_lbn: u32,
     fids_len: usize,
-    unique_id: u64,
+    (unique_id, links): (u64, u16),
     unix_time: i64,
 ) -> Result<Vec<u8>, UdfError> {
-    let lbn = checked_add_u32(partition_start, fe_lbn, "directory FE LBN")?;
     let extents = if fids_len == 0 {
         Vec::new()
     } else {
@@ -913,17 +819,18 @@ fn directory_entry_bytes(
     };
 
     Ok(desc::file_entry(
-        lbn, true, 0, &extents, unique_id, unix_time, 2,
+        lbn,
+        true,
+        fids_len as u64,
+        &extents,
+        unique_id,
+        unix_time,
+        links,
     ))
 }
 
-fn file_entry_bytes(
-    partition_start: u32,
-    meta: &FileMeta,
-    unique_id: u64,
-    unix_time: i64,
-) -> Result<Vec<u8>, UdfError> {
-    let lbn = checked_add_u32(partition_start, meta.fe_lbn, "file FE LBN")?;
+fn file_entry_bytes(meta: &FileMeta, unique_id: u64, unix_time: i64) -> Result<Vec<u8>, UdfError> {
+    let lbn = meta.fe_lbn;
     let extent_len = if meta.size == 0 {
         SECTOR_SIZE_U32
     } else {
@@ -1056,6 +963,32 @@ fn fid_sector_count(len: usize) -> Result<u32, UdfError> {
     u32_from_u64(sectors, "FID sectors")
 }
 
+/// The ISO 9660 volume identifier: d-characters made from the label (which the UDF side keeps as it is), or from
+/// the image's file name when the label has no letter or digit ISO 9660 can hold (a Japanese disc name).
+fn iso_volume_label(label: &str, out: &Path) -> String {
+    let from_label = iso9660::sanitize_volume_id(label);
+    if from_label.chars().any(|ch| ch.is_ascii_alphanumeric()) {
+        return from_label;
+    }
+    let stem = out
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    iso9660::sanitize_volume_id(&stem)
+}
+
+/// The volume set identifier (UDF 2.2.2.5): unique in its first 16 characters, the first 8 of them the hex digits
+/// of the time, as Encore writes it, then the volume's name.
+fn volume_set_id(label: &str, unix_time: i64) -> String {
+    let stamp = u32::try_from(unix_time.rem_euclid(1 << 32)).unwrap_or(0);
+    format!("{stamp:08x}{:8}{label}", "")
+}
+
+/// Whether `name` is the backup of an IFO (`VIDEO_TS.BUP`, `VTS_nn_0.BUP`), placed after a gap.
+fn is_backup(name: &str) -> bool {
+    name.to_ascii_uppercase().ends_with(".BUP")
+}
+
 fn order_key(name: &str) -> (u8, u32, u8, u8, String) {
     let up = name.to_ascii_uppercase();
     match up.as_str() {
@@ -1162,6 +1095,24 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn the_iso9660_label_falls_back_to_the_file_name() {
+        use super::iso_volume_label;
+        assert_eq!(
+            iso_volume_label("Summer Trip", Path::new("x.iso")),
+            "SUMMER_TRIP"
+        );
+        assert_eq!(
+            iso_volume_label("夏の旅行", Path::new("out/trip-2026.iso")),
+            "TRIP_2026"
+        );
+        assert_eq!(
+            iso_volume_label("夏の旅行 2026", Path::new("a.iso")),
+            "_____2026"
+        );
+        assert_eq!(iso_volume_label("夏", Path::new("夏.iso")), "_");
+    }
+
+    #[test]
     fn dvd_file_order_sorts() {
         let names = vec![
             String::from("VTS_02_0.IFO"),
@@ -1240,10 +1191,11 @@ mod tests {
         let vts_ifo_sector = find_sector(&udf, "VIDEO_TS/VTS_01_0.IFO")?;
         let vts_vob_sector = find_sector(&udf, "VIDEO_TS/VTS_01_1.VOB")?;
 
+        // The BUP after the gap that keeps it out of its IFO's ECC block.
         assert_eq!(
             bup_sector,
             ifo_sector
-                .checked_add(2)
+                .checked_add(2 + super::BUP_GAP_SECTORS)
                 .ok_or_else(|| invalid("overflow"))?
         );
         assert_eq!(
@@ -1282,6 +1234,70 @@ mod tests {
         assert_eq!(tag_id_at(&anchor2, 0)?, 2);
 
         verify_vds_and_anchors(&out, report.sectors)?;
+        verify_directories(&out)?;
+        Ok(())
+    }
+
+    /// The ISO 9660 root holds VIDEO_TS alone (no AUDIO_TS on a DVD-Video disc); the UDF directories record their
+    /// FIDs' size as their information length and the FIDs that identify them as their link count.
+    fn verify_directories(out: &Path) -> Result<(), UdfError> {
+        let u32_at = |b: &[u8], at: usize| -> Result<u32, UdfError> {
+            Ok(u32::from_le_bytes(
+                b.get(at..at + 4)
+                    .and_then(|s| s.try_into().ok())
+                    .ok_or_else(|| invalid("short"))?,
+            ))
+        };
+        let root = read_test_sector(out, super::iso9660::ROOT_DIR_SECTOR)?;
+        let mut names = Vec::new();
+        let mut at = 0;
+        while root[at] != 0 {
+            let len = usize::from(root[at + 32]);
+            names.push((
+                root[at + 33..at + 33 + len].to_vec(),
+                u32_at(&root, at + 2)?,
+            ));
+            at += usize::from(root[at]);
+        }
+        assert_eq!(
+            names,
+            vec![
+                (vec![0], super::iso9660::ROOT_DIR_SECTOR),
+                (vec![1], super::iso9660::ROOT_DIR_SECTOR),
+                (b"VIDEO_TS".to_vec(), super::iso9660::VIDEO_DIR_SECTOR),
+            ]
+        );
+
+        let lvid = read_test_sector(out, super::LVID_SECTOR)?;
+        assert_eq!(u32_at(&lvid, 124)?, 2, "directories: the root and VIDEO_TS");
+
+        // A directory FE: (link count, information length, FIDs' length, FIDs' sector).
+        let start = super::PARTITION_START_BASE;
+        // Descriptors in the partition carry their logical block number there as their tag location (ECMA-167
+        // 4/7.2.1); Windows does not mount a UDF volume whose descriptors carry the image sector.
+        let fe = |lbn: u32| -> Result<(u16, u64, u32, u32), UdfError> {
+            let b = read_test_sector(out, start + lbn)?;
+            assert_eq!(u32_at(&b, 12)?, lbn, "FE tag location");
+            let lea = usize::try_from(u32_at(&b, 168)?).map_err(|_| invalid("L_EA"))?;
+            Ok((
+                u16::from_le_bytes([b[48], b[49]]),
+                u64::from(u32_at(&b, 56)?),
+                u32_at(&b, 176 + lea)? & 0x3fff_ffff,
+                u32_at(&b, 176 + lea + 4)?,
+            ))
+        };
+        let fsd = read_test_sector(out, start)?;
+        assert_eq!(u32_at(&fsd, 12)?, 0, "FSD tag location");
+        let (links, info, fids_len, fids_lbn) = fe(u32_at(&fsd, 404)?)?;
+        assert_eq!((links, info), (2, u64::from(fids_len)), "root");
+        // The root's FIDs: its parent, then VIDEO_TS.
+        let fids = read_test_sector(out, start + fids_lbn)?;
+        assert_eq!(u32_at(&fids, 12)?, fids_lbn, "FID tag location");
+        let parent_len = (38 + usize::from(fids[19]) + 3) & !3;
+        assert_eq!(&fids[parent_len + 38 + 1..parent_len + 38 + 9], b"VIDEO_TS");
+        let (links, info, fids_len, _) = fe(u32_at(&fids, parent_len + 24)?)?;
+        assert_eq!((links, info), (1, u64::from(fids_len)), "VIDEO_TS");
+        assert!(info > 0);
         Ok(())
     }
 

@@ -56,7 +56,12 @@ fn main() -> ExitCode {
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("DiscCraft を起動できませんでした: {error}");
+            use std::io::Write;
+            // A closed error stream is not a reason to panic.
+            let _ = writeln!(
+                std::io::stderr(),
+                "DiscCraft を起動できませんでした: {error}"
+            );
             ExitCode::FAILURE
         }
     }

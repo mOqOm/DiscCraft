@@ -141,6 +141,58 @@ pub struct PlayerFrame {
     pub rgb: Vec<u8>,
 }
 
+/// A video file held open for the monitor's still frames: scrubbing asks for frame after frame and reuses the
+/// decoder. Frames come at a size (square pixels, the picture fitted in with bars), as the player gives them.
+pub struct FrameSource {
+    reader: FrameReader,
+    path: PathBuf,
+}
+
+impl std::fmt::Debug for FrameSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FrameSource")
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+impl FrameSource {
+    /// Opens a video file.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be read as a video.
+    pub fn open(path: &std::path::Path) -> Result<Self, String> {
+        Ok(Self {
+            reader: FrameReader::open(path).map_err(|error| error.to_string())?,
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// The file it reads.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// The frame at `seconds` (clamped to the file) at `size` (width, height).
+    ///
+    /// # Errors
+    ///
+    /// When the frame cannot be decoded.
+    pub fn frame(&self, seconds: f64, (width, height): (u32, u32)) -> Result<PlayerFrame, String> {
+        let (width, height, rgb) = self
+            .reader
+            .frame_sized(seconds, width, height)
+            .map_err(|error| error.to_string())?;
+        Ok(PlayerFrame {
+            seconds,
+            width,
+            height,
+            rgb,
+        })
+    }
+}
+
 /// Where playback is.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlayerStatus {
@@ -181,6 +233,18 @@ impl Player {
         from_seconds: f64,
         fps: f64,
     ) -> Self {
+        Self::start_sized(path, audio, from_seconds, fps, None)
+    }
+
+    /// [`Player::start_with_audio`], with the frames at `size` (width, height; square pixels, the picture fitted in
+    /// with bars, as a Blu-ray HD title shows) instead of the 720 x 480 letterboxed frame.
+    pub fn start_sized(
+        path: PathBuf,
+        audio: Option<PlayerAudio>,
+        from_seconds: f64,
+        fps: f64,
+        size: Option<(u32, u32)>,
+    ) -> Self {
         let shared = Arc::new(Mutex::new(Shared {
             frame: None,
             status: PlayerStatus::Playing,
@@ -207,7 +271,7 @@ impl Player {
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     play(
                         &path,
-                        (from, fps),
+                        (from, fps, size),
                         &worker_shared,
                         &worker_stop,
                         &worker_clock,
@@ -372,21 +436,26 @@ fn decode_audio(
 /// The worker: decode the frame for the clock until the end or a stop. The clock starts with the first frame.
 fn play(
     path: &std::path::Path,
-    (from, fps): (f64, f64),
+    (from, fps, size): (f64, f64, Option<(u32, u32)>),
     shared: &Mutex<Shared>,
     stop: &AtomicBool,
     clock: &OnceLock<Instant>,
 ) -> Result<PlayerStatus, String> {
     let reader = FrameReader::open(path).map_err(|error| error.to_string())?;
+    let frame_at = |seconds: f64| {
+        match size {
+            Some((width, height)) => reader.frame_sized(seconds, width, height),
+            None => reader.frame(seconds),
+        }
+        .map_err(|error| error.to_string())
+    };
     let end = reader.duration_seconds();
     if from >= end {
         return Ok(PlayerStatus::Ended);
     }
     // The first frame is decoded before the clock starts, so the sound waits for the picture.
     let first = (from * fps).floor();
-    let picture = reader
-        .frame(first / fps)
-        .map_err(|error| error.to_string())?;
+    let picture = frame_at(first / fps)?;
     let started = *clock.get_or_init(Instant::now);
     let mut shown: Option<i64> = None;
     if let Ok(mut shared) = shared.lock() {
@@ -415,7 +484,7 @@ fn play(
             continue;
         }
         let seconds = index as f64 / fps;
-        let (width, height, rgb) = reader.frame(seconds).map_err(|error| error.to_string())?;
+        let (width, height, rgb) = frame_at(seconds)?;
         if let Ok(mut shared) = shared.lock() {
             shared.frame = Some(PlayerFrame {
                 seconds,

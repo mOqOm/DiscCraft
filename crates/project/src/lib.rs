@@ -89,6 +89,7 @@ pub use model::{
     Asset, AssetKind, AudioTrack, Capacity, Chapter, DiscKind, DiscSettings, Menu, Project,
     SubtitleDefault, SubtitleTrack, Timeline, VideoStandard,
 };
+pub use model::{FLOWCHART_DISC, FLOWCHART_LIMIT, FlowPoint, LayerBreakPoint};
 pub use replace::{DesignButton, MenuDesign};
 pub use subpicture::{MAX_SUBPICTURE_SIDE, Subpicture};
 pub use thumbnail::{MenuThumbnail, THUMBNAIL_PARTS, ThumbnailArea, ThumbnailSource};

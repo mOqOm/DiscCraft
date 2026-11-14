@@ -120,6 +120,21 @@ Subtitle test
     p
 }
 
+/// M10.9: the title's pop-up menu reads back out of its clip: one pop-up composition, its one button with HDMV
+/// commands.
+fn popup_reads_back(out: &Path) {
+    let clip = std::fs::read(out.join("BDMV/STREAM/00001.m2ts")).unwrap();
+    let segments: Vec<u8> = disccraft_m2tsmux::pes_payloads(&clip, disccraft_m2tsmux::IG_PID)
+        .unwrap()
+        .concat();
+    let compositions = disccraft_pgs::read::interactive_compositions(&segments).unwrap();
+    let popup = compositions.first().unwrap();
+    assert!(popup.popup);
+    let page = popup.pages.first().unwrap();
+    assert_eq!(page.buttons.len(), 1);
+    assert!(!page.buttons.first().unwrap().commands.is_empty());
+}
+
 #[test]
 fn project_becomes_a_bdmv_folder_that_libbluray_plays() {
     let (Some(ffmpeg), Some(ffprobe)) = (
@@ -171,6 +186,7 @@ fn project_becomes_a_bdmv_folder_that_libbluray_plays() {
     assert_eq!(main.playback, disccraft_bdmv::mpls::Playback::Sequential);
     // The pop-up menu rides in the title clip as an IG stream the playlist lists.
     assert_eq!(main_item.streams.ig.len(), 1);
+    popup_reads_back(&out);
     let first = highlights.items.first().unwrap();
     let second = highlights.items.get(1).unwrap();
     assert_eq!(&first.clip, b"00001");

@@ -136,6 +136,7 @@ pub fn write_vtsi(v: &Vtsi) -> Result<Vec<u8>, IfoError> {
     let last_title_set = ifo_sectors
         .checked_mul(2)
         .and_then(|x| x.checked_add(title_vobs))
+        .and_then(|x| x.checked_add(crate::BUP_GAP_SECTORS as usize))
         .and_then(|x| x.checked_sub(1))
         .ok_or_else(|| IfoError("title set size overflow".to_string()))?;
 
@@ -559,6 +560,7 @@ fn derive_title_vobs(last_title_set: u32, ifo_sectors: usize) -> Result<u32, Ifo
     let two_ifo = u64::try_from(ifo_sectors)
         .map_err(|_| IfoError("IFO too large".to_string()))?
         .checked_mul(2)
+        .and_then(|x| x.checked_add(u64::from(crate::BUP_GAP_SECTORS)))
         .ok_or_else(|| IfoError("VTS size overflow".to_string()))?;
     let total = u64::from(last_title_set)
         .checked_add(1)
@@ -1053,6 +1055,7 @@ mod tests {
                         vob_id: 1,
                         cell_id: 1,
                         stc_discontinuity: true,
+                        seamless: false,
                         still_time: 0,
                         playback_time: BcdTime([0, 0, 0, 0]),
                         first_sector: 0,
@@ -1063,6 +1066,7 @@ mod tests {
                         vob_id: 1,
                         cell_id: 2,
                         stc_discontinuity: false,
+                        seamless: true,
                         still_time: 0,
                         playback_time: BcdTime([0, 0, 0, 0]),
                         first_sector: 10,
@@ -1198,8 +1202,9 @@ mod tests {
 
         let block = vts_attr_block(&data)?;
         assert_eq!(block.len(), VTSI_MAT_END - 0x100);
-        assert_eq!(block.first(), Some(&0x40));
-        assert_eq!(block.get(0x100), Some(&0x40));
+        // MPEG-2 NTSC 4:3, neither pan/scan nor letterbox (0x43).
+        assert_eq!(block.first(), Some(&0x43));
+        assert_eq!(block.get(0x100), Some(&0x43));
         assert_eq!(block.get(0x2FF), Some(&0x00));
         assert_eq!(block.get(0x300), None);
 

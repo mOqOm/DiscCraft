@@ -295,6 +295,8 @@ fn run_probe(session: &mut Session, params: &Value) -> CommandResult {
                 seconds = Some(probe.seconds);
                 let _ = fields.insert("width".to_string(), Value::from(probe.width));
                 let _ = fields.insert("height".to_string(), Value::from(probe.height));
+                let _ = fields.insert("wide".to_string(), Value::from(probe.wide));
+                let _ = fields.insert("audio".to_string(), Value::from(probe.has_audio));
                 if let Some(fps) = Number::from_f64(probe.fps).filter(|_| probe.fps > 0.0) {
                     let _ = fields.insert("fps".to_string(), Value::Number(fps));
                 }

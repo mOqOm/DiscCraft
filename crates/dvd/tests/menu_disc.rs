@@ -73,6 +73,17 @@ fn run_menu_test(
     }
 
     let model = load_video_ts(&video_ts)?;
+    // The project preview's model (made without building) is the disc's: the same commands, buttons, routes and
+    // titles (the chapter playlist and the root menu remote included).
+    if disccraft_dvd::preview_model(project)? != model {
+        return Err(format!(
+            "preview model differs from the disc:
+{:?}
+{model:?}",
+            disccraft_dvd::preview_model(project)?
+        )
+        .into());
+    }
     let mut vm = Vm::start(&model)?;
     expect_location(vm.location(), &Location::Menu { pgcn: 1, button: 1 })?;
     // Each button plays its chapter; the end action returns to the menu.
@@ -404,6 +415,116 @@ fn expect_contains(haystack: &str, needle: &str) -> Result<(), Box<dyn Error>> {
     }
 }
 
+/// A small solid PNG (a slide).
+fn solid_png(path: &Path, rgb: [u8; 3]) -> Result<(), Box<dyn Error>> {
+    let file = std::io::BufWriter::new(fs::File::create(path)?);
+    let mut encoder = png::Encoder::new(file, 64, 48);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    let pixels: Vec<u8> = rgb.iter().copied().cycle().take(64 * 48 * 3).collect();
+    writer.write_image_data(&pixels)?;
+    Ok(())
+}
+
+/// The project preview's model (made without building) is the built disc's, with a moving menu that loops a
+/// counted number of times before its end action, a second menu, a slideshow and a chapter playlist.
+#[test]
+fn the_preview_model_is_the_discs() -> Result<(), Box<dyn Error>> {
+    let fixtures = fixtures_dir();
+    let m2v = fixtures.join("ntsc.m2v");
+    if !m2v.is_file() {
+        println!("skipped: no fixtures");
+        return Ok(());
+    }
+    let _guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
+    let dir = temp_dir("preview_model");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir)?;
+    let wav = dir.join("song.wav");
+    fs::write(&wav, silent_wav(48_000))?;
+    let red = dir.join("red.png");
+    let blue = dir.join("blue.png");
+    solid_png(&red, [200, 30, 30])?;
+    solid_png(&blue, [30, 30, 200])?;
+
+    let mut project = Project::default();
+    let video = project.add_asset(&m2v)?;
+    let song = project.add_asset(&wav)?;
+    let red = project.add_asset(&red)?;
+    let blue = project.add_asset(&blue)?;
+    let t = project.add_timeline(video, Some("Main".to_string()))?;
+    project.add_chapter(t, Tick(5 * TICKS_PER_SECOND), None)?;
+    project.timeline_mut(t).ok_or("timeline")?.end_action = Link::LastMenu;
+    let slides = project.add_slideshow(Some("Slides".to_string()))?;
+    project.add_slide(slides, red, Tick(TICKS_PER_SECOND))?;
+    project.add_slide(slides, blue, Tick(TICKS_PER_SECOND))?;
+    let highlights = project.add_chapter_playlist(t, Some("Highlights".to_string()))?;
+    project.add_chapter_playlist_entry(highlights, 1, None)?;
+    let top = project.add_menu(Some("Top".to_string()))?;
+    let second = project.add_menu(Some("Second".to_string()))?;
+    for (label, link) in [
+        ("Play", Link::Timeline { id: t, chapter: 0 }),
+        ("Slides", Link::Slideshow { id: slides }),
+        ("Highlights", Link::ChapterPlaylist { id: highlights }),
+        (
+            "More",
+            Link::Menu {
+                id: second,
+                button: None,
+            },
+        ),
+    ] {
+        project.add_button(top, label.to_string(), None, link)?;
+    }
+    project.add_button(
+        second,
+        "Back".to_string(),
+        None,
+        Link::Menu {
+            id: top,
+            button: Some(2),
+        },
+    )?;
+    {
+        let menu = project.menu_mut(top).ok_or("menu")?;
+        // A moving menu (menu audio) played twice, then its end action.
+        menu.audio = Some(song);
+        menu.loops = Some(disccraft_project::MenuLoops::Times(2));
+        menu.end_action = Link::Menu {
+            id: second,
+            button: None,
+        };
+    }
+    project.settings.first_play = Link::Menu {
+        id: top,
+        button: None,
+    };
+
+    let out = dir.join("out");
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        build_video_ts(&project, &out)?;
+        let model = load_video_ts(&out.join("VIDEO_TS"))?;
+        let preview = disccraft_dvd::preview_model(&project)?;
+        if preview != model {
+            return Err(format!(
+                "preview model differs from the disc:
+{preview:?}
+{model:?}"
+            )
+            .into());
+        }
+        // Titles: the timeline (2 chapters), the slideshow (a chapter a slide), the chapter playlist (1 entry).
+        let chapters: Vec<u16> = model.titles.iter().map(|title| title.chapters).collect();
+        if chapters != [2, 2, 1] {
+            return Err(format!("unexpected titles: {:?}", model.titles).into());
+        }
+        Ok(())
+    })();
+    let _ = fs::remove_dir_all(&dir);
+    result
+}
+
 /// A still menu with audio becomes a looping clip with an LPCM stream, and the VMGI declares the menu audio.
 #[test]
 fn builds_a_still_menu_with_audio() -> Result<(), Box<dyn Error>> {
@@ -463,8 +584,17 @@ fn builds_a_still_menu_with_audio() -> Result<(), Box<dyn Error>> {
         if !lpcm {
             return Err("no LPCM packets in the menu VOB".into());
         }
-        // The VM still shows the menu.
+        // The VM still shows the menu, and the preview's model is the disc's.
         let model = load_video_ts(&video_ts)?;
+        let preview = disccraft_dvd::preview_model(&project)?;
+        if preview != model {
+            return Err(format!(
+                "preview model differs from the disc:
+{preview:?}
+{model:?}"
+            )
+            .into());
+        }
         let vm = Vm::start(&model)?;
         expect_location(vm.location(), &Location::Menu { pgcn: 1, button: 1 })
     })();

@@ -5,7 +5,6 @@
 
 use crate::DiscCraftApp;
 use crate::i18n::{tl, tlf};
-use crate::workspace::CenterTab;
 
 use disccraft_engine::{Player, PlayerAudio, PlayerFrame, PlayerStatus};
 use disccraft_project::TimelineId;
@@ -76,7 +75,7 @@ impl DiscCraftApp {
         if self.preview.open {
             self.close_preview();
         }
-        self.tab = CenterTab::Monitor;
+        self.show_panel(crate::workspace::Panel::Monitor);
         crate::timeline_view::set_playhead_seconds(ctx, id, from);
 
         // 音: 1 つ目のオーディオトラック、なければ映像のファイルの音を、出力デバイスの周波数で。
@@ -103,7 +102,9 @@ impl DiscCraftApp {
             }),
             _ => None,
         };
-        let player = Player::start_with_audio(path, player_audio, from, fps);
+        // The frames at the monitor's screen size, as its still frames.
+        let size = self.monitor_frame_size(id);
+        let player = Player::start_sized(path, player_audio, from, fps, Some(size));
         let audio = match (device, player.audio()) {
             (Some(device), Some(feed)) => match device.play(feed) {
                 Ok(out) => Some(out),

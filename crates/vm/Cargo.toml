@@ -8,7 +8,10 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+disccraft-bdmv.workspace = true
 disccraft-ifo.workspace = true
+disccraft-m2tsmux.workspace = true
+disccraft-pgs.workspace = true
 disccraft-psmux.workspace = true
 thiserror.workspace = true
 

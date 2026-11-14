@@ -179,7 +179,6 @@
 	Output:	出力:
 	Folder	フォルダー
 	ISO	ISO
-	Enter an output path	出力パスを入力してください
 	Build started	ビルドを開始しました
 	Build finished: {path}	ビルド完了: {path}
 	The build thread ended	ビルドスレッドが終了しました
@@ -218,7 +217,6 @@
 	Timeline: {name} → end action: {target}	タイムライン: {name} → エンドアクション: {target}
 	First Play	ファーストプレイ
 	End Action	エンドアクション
-	Drag from a button or an end action to a menu, timeline, slideshow or playlist to link it.	ボタンかエンドアクションから、メニュー・タイムライン・スライドショー・再生リストへドラッグするとリンクします。
 	Timeline {id}	タイムライン {id}
 	Menu {id}	メニュー {id}
 	{label} → {target}	{label} → {target}
@@ -486,7 +484,6 @@
 	Add Audio Track	オーディオトラックを追加
 	Add Subtitle Track	字幕トラックを追加
 	Asset:	アセット:
-	Import an audio file first.	先にオーディオファイルを読み込んでください。
 	Import a subtitle file (.srt) first.	先に字幕ファイル（.srt）を読み込んでください。
 	Version {version}	バージョン {version}
 	DVD and Blu-ray authoring.	DVD と Blu-ray のオーサリング。
@@ -917,3 +914,80 @@
 	1920x1080 59.94p (H.264, outside the Blu-ray standard)	1920x1080 59.94p（H.264、Blu-ray の規格外）
 	Playing without sound: {message}	音なしで再生しています: {message}
 	Cannot play the sound: {message}	音を再生できません: {message}
+	Timeline Display Settings	タイムライン表示設定
+	Undock Panel	パネルのドッキングを解除
+	Close Panel	パネルを閉じる
+	Move Panel to Group	パネルをグループへ移動
+	Panels	パネル
+	Move Tab Group	タブグループを移動
+	Close Tab Group	タブグループを閉じる
+	Minimize	最小化
+	Expand	展開
+	Undock Tab Group	タブグループのドッキングを解除
+	Move Tab Group To	タブグループの移動先
+	Close Other Panels in Group	グループのほかのパネルを閉じる
+	Maximize Frame	フレームを最大化
+	Restore Frame Size	フレームのサイズを元に戻す
+	Close Panel Window	パネルのウィンドウを閉じる
+	Cannot arrange the panels: {error}	パネルを並べられません: {error}
+	Too many workspaces; delete one first.	ワークスペースが多すぎます。先に 1 つ削除してください。
+	New Workspace	新規ワークスペース
+	New Workspace…	新規ワークスペース…
+	A workspace with this name is replaced.	同じ名前のワークスペースは置き換えられます。
+	Delete Workspace	ワークスペースを削除
+	Reset “{name}”	「{name}」をリセット
+	Display language ({code})	表示言語 ({code})
+	Audio language:	オーディオの言語:
+	Not found	見つかりません
+	Remove from List	一覧から削除
+	Audio: Dolby Digital (AC-3) 192 kbps stereo (AC-3 and WAV sources are kept)	オーディオ: Dolby Digital (AC-3) 192 kbps ステレオ (AC-3 と WAV の素材はそのまま)
+	Audio Track	オーディオトラック
+	Close the preview and go back to where you were	プレビューを閉じて、開く前の選択に戻ります。
+	Close the preview and open what it shows	プレビューを閉じて、映しているメニューやタイムラインを開きます。
+	Enter a chapter number	チャプター番号を入力してください。
+	Exit Here	ここで終了
+	Exit and Return	終了して戻る
+	Go to Chapter	チャプターへ移動
+	Paused {time}	一時停止 {time}
+	Project Preview	プロジェクトプレビュー
+	Run the End Action	エンドアクションを実行
+	Stopped. Press Play to start again.	停止しています。再生を押すとファーストプレイから始めます。
+	Subtitle Track	字幕トラック
+	Title {n}	タイトル {n}
+	Go to End	末尾へ移動
+	Go to Start	先頭へ移動
+	Play / Stop (Space)	再生 / 停止 (Space)
+	Previous Frame (Left Arrow)	1 フレーム戻す (←)
+	Next Frame (Right Arrow)	1 フレーム進める (→)
+	Auto Layout All	すべて自動レイアウト
+	Drag a node to move it, or drag from a button or an end action to a menu, timeline, slideshow or playlist to link it.	ノードはドラッグで動かせます。ボタンやエンドアクションからメニュー、タイムライン、スライドショー、再生リストへドラッグするとリンクします。
+	Auto Layout	自動レイアウト
+	{name} (sound)	{name} の音声
+	Import an audio file or a video with sound first.	先に音声のファイルか、音声のある映像を読み込んでください。
+	Preparing…	準備しています…
+	Writing the disc image	ディスクイメージを書いています
+	Transcoding {name}	{name} を変換しています
+	Building: {step} {percent}% ({time})	ビルド中: {step} {percent}%（{time}）
+	Building…	ビルド中…
+	Elapsed: {time}	経過時間: {time}
+	Pop-up Menu	ポップアップメニュー
+	Project Preview (Blu-ray)	プロジェクトプレビュー（Blu-ray）
+	frame {frame} · {ms} ms	フレーム {frame}・{ms} ms
+	Layer Break	レイヤーブレーク
+	Used for a dual-layer disc (8.5 GB).	2 層ディスク（8.5 GB）で使います。
+	Manual	手動
+	The build breaks at the first cell boundary past the middle of the image.	イメージの中央より後の、最初のセルの境目で分けます。
+	Time:	時間:
+	A timecode, a frame number (45f) or milliseconds (1501.5ms)	タイムコード、フレーム番号（45f）、ミリ秒（1501.5ms）で入力
+	Playhead	再生ヘッド
+	Set the break at the timeline's playhead	タイムラインの再生ヘッドの位置にする
+	The build starts a cell (not a chapter) at this frame. Layer 0 must be at least as large as layer 1.	このフレームでセルを分けます（チャプターにはなりません）。レイヤー 0 はレイヤー 1 以上の大きさが必要です。
+	Enter a timecode, a frame number (45f) or milliseconds (1501.5ms)	タイムコード、フレーム番号（45f）、ミリ秒（1501.5ms）を入力してください
+	A folder has no layer break: build an image to check it.	フォルダーにはレイヤーブレークがありません。確かめるにはイメージをビルドしてください。
+	Layer break at sector {sector} ({mode}): layer 0 {layer0} / layer 1 {layer1} sectors	レイヤーブレーク: セクター {sector}（{mode}） レイヤー 0: {layer0} / レイヤー 1: {layer1} セクター
+	manual	手動
+	automatic	自動
+	Title {title}, cell {cell}: frame {frame} ({ms} ms)	タイトル {title}、セル {cell}: フレーム {frame}（{ms} ms）
+	The break is not at the start of a cell.	ブレークがセルの先頭にありません。
+	As set.	指定どおりです。
+	Not where it was set (frame {frame}).	指定した位置（フレーム {frame}）と違います。

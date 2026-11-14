@@ -22,12 +22,15 @@ mod check_window;
 mod color_set_dialog;
 mod confirm;
 mod context_menus;
+mod craft_timeline;
 mod dock;
 mod flowchart;
 mod fonts;
 mod gui_params;
 mod guides;
 mod i18n;
+mod icons;
+mod layer_break_view;
 mod library_panel;
 mod link_dialog;
 mod menu_commands;
@@ -36,6 +39,7 @@ mod menu_graphic;
 mod menu_text;
 mod menubar;
 mod monitor;
+mod monitor_controls;
 mod new_project;
 mod orient;
 mod panels;
@@ -43,7 +47,9 @@ mod photocraft;
 mod pickwhip;
 mod playback;
 mod prefs;
+mod preview_playback;
 mod project_panel;
+mod project_preview;
 mod properties;
 mod route_drag;
 mod shadow_dialog;
@@ -54,6 +60,7 @@ mod timeline_view;
 mod track_dialog;
 mod user_library;
 mod user_ops;
+mod waveforms;
 mod welcome;
 mod workspace;
 
@@ -124,10 +131,20 @@ mod tests {
             output: OutputKind::Folder,
             path: PathBuf::from("out"),
             cache: None,
+            audio_language: None,
         };
 
         let mut job2 = BuildJob::default();
-        job2.start(Project::default(), options, move |_, _| Ok(report), false);
+        job2.start(
+            Project::default(),
+            options,
+            move |_, _, progress| {
+                progress("movie", 0.5);
+                Ok(report)
+            },
+            false,
+        );
+        assert_eq!(job2.current_progress(), Some(("movie".to_owned(), 0.5)));
         assert_eq!(job2.state, BuildState::Finished);
 
         Ok(())

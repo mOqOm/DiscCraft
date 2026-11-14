@@ -34,6 +34,22 @@ fn transcodes_h264_aac_fixture() -> Result<(), Box<dyn Error>> {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir)?;
 
+    // The file has sound: a timeline made from it lays the sound out as its own track.
+    let probe = disccraft_transcode::probe_video(&input)?;
+    assert!(probe.has_audio);
+    assert!(probe.wide);
+
+    // M10.12: a frame at a Blu-ray HD size. The 16:9 picture fills a 16:9 frame (its first row is picture); a 4:3
+    // frame letterboxes it (its first row is a black bar); sizes are bounded.
+    let reader = disccraft_transcode::FrameReader::open(&input)?;
+    let (width, height, rgb) = reader.frame_sized(1.0, 1920, 1080)?;
+    assert_eq!((width, height, rgb.len()), (1920, 1080, 1920 * 1080 * 3));
+    assert!(rgb[..1920 * 3].iter().any(|value| *value > 16));
+    let (_, _, boxed) = reader.frame_sized(1.0, 960, 720)?;
+    assert!(boxed[..960 * 3].iter().all(|value| *value == 0));
+    let (width, height, _) = reader.frame_sized(0.0, 100_000, 1)?;
+    assert_eq!((width, height), (disccraft_transcode::MAX_FRAME_WIDTH, 16));
+
     let result = run_transcode(&input, &dir);
     let _ = fs::remove_dir_all(&dir);
     result
@@ -48,6 +64,7 @@ fn run_transcode(input: &Path, dir: &Path) -> Result<(), Box<dyn Error>> {
         video_bitrate: 6_000_000,
         max_bitrate: 9_800_000,
         wide: false,
+        gop_starts: Vec::new(),
     };
 
     let mut progress = |_fraction| {};
