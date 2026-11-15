@@ -191,6 +191,9 @@ fn mp4_becomes_a_clean_menu_dvd() {
                 && !l.contains("for reading")
                 && !l.contains("CSS auth")
                 && !l.contains("device")
+                // libdvdnav tries lowercase `video_ts/` first; on case-sensitive
+                // filesystems that miss is logged before it finds `VIDEO_TS/`.
+                && !l.contains("findDirFile")
         })
         .collect();
     assert!(

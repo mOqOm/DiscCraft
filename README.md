@@ -1,5 +1,7 @@
 # DiscCraft
 
+**日本語** | [English](README.en.md)
+
 Pure Rust のオープンソース DVD / Blu-ray オーサリングソフト。Adobe Encore 相当の機能を目指す。
 
 ## 概要
