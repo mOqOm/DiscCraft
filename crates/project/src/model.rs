@@ -328,8 +328,9 @@ impl AssetKind {
             Some("png") | Some("jpg") | Some("jpeg") | Some("bmp") | Some("tif") | Some("tiff")
             // Vector drawings are rendered at the size they are shown at.
             | Some("psd") | Some("svg") => AssetKind::Image,
-            // Subtitle files; a .txt is read as a timecoded subtitle script.
-            Some("srt") | Some("vtt") | Some("txt") => AssetKind::Subtitle,
+            // Subtitle files; a .txt is read as a timecoded subtitle script. VobSub (.idx, with its .sub) and PGS
+            // (.sup) are a DVD's and a Blu-ray's own subtitles, passed through.
+            Some("srt") | Some("vtt") | Some("txt") | Some("idx") | Some("sup") => AssetKind::Subtitle,
             _ => AssetKind::Other,
         }
     }

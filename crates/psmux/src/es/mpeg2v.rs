@@ -78,9 +78,52 @@ const MAX_PICTURES: usize = 10_000_000;
 
 /// Parse an MPEG-2 video elementary stream.
 pub fn parse_video(data: &[u8], start_dts: i64) -> Result<VideoStream, EsError> {
-    let mut parser = VideoParser::new(data);
-    parser.run(start_dts)
+    let mut parser = VideoParser::new();
+    parser.feed(data, 0, true)?;
+    parser.finish(data.len(), start_dts)
 }
+
+/// [`parse_video`] of a stream read from `reader` a chunk at a time, so it is never in memory whole (the pictures'
+/// offsets are into the stream as read).
+///
+/// # Errors
+///
+/// As [`parse_video`], and when the stream cannot be read.
+pub fn parse_video_reader(
+    reader: impl std::io::Read,
+    start_dts: i64,
+) -> Result<VideoStream, EsError> {
+    parse_video_chunked(reader, start_dts, 8 << 20)
+}
+
+/// [`parse_video_reader`] reading `chunk_len` bytes at a time.
+fn parse_video_chunked(
+    mut reader: impl std::io::Read,
+    start_dts: i64,
+    chunk_len: usize,
+) -> Result<VideoStream, EsError> {
+    let mut parser = VideoParser::new();
+    let mut window: Vec<u8> = Vec::with_capacity(chunk_len + HEADER_WINDOW);
+    let mut chunk = vec![0u8; chunk_len.max(1)];
+    let mut base = 0usize;
+    loop {
+        let read = reader
+            .read(&mut chunk)
+            .map_err(|error| es_err(&format!("read failed: {error}")))?;
+        window.extend_from_slice(chunk.get(..read).unwrap_or_default());
+        let last = read == 0;
+        let consumed = parser.feed(&window, base, last)?;
+        if last {
+            return parser.finish(base + window.len(), start_dts);
+        }
+        window.drain(..consumed.min(window.len()));
+        base += consumed;
+    }
+}
+
+/// The most bytes after a start code that a header parsed here reads (a sequence header with both quantiser
+/// matrices is 140): a start code is handled once that many bytes after it are in the chunk, or the stream has ended.
+const HEADER_WINDOW: usize = 512;
 
 /// Frame duration in 27 MHz units for MPEG-2 frame_rate_code values 1..=8.
 pub fn frame_duration(frame_rate_code: u8) -> Option<i64> {
@@ -431,8 +474,9 @@ fn add_gop_order(
     Ok(())
 }
 
-struct VideoParser<'a> {
-    data: &'a [u8],
+struct VideoParser {
+    /// A start code has been handled (the first must be a sequence header).
+    started: bool,
     seq: Option<SequenceInfo>,
     pictures: Vec<Picture>,
     has_sequence_end: bool,
@@ -443,10 +487,10 @@ struct VideoParser<'a> {
     first_picture: bool,
 }
 
-impl<'a> VideoParser<'a> {
-    fn new(data: &'a [u8]) -> Self {
+impl VideoParser {
+    fn new() -> Self {
         Self {
-            data,
+            started: false,
             seq: None,
             pictures: Vec::new(),
             has_sequence_end: false,
@@ -458,41 +502,57 @@ impl<'a> VideoParser<'a> {
         }
     }
 
-    fn run(&mut self, start_dts: i64) -> Result<VideoStream, EsError> {
-        let first = find_start_code(self.data, 0).ok_or_else(|| es_err("no start code"))?;
-        let first_code_offset = first
-            .checked_add(3)
-            .ok_or_else(|| es_err("start code offset overflow"))?;
-        if self.data.get(first_code_offset).copied() != Some(0xB3) {
-            return Err(es_err("stream must start with sequence header"));
-        }
-
-        let mut pos = first;
-        while let Some(sc) = find_start_code(self.data, pos) {
+    /// Handles the start codes in `data` (the stream from byte `base`) whose headers it holds whole: all of them
+    /// when it is the `last` of the stream. Returns how many of its bytes are done with; the rest come again at the
+    /// front of the next chunk.
+    fn feed(&mut self, data: &[u8], base: usize, last: bool) -> Result<usize, EsError> {
+        let limit = if last {
+            data.len()
+        } else {
+            data.len().saturating_sub(HEADER_WINDOW)
+        };
+        let mut pos = 0usize;
+        while let Some(sc) = find_start_code(data, pos) {
+            if sc >= limit {
+                break;
+            }
             let code_offset = sc
                 .checked_add(3)
                 .ok_or_else(|| es_err("start code offset overflow"))?;
-            let code = self
-                .data
+            let code = data
                 .get(code_offset)
                 .copied()
                 .ok_or_else(|| es_err("missing start code"))?;
-            self.handle_start_code(sc, code)?;
+            if !self.started {
+                if code != 0xB3 {
+                    return Err(es_err("stream must start with sequence header"));
+                }
+                self.started = true;
+            }
+            self.handle_start_code(data, base, sc, code)?;
             pos = sc.checked_add(1).ok_or_else(|| es_err("offset overflow"))?;
             if self.pictures.len() >= MAX_PICTURES {
                 return Err(es_err("too many pictures"));
             }
         }
-
-        self.finish(start_dts)
+        Ok(limit)
     }
 
-    fn handle_start_code(&mut self, sc: usize, code: u8) -> Result<(), EsError> {
+    fn handle_start_code(
+        &mut self,
+        data: &[u8],
+        base: usize,
+        sc: usize,
+        code: u8,
+    ) -> Result<(), EsError> {
+        let at = base
+            .checked_add(sc)
+            .ok_or_else(|| es_err("offset overflow"))?;
         match code {
-            0xB3 => self.handle_sequence(sc),
-            0xB5 => self.handle_extension(sc),
-            0xB8 => self.handle_gop(sc),
-            0x00 => self.handle_picture(sc),
+            0xB3 => self.handle_sequence(data, sc, at),
+            0xB5 => self.handle_extension(data, sc),
+            0xB8 => self.handle_gop(data, sc, at),
+            0x00 => self.handle_picture(data, sc, at),
             0xB7 => {
                 self.has_sequence_end = true;
                 Ok(())
@@ -501,28 +561,29 @@ impl<'a> VideoParser<'a> {
         }
     }
 
-    fn handle_sequence(&mut self, sc: usize) -> Result<(), EsError> {
-        let info = parse_sequence_header(self.data, sc)?;
+    /// `sc` is the start code's offset in `data`, `at` in the stream.
+    fn handle_sequence(&mut self, data: &[u8], sc: usize, at: usize) -> Result<(), EsError> {
+        let info = parse_sequence_header(data, sc)?;
         self.seq = Some(info);
         if self.pending_start.is_none() {
-            self.pending_start = Some(sc);
+            self.pending_start = Some(at);
         }
         self.pending_has_sequence = true;
         self.current_picture = None;
         Ok(())
     }
 
-    fn handle_gop(&mut self, sc: usize) -> Result<(), EsError> {
-        let closed = parse_gop_header(self.data, sc)?;
+    fn handle_gop(&mut self, data: &[u8], sc: usize, at: usize) -> Result<(), EsError> {
+        let closed = parse_gop_header(data, sc)?;
         if self.pending_start.is_none() {
-            self.pending_start = Some(sc);
+            self.pending_start = Some(at);
         }
         self.pending_gop = Some(closed);
         self.current_picture = None;
         Ok(())
     }
 
-    fn handle_picture(&mut self, sc: usize) -> Result<(), EsError> {
+    fn handle_picture(&mut self, data: &[u8], sc: usize, at: usize) -> Result<(), EsError> {
         if self.seq.is_none() {
             return Err(es_err("missing sequence header"));
         }
@@ -530,10 +591,10 @@ impl<'a> VideoParser<'a> {
             return Err(es_err("too many pictures"));
         }
 
-        let (temporal_reference, kind) = parse_picture_header(self.data, sc)?;
+        let (temporal_reference, kind) = parse_picture_header(data, sc)?;
         let offset = match self.pending_start {
             Some(o) => o,
-            None => sc,
+            None => at,
         };
         let gop_start = self.pending_gop.is_some();
         let closed_gop = self.pending_gop.unwrap_or_default();
@@ -570,12 +631,12 @@ impl<'a> VideoParser<'a> {
         Ok(())
     }
 
-    fn handle_extension(&mut self, sc: usize) -> Result<(), EsError> {
-        let id = read_extension_id(self.data, sc)?;
+    fn handle_extension(&mut self, data: &[u8], sc: usize) -> Result<(), EsError> {
+        let id = read_extension_id(data, sc)?;
         match id {
             1 => {
                 if let Some(seq) = self.seq.as_mut() {
-                    parse_sequence_extension(self.data, sc, seq)?;
+                    parse_sequence_extension(data, sc, seq)?;
                 } else {
                     return Err(es_err("sequence extension before sequence header"));
                 }
@@ -583,7 +644,7 @@ impl<'a> VideoParser<'a> {
             8 => {
                 if let Some(idx) = self.current_picture {
                     if let Some(pic) = self.pictures.get_mut(idx) {
-                        parse_picture_coding_extension(self.data, sc, pic)?;
+                        parse_picture_coding_extension(data, sc, pic)?;
                     } else {
                         return Err(es_err("missing picture"));
                     }
@@ -596,7 +657,11 @@ impl<'a> VideoParser<'a> {
         Ok(())
     }
 
-    fn finish(&mut self, start_dts: i64) -> Result<VideoStream, EsError> {
+    /// The parsed stream, `total` bytes long.
+    fn finish(&mut self, total: usize, start_dts: i64) -> Result<VideoStream, EsError> {
+        if !self.started {
+            return Err(es_err("no start code"));
+        }
         let seq = self
             .seq
             .clone()
@@ -605,7 +670,7 @@ impl<'a> VideoParser<'a> {
             return Err(es_err("no pictures"));
         }
 
-        self.set_lengths()?;
+        self.set_lengths(total)?;
         let frame_dur =
             frame_duration(seq.frame_rate_code).ok_or_else(|| es_err("invalid frame rate code"))?;
         self.set_durations(&seq, frame_dur);
@@ -619,7 +684,7 @@ impl<'a> VideoParser<'a> {
         })
     }
 
-    fn set_lengths(&mut self) -> Result<(), EsError> {
+    fn set_lengths(&mut self, total: usize) -> Result<(), EsError> {
         let len = self.pictures.len();
         for i in 0..len {
             let offset = self
@@ -634,10 +699,10 @@ impl<'a> VideoParser<'a> {
                         .ok_or_else(|| es_err("missing picture"))?
                         .offset
                 } else {
-                    self.data.len()
+                    total
                 }
             } else {
-                self.data.len()
+                total
             };
             let unit_len = next
                 .checked_sub(offset)
@@ -658,7 +723,6 @@ impl<'a> VideoParser<'a> {
 
     fn set_timestamps(&mut self, start_dts: i64, frame_dur: i64) -> Result<(), EsError> {
         let has_b = self.pictures.iter().any(|p| p.kind == PictureType::B);
-        let delay = if has_b { frame_dur } else { 0 };
 
         let mut acc = start_dts;
         for pic in self.pictures.iter_mut() {
@@ -669,9 +733,7 @@ impl<'a> VideoParser<'a> {
         }
 
         let display = self.display_order()?;
-        let mut acc = start_dts
-            .checked_add(delay)
-            .ok_or_else(|| es_err("pts overflow"))?;
+        let mut acc = start_dts;
         for idx in display {
             if let Some(pic) = self.pictures.get_mut(idx) {
                 pic.pts = acc;
@@ -681,6 +743,27 @@ impl<'a> VideoParser<'a> {
             } else {
                 return Err(es_err("missing picture"));
             }
+        }
+
+        // The reorder delay: one frame with B pictures, or more when repeat_first_field (soft pulldown) makes the
+        // pictures shown ahead of an anchor last longer than it, and never so little that a picture is shown before
+        // it is decoded.
+        let needed = self
+            .pictures
+            .iter()
+            .map(|pic| pic.dts.saturating_sub(pic.pts))
+            .max()
+            .unwrap_or(0);
+        let delay = if has_b {
+            needed.max(frame_dur)
+        } else {
+            needed.max(0)
+        };
+        for pic in self.pictures.iter_mut() {
+            pic.pts = pic
+                .pts
+                .checked_add(delay)
+                .ok_or_else(|| es_err("pts overflow"))?;
         }
 
         for pic in self.pictures.iter() {
@@ -881,6 +964,23 @@ mod tests {
         assert_eq!(frame_duration(4), Some(900_900));
         assert_eq!(frame_duration(3), Some(1_080_000));
         assert_eq!(frame_duration(0), None);
+    }
+
+    #[test]
+    fn a_stream_read_in_chunks_parses_as_one_slice() {
+        // Many pictures, read a few bytes at a time and in chunks larger than the header window.
+        let mut data = build_valid_video();
+        let one = data.clone();
+        for _ in 0..200 {
+            data.extend_from_slice(&one);
+        }
+        let whole = parse_video(&data, 1_000_000).map_err(|err| err.0);
+        for chunk in [1, 7, 100, 513, 4096, data.len()] {
+            let chunked =
+                super::parse_video_chunked(&data[..], 1_000_000, chunk).map_err(|err| err.0);
+            assert_eq!(chunked, whole, "chunks of {chunk}");
+        }
+        assert!(whole.is_ok());
     }
 
     #[test]

@@ -31,5 +31,7 @@ pub mod ac3;
 pub mod wav;
 
 pub use ac3::{Ac3Frame, Ac3Stream, parse_ac3};
-pub use mpeg2v::{Picture, PictureType, SequenceInfo, VideoStream, parse_video};
+pub use mpeg2v::{
+    Picture, PictureType, SequenceInfo, VideoStream, parse_video, parse_video_reader,
+};
 pub use wav::{LpcmStream, parse_wav};

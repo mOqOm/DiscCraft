@@ -466,6 +466,40 @@ fn is_png(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
 }
 
+/// A button's subpicture from a PNG, as a PSD's `(=1)` / `(=2)` / `(=3)` layers give it: its size and each pixel's
+/// value, 0 (none) for a transparent pixel (alpha under half; with no alpha, black), else 1, 2 or 3 by how light it
+/// is (dark, mid, light thirds), which the menu's colour set colours.
+///
+/// # Errors
+///
+/// When the PNG cannot be read or is not 8-bit RGB / RGBA.
+pub fn subpicture_from_png(path: &Path) -> Result<(u32, u32, Vec<u8>), MenuError> {
+    let image = decode_png(path)?;
+    let values = image
+        .data
+        .chunks_exact(image.channels)
+        .map(|pixel| {
+            let channel = |index: usize| u32::from(pixel.get(index).copied().unwrap_or(0));
+            let luma = (299 * channel(0) + 587 * channel(1) + 114 * channel(2)) / 1000;
+            let transparent = if image.channels == 4 {
+                channel(3) < 128
+            } else {
+                luma < 43
+            };
+            match (transparent, luma) {
+                (true, _) => 0,
+                (false, 0..=84) => 1,
+                (false, 85..=169) => 2,
+                (false, _) => 3,
+            }
+        })
+        .collect();
+    let size = |value: usize| {
+        u32::try_from(value).map_err(|_| MenuError::Invalid("png too large".to_string()))
+    };
+    Ok((size(image.width)?, size(image.height)?, values))
+}
+
 fn decode_png(path: &Path) -> Result<SourceImage, MenuError> {
     let png_err =
         |e: &dyn std::fmt::Display| MenuError::Invalid(format!("{}: {e}", path.display()));

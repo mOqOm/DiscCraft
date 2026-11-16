@@ -17,10 +17,38 @@ const HD_TARGET_KBPS: u32 = 12_000;
 /// video may go to 40).
 const HD_MAX_KBPS: u32 = 24_000;
 
+/// Reads an HD title's access units from its cached stream one at a time, as the multiplexer writes them.
+pub(crate) struct HdReader {
+    file: std::sync::Mutex<std::fs::File>,
+    /// Each unit's offset and length.
+    units: Vec<(u64, u32)>,
+}
+
+impl disccraft_m2tsmux::UnitData for HdReader {
+    fn read(&self, unit: usize) -> std::io::Result<Vec<u8>> {
+        use std::io::{Read, Seek, SeekFrom};
+        let (offset, len) = self.units.get(unit).copied().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("no unit {unit}"))
+        })?;
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| std::io::Error::other("the HD stream reader was poisoned"))?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut bytes = vec![0u8; len as usize];
+        file.read_exact(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn len(&self, unit: usize) -> usize {
+        self.units.get(unit).map_or(0, |(_, len)| *len as usize)
+    }
+}
+
 /// A title's HD video.
 pub(crate) struct HdTitle {
-    /// The H.264 elementary stream (Annex B).
-    pub(crate) data: Vec<u8>,
+    /// The cached H.264 elementary stream (Annex B), read a unit at a time as the clip is written.
+    pub(crate) stream: PathBuf,
     /// Its access units, time stamps in 90 kHz from 0.
     pub(crate) units: Vec<AccessUnit>,
     /// Frame size.
@@ -34,6 +62,20 @@ pub(crate) struct HdTitle {
 }
 
 impl HdTitle {
+    /// A reader of its access units for the multiplexer.
+    pub(crate) fn reader(&self) -> Result<HdReader, BdError> {
+        let file =
+            std::fs::File::open(&self.stream).map_err(|error| io_error(&self.stream, error))?;
+        Ok(HdReader {
+            file: std::sync::Mutex::new(file),
+            units: self
+                .units
+                .iter()
+                .map(|unit| (unit.offset, unit.len))
+                .collect(),
+        })
+    }
+
     /// The BD video format code (5 for 720p, 6 for 1080p).
     pub(crate) fn video_format(&self) -> u8 {
         if self.height >= 1080 { 6 } else { 5 }
@@ -94,9 +136,8 @@ pub(crate) fn hd_title(
             .map_err(|error| BdError::Prepare(error.to_string()))?;
             let units =
                 read_h264_index(&index).map_err(|error| BdError::Prepare(error.to_string()))?;
-            let data = std::fs::read(&es).map_err(|error| io_error(&es, error))?;
             return Ok(Some(HdTitle {
-                data,
+                stream: es,
                 units,
                 width: size(width)?,
                 height: size(height)?,
@@ -114,7 +155,14 @@ pub(crate) fn hd_title(
         .get(&timeline.video)
         .ok_or_else(|| invalid("timeline video does not exist"))?;
     let source = Path::new(&asset.path);
-    let (es, index) = cached_paths(cache_dir, source, project.settings.bd_video.id())?;
+    // A Blu-ray's own H.264 (an .m2ts) that fits the disc goes on it as it is; anything else is encoded.
+    let passthrough =
+        disccraft_dvd::demux_h264_for_bd(source, cache_dir, (width, height, fps_num, fps_den))
+            .map_err(|error| BdError::Prepare(error.to_string()))?;
+    let (es, index) = match passthrough {
+        Some(paths) => paths,
+        None => cached_paths(cache_dir, source, project.settings.bd_video.id())?,
+    };
     if !(es.is_file() && index.is_file()) {
         std::fs::create_dir_all(cache_dir).map_err(|error| io_error(cache_dir, error))?;
         let es_part = es.with_extension("h264.part");
@@ -128,7 +176,6 @@ pub(crate) fn hd_title(
         std::fs::rename(&index_part, &index).map_err(|error| io_error(&index, error))?;
     }
     let units = read_h264_index(&index).map_err(|error| BdError::Prepare(error.to_string()))?;
-    let data = std::fs::read(&es).map_err(|error| io_error(&es, error))?;
     let subtitles = disccraft_dvd::subtitle_tracks_sized(
         project,
         timeline,
@@ -137,7 +184,7 @@ pub(crate) fn hd_title(
     )
     .map_err(|error| BdError::Prepare(error.to_string()))?;
     Ok(Some(HdTitle {
-        data,
+        stream: es,
         units,
         width: size(width)?,
         height: size(height)?,
@@ -180,7 +227,7 @@ mod tests {
 
     fn title(rate: (u32, u32), height: u16) -> HdTitle {
         HdTitle {
-            data: Vec::new(),
+            stream: std::path::PathBuf::new(),
             units: Vec::new(),
             width: 1920,
             height,

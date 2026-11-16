@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 disccraft-automation.workspace = true
+disccraft-check.workspace = true
 disccraft-project.workspace = true
 disccraft-engine.workspace = true
 serde_json.workspace = true

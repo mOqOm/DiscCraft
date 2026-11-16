@@ -32,6 +32,11 @@ pub fn check_project(project: &Project) -> Vec<Problem> {
     if !base_errors {
         check_navigation(project, &mut problems);
         capacity::check(project, &mut problems);
+        problems.extend(
+            disccraft_dvd::passthrough_chapter_problems(project)
+                .into_iter()
+                .map(|message| error("chapterNotAtClosedGop", message)),
+        );
     }
 
     problems

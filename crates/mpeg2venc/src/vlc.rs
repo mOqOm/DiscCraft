@@ -224,6 +224,17 @@ pub(crate) fn write_macroblock_address_increment(writer: &mut BitWriter, n: u8) 
     }
 }
 
+/// Write the address increment of a macroblock that follows `skipped` skipped ones: a `macroblock_escape` for each
+/// 33, then the code of the rest plus one.
+pub(crate) fn write_macroblock_address_increment_after(writer: &mut BitWriter, skipped: u32) {
+    let mut increment = skipped.saturating_add(1);
+    while increment > 33 {
+        writer.write_bits(8, 11); // macroblock_escape: 0000 0001 000
+        increment -= 33;
+    }
+    write_macroblock_address_increment(writer, u8::try_from(increment).unwrap_or(1));
+}
+
 /// Write a P-picture macroblock type code.
 pub(crate) fn write_p_macroblock_type(writer: &mut BitWriter, kind: PType) {
     let code = p_macroblock_type(kind);
@@ -301,6 +312,277 @@ pub(crate) fn write_end_of_block(writer: &mut BitWriter) {
     writer.write_bits(0b10, 2);
 }
 
+/// Which DCT coefficient table codes a block's coefficients (H.262 7.2.2.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DctTable {
+    /// B.14, table zero: non-intra blocks, and intra blocks when `intra_vlc_format` is 0.
+    Zero,
+    /// B.15, table one: intra blocks when `intra_vlc_format` is 1.
+    One,
+}
+
+/// Write one coefficient (`run` zeros, then `level`): its run/level code and sign bit when the table has one, else
+/// an escape. `first` marks the first coefficient of a non-intra block, where table zero codes run 0 level ±1 as
+/// `1s`.
+pub(crate) fn write_coefficient(
+    writer: &mut BitWriter,
+    table: DctTable,
+    run: u8,
+    level: i32,
+    first: bool,
+) {
+    let magnitude = level.unsigned_abs();
+    let sign = u32::from(level < 0);
+    if first && table == DctTable::Zero && run == 0 && magnitude == 1 {
+        writer.write_bits(0b10 | sign, 2);
+        return;
+    }
+    match run_level_code(table, run, magnitude) {
+        Some((bits, len)) => {
+            writer.write_bits(bits, len);
+            writer.write_bits(sign, 1);
+        }
+        None => write_escape_coefficient(writer, run, level),
+    }
+}
+
+/// Write the end-of-block code of `table`.
+pub(crate) fn write_end_of_block_in(writer: &mut BitWriter, table: DctTable) {
+    match table {
+        DctTable::Zero => writer.write_bits(0b10, 2),
+        DctTable::One => writer.write_bits(0b0110, 4),
+    }
+}
+
+/// The run/level code (sign bit excluded) of `table`, if it has one.
+pub(crate) fn run_level_code(table: DctTable, run: u8, level: u32) -> Option<VlcCode> {
+    let tables = dct_tables();
+    let codes = match table {
+        DctTable::Zero => &tables.zero,
+        DctTable::One => &tables.one,
+    };
+    let level = usize::try_from(level).ok()?;
+    codes.get(usize::from(run))?.get(level).copied().flatten()
+}
+
+/// Longest run, and largest level, that the tables code.
+const DCT_MAX_RUN: usize = 31;
+const DCT_MAX_LEVEL: usize = 40;
+
+type RunLevelCodes = [[Option<VlcCode>; DCT_MAX_LEVEL + 1]; DCT_MAX_RUN + 1];
+
+struct DctTables {
+    zero: RunLevelCodes,
+    one: RunLevelCodes,
+}
+
+static DCT_TABLES: std::sync::OnceLock<DctTables> = std::sync::OnceLock::new();
+
+fn dct_tables() -> &'static DctTables {
+    DCT_TABLES.get_or_init(|| {
+        let build = |lists: &[&[(&str, u8, u8)]]| {
+            let mut codes: RunLevelCodes = [[None; DCT_MAX_LEVEL + 1]; DCT_MAX_RUN + 1];
+            for list in lists {
+                for &(code, run, level) in *list {
+                    if let Some(slot) = codes
+                        .get_mut(usize::from(run))
+                        .and_then(|levels| levels.get_mut(usize::from(level)))
+                    {
+                        *slot = Some(parse_code(code));
+                    }
+                }
+            }
+            codes
+        };
+        DctTables {
+            zero: build(&[DCT_ZERO, DCT_ZERO_RUN0_LONG, DCT_MID_SHARED, DCT_LONG]),
+            one: build(&[DCT_ONE, DCT_MID_SHARED, DCT_LONG]),
+        }
+    })
+}
+
+/// A code written as a string of `0` and `1`, spaces ignored.
+fn parse_code(code: &str) -> VlcCode {
+    code.bytes()
+        .filter(|byte| *byte != b' ')
+        .fold((0u32, 0u8), |(bits, len), byte| {
+            ((bits << 1) | u32::from(byte == b'1'), len.saturating_add(1))
+        })
+}
+
+/// B.14, table zero: (code without the sign bit, run, level). End of block (`10`), escape (`0000 01`) and the `1s`
+/// first coefficient are written separately.
+const DCT_ZERO: &[(&str, u8, u8)] = &[
+    ("11", 0, 1),
+    ("011", 1, 1),
+    ("0100", 0, 2),
+    ("0101", 2, 1),
+    ("0010 1", 0, 3),
+    ("0011 1", 3, 1),
+    ("0011 0", 4, 1),
+    ("0001 10", 1, 2),
+    ("0001 11", 5, 1),
+    ("0001 01", 6, 1),
+    ("0001 00", 7, 1),
+    ("0000 110", 0, 4),
+    ("0000 100", 2, 2),
+    ("0000 111", 8, 1),
+    ("0000 101", 9, 1),
+    ("0010 0110", 0, 5),
+    ("0010 0001", 0, 6),
+    ("0010 0101", 1, 3),
+    ("0010 0100", 3, 2),
+    ("0010 0111", 10, 1),
+    ("0010 0011", 11, 1),
+    ("0010 0010", 12, 1),
+    ("0010 0000", 13, 1),
+    ("0000 0010 10", 0, 7),
+    ("0000 0011 00", 1, 4),
+    ("0000 0010 11", 2, 3),
+    ("0000 0011 11", 4, 2),
+    ("0000 0010 01", 5, 2),
+    ("0000 0011 10", 14, 1),
+    ("0000 0011 01", 15, 1),
+    ("0000 0010 00", 16, 1),
+    ("0000 0001 1101", 0, 8),
+    ("0000 0001 1000", 0, 9),
+    ("0000 0001 0011", 0, 10),
+    ("0000 0001 0000", 0, 11),
+    ("0000 0001 1011", 1, 5),
+    ("0000 0001 0100", 2, 4),
+];
+
+/// Table zero's codes for run 0, levels 12-15 (table one has shorter ones of its own).
+const DCT_ZERO_RUN0_LONG: &[(&str, u8, u8)] = &[
+    ("0000 0000 1101 0", 0, 12),
+    ("0000 0000 1100 1", 0, 13),
+    ("0000 0000 1100 0", 0, 14),
+    ("0000 0000 1011 1", 0, 15),
+];
+
+/// B.15, table one: (code without the sign bit, run, level). End of block is `0110`, escape `0000 01`.
+const DCT_ONE: &[(&str, u8, u8)] = &[
+    ("10", 0, 1),
+    ("010", 1, 1),
+    ("110", 0, 2),
+    ("0010 1", 2, 1),
+    ("0111", 0, 3),
+    ("0011 1", 3, 1),
+    ("0001 10", 4, 1),
+    ("0011 0", 1, 2),
+    ("0001 11", 5, 1),
+    ("0000 110", 6, 1),
+    ("0000 100", 7, 1),
+    ("1110 0", 0, 4),
+    ("0000 111", 2, 2),
+    ("0000 101", 8, 1),
+    ("1111 000", 9, 1),
+    ("1110 1", 0, 5),
+    ("0001 01", 0, 6),
+    ("1111 001", 1, 3),
+    ("0010 0110", 3, 2),
+    ("1111 010", 10, 1),
+    ("0010 0001", 11, 1),
+    ("0010 0101", 12, 1),
+    ("0010 0100", 13, 1),
+    ("0001 00", 0, 7),
+    ("0010 0111", 1, 4),
+    ("1111 1100", 2, 3),
+    ("1111 1101", 4, 2),
+    ("0000 0010 0", 5, 2),
+    ("0000 0010 1", 14, 1),
+    ("0000 0011 1", 15, 1),
+    ("0000 0011 01", 16, 1),
+    ("1111 011", 0, 8),
+    ("1111 100", 0, 9),
+    ("0010 0011", 0, 10),
+    ("0010 0010", 0, 11),
+    ("0010 0000", 1, 5),
+    ("0000 0011 00", 2, 4),
+    ("1111 1010", 0, 12),
+    ("1111 1011", 0, 13),
+    ("1111 1110", 0, 14),
+    ("1111 1111", 0, 15),
+];
+
+/// `0000 0001 xxxx` codes the two tables share.
+const DCT_MID_SHARED: &[(&str, u8, u8)] = &[
+    ("0000 0001 1100", 3, 3),
+    ("0000 0001 0010", 4, 3),
+    ("0000 0001 1110", 6, 2),
+    ("0000 0001 0101", 7, 2),
+    ("0000 0001 0001", 8, 2),
+    ("0000 0001 1111", 17, 1),
+    ("0000 0001 1010", 18, 1),
+    ("0000 0001 1001", 19, 1),
+    ("0000 0001 0111", 20, 1),
+    ("0000 0001 0110", 21, 1),
+];
+
+/// Codes from `0000 0000 1` on, which the two tables share.
+const DCT_LONG: &[(&str, u8, u8)] = &[
+    ("0000 0000 1011 0", 1, 6),
+    ("0000 0000 1010 1", 1, 7),
+    ("0000 0000 1010 0", 2, 5),
+    ("0000 0000 1001 1", 3, 4),
+    ("0000 0000 1001 0", 5, 3),
+    ("0000 0000 1000 1", 9, 2),
+    ("0000 0000 1000 0", 10, 2),
+    ("0000 0000 1111 1", 22, 1),
+    ("0000 0000 1111 0", 23, 1),
+    ("0000 0000 1110 1", 24, 1),
+    ("0000 0000 1110 0", 25, 1),
+    ("0000 0000 1101 1", 26, 1),
+    ("0000 0000 0111 11", 0, 16),
+    ("0000 0000 0111 10", 0, 17),
+    ("0000 0000 0111 01", 0, 18),
+    ("0000 0000 0111 00", 0, 19),
+    ("0000 0000 0110 11", 0, 20),
+    ("0000 0000 0110 10", 0, 21),
+    ("0000 0000 0110 01", 0, 22),
+    ("0000 0000 0110 00", 0, 23),
+    ("0000 0000 0101 11", 0, 24),
+    ("0000 0000 0101 10", 0, 25),
+    ("0000 0000 0101 01", 0, 26),
+    ("0000 0000 0101 00", 0, 27),
+    ("0000 0000 0100 11", 0, 28),
+    ("0000 0000 0100 10", 0, 29),
+    ("0000 0000 0100 01", 0, 30),
+    ("0000 0000 0100 00", 0, 31),
+    ("0000 0000 0011 000", 0, 32),
+    ("0000 0000 0010 111", 0, 33),
+    ("0000 0000 0010 110", 0, 34),
+    ("0000 0000 0010 101", 0, 35),
+    ("0000 0000 0010 100", 0, 36),
+    ("0000 0000 0010 011", 0, 37),
+    ("0000 0000 0010 010", 0, 38),
+    ("0000 0000 0010 001", 0, 39),
+    ("0000 0000 0010 000", 0, 40),
+    ("0000 0000 0011 111", 1, 8),
+    ("0000 0000 0011 110", 1, 9),
+    ("0000 0000 0011 101", 1, 10),
+    ("0000 0000 0011 100", 1, 11),
+    ("0000 0000 0011 011", 1, 12),
+    ("0000 0000 0011 010", 1, 13),
+    ("0000 0000 0011 001", 1, 14),
+    ("0000 0000 0001 0011", 1, 15),
+    ("0000 0000 0001 0010", 1, 16),
+    ("0000 0000 0001 0001", 1, 17),
+    ("0000 0000 0001 0000", 1, 18),
+    ("0000 0000 0001 0100", 6, 3),
+    ("0000 0000 0001 1010", 11, 2),
+    ("0000 0000 0001 1001", 12, 2),
+    ("0000 0000 0001 1000", 13, 2),
+    ("0000 0000 0001 0111", 14, 2),
+    ("0000 0000 0001 0110", 15, 2),
+    ("0000 0000 0001 0101", 16, 2),
+    ("0000 0000 0001 1111", 27, 1),
+    ("0000 0000 0001 1110", 28, 1),
+    ("0000 0000 0001 1101", 29, 1),
+    ("0000 0000 0001 1100", 30, 1),
+    ("0000 0000 0001 1011", 31, 1),
+];
+
 fn lookup(table: &[(u8, u32, u8)], key: u8) -> Option<VlcCode> {
     for &(entry_key, bits, len) in table {
         if entry_key == key {
@@ -347,9 +629,10 @@ fn level_to_twos_complement_12(level: i32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        PType, VlcCode, coded_block_pattern, dct_dc_size_chroma, dct_dc_size_luma,
-        macroblock_address_increment, motion_code, p_macroblock_type, wrap_motion_delta,
-        write_end_of_block, write_escape_coefficient, write_motion_delta,
+        DctTable, PType, VlcCode, coded_block_pattern, dct_dc_size_chroma, dct_dc_size_luma,
+        macroblock_address_increment, motion_code, p_macroblock_type, run_level_code,
+        wrap_motion_delta, write_coefficient, write_end_of_block, write_end_of_block_in,
+        write_escape_coefficient, write_macroblock_address_increment_after, write_motion_delta,
     };
     use crate::bitwriter::BitWriter;
 
@@ -526,5 +809,95 @@ mod tests {
         let mut writer = BitWriter::new();
         write_end_of_block(&mut writer);
         assert_eq!(writer.finish(), vec![0x80]);
+    }
+
+    /// Every run/level code of a table, with its end of block and escape.
+    fn dct_codes(table: DctTable) -> Vec<VlcCode> {
+        let mut codes: Vec<VlcCode> = (0u8..64)
+            .flat_map(|run| (1u32..=64).filter_map(move |level| run_level_code(table, run, level)))
+            .collect();
+        codes.push(match table {
+            DctTable::Zero => (0b10, 2),
+            DctTable::One => (0b0110, 4),
+        });
+        codes.push((0b000001, 6));
+        codes
+    }
+
+    #[test]
+    fn dct_tables_are_complete_and_prefix_free() {
+        for table in [DctTable::Zero, DctTable::One] {
+            let codes = dct_codes(table);
+            // 111 run/level codes, end of block and escape in each of B.14 and B.15.
+            assert_eq!(codes.len(), 113, "{table:?}");
+            codes_are_prefix_free(&codes);
+            // (The sign bit after a run/level code splits its share of the code space, not adds to it.) Table zero
+            // leaves only "0000 0000 0000 xxxx" unused: a Kraft sum of 1 - 2^-12. Table one also leaves free the
+            // codes its short ones replaced.
+            let kraft: f64 = codes
+                .iter()
+                .map(|&(_, len)| 2f64.powi(-i32::from(len)))
+                .sum();
+            assert!(kraft <= 1.0, "{table:?}: Kraft sum {kraft}");
+            if table == DctTable::Zero {
+                assert!(
+                    (kraft - (1.0 - 2f64.powi(-12))).abs() < 1e-12,
+                    "Kraft sum {kraft}"
+                );
+            }
+        }
+    }
+
+    fn coefficient(table: DctTable, run: u8, level: i32, first: bool) -> Vec<u8> {
+        let mut writer = BitWriter::new();
+        write_coefficient(&mut writer, table, run, level, first);
+        writer.finish()
+    }
+
+    #[test]
+    fn coefficient_exact_values() {
+        // Table zero, first coefficient of a non-intra block: 1s.
+        assert_eq!(coefficient(DctTable::Zero, 0, 1, true), vec![0x80]);
+        assert_eq!(coefficient(DctTable::Zero, 0, -1, true), vec![0xC0]);
+        // Otherwise 11s.
+        assert_eq!(coefficient(DctTable::Zero, 0, 1, false), vec![0xC0]);
+        assert_eq!(coefficient(DctTable::Zero, 0, -1, false), vec![0xE0]);
+        // run 1 level -1: 011 1.
+        assert_eq!(coefficient(DctTable::Zero, 1, -1, false), vec![0x70]);
+        // Table one, run 0 level 2: 110 0; "1s" is not used there.
+        assert_eq!(coefficient(DctTable::One, 0, 2, false), vec![0xC0]);
+        assert_eq!(coefficient(DctTable::One, 0, 1, true), vec![0x80]);
+        // Not in the tables (run 0 level 41, run 32 level 1): escape.
+        assert_eq!(
+            coefficient(DctTable::Zero, 0, 41, false),
+            write_escape(0, 41)
+        );
+        assert_eq!(
+            coefficient(DctTable::One, 32, 1, false),
+            write_escape(32, 1)
+        );
+    }
+
+    #[test]
+    fn end_of_block_per_table() {
+        let mut writer = BitWriter::new();
+        write_end_of_block_in(&mut writer, DctTable::One);
+        assert_eq!(writer.finish(), vec![0x60]);
+    }
+
+    fn address_increment(skipped: u32) -> Vec<u8> {
+        let mut writer = BitWriter::new();
+        write_macroblock_address_increment_after(&mut writer, skipped);
+        writer.finish()
+    }
+
+    #[test]
+    fn address_increment_after_skips() {
+        // No skip: increment 1 is "1".
+        assert_eq!(address_increment(0), vec![0x80]);
+        // 32 skipped: increment 33, "0000 0011 000".
+        assert_eq!(address_increment(32), vec![0x03, 0x00]);
+        // 33 skipped: escape "0000 0001 000", then increment 1 "1".
+        assert_eq!(address_increment(33), vec![0x01, 0x10]);
     }
 }

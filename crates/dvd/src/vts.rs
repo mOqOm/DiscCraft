@@ -63,7 +63,7 @@ pub(crate) fn build_title_set(
         .ok_or_else(|| invalid("video duration underflow"))?;
 
     let audio_attrs = build_audio_attrs(&loaded.audio)?;
-    let pgc = build_pgc(
+    let mut pgc = build_pgc(
         &layout,
         duration,
         (audio_attrs.len(), loaded.subpictures.len()),
@@ -75,6 +75,8 @@ pub(crate) fn build_title_set(
             loaded.layer_break_cell,
         ),
     )?;
+    // The colours the title's subtitles draw with (drawn text's, and passed-through subpictures' own).
+    pgc.palette = loaded.palette;
     let (tmap_unit, tmap) = build_tmap(&layout)?;
     let vobu_starts = layout.vobus.iter().map(|vobu| vobu.start_sector).collect();
 
@@ -378,7 +380,7 @@ fn mux_input<'a>(loaded: &'a LoadedTitle) -> MuxInput<'a> {
 
     MuxInput {
         video: &loaded.video,
-        video_data: &loaded.video_data,
+        video_data: &*loaded.video_data,
         audio,
         audio_start_pts: loaded.first_pts,
         cell_starts: loaded.cell_starts.clone(),
@@ -487,30 +489,10 @@ fn build_pgc(
         cell_commands: Vec::new(),
         subpicture_streams: u8::try_from(subtitle_streams)
             .map_err(|_| DvdError::Invalid("too many subtitle streams".to_string()))?,
-        palette: SUBTITLE_PALETTE,
+        palette: crate::source::text_palette(),
         ..Pgc::default()
     })
 }
-
-/// Title CLUT: 0 black, 1 white (subtitle text), 2 black (outline), rest black. Entries are `00 Y Cr Cb`.
-const SUBTITLE_PALETTE: [u32; 16] = [
-    0x0010_8080,
-    0x00EB_8080,
-    0x0010_8080,
-    0x0010_8080,
-    0x0010_8080,
-    0x0010_8080,
-    0x0010_8080,
-    0x0010_8080,
-    0x0010_8080,
-    0x0010_8080,
-    0x0010_8080,
-    0x0010_8080,
-    0x0010_8080,
-    0x0010_8080,
-    0x0010_8080,
-    0x0010_8080,
-];
 
 /// Compute the TMAP time unit.
 fn tmap_unit(duration_90k: u32) -> Result<u8, DvdError> {

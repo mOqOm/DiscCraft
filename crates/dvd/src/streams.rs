@@ -58,6 +58,9 @@ pub struct SubtitleTrack {
     pub language: Option<[u8; 2]>,
     /// Cues in time order.
     pub cues: Vec<SubtitleCue>,
+    /// A PGS (`.sup`) track's own segments, passed through (times 90 kHz on the title's clock, as `first_pts`);
+    /// empty for drawn cues.
+    pub segments: Vec<crate::PgSegment>,
 }
 
 /// Elementary streams of one title, in the DVD-compatible encoding (MPEG-2 video, LPCM / AC-3 audio).
@@ -91,15 +94,49 @@ pub fn load_title_streams(
     cache_dir: &Path,
     progress: &mut dyn FnMut(&str, f32),
 ) -> Result<Vec<TitleStreams>, DvdError> {
+    load_titles(project, cache_dir, progress, true)
+}
+
+/// [`load_title_streams`] for a Blu-ray in HD, which encodes the timelines' video on its own: the timelines come
+/// with their sound, chapters and timing but no video (and no SD subtitles), so their MPEG-2 is never made.
+///
+/// # Errors
+///
+/// As [`load_title_streams`].
+pub fn load_title_streams_for_hd(
+    project: &Project,
+    cache_dir: &Path,
+    progress: &mut dyn FnMut(&str, f32),
+) -> Result<Vec<TitleStreams>, DvdError> {
+    load_titles(project, cache_dir, progress, false)
+}
+
+fn load_titles(
+    project: &Project,
+    cache_dir: &Path,
+    progress: &mut dyn FnMut(&str, f32),
+    timeline_video: bool,
+) -> Result<Vec<TitleStreams>, DvdError> {
     let budget = prepare::budget(project)?;
     // Transcode the titles in parallel first; the titles below then come from the cache.
-    prepare::prepare_all(project, cache_dir, &budget, progress)?;
+    prepare::prepare_all_of(project, cache_dir, &budget, progress, timeline_video)?;
     let mut titles = Vec::new();
+    let standard = project.settings.standard;
     for timeline in project.timelines.values() {
-        let prepared = prepare::prepare_title(project, timeline, cache_dir, &budget, progress)?;
-        let loaded = source::load_title(project, timeline, project.settings.standard, &prepared)?;
-        let mut title = convert(TitleSource::Timeline(timeline.id.0), loaded);
-        title.subtitles = subtitle_tracks(project, timeline, title.first_pts)?;
+        let source = TitleSource::Timeline(timeline.id.0);
+        let title = if timeline_video {
+            let prepared = prepare::prepare_title(project, timeline, cache_dir, &budget, progress)?;
+            let loaded = source::load_title(project, timeline, standard, &prepared)?;
+            let mut title = convert(source, loaded)?;
+            title.subtitles = subtitle_tracks(project, timeline, title.first_pts)?;
+            title
+        } else {
+            let prepared = prepare::prepare_title_sound(project, timeline, cache_dir)?;
+            convert(
+                source,
+                source::load_title_without_video(project, timeline, standard, &prepared)?,
+            )?
+        };
         titles.push(title);
     }
     for id in slideshow_ids(project) {
@@ -111,22 +148,27 @@ pub fn load_title_streams(
             prepare::prepare_slideshow(project, slideshow, cache_dir, &budget, progress)?;
         let loaded =
             load_slideshow_title(project, slideshow, project.settings.standard, &prepared)?;
-        titles.push(convert(TitleSource::Slideshow(id), loaded));
+        titles.push(convert(TitleSource::Slideshow(id), loaded)?);
     }
     Ok(titles)
 }
 
-fn convert(source: TitleSource, loaded: LoadedTitle) -> TitleStreams {
-    TitleStreams {
+/// A loaded title as the Blu-ray build takes it: its SD video (none for an HD title's) read into memory.
+fn convert(source: TitleSource, loaded: LoadedTitle) -> Result<TitleStreams, DvdError> {
+    let video_data = loaded
+        .video_data
+        .bytes(0..loaded.video_data.len())
+        .map_err(|err| DvdError::Invalid(format!("video read error: {err}")))?;
+    Ok(TitleStreams {
         source,
         video: loaded.video,
-        video_data: loaded.video_data,
+        video_data,
         audio: loaded.audio.into_iter().map(convert_audio).collect(),
         chapter_starts: loaded.cell_starts,
         first_pts: loaded.first_pts,
         wide: loaded.wide,
         subtitles: Vec::new(),
-    }
+    })
 }
 
 /// Parse and render every subtitle track of a timeline; cue times become 27 MHz presentation times.
@@ -160,7 +202,35 @@ pub fn subtitle_tracks_sized(
             .assets
             .get(&track.asset)
             .ok_or_else(|| DvdError::Invalid("subtitle asset does not exist".to_string()))?;
-        let cues = read_subtitles(Path::new(&asset.path), &project.settings)
+        let path = Path::new(&asset.path);
+        match source::subtitle_file(path) {
+            source::SubtitleFile::Text => {}
+            source::SubtitleFile::Pgs => {
+                // A Blu-ray's own subtitles: their segments as they are, moved onto the title's clock.
+                let start = first_pts / 300;
+                let segments = crate::sup::read_sup(path)?
+                    .into_iter()
+                    .map(|segment| crate::PgSegment {
+                        pts: start + segment.pts,
+                        dts: start + segment.dts,
+                        data: segment.data,
+                    })
+                    .collect();
+                tracks.push(SubtitleTrack {
+                    language: source::parse_language(&track.language),
+                    cues: Vec::new(),
+                    segments,
+                });
+                continue;
+            }
+            source::SubtitleFile::VobSub => {
+                return Err(DvdError::Unsupported(format!(
+                    "{}: VobSub (.idx/.sub) subtitles are a DVD's; a Blu-ray takes PGS (.sup) or text subtitles",
+                    path.display()
+                )));
+            }
+        }
+        let cues = read_subtitles(path, &project.settings)
             .map_err(|e| DvdError::Invalid(e.to_string()))?;
         let mut rendered = Vec::with_capacity(cues.len());
         for cue in cues {
@@ -175,6 +245,7 @@ pub fn subtitle_tracks_sized(
         tracks.push(SubtitleTrack {
             language: source::parse_language(&track.language),
             cues: rendered,
+            segments: Vec::new(),
         });
     }
     Ok(tracks)

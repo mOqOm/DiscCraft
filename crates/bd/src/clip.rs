@@ -8,7 +8,7 @@ use disccraft_bdmv::{Stream, StreamCoding};
 use disccraft_dvd::{SubtitleTrack, TitleAudio, TitleStreams};
 use disccraft_m2tsmux::{
     AUDIO_PID, EsInput, EsUnit, M2tsLayout, MuxConfig, PCR_PID, PG_PID, PMT_PID, StreamKind,
-    VIDEO_PID, bd_lpcm_units, mux_m2ts,
+    VIDEO_PID, bd_lpcm_units,
 };
 use disccraft_project::DiscSettings;
 use disccraft_psmux::es::{Ac3Frame, Ac3Stream, LpcmStream, PictureType, VideoStream};
@@ -33,6 +33,8 @@ pub(crate) struct BuiltClip {
 pub(crate) struct PreparedClip {
     number: u16,
     inputs: Vec<EsInput>,
+    /// The HD video's units, read from its cache as the clip is written (its input holds only their times).
+    video_reader: Option<crate::hd::HdReader>,
     /// Audio and PG streams (the video stream is separate).
     streams: Vec<Stream>,
     video_stream: Stream,
@@ -119,6 +121,7 @@ pub(crate) fn prepare_clip(
     Ok(PreparedClip {
         number,
         inputs,
+        video_reader: hd.map(HdTitle::reader).transpose()?,
         streams,
         video_stream,
         presentation_start,
@@ -135,7 +138,11 @@ pub(crate) fn write_prepared(
 ) -> Result<BuiltClip, BdError> {
     let number = prepared.number;
     let m2ts_path = stream_dir.join(format!("{number:05}.m2ts"));
-    let (layout, m2ts_size) = write_m2ts(&m2ts_path, &prepared.inputs)?;
+    let video: Option<&dyn disccraft_m2tsmux::UnitData> = prepared
+        .video_reader
+        .as_ref()
+        .map(|reader| reader as &dyn disccraft_m2tsmux::UnitData);
+    let (layout, m2ts_size) = write_m2ts_with(&m2ts_path, &prepared.inputs, video)?;
 
     let clip_info = build_clip_info(
         &layout,
@@ -220,6 +227,24 @@ fn pg_inputs(
 
 /// Subtitle bitmaps → PGS display sets. Palette: 0 transparent, 1 white text, 2 black outline.
 fn pg_units(track: &SubtitleTrack, width: u16, height: u16) -> Result<Vec<EsUnit>, BdError> {
+    // A PGS file's own segments, as they are (one PES each).
+    if !track.segments.is_empty() {
+        return track
+            .segments
+            .iter()
+            .map(|segment| {
+                let time = |value: i64| {
+                    u64::try_from(value).map_err(|_| invalid("subtitle before the title starts"))
+                };
+                Ok(EsUnit {
+                    pts: time(segment.pts)?,
+                    dts: time(segment.dts)?,
+                    data: segment.data.clone(),
+                    random_access: false,
+                })
+            })
+            .collect();
+    }
     let palette = vec![
         disccraft_pgs::rgba_to_entry(0, 0, 0, 0, 0),
         disccraft_pgs::rgba_to_entry(1, 255, 255, 255, 255),
@@ -266,22 +291,13 @@ fn hd_units(title: &TitleStreams, hd: &HdTitle) -> Result<Vec<EsUnit>, BdError> 
             .and_then(|value| u64::try_from(value).ok())
             .ok_or_else(|| invalid("HD time stamp out of range"))
     };
+    // Times only: the data is read from the title's cached stream as the clip is written (`HdTitle::reader`).
     let mut units = Vec::with_capacity(hd.units.len());
     for unit in &hd.units {
-        let begin =
-            usize::try_from(unit.offset).map_err(|_| invalid("HD unit offset too large"))?;
-        let end = begin
-            .checked_add(usize::try_from(unit.len).map_err(|_| invalid("HD unit too large"))?)
-            .ok_or_else(|| invalid("HD unit range overflow"))?;
-        let data = hd
-            .data
-            .get(begin..end)
-            .ok_or_else(|| invalid("HD unit outside its stream"))?
-            .to_vec();
         units.push(EsUnit {
             pts: at(unit.pts)?,
             dts: at(unit.dts)?,
-            data,
+            data: Vec::new(),
             random_access: unit.keyframe,
         });
     }
@@ -555,10 +571,20 @@ fn chapter_marks(presentation_start: u32, chapter_starts: &[i64]) -> Result<Vec<
 }
 
 pub(crate) fn write_m2ts(path: &Path, inputs: &[EsInput]) -> Result<(M2tsLayout, u64), BdError> {
+    write_m2ts_with(path, inputs, None)
+}
+
+/// [`write_m2ts`], the first input's (the video's) units read from `video` when given.
+fn write_m2ts_with(
+    path: &Path,
+    inputs: &[EsInput],
+    video: Option<&dyn disccraft_m2tsmux::UnitData>,
+) -> Result<(M2tsLayout, u64), BdError> {
     let file = std::fs::File::create(path).map_err(|error| io_error(path, error))?;
     let mut writer = BufWriter::new(file);
-    let layout = mux_m2ts(inputs, &MuxConfig::default(), &mut writer)
-        .map_err(|error| BdError::Mux(error.to_string()))?;
+    let layout =
+        disccraft_m2tsmux::mux_m2ts_with(inputs, &[video], &MuxConfig::default(), &mut writer)
+            .map_err(|error| BdError::Mux(error.to_string()))?;
     writer.flush().map_err(|error| io_error(path, error))?;
 
     if layout.late_packets > 0 {

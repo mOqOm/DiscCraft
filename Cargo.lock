@@ -1435,6 +1435,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "disccraft-automation",
+ "disccraft-check",
  "disccraft-engine",
  "disccraft-project",
  "serde_json",
@@ -1444,6 +1445,7 @@ dependencies = [
 name = "disccraft-dvd"
 version = "0.1.0"
 dependencies = [
+ "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9)",
  "craft-video 0.1.0 (git+https://github.com/storytold/craft-libs?rev=47107f660191de2f0b425569506f4daa4faadac9)",
  "disccraft-ac3enc",
  "disccraft-ifo",

@@ -26,6 +26,7 @@ use disccraft_project::frame_size;
 use thiserror::Error;
 
 pub use disccraft_project::{Menu, Project, Rect};
+pub use draw::subpicture_from_png;
 pub use highlight::HighlightLayer;
 pub use palette::{NORMAL_ENTRY as NORMAL_PALETTE_ENTRY, ycrcb_entry};
 pub use route::{auto_route, auto_route_with, button_routes};

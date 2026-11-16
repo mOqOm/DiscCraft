@@ -70,13 +70,112 @@ pub struct SubpictureUnit {
 /// Maximum number of DVD subpicture streams.
 pub(crate) const SUBPICTURE_COUNT: usize = 32;
 
+/// A video elementary stream's bytes, for the multiplexer (which reads it a GOP's packs at a time, in order).
+pub trait VideoBytes: fmt::Debug {
+    /// Its length in bytes.
+    fn len(&self) -> usize;
+    /// Whether it is empty.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// The bytes in `range`.
+    ///
+    /// # Errors
+    ///
+    /// When the range is outside the stream or cannot be read.
+    fn bytes(&self, range: std::ops::Range<usize>) -> Result<Vec<u8>, MuxError>;
+}
+
+impl VideoBytes for Vec<u8> {
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    fn bytes(&self, range: std::ops::Range<usize>) -> Result<Vec<u8>, MuxError> {
+        self.get(range)
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| invalid("video data out of range"))
+    }
+}
+
+/// A video elementary stream read from a file as it is muxed, through a window of [`FileBytes::WINDOW`] bytes, so
+/// a title's video is never in memory whole.
+#[derive(Debug)]
+pub struct FileBytes {
+    file: std::sync::Mutex<(std::fs::File, usize, Vec<u8>)>,
+    len: usize,
+    window: usize,
+}
+
+impl FileBytes {
+    /// How much is read at once.
+    pub const WINDOW: usize = 8 << 20;
+
+    /// Opens the stream at `path`.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be opened.
+    pub fn open(path: &std::path::Path) -> io::Result<Self> {
+        Self::with_window(path, Self::WINDOW)
+    }
+
+    /// [`FileBytes::open`], reading `window` bytes at once.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be opened.
+    pub fn with_window(path: &std::path::Path, window: usize) -> io::Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let len = usize::try_from(file.metadata()?.len())
+            .map_err(|_| io::Error::other("video file too large"))?;
+        Ok(Self {
+            file: std::sync::Mutex::new((file, 0, Vec::new())),
+            len,
+            window: window.max(1),
+        })
+    }
+}
+
+impl VideoBytes for FileBytes {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn bytes(&self, range: std::ops::Range<usize>) -> Result<Vec<u8>, MuxError> {
+        use std::io::{Read, Seek, SeekFrom};
+        if range.start > range.end || range.end > self.len {
+            return Err(invalid("video data out of range"));
+        }
+        let mut guard = self
+            .file
+            .lock()
+            .map_err(|_| invalid("video reader poisoned"))?;
+        let (file, start, window) = &mut *guard;
+        let inside = range.start >= *start && range.end <= *start + window.len();
+        if !inside {
+            // Read on from the range's start: the next packs of the GOP follow it.
+            let size = self.window.max(range.len()).min(self.len - range.start);
+            file.seek(SeekFrom::Start(range.start as u64))?;
+            window.resize(size, 0);
+            file.read_exact(window)?;
+            *start = range.start;
+        }
+        window
+            .get(range.start - *start..range.end - *start)
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| invalid("video data out of range"))
+    }
+}
+
 /// Input for one title VOBS.
 #[derive(Debug)]
 pub struct MuxInput<'a> {
     /// Parsed MPEG-2 video stream.
     pub video: &'a VideoStream,
-    /// Video elementary stream bytes.
-    pub video_data: &'a [u8],
+    /// Video elementary stream bytes: in memory (a `Vec<u8>`), or read from a file as they are muxed
+    /// ([`FileBytes`]).
+    pub video_data: &'a dyn VideoBytes,
     /// Audio streams, index = DVD audio stream number, max 8.
     pub audio: Vec<AudioSource<'a>>,
     /// Audio start PTS in 27 MHz units.
@@ -206,6 +305,7 @@ pub fn mux_vobs_with(
     let mut records: Vec<VobuRecord> = Vec::new();
     let mut total_sectors = extra.base_sector;
     let mut prev_scr = 0i128;
+    let mut video_buffer = schedule::VideoBuffer::default();
     let mut rem = 0i128;
 
     for (cell_idx, cell) in cells.iter().enumerate() {
@@ -229,6 +329,7 @@ pub fn mux_vobs_with(
                 prev_scr,
                 rem,
                 records.is_empty(),
+                &mut video_buffer,
             )?;
             records.push(record);
             total_sectors = new_total;
@@ -257,7 +358,7 @@ pub(crate) fn u32_from_i64(value: i64) -> Result<u32, MuxError> {
     Ok(value as u32)
 }
 
-fn build_gops(video: &VideoStream, data: &[u8]) -> Result<Vec<GopInfo>, MuxError> {
+fn build_gops(video: &VideoStream, data: &dyn VideoBytes) -> Result<Vec<GopInfo>, MuxError> {
     if video.pictures.is_empty() {
         return Err(invalid("no pictures"));
     }
@@ -286,7 +387,7 @@ fn build_gops(video: &VideoStream, data: &[u8]) -> Result<Vec<GopInfo>, MuxError
 
 fn build_gop(
     video: &VideoStream,
-    data: &[u8],
+    data: &dyn VideoBytes,
     start: usize,
     end: usize,
 ) -> Result<GopInfo, MuxError> {
@@ -1083,7 +1184,7 @@ mod tests {
 
     fn basic_input<'a>(
         video: &'a VideoStream,
-        video_data: &'a [u8],
+        video_data: &'a Vec<u8>,
         audio: Vec<AudioSource<'a>>,
         cell_starts: Vec<i64>,
     ) -> MuxInput<'a> {
@@ -1097,6 +1198,34 @@ mod tests {
             vob_id: 1,
             ntsc: true,
         }
+    }
+
+    /// Video read from a file as it is muxed, through windows far smaller than a GOP, muxes as from memory.
+    #[test]
+    fn video_from_a_file_muxes_as_from_memory() -> Result<(), MuxError> {
+        let (video_data, ac3_data, video, _, from_memory) = mux_basic()?;
+        let path =
+            std::env::temp_dir().join(format!("disccraft-file-bytes-{}.m2v", std::process::id()));
+        std::fs::write(&path, &video_data)?;
+        let ac3 = parse_ac3_data(&ac3_data, FIRST_PTS)?;
+        for window in [1, 1000, 1 << 20] {
+            let file = super::FileBytes::with_window(&path, window)?;
+            let mut input = basic_input(
+                &video,
+                &video_data,
+                vec![AudioSource::Ac3 {
+                    stream: &ac3,
+                    data: &ac3_data,
+                }],
+                vec![0, GOP2_RELATIVE],
+            );
+            input.video_data = &file;
+            let mut from_file = MemorySink::default();
+            mux_vobs(&input, &mut from_file)?;
+            assert!(from_file.sectors == from_memory.sectors, "window {window}");
+        }
+        let _ = std::fs::remove_file(&path);
+        Ok(())
     }
 
     fn mux_basic() -> Result<(Vec<u8>, Vec<u8>, VideoStream, VobsLayout, MemorySink), MuxError> {

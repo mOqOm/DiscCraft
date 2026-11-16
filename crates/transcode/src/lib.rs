@@ -16,6 +16,7 @@
 mod audio;
 pub mod hd;
 mod picture;
+mod pulldown;
 pub mod slideshow;
 mod source;
 mod wav;
@@ -161,6 +162,29 @@ pub(crate) fn io_error(path: &Path, error: std::io::Error) -> TranscodeError {
 pub fn probe_seconds(input: &Path) -> Result<f64, TranscodeError> {
     let source = source::Source::open(input)?;
     Ok(source.info().duration.0 as f64 / 254_016_000_000.0)
+}
+
+/// The GOPs of an MPEG-2 video elementary stream (`.m2v`), read without decoding: when each one's first picture is
+/// shown, in seconds from the stream's first shown picture (soft pulldown counted), and whether it is closed. A DVD
+/// cell, so a chapter, can start only at a closed GOP of video that is passed through. `None` when the stream cannot
+/// be read so (not an elementary stream, field pictures, a progressive sequence, an unknown frame rate).
+///
+/// # Errors
+///
+/// When the file cannot be read.
+pub fn mpeg2_gop_starts(input: &Path) -> Result<Option<Vec<(f64, bool)>>, TranscodeError> {
+    let Some(scanned) = pulldown::scan(input).map_err(|error| io_error(input, error))? else {
+        return Ok(None);
+    };
+    let Some(rate) = pulldown::frame_rate_of_code(scanned.frame_rate_code) else {
+        return Ok(None);
+    };
+    Ok(Some(
+        pulldown::gop_starts(&scanned.pictures, rate)
+            .into_iter()
+            .map(|(start, closed)| (start.0 as f64 / TICKS_PER_SECOND as f64, closed))
+            .collect(),
+    ))
 }
 
 /// Video stream facts for asset views: duration, dimensions and frame rate.

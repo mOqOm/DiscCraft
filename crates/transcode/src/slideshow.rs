@@ -191,7 +191,7 @@ pub fn render_slideshow_hd(
     })?;
     let (data, units) = encoder.finish()?;
     std::fs::write(es_out, &data).map_err(|error| io_error(es_out, error))?;
-    crate::hd::write_index(index_out, &units)?;
+    crate::hd::write_h264_index(index_out, &units)?;
     progress(1.0);
     Ok(written)
 }

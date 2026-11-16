@@ -4,7 +4,7 @@ use crate::packet::{Packetizer, TS_SIZE, null_packet, pcr_packet, pes_packet, so
 use crate::psi::{PmtStream, pat_section, pmt_section};
 use crate::{
     ALIGNED_UNIT_PACKETS, EpEntry, EsInput, M2tsError, M2tsLayout, MuxConfig, PCR_PID, PMT_PID,
-    StreamKind,
+    StreamKind, UnitData,
 };
 
 use std::collections::VecDeque;
@@ -18,14 +18,30 @@ const GRAPHICS_WINDOW: u64 = 27_000_000;
 const TICKS_PER_90KHZ: u64 = 300;
 const PACKET_TIME_NUMERATOR: u64 = 192 * 8 * 27_000_000;
 
-/// One scheduled PES packet.
+/// One scheduled PES packet: built from its unit when it is written, so a clip's units need not all be in memory.
 struct PesItem {
-    pes: Vec<u8>,
+    /// Its unit in the stream.
+    unit: usize,
+    /// The PES packet's size in bytes.
+    pes_len: usize,
     pts: u64,
+    /// Its decoding time (27 MHz): a packet sent later is late.
     deadline: u64,
+    /// When it must start to be sent (27 MHz), the order the streams are served in: its decoding time, or earlier
+    /// for video that a burst ahead of it needs sent early.
+    send_by: u64,
     earliest: u64,
     random_access: bool,
 }
+
+/// The share of the mux rate video is planned at when it is sent ahead of a burst (the rest is left to audio,
+/// graphics and PSI). At 48 Mbit/s, 36: above a Blu-ray's video rate, so the decoder's buffer holds no more than the
+/// encoder's VBV model let it.
+const VIDEO_SHARE_NUMERATOR: u64 = 3;
+const VIDEO_SHARE_DENOMINATOR: u64 = 4;
+
+/// Transport stream payload bytes per packet.
+const TS_PAYLOAD: u64 = 184;
 
 /// Clock and packetizer state for one multiplexing run.
 struct Scheduler<'a> {
@@ -134,11 +150,24 @@ pub fn mux_m2ts(
     config: &MuxConfig,
     out: &mut dyn std::io::Write,
 ) -> Result<M2tsLayout, M2tsError> {
+    mux_m2ts_with(streams, &[], config, out)
+}
+
+/// [`mux_m2ts`], the units of a stream with a reader in `readers` (one entry per stream, `None` or missing for one
+/// whose units hold their data) read from it as they are written: a long HD title's video is then never in memory
+/// at once.
+pub fn mux_m2ts_with(
+    streams: &[EsInput],
+    readers: &[Option<&dyn UnitData>],
+    config: &MuxConfig,
+    out: &mut dyn std::io::Write,
+) -> Result<M2tsLayout, M2tsError> {
     validate(streams, config)?;
+    let reader = |stream: usize| readers.get(stream).copied().flatten();
 
     let packet_time = packet_time(config.mux_rate)?;
     let pmt_section = build_pmt_section(streams)?;
-    let (queues, start) = build_queues(streams)?;
+    let (queues, start) = build_queues(streams, readers, packet_time)?;
     let start = start.unwrap_or(0);
 
     let (first_video_index, first_video_pid) = first_video(streams);
@@ -177,11 +206,12 @@ pub fn mux_m2ts(
 
         let record_ep = first_video_index == Some(stream_index) && item.random_access;
 
+        let pes = build_pes(streams, stream_index, item.unit, reader(stream_index))?;
         let packets = scheduler
             .streams
             .get_mut(stream_index)
             .ok_or_else(|| M2tsError("missing stream packetizer".to_string()))?
-            .pes_packets(&item.pes);
+            .pes_packets(&pes);
 
         write_pes_item(&mut scheduler, &item, packets, record_ep, &mut ep_map)?;
     }
@@ -255,53 +285,122 @@ fn build_pmt_section(streams: &[EsInput]) -> Result<Vec<u8>, M2tsError> {
     pmt_section(1, PCR_PID, &pmt_streams)
 }
 
-/// Build per-stream PES queues and the initial clock.
-fn build_queues(streams: &[EsInput]) -> Result<(Vec<VecDeque<PesItem>>, Option<u64>), M2tsError> {
+/// One unit's PES packet, its data from `reader` when the stream has one.
+fn build_pes(
+    streams: &[EsInput],
+    stream: usize,
+    unit: usize,
+    reader: Option<&dyn UnitData>,
+) -> Result<Vec<u8>, M2tsError> {
+    let input = streams
+        .get(stream)
+        .ok_or_else(|| M2tsError("missing stream".to_string()))?;
+    let es = input
+        .units
+        .get(unit)
+        .ok_or_else(|| M2tsError("missing unit".to_string()))?;
+    let read;
+    let payload: &[u8] = match reader {
+        Some(reader) => {
+            read = reader
+                .read(unit)
+                .map_err(|error| M2tsError(format!("reading unit {unit}: {error}")))?;
+            &read
+        }
+        None => &es.data,
+    };
+    pes_packet(
+        input.kind.stream_id(),
+        es.pts,
+        Some(es.dts),
+        payload,
+        !input.kind.is_video(),
+    )
+}
+
+/// Build per-stream PES queues and the initial clock (`packet_time`: one source packet at the mux rate, 27 MHz).
+fn build_queues(
+    streams: &[EsInput],
+    readers: &[Option<&dyn UnitData>],
+    packet_time: u64,
+) -> Result<(Vec<VecDeque<PesItem>>, Option<u64>), M2tsError> {
     let mut queues = Vec::with_capacity(streams.len());
-    let mut start = None;
 
-    for stream in streams {
+    for (index, stream) in streams.iter().enumerate() {
         let mut queue = VecDeque::new();
+        let reader = readers.get(index).copied().flatten();
 
-        for unit in &stream.units {
+        for (number, unit) in stream.units.iter().enumerate() {
             let bounded = !stream.kind.is_video();
-            let pes = pes_packet(
+            // The PES header (made with no payload) and the payload, which is read only when it is written.
+            let header = pes_packet(
                 stream.kind.stream_id(),
                 unit.pts,
                 Some(unit.dts),
-                &unit.data,
+                &[],
                 bounded,
             )?;
+            let payload = match reader {
+                Some(reader) => reader.len(number),
+                None => unit.data.len(),
+            };
+            if bounded && header.len() + payload > usize::from(u16::MAX) + 6 {
+                return Err(M2tsError(format!(
+                    "PES packet too large: {}",
+                    header.len() + payload
+                )));
+            }
 
             let deadline = unit
                 .dts
                 .checked_mul(TICKS_PER_90KHZ)
                 .ok_or_else(|| M2tsError("deadline overflow".to_string()))?;
 
-            let earliest = deadline.saturating_sub(window_ticks(stream.kind));
-
-            match start {
-                Some(current) => {
-                    if earliest < current {
-                        start = Some(earliest);
-                    }
-                }
-                None => start = Some(earliest),
-            }
-
             queue.push_back(PesItem {
-                pes,
+                unit: number,
+                pes_len: header.len() + payload,
                 pts: unit.pts,
                 deadline,
-                earliest,
+                send_by: deadline,
+                earliest: 0,
                 random_access: unit.random_access,
             });
+        }
+
+        if stream.kind.is_video() {
+            plan_video_ahead(&mut queue, packet_time);
+        }
+        for item in queue.iter_mut() {
+            item.earliest = item.send_by.saturating_sub(window_ticks(stream.kind));
         }
 
         queues.push(queue);
     }
 
+    let start = queues
+        .iter()
+        .filter_map(|queue| queue.iter().map(|item| item.earliest).min())
+        .min();
     Ok((queues, start))
+}
+
+/// Moves each video PES's `send_by` early enough that, sent one after another at the video share of the mux rate,
+/// every one is in by its decoding time: walking back from the last, a PES must start a send time before the
+/// earlier of its own deadline and the start of the next. A burst of large pictures (which an H.264 encoder's VBV
+/// buffer allows) is so sent ahead of time instead of arriving late.
+fn plan_video_ahead(queue: &mut VecDeque<PesItem>, packet_time: u64) {
+    let video_packet_time =
+        packet_time.saturating_mul(VIDEO_SHARE_DENOMINATOR) / VIDEO_SHARE_NUMERATOR;
+    let mut next_start = u64::MAX;
+    for item in queue.iter_mut().rev() {
+        let packets = u64::try_from(item.pes_len)
+            .unwrap_or(u64::MAX)
+            .div_ceil(TS_PAYLOAD);
+        let send_time = packets.saturating_mul(video_packet_time);
+        let finish_by = item.deadline.min(next_start);
+        item.send_by = finish_by.saturating_sub(send_time);
+        next_start = item.send_by;
+    }
 }
 
 /// Return the scheduling window for one stream kind.
@@ -324,17 +423,17 @@ fn first_video(streams: &[EsInput]) -> (Option<usize>, u16) {
     (None, 0)
 }
 
-/// Return the stream index whose next PES has the smallest deadline.
+/// Return the stream index whose next PES must be sent first.
 fn next_stream(queues: &[VecDeque<PesItem>]) -> Option<usize> {
     let mut best: Option<(usize, u64)> = None;
 
     for (index, queue) in queues.iter().enumerate() {
         if let Some(item) = queue.front() {
             match best {
-                None => best = Some((index, item.deadline)),
-                Some((_, best_deadline)) => {
-                    if item.deadline < best_deadline {
-                        best = Some((index, item.deadline));
+                None => best = Some((index, item.send_by)),
+                Some((_, best_send_by)) => {
+                    if item.send_by < best_send_by {
+                        best = Some((index, item.send_by));
                     }
                 }
             }
@@ -507,6 +606,59 @@ mod tests {
             }
         }
 
+        Ok(())
+    }
+
+    /// A burst of large pictures (an H.264 encoder's VBV buffer allows one: 48 Mbit drawn down at once) is sent ahead
+    /// of time, so nothing is late although no half-second window could carry it at 48 Mbit/s.
+    #[test]
+    fn a_video_burst_is_sent_ahead_and_nothing_is_late() -> Result<(), M2tsError> {
+        // One second at 23.976 with 24 Mbit/s on average, then twelve pictures of 500 kB (48 Mbit in half a second).
+        let frame = 3_754_u64;
+        let video_units: Vec<EsUnit> = (0..48_u64)
+            .map(|index| {
+                let dts = 90_000 + frame * index;
+                let size = if (24..36).contains(&index) {
+                    500_000
+                } else {
+                    125_000
+                };
+                EsUnit {
+                    pts: dts + frame,
+                    dts,
+                    data: vec![0_u8; size],
+                    random_access: index % 24 == 0,
+                }
+            })
+            .collect();
+        let audio_units: Vec<EsUnit> = (0..64_u64)
+            .map(|index| {
+                let pts = 90_000 + 2_880 * index;
+                EsUnit {
+                    pts,
+                    dts: pts,
+                    data: vec![0_u8; 640],
+                    random_access: true,
+                }
+            })
+            .collect();
+        let streams = vec![
+            EsInput {
+                pid: VIDEO_PID,
+                kind: StreamKind::H264Video,
+                units: video_units,
+            },
+            EsInput {
+                pid: AUDIO_PID,
+                kind: StreamKind::Ac3,
+                units: audio_units,
+            },
+        ];
+
+        let mut out = Vec::new();
+        let layout = mux_m2ts(&streams, &MuxConfig::default(), &mut out)?;
+        assert_eq!(layout.late_packets, 0);
+        assert_eq!(layout.ep_map.len(), 2);
         Ok(())
     }
 }

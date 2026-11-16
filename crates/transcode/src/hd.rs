@@ -218,7 +218,7 @@ pub fn transcode_h264(
 
     finish_encoder(&mut encoder, options, &mut packets)?;
     packets.flush()?;
-    write_index(index_out, packets.units())?;
+    write_h264_index(index_out, packets.units())?;
     progress(1.0);
     Ok(frames)
 }
@@ -1068,8 +1068,8 @@ fn round_clamp_u8(value: f64) -> u8 {
     rounded as u8
 }
 
-/// Write an access-unit index file.
-pub(crate) fn write_index(path: &Path, units: &[AccessUnit]) -> Result<(), TranscodeError> {
+/// Write an access-unit index file, as [`read_h264_index`] reads it: an encoded stream's, or one demuxed as it is.
+pub fn write_h264_index(path: &Path, units: &[AccessUnit]) -> Result<(), TranscodeError> {
     let file = File::create(path).map_err(|error| io_error(path, error))?;
     let mut writer = BufWriter::new(file);
     writer
@@ -1185,7 +1185,7 @@ mod tests {
 
     use super::{
         AccessUnit, HdOptions, frame_count, read_h264_index, rgb_to_yuv, target_geometry,
-        write_index,
+        write_h264_index,
     };
     use crate::TICKS_PER_SECOND;
     use filmcraft_h264enc::{
@@ -1289,7 +1289,7 @@ mod tests {
                 keyframe: false,
             },
         ];
-        write_index(&path, &units).unwrap();
+        write_h264_index(&path, &units).unwrap();
         let read = read_h264_index(&path).unwrap();
         assert_eq!(read, units);
         let _ = fs::remove_file(&path);
@@ -1306,7 +1306,7 @@ mod tests {
             dts: 0,
             keyframe: true,
         }];
-        write_index(&path, &units).unwrap();
+        write_h264_index(&path, &units).unwrap();
         let bytes = fs::read(&path).unwrap();
         fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
         let error = read_h264_index(&path).unwrap_err();

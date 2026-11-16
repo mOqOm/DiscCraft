@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use disccraft_project::{
-    AssetId, AssetKind, Capacity, Project, Slideshow, Tick, Timeline, TimelineId, VideoStandard,
+    AssetId, AssetKind, Capacity, DiscKind, Project, Slideshow, Tick, Timeline, TimelineId,
+    VideoStandard,
 };
 use disccraft_transcode::slideshow::{
     SlideFit, SlideInput, SlideTransition, Transition, render_slideshow, render_slideshow_hd,
@@ -54,6 +55,9 @@ pub(crate) struct Budget {
 pub(crate) enum PreparedAudio {
     /// AC-3 elementary stream passed through.
     Ac3(PathBuf),
+    /// AC-3 demuxed from a program or transport stream, starting `delay` (27 MHz) after the title's first picture
+    /// as it did there.
+    DelayedAc3 { path: PathBuf, delay: i64 },
     /// LPCM WAV stream passed through or transcoded.
     Wav(PathBuf),
 }
@@ -67,6 +71,9 @@ pub(crate) struct PreparedTitle {
     pub(crate) transcoded_audio: Option<PathBuf>,
     /// Whether the title was transcoded rather than passed through.
     pub(crate) transcoded: bool,
+    /// How long after the first picture `transcoded_audio` starts (27 MHz): an AC-3 demuxed as it is keeps the delay
+    /// it had in its program stream.
+    pub(crate) soundtrack_delay: i64,
     /// Prepared explicit audio tracks, in timeline order.
     pub(crate) audio_tracks: Vec<PreparedAudio>,
 }
@@ -102,6 +109,28 @@ pub(crate) fn is_passthrough(path: &Path, standard: VideoStandard) -> bool {
     first_sequence_header_matches(&data, standard)
 }
 
+/// Whether a video asset's video goes on the disc as it is: a raw elementary stream ([`is_passthrough`]), or the
+/// MPEG-2 of a program or transport stream that fits the standard (demuxed, not transcoded).
+pub(crate) fn video_passes_through(path: &Path, standard: VideoStandard) -> bool {
+    is_passthrough(path, standard) || container_video(path, standard).is_some()
+}
+
+/// The bytes and GOPs of a program or transport stream's MPEG-2 video that goes on the disc as it is.
+pub(crate) fn container_video(
+    path: &Path,
+    standard: VideoStandard,
+) -> Option<(u64, Vec<(f64, bool)>)> {
+    crate::demux::probe(path, standard, DiscKind::Dvd)?
+        .video
+        .clone()
+}
+
+/// The bytes of a program or transport stream's AC-3 that goes on the disc as it is, and how long after the first
+/// picture it starts (27 MHz).
+fn container_ac3(path: &Path, kind: DiscKind) -> Option<(u64, i64)> {
+    crate::demux::probe(path, VideoStandard::Ntsc, kind)?.ac3
+}
+
 /// Allocate a transcode bitrate budget for a project.
 ///
 /// # Errors
@@ -130,6 +159,17 @@ pub(crate) fn prepare_all(
     budget: &Budget,
     progress: &mut dyn FnMut(&str, f32),
 ) -> Result<(), DvdError> {
+    prepare_all_of(project, cache_dir, budget, progress, true)
+}
+
+/// [`prepare_all`], the timelines' videos only when `timelines` (a Blu-ray in HD encodes them on its own).
+pub(crate) fn prepare_all_of(
+    project: &Project,
+    cache_dir: &Path,
+    budget: &Budget,
+    progress: &mut dyn FnMut(&str, f32),
+    timelines: bool,
+) -> Result<(), DvdError> {
     enum Job<'a> {
         Timeline(&'a Timeline),
         Slideshow(&'a Slideshow),
@@ -139,7 +179,7 @@ pub(crate) fn prepare_all(
     let mut jobs: Vec<Job<'_>> = project
         .timelines
         .values()
-        .filter(|timeline| videos.insert(timeline.video))
+        .filter(|timeline| timelines && videos.insert(timeline.video))
         .map(Job::Timeline)
         .collect();
     let mut shows = std::collections::BTreeSet::new();
@@ -164,7 +204,7 @@ pub(crate) fn prepare_all(
 
 /// A number for a transcode's part files, so two transcodes running at once never write the same file (the one
 /// that finishes last publishes its result; both are the same).
-fn part_number() -> u64 {
+pub(crate) fn part_number() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
@@ -193,6 +233,39 @@ pub(crate) fn prepare_title(
             video_path: input.to_path_buf(),
             transcoded_audio: None,
             transcoded: false,
+            soundtrack_delay: 0,
+            audio_tracks,
+        });
+    }
+
+    // A program or transport stream (a DVD's own VOB, an .mpg) whose MPEG-2 fits the disc: demuxed, not transcoded.
+    // Its soundtrack (for a timeline without audio tracks) is its AC-3 as it is when a DVD can carry it, else
+    // transcoded alone.
+    if container_video(input, project.settings.standard).is_some() {
+        let video_path = crate::demux::demux_to_cache(input, cache_dir, crate::demux::Part::Video)?;
+        let (transcoded_audio, soundtrack_delay) = match (
+            timeline.audio.is_empty(),
+            container_ac3(input, project.settings.kind),
+        ) {
+            (false, _) => (None, 0),
+            (true, Some((_, delay))) => (
+                Some(crate::demux::demux_to_cache(
+                    input,
+                    cache_dir,
+                    crate::demux::Part::Ac3,
+                )?),
+                delay,
+            ),
+            (true, None) => (
+                prepare_title_sound(project, timeline, cache_dir)?.transcoded_audio,
+                0,
+            ),
+        };
+        return Ok(PreparedTitle {
+            video_path,
+            transcoded_audio,
+            transcoded: false,
+            soundtrack_delay,
             audio_tracks,
         });
     }
@@ -213,6 +286,7 @@ pub(crate) fn prepare_title(
             video_path: video_out,
             transcoded_audio,
             transcoded: true,
+            soundtrack_delay: 0,
             audio_tracks,
         });
     }
@@ -240,6 +314,56 @@ pub(crate) fn prepare_title(
         video_path,
         transcoded_audio,
         transcoded: true,
+        soundtrack_delay: 0,
+        audio_tracks,
+    })
+}
+
+/// Prepare one timeline's sound only, for a Blu-ray title whose video is encoded in HD on its own: its audio tracks
+/// and, when it has none, the video asset's soundtrack (AC-3) that the SD transcode would have brought.
+///
+/// # Errors
+///
+/// [`DvdError::Unsupported`] when the audio cannot be transcoded, and I/O or invalid-project errors.
+pub(crate) fn prepare_title_sound(
+    project: &Project,
+    timeline: &Timeline,
+    cache_dir: &Path,
+) -> Result<PreparedTitle, DvdError> {
+    let asset = project
+        .assets
+        .get(&timeline.video)
+        .ok_or_else(|| DvdError::Invalid("referenced asset does not exist".to_string()))?;
+    let input = Path::new(asset.path.as_str());
+    let audio_tracks = prepare_audio_tracks(project, timeline, cache_dir)?;
+    let has_sound = || disccraft_transcode::probe_video(input).is_ok_and(|probe| probe.has_audio);
+    // A program or transport stream's AC-3 the disc can carry goes on it as it is, keeping its delay.
+    let container = container_ac3(input, project.settings.kind);
+    let (transcoded_audio, soundtrack_delay) = match (timeline.audio.is_empty(), container) {
+        (true, Some((_, delay))) => (
+            Some(crate::demux::demux_to_cache(
+                input,
+                cache_dir,
+                crate::demux::Part::Ac3,
+            )?),
+            delay,
+        ),
+        (true, None) if has_sound() => {
+            let key = format!("{}-soundtrack", audio_cache_key(input)?);
+            (
+                Some(ac3_soundtrack(&transcode_audio_to_cache(
+                    input, cache_dir, &key,
+                )?)?),
+                0,
+            )
+        }
+        _ => (None, 0),
+    };
+    Ok(PreparedTitle {
+        video_path: input.to_path_buf(),
+        transcoded_audio,
+        transcoded: false,
+        soundtrack_delay,
         audio_tracks,
     })
 }
@@ -267,6 +391,7 @@ pub(crate) fn prepare_slideshow(
             video_path: video_out,
             transcoded_audio: Some(ac3_soundtrack(&audio_out)?),
             transcoded: true,
+            soundtrack_delay: 0,
             audio_tracks: Vec::new(),
         });
     }
@@ -281,6 +406,7 @@ pub(crate) fn prepare_slideshow(
         video_path,
         transcoded_audio,
         transcoded: true,
+        soundtrack_delay: 0,
         audio_tracks: Vec::new(),
     })
 }
@@ -380,7 +506,7 @@ fn scan_timeline(
 ) -> Result<(), DvdError> {
     let video_path = asset_path(project, timeline.video)?;
 
-    if is_passthrough(video_path, project.settings.standard) {
+    if video_passes_through(video_path, project.settings.standard) {
         scan_passthrough(project, timeline, probe, scan)
     } else {
         scan_transcode(project, timeline, video_path, probe, scan)
@@ -395,7 +521,12 @@ fn scan_passthrough(
     scan: &mut Scan,
 ) -> Result<(), DvdError> {
     let video_path = asset_path(project, timeline.video)?;
-    scan.passthrough_bits = add_bits(scan.passthrough_bits, file_size(video_path)?)?;
+    // A container's video is its MPEG-2 alone.
+    let video_bytes = match container_video(video_path, project.settings.standard) {
+        Some((bytes, _)) => bytes,
+        None => file_size(video_path)?,
+    };
+    scan.passthrough_bits = add_bits(scan.passthrough_bits, video_bytes)?;
 
     let mut seconds: Option<f64> = None;
 
@@ -405,6 +536,11 @@ fn scan_passthrough(
         match audio_kind(audio_path) {
             AudioKind::Ac3 | AudioKind::Wav => {
                 scan.passthrough_bits = add_bits(scan.passthrough_bits, file_size(audio_path)?)?;
+            }
+            AudioKind::Transcode if container_ac3(audio_path, project.settings.kind).is_some() => {
+                let bytes =
+                    container_ac3(audio_path, project.settings.kind).map_or(0, |(bytes, _)| bytes);
+                scan.passthrough_bits = add_bits(scan.passthrough_bits, bytes)?;
             }
             AudioKind::Transcode => {
                 let secs = match seconds {
@@ -536,9 +672,15 @@ fn audio_bitrate_for_title(
 
 /// Compute the bitrate contribution of one audio track.
 fn track_audio_bitrate(path: &Path, seconds: f64) -> Result<u32, DvdError> {
-    match audio_kind(path) {
-        AudioKind::Ac3 => {
-            let bits = file_size(path)?
+    // A program or transport stream's AC-3 that goes on the disc as it is counts at its own rate.
+    let ac3_bytes = match audio_kind(path) {
+        AudioKind::Ac3 => Some(file_size(path)?),
+        AudioKind::Transcode => container_ac3(path, DiscKind::Dvd).map(|(bytes, _)| bytes),
+        AudioKind::Wav => None,
+    };
+    match (audio_kind(path), ac3_bytes) {
+        (AudioKind::Ac3, Some(bytes)) | (AudioKind::Transcode, Some(bytes)) => {
+            let bits = bytes
                 .checked_mul(8)
                 .ok_or_else(|| DvdError::Invalid("audio size overflow".to_string()))?;
             let per_second_f64 = bits as f64 / seconds;
@@ -550,8 +692,8 @@ fn track_audio_bitrate(path: &Path, seconds: f64) -> Result<u32, DvdError> {
             u32::try_from(per_second_f64 as u64)
                 .map_err(|_| DvdError::Invalid("audio bitrate exceeds u32".to_string()))
         }
-        AudioKind::Wav => Ok(LPCM_STEREO_BITRATE),
-        AudioKind::Transcode => Ok(AC3_STEREO_BITRATE),
+        (AudioKind::Wav, _) => Ok(LPCM_STEREO_BITRATE),
+        (AudioKind::Ac3 | AudioKind::Transcode, None) => Ok(AC3_STEREO_BITRATE),
     }
 }
 
@@ -656,11 +798,18 @@ fn prepare_audio_tracks(
         let prepared = match audio_kind(path) {
             AudioKind::Ac3 => PreparedAudio::Ac3(path.to_path_buf()),
             AudioKind::Wav => PreparedAudio::Wav(path.to_path_buf()),
-            AudioKind::Transcode => {
-                let key = audio_cache_key(path)?;
-                let wav = transcode_audio_to_cache(path, cache_dir, &key)?;
-                PreparedAudio::Ac3(ac3_soundtrack(&wav)?)
-            }
+            AudioKind::Transcode => match container_ac3(path, project.settings.kind) {
+                // The AC-3 of a program or transport stream, as it is, when a DVD can carry it.
+                Some((_, delay)) => PreparedAudio::DelayedAc3 {
+                    path: crate::demux::demux_to_cache(path, cache_dir, crate::demux::Part::Ac3)?,
+                    delay,
+                },
+                None => {
+                    let key = audio_cache_key(path)?;
+                    let wav = transcode_audio_to_cache(path, cache_dir, &key)?;
+                    PreparedAudio::Ac3(ac3_soundtrack(&wav)?)
+                }
+            },
         };
 
         out.push(prepared);
@@ -708,7 +857,7 @@ fn read_head(path: &Path) -> Option<Vec<u8>> {
 }
 
 /// Validate the first MPEG-2 sequence header in the buffer.
-fn first_sequence_header_matches(data: &[u8], standard: VideoStandard) -> bool {
+pub(crate) fn first_sequence_header_matches(data: &[u8], standard: VideoStandard) -> bool {
     let mut pos = 0usize;
 
     while let Some(slice) = data.get(pos..pos.saturating_add(SEQUENCE_HEADER_BYTES)) {
@@ -867,7 +1016,7 @@ fn asset_wide(project: &Project, path: &Path) -> bool {
 }
 
 /// Compute a 16 hex digit cache key for an audio transcode.
-fn audio_cache_key(input: &Path) -> Result<String, DvdError> {
+pub(crate) fn audio_cache_key(input: &Path) -> Result<String, DvdError> {
     let metadata = fs::metadata(input).map_err(|err| crate::io_error(input, err))?;
     let (secs, nanos) = modified_time(&metadata)?;
     let path = absolute_path_string(input);
@@ -1722,7 +1871,7 @@ fn video_status(
     cache_dir: Option<&Path>,
     budget: Option<&Budget>,
 ) -> TranscodeStatus {
-    if is_passthrough(path, project.settings.standard) {
+    if video_passes_through(path, project.settings.standard) {
         return TranscodeStatus::Unneeded;
     }
     let cached = cache_dir
@@ -1748,7 +1897,7 @@ fn video_status(
 
 /// Status of an audio asset: AC-3 and WAV are used as is, anything else is converted to LPCM.
 fn audio_status(path: &Path, cache_dir: Option<&Path>) -> TranscodeStatus {
-    if audio_kind(path) != AudioKind::Transcode {
+    if audio_kind(path) != AudioKind::Transcode || container_ac3(path, DiscKind::Dvd).is_some() {
         return TranscodeStatus::Unneeded;
     }
     let cached = cache_dir

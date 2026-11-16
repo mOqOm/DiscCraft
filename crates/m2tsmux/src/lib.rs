@@ -18,7 +18,7 @@ mod psi;
 mod read;
 
 pub use lpcm::bd_lpcm_units;
-pub use mux::mux_m2ts;
+pub use mux::{mux_m2ts, mux_m2ts_with};
 pub use read::pes_payloads;
 
 use std::fmt;
@@ -111,6 +111,19 @@ pub struct EsUnit {
     pub data: Vec<u8>,
     /// Whether decoding can start here (an I picture with its sequence header).
     pub random_access: bool,
+}
+
+/// Where a stream's unit data comes from when its units do not hold it ([`mux_m2ts_with`]): read one unit at a
+/// time, as the multiplexer writes it.
+pub trait UnitData {
+    /// Unit `unit`'s bytes.
+    ///
+    /// # Errors
+    ///
+    /// When they cannot be read.
+    fn read(&self, unit: usize) -> std::io::Result<Vec<u8>>;
+    /// Unit `unit`'s length in bytes.
+    fn len(&self, unit: usize) -> usize;
 }
 
 /// One elementary stream of the clip.

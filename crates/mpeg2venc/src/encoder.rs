@@ -72,6 +72,90 @@ pub struct Encoder {
     quant_i: u8,
     quant_p: u8,
     vbv_fullness: u64,
+    rate: RateControl,
+}
+
+/// Picture-level rate control in the manner of MPEG-2 Test Model 5: each picture type has a complexity
+/// (bits × quantiser_scale_code, so a picture coded at code `q` is expected to take `complexity / q` bits); a nominal
+/// GOP's bits are shared between its I picture and its P pictures in proportion to their complexities; and the bits
+/// spent beyond the average so far are paid back over the next two GOPs, so the average converges on the target.
+#[derive(Debug, Clone, Default)]
+struct RateControl {
+    complexity_i: Option<f64>,
+    complexity_p: Option<f64>,
+    /// Bits spent beyond the average budget so far (negative when under it).
+    debt: f64,
+}
+
+/// The quantiser_scale_code of the first picture, before any complexity is known.
+const FIRST_CODE: u8 = 6;
+/// A P picture takes about this share of an I picture's bits at the same quantiser, until one has been coded.
+const P_TO_I_COMPLEXITY: f64 = 0.35;
+/// How far the quantiser of a picture type may fall from the last one of its type (it may rise any amount), so one
+/// nearly empty picture (a still, a repeated frame) does not make the next real one far too large.
+const MAX_CODE_FALL: u8 = 3;
+/// How much coarser a P picture is quantised than an I picture (Test Model 5's K_p): the I picture is the
+/// reference the GOP's P pictures are predicted from, so its quality carries.
+const P_TO_I_CODE: f64 = 1.25;
+/// The smallest share of its nominal budget a picture gets however large the debt.
+const MIN_TARGET_SHARE: f64 = 0.25;
+/// The VBV buffer a picture's target leaves free, as a share of the buffer.
+const VBV_MARGIN: f64 = 0.1;
+
+impl RateControl {
+    /// The quantiser_scale_code (2–31) for the next picture of `picture_type`, aiming at its share of the budget
+    /// and leaving the VBV margin free of the `available` bits. `codes` are the last I and P pictures' codes.
+    fn code(
+        &self,
+        picture_type: PictureType,
+        budget: Budget,
+        available: u64,
+        codes: (u8, u8),
+    ) -> u8 {
+        let Some(complexity_i) = self.complexity_i else {
+            return FIRST_CODE;
+        };
+        let complexity_p = self
+            .complexity_p
+            .unwrap_or(complexity_i * P_TO_I_COMPLEXITY);
+        // Shares in which a P picture's code comes out P_TO_I_CODE times the I picture's.
+        let (weight_i, weight_p) = (complexity_i, complexity_p / P_TO_I_CODE);
+        let total = weight_i + (budget.gop_frames - 1.0).max(0.0) * weight_p;
+        let (complexity, share, last, floor) = match picture_type {
+            PictureType::I => (complexity_i, weight_i / total, codes.0, 2),
+            PictureType::P => {
+                let floor = (f64::from(codes.0) * P_TO_I_CODE).round().clamp(2.0, 31.0) as u8;
+                (complexity_p, weight_p / total, codes.1, floor)
+            }
+        };
+        let nominal = budget.frame_bits * budget.gop_frames * share;
+        let target = (nominal - self.debt * share / 2.0).max(nominal * MIN_TARGET_SHARE);
+        let available = available as f64;
+        let room = (available - VBV_MARGIN * VBV_BUFFER_BITS as f64).max(available / 2.0);
+        let target = target.min(room).max(1.0);
+        let code = (complexity / target).round().clamp(2.0, 31.0) as u8;
+        code.max(last.saturating_sub(MAX_CODE_FALL)).max(floor)
+    }
+
+    /// Learns from a picture of `picture_type` coded in `bits` at `code`.
+    fn update(&mut self, picture_type: PictureType, bits: u64, code: u8, budget: Budget) {
+        let measured = bits as f64 * f64::from(code);
+        let slot = match picture_type {
+            PictureType::I => &mut self.complexity_i,
+            PictureType::P => &mut self.complexity_p,
+        };
+        *slot = Some(slot.map_or(measured, |previous| (previous + measured) / 2.0));
+        // Savings are kept for at most two GOPs, so a long still does not buy one burst much later.
+        let gop_bits = budget.frame_bits * budget.gop_frames;
+        self.debt = (self.debt + bits as f64 - budget.frame_bits).max(-2.0 * gop_bits);
+    }
+}
+
+/// The average bits per picture and the nominal GOP length, in pictures.
+#[derive(Debug, Clone, Copy)]
+struct Budget {
+    frame_bits: f64,
+    gop_frames: f64,
 }
 
 impl Encoder {
@@ -101,9 +185,10 @@ impl Encoder {
             frames_in_gop: 0,
             reference: None,
             reconstruction: None,
-            quant_i: 6,
-            quant_p: 8,
+            quant_i: FIRST_CODE,
+            quant_p: FIRST_CODE,
             vbv_fullness: VBV_BUFFER_BITS,
+            rate: RateControl::default(),
         })
     }
 
@@ -137,15 +222,12 @@ impl Encoder {
         };
         // At most `max_gop_frames`, so it fits the 10-bit field.
         let temporal_reference = u32::try_from(self.frames_in_gop).unwrap_or(0);
-        let target_bits = self.target_bits(picture_type);
-
-        let mut code = match picture_type {
-            PictureType::I => self.quant_i,
-            PictureType::P => self.quant_p,
-        };
 
         let fill = self.fill_bits();
         let fullness = self.vbv_fullness.saturating_add(fill).min(VBV_BUFFER_BITS);
+        let budget = self.budget();
+        let codes = (self.quant_i, self.quant_p);
+        let mut code = self.rate.code(picture_type, budget, fullness, codes);
         let mut attempts = 0u32;
         let mut bits;
 
@@ -161,8 +243,11 @@ impl Encoder {
                 break encoded;
             }
 
-            if attempts >= 3 {
-                return Err(EncodeError("VBV underflow".to_string()));
+            // Coarser and coarser, up to the coarsest quantiser: only a picture that does not fit even there fails.
+            if code >= 31 {
+                return Err(EncodeError(format!(
+                    "VBV underflow: {bits} bits at quantiser 31 after {attempts} retries, {fullness} available"
+                )));
             }
 
             attempts += 1;
@@ -171,10 +256,10 @@ impl Encoder {
 
         self.vbv_fullness = fullness.saturating_sub(bits);
 
-        let updated_code = adjust_code(code, bits, target_bits);
+        self.rate.update(picture_type, bits, code, budget);
         match picture_type {
-            PictureType::I => self.quant_i = updated_code,
-            PictureType::P => self.quant_p = updated_code,
+            PictureType::I => self.quant_i = code,
+            PictureType::P => self.quant_p = code,
         }
 
         self.frames_encoded += 1;
@@ -197,6 +282,11 @@ impl Encoder {
         self.reconstruction.as_ref()
     }
 
+    /// The quantiser_scale_codes (2–31; larger is coarser) of the last I and P pictures.
+    pub fn quantiser_codes(&self) -> (u8, u8) {
+        (self.quant_i, self.quant_p)
+    }
+
     /// Number of frames encoded so far.
     pub fn frames_encoded(&self) -> u64 {
         self.frames_encoded
@@ -209,21 +299,24 @@ impl Encoder {
         }
     }
 
-    fn target_bits(&self, picture_type: PictureType) -> u64 {
-        let fps = u64::from(self.fps());
-        let average = (u64::from(self.config.bitrate) / fps).max(1);
-        let gop = u64::from(self.config.gop_size);
-        let p_target = ((average * gop) / (gop + 2).max(1)).max(1);
-
-        match picture_type {
-            PictureType::I => p_target.saturating_mul(3),
-            PictureType::P => p_target,
+    /// Seconds per picture: 1001/30000 (NTSC) or 1/25 (PAL).
+    fn frame_seconds(&self) -> f64 {
+        match self.config.standard {
+            Standard::Ntsc => 1001.0 / 30000.0,
+            Standard::Pal => 1.0 / 25.0,
         }
     }
 
+    fn budget(&self) -> Budget {
+        Budget {
+            frame_bits: f64::from(self.config.bitrate) * self.frame_seconds(),
+            gop_frames: f64::from(self.config.gop_size.max(1)),
+        }
+    }
+
+    /// The bits the VBV buffer gains in one picture period, filling at the maximum bitrate.
     fn fill_bits(&self) -> u64 {
-        let fps = u64::from(self.fps());
-        (u64::from(self.config.max_bitrate) / fps).max(1)
+        ((f64::from(self.config.max_bitrate) * self.frame_seconds()) as u64).max(1)
     }
 
     fn encode_picture(
@@ -392,6 +485,7 @@ fn encode_row(
             let mut prev_intra = false;
             let mut pmv_x = 0i32;
             let mut pmv_y = 0i32;
+            let mut skipped = 0u32;
             for col in 0..mb_cols {
                 encode_p_macroblock(
                     writer,
@@ -405,6 +499,9 @@ fn encode_row(
                     &mut prev_intra,
                     &mut pmv_x,
                     &mut pmv_y,
+                    &mut skipped,
+                    // A slice's first and last macroblocks are always coded (13818-2 6.3.16).
+                    col > 0 && col + 1 < mb_cols,
                 );
             }
         }
@@ -413,32 +510,6 @@ fn encode_row(
 
 fn bit_rate_value(max_bitrate: u32) -> u32 {
     max_bitrate.saturating_add(399) / 400
-}
-
-fn adjust_code(code: u8, actual_bits: u64, target_bits: u64) -> u8 {
-    if target_bits == 0 {
-        return code;
-    }
-
-    let scaled = u64::from(code).saturating_mul(actual_bits);
-    let rounded = (scaled + target_bits / 2) / target_bits;
-    let mut updated = u8::try_from(rounded).unwrap_or(31);
-
-    updated = updated.clamp(2, 31);
-
-    let min_allowed = code.saturating_sub(4);
-    let max_allowed = code.saturating_add(4);
-
-    if updated < min_allowed {
-        updated = min_allowed;
-    }
-    if updated > max_allowed {
-        updated = max_allowed;
-    }
-
-    updated = updated.clamp(2, 31);
-
-    updated
 }
 
 fn validate_frame(frame: &Frame420, standard: Standard) -> Result<(), EncodeError> {
@@ -579,18 +650,18 @@ fn write_picture_coding_extension(writer: &mut BitWriter, picture_type: PictureT
     writer.write_bits(f01, 4);
     writer.write_bits(15, 4);
     writer.write_bits(15, 4);
-    writer.write_bits(0, 2);
-    writer.write_bits(3, 2);
-    writer.write_bits(1, 1);
-    writer.write_bits(1, 1);
-    writer.write_bits(0, 1);
-    writer.write_bits(0, 1);
-    writer.write_bits(0, 1);
-    writer.write_bits(0, 1);
-    writer.write_bits(0, 1);
-    writer.write_bits(1, 1);
-    writer.write_bits(1, 1);
-    writer.write_bits(0, 1);
+    writer.write_bits(0, 2); // intra_dc_precision: 8 bits
+    writer.write_bits(3, 2); // picture_structure: frame
+    writer.write_bits(1, 1); // top_field_first
+    writer.write_bits(1, 1); // frame_pred_frame_dct
+    writer.write_bits(0, 1); // concealment_motion_vectors
+    writer.write_bits(0, 1); // q_scale_type: linear
+    writer.write_bits(1, 1); // intra_vlc_format: table one (B.15) for intra AC coefficients
+    writer.write_bits(0, 1); // alternate_scan
+    writer.write_bits(0, 1); // repeat_first_field
+    writer.write_bits(1, 1); // chroma_420_type
+    writer.write_bits(1, 1); // progressive_frame
+    writer.write_bits(0, 1); // composite_display_flag
 }
 
 fn write_slice_header(writer: &mut BitWriter, row: usize, code: u8) {
@@ -761,12 +832,15 @@ fn encode_p_macroblock(
     prev_intra: &mut bool,
     pmv_x: &mut i32,
     pmv_y: &mut i32,
+    skipped: &mut u32,
+    can_skip: bool,
 ) {
     let (dx, dy, sad) = motion::search_fast(cur, reference, x, y, 15, (*pmv_x / 2, *pmv_y / 2));
     let intra = motion::intra_cost(cur, x, y);
 
     if intra.saturating_add(512) < sad {
-        vlc::write_macroblock_address_increment(writer, 1);
+        vlc::write_macroblock_address_increment_after(writer, *skipped);
+        *skipped = 0;
         vlc::write_p_macroblock_type(writer, vlc::PType::Intra);
 
         if !*prev_intra {
@@ -815,25 +889,34 @@ fn encode_p_macroblock(
         cbp |= 32;
     }
 
-    vlc::write_macroblock_address_increment(writer, 1);
-
-    // Syntax order (13818-2 §6.2.5): macroblock_modes, motion_vectors, coded_block_pattern, blocks.
-    if cbp != 0 {
-        vlc::write_p_macroblock_type(writer, vlc::PType::McCoded);
+    // A skipped macroblock (P picture): no motion and no coefficients, so the decoder copies the reference at the same
+    // place, resets the motion vector predictors to zero (13818-2 7.6.6.2) and the DC predictors (7.2.1); the
+    // reconstruction below is exactly that copy.
+    if can_skip && cbp == 0 && mv_x == 0 && mv_y == 0 {
+        *skipped = skipped.saturating_add(1);
     } else {
-        vlc::write_p_macroblock_type(writer, vlc::PType::McNotCoded);
+        vlc::write_macroblock_address_increment_after(writer, *skipped);
+        *skipped = 0;
+
+        // Syntax order (13818-2 §6.2.5): macroblock_modes, motion_vectors, coded_block_pattern, blocks.
+        if cbp != 0 {
+            vlc::write_p_macroblock_type(writer, vlc::PType::McCoded);
+        } else {
+            vlc::write_p_macroblock_type(writer, vlc::PType::McNotCoded);
+        }
+
+        let delta_x = vlc::wrap_motion_delta(mv_x - *pmv_x, P_F_CODE);
+        let delta_y = vlc::wrap_motion_delta(mv_y - *pmv_y, P_F_CODE);
+        vlc::write_motion_delta(writer, delta_x, P_F_CODE);
+        vlc::write_motion_delta(writer, delta_y, P_F_CODE);
+
+        if cbp != 0 {
+            // Internally bit 0 is block 0 (Y0); in the bitstream block 0 is the MSB of the 6-bit pattern.
+            vlc::write_coded_block_pattern(writer, reverse_cbp(cbp));
+        }
     }
 
-    let delta_x = vlc::wrap_motion_delta(mv_x - *pmv_x, P_F_CODE);
-    let delta_y = vlc::wrap_motion_delta(mv_y - *pmv_y, P_F_CODE);
-    vlc::write_motion_delta(writer, delta_x, P_F_CODE);
-    vlc::write_motion_delta(writer, delta_y, P_F_CODE);
-
-    if cbp != 0 {
-        // Internally bit 0 is block 0 (Y0); in the bitstream block 0 is the MSB of the 6-bit pattern.
-        vlc::write_coded_block_pattern(writer, reverse_cbp(cbp));
-    }
-
+    // After a skipped macroblock the predictor is zero, which is `mv_x` / `mv_y` then too.
     *pmv_x = mv_x;
     *pmv_y = mv_y;
 
@@ -1099,46 +1182,37 @@ fn diff_size(diff: i32) -> u8 {
     size
 }
 
+/// The AC coefficients of an intra block, in table one (`intra_vlc_format` is 1 in every picture).
 fn write_intra_ac(writer: &mut BitWriter, levels: &[i16; 64]) {
-    let mut run = 0u32;
-
-    for scan in 1..64 {
-        let level = levels.get(scan).copied().unwrap_or(0);
-
-        if level != 0 {
-            vlc::write_escape_coefficient(
-                writer,
-                u8::try_from(run).unwrap_or(63),
-                i32::from(level),
-            );
-            run = 0;
-        } else {
-            run += 1;
-        }
-    }
-
-    vlc::write_end_of_block(writer);
+    write_coefficients(writer, levels, 1, vlc::DctTable::One);
 }
 
+/// The coefficients of a non-intra block, in table zero.
 fn write_non_intra_block(writer: &mut BitWriter, levels: &[i16; 64]) {
-    let mut run = 0u32;
+    write_coefficients(writer, levels, 0, vlc::DctTable::Zero);
+}
 
-    for scan in 0..64 {
-        let level = levels.get(scan).copied().unwrap_or(0);
+/// Writes the nonzero levels from scan position `from` on as run/level codes of `table`, then end of block.
+fn write_coefficients(
+    writer: &mut BitWriter,
+    levels: &[i16; 64],
+    from: usize,
+    table: vlc::DctTable,
+) {
+    let mut run = 0u8;
+    let mut first = true;
 
-        if level != 0 {
-            vlc::write_escape_coefficient(
-                writer,
-                u8::try_from(run).unwrap_or(63),
-                i32::from(level),
-            );
-            run = 0;
-        } else {
-            run += 1;
+    for &level in levels.iter().skip(from) {
+        if level == 0 {
+            run = run.saturating_add(1);
+            continue;
         }
+        vlc::write_coefficient(writer, table, run, i32::from(level), first && from == 0);
+        run = 0;
+        first = false;
     }
 
-    vlc::write_end_of_block(writer);
+    vlc::write_end_of_block_in(writer, table);
 }
 
 fn build_cos_table() -> [[f64; 8]; 8] {

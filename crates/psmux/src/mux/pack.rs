@@ -36,10 +36,31 @@ pub(crate) fn next_scr(
             }
         }
         if scr > deadline {
-            return Err(invalid("mux rate exceeded"));
+            return Err(rate_exceeded("audio or subtitle", deadline, scr));
         }
     }
 
+    Ok((scr, new_rem))
+}
+
+/// [`next_scr`] for a video pack: as soon after the previous pack as the mux rate allows and no earlier than
+/// `room` (when the decoder's video buffer has room for it), not held back to [`LEAD`] before its `deadline` as other
+/// packs are: a burst of large pictures goes ahead of time, as far as the buffer allows.
+pub(crate) fn next_video_scr(
+    prev_scr: i128,
+    rem: i128,
+    deadline: i64,
+    room: i128,
+) -> Result<(i128, i128), MuxError> {
+    let (min_scr, min_rem) = next_scr(prev_scr, rem, None)?;
+    let (scr, new_rem) = if room > min_scr {
+        (room, 0)
+    } else {
+        (min_scr, min_rem)
+    };
+    if scr > i128::from(deadline) {
+        return Err(rate_exceeded("video", i128::from(deadline), scr));
+    }
     Ok((scr, new_rem))
 }
 
@@ -331,4 +352,14 @@ fn write_bits_vec(bits: u128, nbits: u32, out: &mut Vec<u8>) -> Result<(), MuxEr
         out.push(((bits >> shift) & 0xFF) as u8);
     }
     Ok(())
+}
+
+/// The error of a pack of `what` that cannot be sent by its `deadline` at the mux rate: when (27 MHz), and how late.
+fn rate_exceeded(what: &str, deadline: i128, scr: i128) -> MuxError {
+    let seconds = |ticks: i128| ticks as f64 / 27_000_000.0;
+    invalid(&format!(
+        "mux rate exceeded at {:.3} s: the {what} data due then could only be sent {:.3} s late",
+        seconds(deadline),
+        seconds(scr - deadline)
+    ))
 }

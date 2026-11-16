@@ -96,7 +96,8 @@ fn write_timelines(project: &Project, out: &mut String) -> Result<(), String> {
 }
 
 fn write_check(project: &Project, out: &mut String) -> Result<(), String> {
-    let problems = project.check();
+    // The whole check, as the GUI, MCP and a build run it (capacity, navigation and the media too).
+    let problems = disccraft_check::check_project(project);
     let errors = problems
         .iter()
         .filter(|problem| problem.severity == Severity::Error)

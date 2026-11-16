@@ -12,16 +12,22 @@ mod menus;
 pub use menus::{HdMotionMenu, MotionMenu, encode_hd_motion_menu, encode_motion_menu};
 mod thumbnails;
 pub use thumbnails::{ThumbnailFrame, still_thumbnails};
+mod demux;
 mod output;
 mod prepare;
 mod preview;
+mod sup;
+mod vobsub;
+pub use demux::demux_h264_for_bd;
 pub use prepare::{Estimate, TranscodeStatus, encode_hd_slideshow, estimate, transcode_status};
+pub use sup::PgSegment;
+
 pub use preview::preview_model;
 mod source;
 pub mod streams;
 pub use streams::{
     SubtitleCue, SubtitleTrack, TitleAudio, TitleSource, TitleStreams, load_title_streams,
-    subtitle_tracks_sized,
+    load_title_streams_for_hd, subtitle_tracks_sized,
 };
 mod parallel;
 
@@ -31,7 +37,6 @@ pub(crate) const UOP_TIME_PLAY: u32 = 0x0000_0001;
 mod vmg;
 mod vts;
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use disccraft_ifo::{IfoError, Standard, TitleEntry, VmCommand, VmgMenus};
@@ -39,7 +44,7 @@ use disccraft_nav::{ChapterPlaylistNav, Cmd, CompiledNav, NavError, TitleNav, co
 use disccraft_project::{
     DiscKind, Project, Slideshow, Tick, Timeline, TimelineId, VideoStandard, has_errors,
 };
-use disccraft_psmux::es::{VideoStream, parse_video};
+use disccraft_psmux::es::VideoStream;
 use disccraft_psmux::mux::MuxError;
 use thiserror::Error;
 
@@ -156,8 +161,6 @@ pub(crate) struct BuiltTitles {
     pub(crate) total_bytes: u64,
 }
 
-const MAX_INPUT_BYTES: u64 = 8_589_934_592;
-const START_DTS: i64 = 8_100_000;
 const MAX_CELLS: usize = 255;
 
 /// Convert a project tick to a 27 MHz timestamp.
@@ -607,9 +610,7 @@ pub(crate) fn load_slideshow_title(
     standard: VideoStandard,
     prepared: &prepare::PreparedTitle,
 ) -> Result<source::LoadedTitle, DvdError> {
-    let video_data = read_path(&prepared.video_path)?;
-    let video = parse_video(&video_data, START_DTS)
-        .map_err(|err| DvdError::Invalid(format!("video parse error: {err}")))?;
+    let (video, video_data) = source::load_video(&prepared.video_path)?;
 
     validate_video(&video, standard)?;
     let first_pts = first_pts(&video)?;
@@ -639,6 +640,7 @@ pub(crate) fn load_slideshow_title(
         wide: project.settings.widescreen,
         subpictures: Vec::new(),
         subtitle_languages: Vec::new(),
+        palette: source::text_palette(),
         // 手動で進める: 各スライドのセルを無限の静止にして、リモコンの次へ / 決定で進む。
         cell_still: if slideshow.manual_advance { 0xFF } else { 0 },
     })
@@ -740,25 +742,6 @@ fn first_pts(video: &VideoStream) -> Result<i64, DvdError> {
         .ok_or_else(|| DvdError::Invalid("video has no pictures".to_string()))
 }
 
-fn read_path(path: &Path) -> Result<Vec<u8>, DvdError> {
-    let metadata = fs::metadata(path).map_err(|err| crate::io_error(path, err))?;
-
-    if !metadata.is_file() {
-        return Err(DvdError::Invalid(format!(
-            "asset is not a file: {}",
-            path.display()
-        )));
-    }
-    if metadata.len() > MAX_INPUT_BYTES {
-        return Err(DvdError::Unsupported(format!(
-            "asset larger than 8 GiB: {}",
-            path.display()
-        )));
-    }
-
-    fs::read(path).map_err(|err| crate::io_error(path, err))
-}
-
 /// Convert a zero-based timeline index to a one-based VTS number.
 fn vts_number(index: usize) -> Result<u8, DvdError> {
     let value = index
@@ -827,5 +810,142 @@ mod tests {
         );
 
         Ok(())
+    }
+}
+
+/// What is wrong with the chapters of the DVD's timelines whose video is passed through (an MPEG-2 elementary stream
+/// that needs no transcode): a chapter starts a cell at the GOP whose first picture is shown nearest its time, so
+/// that GOP must be closed, and two chapters cannot share one. One message for each such chapter (empty for a
+/// Blu-ray, and for video that is transcoded, which gets a GOP of its own at every chapter).
+pub fn passthrough_chapter_problems(project: &Project) -> Vec<String> {
+    if project.settings.kind != disccraft_project::DiscKind::Dvd {
+        return Vec::new();
+    }
+    let mut problems = Vec::new();
+    for timeline in project.timelines.values() {
+        let Some(asset) = project.assets.get(&timeline.video) else {
+            continue;
+        };
+        let path = Path::new(asset.path.as_str());
+        // A raw elementary stream is scanned; a program or transport stream's index already has its GOPs.
+        let gops = if prepare::is_passthrough(path, project.settings.standard) {
+            match disccraft_transcode::mpeg2_gop_starts(path) {
+                Ok(Some(gops)) => gops,
+                _ => continue,
+            }
+        } else {
+            match prepare::container_video(path, project.settings.standard) {
+                Some((_, gops)) => gops,
+                None => continue,
+            }
+        };
+        problems.extend(chapter_gop_problems(
+            &timeline.name,
+            &timeline.chapters,
+            &gops,
+        ));
+    }
+    problems
+}
+
+/// [`passthrough_chapter_problems`] of one timeline, its video's GOPs given as (display start in seconds, closed).
+fn chapter_gop_problems(
+    timeline: &str,
+    chapters: &[disccraft_project::Chapter],
+    gops: &[(f64, bool)],
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut previous: Option<usize> = None;
+    for (index, chapter) in chapters.iter().enumerate() {
+        let seconds = chapter.time.0 as f64 / 254_016_000_000.0;
+        // The nearest GOP, the first of equally near ones (as the multiplexer picks it).
+        let Some(nearest) = gops
+            .iter()
+            .enumerate()
+            .min_by(|(a_index, a), (b_index, b)| {
+                (a.0 - seconds)
+                    .abs()
+                    .total_cmp(&(b.0 - seconds).abs())
+                    .then(a_index.cmp(b_index))
+            })
+            .map(|(gop, _)| gop)
+        else {
+            break;
+        };
+        let number = index + 1;
+        if previous.is_some_and(|previous| nearest <= previous) {
+            problems.push(format!(
+                "timeline \"{timeline}\": chapters {} and {number} fall in the same GOP of the passed-through video",
+                number - 1
+            ));
+        } else if index > 0 && !gops.get(nearest).is_some_and(|gop| gop.1) {
+            let closed: Vec<f64> = gops.iter().filter(|gop| gop.1).map(|gop| gop.0).collect();
+            let before = closed.iter().rev().find(|&&time| time <= seconds);
+            let after = closed.iter().find(|&&time| time > seconds);
+            let near = match (before, after) {
+                (Some(before), Some(after)) => format!("{} or {}", clock(*before), clock(*after)),
+                (Some(time), None) | (None, Some(time)) => clock(*time),
+                (None, None) => "none in the video".to_string(),
+            };
+            problems.push(format!(
+                "timeline \"{timeline}\": chapter {number} ({}) is not at a closed GOP of the passed-through video, \
+                 so it cannot start a cell there; the nearest closed GOPs start at {near}",
+                clock(seconds)
+            ));
+        }
+        previous = Some(nearest);
+    }
+    problems
+}
+
+/// `seconds` as H:MM:SS.mmm.
+fn clock(seconds: f64) -> String {
+    let millis = (seconds.max(0.0) * 1000.0).round() as u64;
+    format!(
+        "{}:{:02}:{:02}.{:03}",
+        millis / 3_600_000,
+        millis / 60_000 % 60,
+        millis / 1000 % 60,
+        millis % 1000
+    )
+}
+
+#[cfg(test)]
+mod passthrough_chapter_tests {
+    use super::chapter_gop_problems;
+    use disccraft_project::{Chapter, Tick};
+
+    fn chapter(seconds: f64) -> Chapter {
+        Chapter {
+            time: Tick((seconds * 254_016_000_000.0) as i64),
+            name: String::new(),
+            poster: None,
+        }
+    }
+
+    #[test]
+    fn chapters_must_fall_on_distinct_closed_gops() {
+        // GOPs every half second; only those on whole seconds are closed.
+        let gops: Vec<(f64, bool)> = (0..10)
+            .map(|index| (f64::from(index) * 0.5, index % 2 == 0))
+            .collect();
+        // Chapters on closed GOPs (1 s, and 2.1 s, nearest to the closed one at 2 s) are fine.
+        assert!(
+            chapter_gop_problems("t", &[chapter(0.0), chapter(1.0), chapter(2.1)], &gops)
+                .is_empty()
+        );
+        // 1.5 s is an open GOP: the closed ones around it are named.
+        let open = chapter_gop_problems("t", &[chapter(0.0), chapter(1.5)], &gops);
+        assert_eq!(open.len(), 1);
+        assert!(open[0].contains("chapter 2 (0:00:01.500)"), "{}", open[0]);
+        assert!(
+            open[0].contains("0:00:01.000 or 0:00:02.000"),
+            "{}",
+            open[0]
+        );
+        // Two chapters nearest to the same GOP.
+        let same = chapter_gop_problems("t", &[chapter(0.0), chapter(1.0), chapter(1.1)], &gops);
+        assert_eq!(same.len(), 1);
+        assert!(same[0].contains("chapters 2 and 3"), "{}", same[0]);
     }
 }

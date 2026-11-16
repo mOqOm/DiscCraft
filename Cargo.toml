@@ -71,6 +71,9 @@ craft-video = { git = "https://github.com/storytold/craft-libs", rev = "47107f66
 # craft-libs' AC-3 encoder (ETSI TS 102 366), the same revision: the transcoded soundtracks become Dolby Digital, as
 # Encore makes them. Used through its public API only.
 craft-audio = { git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9", default-features = false, features = ["ac3-encode"] }
+# craft-libs' MPEG-2 Systems demuxer, the same revision: program and transport streams whose MPEG-2 video and AC-3
+# can go on a DVD as they are are demuxed, not transcoded.
+craft-media = { git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9", default-features = false, features = ["mpegts"] }
 # craft-libs' shared UI (MIT OR Apache-2.0), the revision FilmCraft uses: its docking (tab groups that are dragged,
 # split, floated and closed, saved as workspaces), as the other Craft apps arrange their panels.
 craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "47107f660191de2f0b425569506f4daa4faadac9", features = ["serde"] }

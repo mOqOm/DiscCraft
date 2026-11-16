@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 disccraft-ac3enc.workspace = true
+craft-media.workspace = true
 disccraft-transcode.workspace = true
 disccraft-nav.workspace = true
 disccraft-menu.workspace = true

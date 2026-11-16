@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use disccraft_bdmv::{index, mobj, mpls};
-use disccraft_dvd::{TitleSource, TitleStreams, load_title_streams};
+use disccraft_dvd::{TitleSource, TitleStreams, load_title_streams, load_title_streams_for_hd};
 use disccraft_project::{
     DiscKind, Link, Menu, MenuLoops, PlaylistItem, Project, TimelineId, VideoStandard,
 };
@@ -119,8 +119,13 @@ pub fn build_bdmv_with(
     }
 
     let dirs = prepare_directories(out_dir)?;
-    let titles = load_title_streams(project, cache_dir, progress)
-        .map_err(|error| BdError::Prepare(error.to_string()))?;
+    // In HD the timelines' video is encoded to H.264 below; their SD MPEG-2 would be made only to be thrown away.
+    let titles = if project.settings.bd_video.hd().is_some() {
+        load_title_streams_for_hd(project, cache_dir, progress)
+    } else {
+        load_title_streams(project, cache_dir, progress)
+    }
+    .map_err(|error| BdError::Prepare(error.to_string()))?;
 
     let mut hd_titles = Vec::with_capacity(titles.len());
     for title in &titles {

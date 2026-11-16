@@ -223,6 +223,16 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "button.setSubpicture",
+        label: "ボタンのサブピクチャを設定",
+        menu: &["ボタン"],
+        shortcut: None,
+        params: r#"{"menu": id, "button": index, "path": "highlight.png" | null}"#,
+        enabled: always_enabled,
+        run: run_set_subpicture,
+        journal: true,
+    },
+    CommandSpec {
         id: "button.setTransition",
         label: "ボタンのトランジションを設定",
         menu: &["ボタン"],
@@ -575,6 +585,38 @@ fn run_set_text_subpicture(session: &mut Session, params: &Value) -> CommandResu
         return Err(format!("button {button} does not exist"));
     };
     target.text_subpicture = on;
+    Ok(empty_object())
+}
+
+/// A button's own subpicture (its highlight, as a PSD's `(=1)`–`(=3)` layers give it) from a PNG stretched over the
+/// button: transparent pixels none, the others colour 1 to 3 of the colour set by how light they are (null: none,
+/// back to the text or frame highlight).
+fn run_set_subpicture(session: &mut Session, params: &Value) -> CommandResult {
+    let menu_id = MenuId(req_u64(params, "menu")?);
+    let button = req_usize(params, "button")?;
+    let subpicture = match params.get("path") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(path)) => {
+            let (width, height, values) =
+                disccraft_menu::subpicture_from_png(std::path::Path::new(path))
+                    .map_err(|error| error.to_string())?;
+            let size = |value: u32| u16::try_from(value).map_err(|_| format!("{path}: too large"));
+            Some(
+                disccraft_project::Subpicture::from_values(size(width)?, size(height)?, &values)
+                    .ok_or_else(|| {
+                        format!("{path}: no highlight in it (every pixel transparent)")
+                    })?,
+            )
+        }
+        Some(_) => return Err("parameter \"path\" must be a PNG path or null".to_string()),
+    };
+    let Some(menu) = session.project.menu_mut(menu_id) else {
+        return Err(format!("menu {} does not exist", menu_id.0));
+    };
+    let Some(target) = menu.buttons.get_mut(button) else {
+        return Err(format!("button {button} does not exist"));
+    };
+    target.subpicture = subpicture;
     Ok(empty_object())
 }
 

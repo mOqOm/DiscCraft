@@ -54,6 +54,44 @@ const SUB_FIRST_CAPACITY: usize =
 /// Maximum subpicture SPU bytes in a continuation PES packet without PTS.
 const SUB_CONT_CAPACITY: usize = SECTOR - PACK_HEADER_LEN - PES_HEADER_BASE - SUB_ID_LEN;
 
+/// The video packs in the decoder's buffer (P-STD), so video can be sent ahead of time without overflowing it: each
+/// pack counted whole, until the decoding time (27 MHz) of the picture its first byte belongs to.
+#[derive(Debug, Default)]
+pub(crate) struct VideoBuffer {
+    packs: std::collections::VecDeque<i64>,
+}
+
+impl VideoBuffer {
+    /// The DVD video buffer (P-STD: 232 kB), in packs. A pack counts whole until its first picture is decoded.
+    const CAPACITY_PACKS: usize = 232 * 1024 / SECTOR;
+
+    /// The earliest SCR (27 MHz) at which one more pack fits, given that none is sent before `now`.
+    fn room_at(&mut self, now: i128) -> i128 {
+        while self
+            .packs
+            .front()
+            .is_some_and(|&dts| i128::from(dts) <= now)
+        {
+            self.packs.pop_front();
+        }
+        match Self::CAPACITY_PACKS
+            .checked_sub(1)
+            .and_then(|keep| self.packs.len().checked_sub(keep))
+        {
+            // The `excess`-th pack (from the oldest) must be decoded first.
+            Some(excess) if excess > 0 => self
+                .packs
+                .get(excess - 1)
+                .map_or(now, |&dts| i128::from(dts).max(now)),
+            _ => now,
+        }
+    }
+
+    fn push(&mut self, dts: i64) {
+        self.packs.push_back(dts);
+    }
+}
+
 /// Progress state for the video payload of one GOP.
 #[derive(Debug)]
 struct GopState {
@@ -86,6 +124,8 @@ pub(crate) struct AudioState<'a> {
     kind: AudioKind<'a>,
     /// Next frame index to emit.
     next_frame: usize,
+    /// AC-3: bytes of `next_frame` already sent (a frame may run on into the next pack).
+    next_byte: usize,
     /// Audio start PTS in 27 MHz units.
     start_pts: i64,
 }
@@ -147,6 +187,7 @@ pub(crate) fn init_audio_states<'a>(input: &MuxInput<'a>) -> Result<Vec<AudioSta
                 states.push(AudioState {
                     kind: AudioKind::Ac3 { stream, data },
                     next_frame: 0,
+                    next_byte: 0,
                     start_pts: input.audio_start_pts,
                 });
             }
@@ -157,6 +198,7 @@ pub(crate) fn init_audio_states<'a>(input: &MuxInput<'a>) -> Result<Vec<AudioSta
                 states.push(AudioState {
                     kind: AudioKind::Lpcm(lpcm),
                     next_frame: 0,
+                    next_byte: 0,
                     start_pts: input.audio_start_pts,
                 });
             }
@@ -224,6 +266,7 @@ pub(crate) fn mux_vobu(
     prev_scr: i128,
     rem: i128,
     first_nav: bool,
+    video_buffer: &mut VideoBuffer,
 ) -> Result<(VobuRecord, u32, i128, i128), MuxError> {
     let _ = cell_id;
     let gop = gops.get(gop_idx).ok_or_else(|| invalid("missing GOP"))?;
@@ -266,7 +309,16 @@ pub(crate) fn mux_vobu(
         subpicture_states,
         next_gop_dts,
     )? {
-        let (scr, new_rem) = pack::next_scr(prev_scr, rem, Some(deadline))?;
+        let (scr, new_rem) = match candidate {
+            Candidate::Video => {
+                let (earliest, _) = pack::next_scr(prev_scr, rem, None)?;
+                let room = video_buffer.room_at(earliest);
+                let timed = pack::next_video_scr(prev_scr, rem, deadline, room)?;
+                video_buffer.push(deadline);
+                timed
+            }
+            _ => pack::next_scr(prev_scr, rem, Some(deadline))?,
+        };
         let sector_idx = total_sectors;
         let mut sector = [0u8; SECTOR];
 
@@ -745,7 +797,7 @@ fn first_pic_start_at_or_after(gop: &GopInfo, state: &GopState) -> Option<usize>
 /// Build video payload bytes for one pack.
 fn build_video_payload(
     gop: &GopInfo,
-    video_data: &[u8],
+    video_data: &dyn super::VideoBytes,
     append_seq_end: bool,
     start: usize,
     len: usize,
@@ -774,10 +826,7 @@ fn build_video_payload(
             .byte_start
             .checked_add(copy_end)
             .ok_or_else(|| invalid("video source overflow"))?;
-        let slice = video_data
-            .get(src_start..src_end)
-            .ok_or_else(|| invalid("video data out of range"))?;
-        out.extend_from_slice(slice);
+        out.extend_from_slice(&video_data.bytes(src_start..src_end)?);
     }
 
     if end > gop.byte_len {
@@ -921,7 +970,9 @@ impl<'a> AudioState<'a> {
         Ok((payload, to_90k(pts), count))
     }
 
-    /// Build one AC-3 PES payload.
+    /// Build one AC-3 PES payload, filled: frames run on from one pack into the next, as DVD authoring packs them
+    /// (a pack of whole frames only leaves up to a frame's length unused: 11 % of the mux rate of 448 kbit/s 5.1).
+    /// The header counts the frames that start in the pack and points at the first of them, whose PTS the pack carries.
     fn build_ac3_payload(
         &mut self,
         stream: &Ac3Stream,
@@ -929,70 +980,71 @@ impl<'a> AudioState<'a> {
         stream_index: usize,
     ) -> Result<(Vec<u8>, i64, usize), MuxError> {
         let sub_id = sub_stream_id(0x80, stream_index)?;
-        let mut count = 0usize;
-        let mut total = 0usize;
+        let mut audio = Vec::with_capacity(AC3_DATA_CAPACITY);
+        let mut starts = 0usize;
+        let mut first_start: Option<(usize, i64)> = None;
+        let (mut index, mut byte) = (self.next_frame, self.next_byte);
 
-        while count < 255 {
-            let Some(frame_idx) = self.next_frame.checked_add(count) else {
+        while audio.len() < AC3_DATA_CAPACITY {
+            let Some(frame) = stream.frames.get(index) else {
                 break;
             };
-            let Some(frame) = stream.frames.get(frame_idx) else {
-                break;
-            };
-            let Some(next_total) = total.checked_add(frame.len) else {
-                break;
-            };
-            if next_total > AC3_DATA_CAPACITY {
-                break;
+            if byte == 0 {
+                if starts == usize::from(u8::MAX) {
+                    break;
+                }
+                starts += 1;
+                if first_start.is_none() {
+                    first_start = Some((audio.len(), frame.pts));
+                }
             }
-            total = next_total;
-            count = count.saturating_add(1);
-        }
-
-        if count == 0 {
-            return Err(invalid("AC-3 frame too large"));
-        }
-
-        let first_idx = self.next_frame;
-        let first_pts = stream
-            .frames
-            .get(first_idx)
-            .ok_or_else(|| invalid("missing AC-3 frame"))?
-            .pts;
-        let count_u8 = u8::try_from(count).map_err(|_| invalid("too many AC-3 frames"))?;
-
-        let mut payload = Vec::with_capacity(
-            AC3_SUBHEADER_LEN
-                .checked_add(total)
-                .ok_or_else(|| invalid("AC-3 payload overflow"))?,
-        );
-        payload.push(sub_id);
-        payload.push(count_u8);
-        payload.push(0x00);
-        payload.push(0x01);
-
-        for k in 0..count {
-            let frame_idx = first_idx
-                .checked_add(k)
-                .ok_or_else(|| invalid("AC-3 frame index overflow"))?;
-            let frame = stream
-                .frames
-                .get(frame_idx)
-                .ok_or_else(|| invalid("missing AC-3 frame"))?;
-            let end = frame
+            let take = frame
+                .len
+                .checked_sub(byte)
+                .ok_or_else(|| invalid("AC-3 frame offset out of range"))?
+                .min(AC3_DATA_CAPACITY - audio.len());
+            let from = frame
                 .offset
-                .checked_add(frame.len)
-                .ok_or_else(|| invalid("AC-3 frame length overflow"))?;
+                .checked_add(byte)
+                .ok_or_else(|| invalid("AC-3 frame offset overflow"))?;
             let slice = data
-                .get(frame.offset..end)
+                .get(from..from + take)
                 .ok_or_else(|| invalid("AC-3 frame data out of range"))?;
-            payload.extend_from_slice(slice);
+            audio.extend_from_slice(slice);
+            byte += take;
+            if byte == frame.len {
+                index += 1;
+                byte = 0;
+            }
         }
 
-        self.next_frame = first_idx
-            .checked_add(count)
-            .ok_or_else(|| invalid("AC-3 frame index overflow"))?;
-        Ok((payload, first_pts, count))
+        if audio.is_empty() {
+            return Err(invalid("no AC-3 data to send"));
+        }
+        // The tail of the last frame alone: no frame starts here, so the pack is timed by that frame.
+        let (pointer, pts) = match first_start {
+            Some((offset, pts)) => (offset + 1, pts),
+            None => (
+                0,
+                stream
+                    .frames
+                    .get(self.next_frame)
+                    .map(|frame| frame.pts)
+                    .ok_or_else(|| invalid("missing AC-3 frame"))?,
+            ),
+        };
+        let pointer = u16::try_from(pointer).map_err(|_| invalid("AC-3 pointer overflow"))?;
+        let count = u8::try_from(starts).map_err(|_| invalid("too many AC-3 frames"))?;
+
+        let mut payload = Vec::with_capacity(AC3_SUBHEADER_LEN + audio.len());
+        payload.push(sub_id);
+        payload.push(count);
+        payload.extend_from_slice(&pointer.to_be_bytes());
+        payload.extend_from_slice(&audio);
+
+        self.next_frame = index;
+        self.next_byte = byte;
+        Ok((payload, pts, starts))
     }
 
     /// Build one LPCM PES payload.

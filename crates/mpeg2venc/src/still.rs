@@ -460,22 +460,29 @@ fn diff_size(diff: i32) -> u8 {
     size
 }
 
+/// The AC coefficients as run/level codes of table zero (`intra_vlc_format` is 0 here), then end of block.
 fn write_ac(writer: &mut BitWriter, coeffs: &[f64; 64], quantiser_scale: f64) {
-    let mut run = 0u32;
+    let mut run = 0u8;
 
     for index in 1..64 {
         if let Some(&(u, v)) = ZIGZAG.get(index) {
             let level = ac_level(coeffs, u, v, quantiser_scale);
             if level != 0 {
-                write_escape(writer, run, level);
+                crate::vlc::write_coefficient(
+                    writer,
+                    crate::vlc::DctTable::Zero,
+                    run,
+                    level,
+                    false,
+                );
                 run = 0;
             } else {
-                run += 1;
+                run = run.saturating_add(1);
             }
         }
     }
 
-    writer.write_bits(2, 2);
+    crate::vlc::write_end_of_block_in(writer, crate::vlc::DctTable::Zero);
 }
 
 fn ac_level(coeffs: &[f64; 64], u: usize, v: usize, quantiser_scale: f64) -> i32 {
@@ -508,12 +515,6 @@ fn round_to_i32(value: f64, min: i32, max: i32) -> i32 {
     } else {
         rounded as i32
     }
-}
-
-fn write_escape(writer: &mut BitWriter, run: u32, level: i32) {
-    writer.write_bits(1, 6);
-    writer.write_bits(run & 0x3F, 6);
-    writer.write_bits((level as u32) & 0xFFF, 12);
 }
 
 #[cfg(test)]

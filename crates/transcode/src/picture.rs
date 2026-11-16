@@ -101,6 +101,9 @@ pub(crate) fn encode_video(
                 }
             }
         });
+        // Owned by this closure, so an early return (an encode or write error) drops it: a decoding thread blocked
+        // on a full channel then sees it closed and stops, instead of `scope` waiting for it forever.
+        let receiver = receiver;
         let mut gops = GopPlanner::new(
             u64::from(encoder_config(options, max_bitrate).gop_size),
             disccraft_mpeg2venc::encoder::max_gop_frames(standard),

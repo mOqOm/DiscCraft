@@ -432,7 +432,12 @@ fn run_add_subtitle_track(session: &mut Session, params: &Value) -> CommandResul
     let language = opt_str(params, "language")?.unwrap_or_default();
     match session.project.assets.get(&asset) {
         Some(a) if a.kind == AssetKind::Subtitle => {}
-        Some(_) => return Err(format!("asset {} is not a subtitle (.srt) asset", asset.0)),
+        Some(_) => {
+            return Err(format!(
+                "asset {} is not a subtitle asset (.srt, .vtt, .txt, .idx or .sup)",
+                asset.0
+            ));
+        }
         None => return Err(format!("asset {} does not exist", asset.0)),
     }
     let Some(timeline) = session.project.timeline_mut(timeline) else {
