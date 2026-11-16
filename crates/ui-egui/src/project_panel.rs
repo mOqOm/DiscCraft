@@ -296,6 +296,9 @@ pub(crate) fn folder_path(project: &disccraft_project::Project, folder: u64) -> 
     parts.join(" / ")
 }
 
+/// The thumbnail of the summary above the Project panel's table.
+const SUMMARY_THUMBNAIL: egui::Vec2 = egui::vec2(96.0, 54.0);
+
 impl DiscCraftApp {
     /// プロジェクトのタブ。
     pub(crate) fn project_tab(&mut self, ui: &mut Ui) {
@@ -329,8 +332,26 @@ impl DiscCraftApp {
             });
     }
 
-    /// 上の概要（選択中の項目のサムネール、名前、種類、デュレーション、場所）。
+    /// 上の概要（選択中の項目のサムネール、名前、種類、デュレーション、場所）。高さは 4 行ぶんで固定し（何を選んでも
+    /// 下の表が動かない）、長い名前や場所は省略してマウスを重ねると全体を出す。
     fn project_summary(&mut self, ui: &mut Ui) {
+        let row = ui.text_style_height(&egui::TextStyle::Body);
+        let small = ui.text_style_height(&egui::TextStyle::Small);
+        let gap = ui.spacing().item_spacing.y;
+        let height = (row * 3.0 + small + gap * 3.0).max(SUMMARY_THUMBNAIL.y);
+        let width = ui.available_width();
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, height),
+            egui::Layout::left_to_right(egui::Align::Min),
+            |ui| {
+                ui.set_min_size(egui::vec2(width, height));
+                ui.set_max_height(height);
+                self.project_summary_contents(ui);
+            },
+        );
+    }
+
+    fn project_summary_contents(&mut self, ui: &mut Ui) {
         let texture = match self.selection {
             // メニューはメニューの絵を縮めて出す。
             Selection::Menu(id) => self.menu_thumbnail(ui.ctx(), id),
@@ -339,8 +360,8 @@ impl DiscCraftApp {
                 .and_then(|id| self.asset_thumbnail(ui.ctx(), id)),
         };
 
-        ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(96.0, 54.0), egui::Sense::hover());
+        {
+            let (rect, _) = ui.allocate_exact_size(SUMMARY_THUMBNAIL, egui::Sense::hover());
             let visuals = ui.visuals();
             ui.painter()
                 .rect_filled(rect, 2.0, visuals.extreme_bg_color);
@@ -359,7 +380,11 @@ impl DiscCraftApp {
                     ui.label(tl!("Nothing selected"));
                     return;
                 };
-                ui.strong(row.name.clone());
+                let _ = ui
+                    .add(
+                        egui::Label::new(egui::RichText::new(row.name.clone()).strong()).truncate(),
+                    )
+                    .on_hover_text(row.name.clone());
 
                 // 種類と寸法（例: ビデオ, 1280x720）、デュレーションとフレームレート（例: 00:00:06:00 24 fps）。
                 let probe = match row.selection {
@@ -380,7 +405,7 @@ impl DiscCraftApp {
                     Some((width, height)) => format!("{}, {width}x{height}", row.kind),
                     None => row.kind.to_owned(),
                 };
-                ui.label(kind_line);
+                let _ = ui.add(egui::Label::new(kind_line).truncate());
 
                 if let Some(seconds) = row.seconds {
                     let mut line = self.duration_text_at(seconds, row.fps);
@@ -388,15 +413,20 @@ impl DiscCraftApp {
                         line.push(' ');
                         line.push_str(&crate::properties::fps_text(fps));
                     }
-                    ui.label(line);
+                    let _ = ui.add(egui::Label::new(line).truncate());
                 }
                 if let Selection::Asset(id) = row.selection
                     && let Some(asset) = self.session.project.assets.get(&id)
                 {
-                    ui.small(asset.path.clone());
+                    let _ = ui
+                        .add(
+                            egui::Label::new(egui::RichText::new(asset.path.clone()).small())
+                                .truncate(),
+                        )
+                        .on_hover_text(asset.path.clone());
                 }
             });
-        });
+        }
     }
 
     /// 項目の行をフォルダーの木に並べ直す: 各階層でフォルダー（名前順）とその中身、そのあとに項目。畳んだフォルダーの
@@ -1146,7 +1176,8 @@ impl DiscCraftApp {
                 name,
                 kind: tl!("Timeline"),
                 icon: RowIcon::Timeline,
-                seconds: self.asset_seconds(video),
+                // The whole timeline: its clips added up.
+                seconds: Some(self.timeline_seconds(id)).filter(|seconds| *seconds > 0.0),
                 fps: self.asset_probe(video).fps,
                 transcode: self.transcode_state(video),
                 dimensions: Some(frame),
@@ -1590,7 +1621,8 @@ impl DiscCraftApp {
             .collect();
         let mut rows = rows;
         for row in &mut rows {
-            row.seconds = self.asset_seconds(row.video);
+            // The whole timeline: its clips added up.
+            row.seconds = Some(self.timeline_seconds(row.id)).filter(|seconds| *seconds > 0.0);
         }
         let sort = self.table_sort("timelines_grid");
         let usage = self.usage.clone();

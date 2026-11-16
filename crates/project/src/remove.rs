@@ -149,7 +149,7 @@ impl Project {
     /// The name of the first object that uses asset `id`, if any.
     pub fn asset_user(&self, id: AssetId) -> Option<String> {
         for timeline in self.timelines.values() {
-            let uses = timeline.video == id
+            let uses = timeline.videos().contains(&id)
                 || timeline.audio.iter().any(|track| track.asset == id)
                 || timeline.subtitles.iter().any(|track| track.asset == id);
             if uses {

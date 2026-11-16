@@ -36,7 +36,7 @@ mod vmgi;
 mod vtsi;
 mod vtsm;
 
-pub use attr::{AudioAttr, AudioCoding, BcdTime, Standard, VideoAttr, VmCommand};
+pub use attr::{AudioAttr, AudioCoding, BcdTime, Resolution, Standard, VideoAttr, VmCommand};
 pub use bytes::SECTOR;
 pub use pgc::{Cell, Pgc, read_pgc, write_pgc};
 pub use vmgi::{

@@ -158,9 +158,28 @@ pub fn render_slideshow(
     })
 }
 
+/// A slideshow's sound alone, as [`render_slideshow`] writes it beside the pictures: the clips one after another
+/// (or silence) as a 48 kHz stereo 16-bit WAV of the show's length. For a disc whose pictures are made in another
+/// format ([`render_slideshow_hd`]).
+///
+/// # Errors
+///
+/// When the slides' lengths are out of range or a clip cannot be read.
+pub fn render_slideshow_audio(
+    slides: &[SlideInput],
+    audio: &[PathBuf],
+    loop_audio: bool,
+    audio_out: &Path,
+    standard: Standard,
+) -> Result<(), TranscodeError> {
+    let (_, _, total_seconds) = validate_slides(slides, fps(standard))?;
+    write_slideshow_audio(audio, loop_audio, audio_out, total_seconds)
+}
+
 /// Render a slideshow's pictures for an HD Blu-ray disc: H.264 of `options`' size and rate on a 16:9 frame
 /// (square pixels) to `es_out`, its access-unit index in `index_out` (as [`crate::hd::transcode_h264`] writes
-/// them). The slides are placed, held and mixed as [`render_slideshow`] does; the audio is the SD render's.
+/// them). The slides are placed, held and mixed as [`render_slideshow`] does; the audio is
+/// [`render_slideshow_audio`]'s.
 /// Returns the number of frames.
 ///
 /// # Errors
@@ -423,7 +442,7 @@ fn slide_rgb(
             output_width.saturating_mul(2),
             output_height.saturating_mul(2),
         ))
-    } else if disccraft_photo::is_psd(path) {
+    } else if disccraft_photo::is_document(path) {
         Some(disccraft_photo::load_image(path))
     } else {
         None

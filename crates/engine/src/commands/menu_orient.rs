@@ -1,5 +1,6 @@
 //! Flipping and turning menu objects (Encore's Object ▸ Flip Horizontal / Flip Vertical / Rotate ▸): texts,
-//! buttons and graphics. A quarter turn keeps the object's centre and swaps its width and height.
+//! buttons and graphics. A quarter turn keeps the object's centre and swaps its width and height. Encore's Rotate
+//! tool turns texts and graphics by any angle about their centre (`menu.setAngle`).
 
 use crate::params::{opt_str, req_u64};
 use crate::{CommandResult, CommandSpec, Session};
@@ -8,16 +9,78 @@ use serde_json::Value;
 
 use super::{always_enabled, empty_object};
 
-pub(crate) const COMMANDS: &[CommandSpec] = &[CommandSpec {
-    id: "menu.orient",
-    label: "反転 / 回転",
-    menu: &["オブジェクト"],
-    shortcut: None,
-    params: r#"{"menu": id, "texts"?: [index], "buttons"?: [index], "graphics"?: [index], "flip"?: "horizontal" | "vertical", "rotate"?: 90 | 180 | 270}"#,
-    enabled: always_enabled,
-    run: run_orient,
-    journal: true,
-}];
+pub(crate) const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        id: "menu.orient",
+        label: "反転 / 回転",
+        menu: &["オブジェクト"],
+        shortcut: None,
+        params: r#"{"menu": id, "texts"?: [index], "buttons"?: [index], "graphics"?: [index], "flip"?: "horizontal" | "vertical", "rotate"?: 90 | 180 | 270}"#,
+        enabled: always_enabled,
+        run: run_orient,
+        journal: true,
+    },
+    CommandSpec {
+        id: "menu.setAngle",
+        label: "角度を設定",
+        menu: &["オブジェクト"],
+        shortcut: None,
+        params: r#"{"menu": id, "texts"?: [index], "graphics"?: [index], "buttons"?: [index], "degrees": number (時計回り、0.1° 単位)}"#,
+        enabled: always_enabled,
+        run: run_set_angle,
+        journal: true,
+    },
+];
+
+/// Turns texts, graphics and buttons by `degrees` (clockwise, absolute, to a tenth of a degree) about their box's
+/// centre (Encore's Rotate tool). A text's or graphic's box stays; a button's content turns about its content box
+/// and the button's rectangle becomes the area the turned content covers (Encore's bounds of the button set).
+fn run_set_angle(session: &mut Session, params: &Value) -> CommandResult {
+    let menu_id = MenuId(req_u64(params, "menu")?);
+    let texts = indexes(params, "texts")?;
+    let graphics = indexes(params, "graphics")?;
+    let buttons = indexes(params, "buttons")?;
+    if texts.is_empty() && graphics.is_empty() && buttons.is_empty() {
+        return Err("give the texts, graphics or buttons to turn".to_string());
+    }
+    let frame = frame_size(&session.project.settings);
+    let degrees = params
+        .get("degrees")
+        .and_then(Value::as_f64)
+        .filter(|degrees| degrees.is_finite() && degrees.abs() <= 3600.0)
+        .ok_or_else(|| "parameter \"degrees\" must be a number of degrees".to_string())?;
+    // Finite and small; `as` is exact after rounding.
+    let tenths = (degrees * 10.0).round() as i32;
+    let Some(menu) = session.project.menu_mut(menu_id) else {
+        return Err(format!("menu {} does not exist", menu_id.0));
+    };
+    if texts.iter().any(|index| *index >= menu.texts.len()) {
+        return Err("a text does not exist".to_string());
+    }
+    if graphics.iter().any(|index| *index >= menu.graphics.len()) {
+        return Err("a graphic does not exist".to_string());
+    }
+    if buttons.iter().any(|index| *index >= menu.buttons.len()) {
+        return Err("a button does not exist".to_string());
+    }
+    for index in buttons {
+        if let Some(button) = menu.buttons.get_mut(index) {
+            button.orientation = button.orientation.with_angle(tenths);
+        }
+        super::menu::refit_button(menu, index, frame)?;
+    }
+    for index in texts {
+        if let Some(text) = menu.texts.get_mut(index) {
+            text.orientation = text.orientation.with_angle(tenths);
+        }
+    }
+    for index in graphics {
+        if let Some(graphic) = menu.graphics.get_mut(index) {
+            graphic.orientation = graphic.orientation.with_angle(tenths);
+        }
+    }
+    Ok(empty_object())
+}
 
 /// What happens to every object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,9 +214,21 @@ fn run_orient(session: &mut Session, params: &Value) -> CommandResult {
             .buttons
             .get(index)
             .ok_or_else(|| format!("button {index} does not exist"))?;
+        // A button whose content has a box of its own (moved out or turned freely) turns its content about the box:
+        // a quarter turn is a quarter more of the free angle, and the rectangle is fitted to the content after.
+        if button.body.is_some() {
+            let orientation = match change {
+                Change::Rotate(turns) => button
+                    .orientation
+                    .with_angle(i32::from(button.orientation.angle) + 900 * i32::from(turns)),
+                _ => change.apply(button.orientation),
+            };
+            button_plan.push((index, orientation, None));
+            continue;
+        }
         let what = format!("button {}", index.saturating_add(1));
         let rect = turned_rect(button.rect, change, frame, &what)?;
-        button_plan.push((index, change.apply(button.orientation), rect));
+        button_plan.push((index, change.apply(button.orientation), Some(rect)));
     }
     let mut graphic_plan = Vec::with_capacity(graphics.len());
     for index in graphics {
@@ -179,7 +254,10 @@ fn run_orient(session: &mut Session, params: &Value) -> CommandResult {
     for (index, orientation, rect) in button_plan {
         if let Some(button) = menu.buttons.get_mut(index) {
             button.orientation = orientation;
-            button.rect = rect;
+            match rect {
+                Some(rect) => button.rect = rect,
+                None => super::menu::refit_button(menu, index, frame)?,
+            }
         }
     }
     for (index, orientation, rect) in graphic_plan {
@@ -241,7 +319,8 @@ mod tests {
             orientation,
             Orientation {
                 flip: false,
-                turns: 1
+                turns: 1,
+                angle: 0
             }
         );
         session.execute(
@@ -262,6 +341,45 @@ mod tests {
         Ok(())
     }
 
+    /// M6.191: the Rotate tool's command turns texts and graphics by any angle (to a tenth of a degree, wrapped),
+    /// keeps their box, refuses buttons, and undoes; a flip mirrors the turn.
+    #[test]
+    fn texts_and_graphics_turn_by_any_angle() -> Result<(), Box<dyn Error>> {
+        let (mut session, menu) = session_with_menu()?;
+        session.execute(
+            "menu.addShape",
+            &json!({"menu": menu, "shape": "rectangle", "x": 10, "y": 10, "w": 40, "h": 20}),
+        )?;
+        session.execute(
+            "menu.setAngle",
+            &json!({"menu": menu, "graphics": [0], "degrees": 30.04}),
+        )?;
+        let (rect, orientation) = graphic(&session, menu).ok_or("no graphic")?;
+        assert_eq!(orientation.angle, 300);
+        assert_eq!((rect.x, rect.y, rect.w, rect.h), (10, 10, 40, 20));
+        session.execute(
+            "menu.setAngle",
+            &json!({"menu": menu, "graphics": [0], "degrees": -200}),
+        )?;
+        assert_eq!(graphic(&session, menu).map(|(_, o)| o.angle), Some(1600));
+        session.execute(
+            "menu.orient",
+            &json!({"menu": menu, "graphics": [0], "flip": "horizontal"}),
+        )?;
+        assert_eq!(graphic(&session, menu).map(|(_, o)| o.angle), Some(-1600));
+        for bad in [
+            json!({"menu": menu, "graphics": [0], "degrees": "x"}),
+            json!({"menu": menu, "graphics": [5], "degrees": 10}),
+            json!({"menu": menu, "degrees": 10}),
+        ] {
+            assert!(session.execute("menu.setAngle", &bad).is_err(), "{bad}");
+        }
+        session.execute("edit.undo", &json!({}))?;
+        session.execute("edit.undo", &json!({}))?;
+        assert_eq!(graphic(&session, menu).map(|(_, o)| o.angle), Some(300));
+        Ok(())
+    }
+
     #[test]
     fn flips_add_up_like_mirrors() -> Result<(), Box<dyn Error>> {
         let (mut session, menu) = session_with_menu()?;
@@ -277,7 +395,8 @@ mod tests {
             graphic(&session, menu).map(|(_, o)| o),
             Some(Orientation {
                 flip: true,
-                turns: 0
+                turns: 0,
+                angle: 0
             })
         );
         // Mirroring both ways is half a turn; the rectangle does not move.
@@ -290,7 +409,8 @@ mod tests {
             orientation,
             Orientation {
                 flip: false,
-                turns: 2
+                turns: 2,
+                angle: 0
             }
         );
         assert_eq!((rect.x, rect.y, rect.w, rect.h), (10, 10, 40, 20));
@@ -299,7 +419,8 @@ mod tests {
             graphic(&session, menu).map(|(_, o)| o),
             Some(Orientation {
                 flip: true,
-                turns: 0
+                turns: 0,
+                angle: 0
             })
         );
         Ok(())

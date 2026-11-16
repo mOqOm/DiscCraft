@@ -138,14 +138,16 @@ impl Project {
 
     fn check_timelines(&self, problems: &mut Vec<Problem>) {
         for timeline in self.timelines.values() {
-            if !self.assets.contains_key(&timeline.video) {
-                problems.push(error(
-                    "missingAsset",
-                    format!(
-                        "timeline {} references missing video asset {}",
-                        timeline.id.0, timeline.video.0
-                    ),
-                ));
+            for video in timeline.videos() {
+                if !self.assets.contains_key(&video) {
+                    problems.push(error(
+                        "missingAsset",
+                        format!(
+                            "timeline {} references missing video asset {}",
+                            timeline.id.0, video.0
+                        ),
+                    ));
+                }
             }
 
             for track in &timeline.audio {
@@ -363,8 +365,43 @@ impl Project {
                     format!("asset {} is offline", asset.id.0),
                 ));
             }
+            if let Some(cues) = &asset.cues
+                && let Some(reason) = subtitle_cues_problem(cues)
+            {
+                problems.push(error(
+                    "subtitleCues",
+                    format!("subtitle asset {}: {reason}", asset.id.0),
+                ));
+            }
         }
     }
+}
+
+/// What is wrong with a subtitle asset's edited cues, if anything: too many, a cue that does not start before it
+/// ends or starts before zero, or cues out of order. (Overlaps a subtitle file brought in are left as they were.)
+fn subtitle_cues_problem(cues: &[crate::model::SubtitleCue]) -> Option<String> {
+    if cues.len() > crate::model::MAX_SUBTITLE_CUES {
+        return Some(format!(
+            "more than {} subtitles",
+            crate::model::MAX_SUBTITLE_CUES
+        ));
+    }
+    if let Some(index) = cues
+        .iter()
+        .position(|cue| cue.start.0 < 0 || cue.end.0 <= cue.start.0)
+    {
+        return Some(format!(
+            "subtitle {} does not start before it ends",
+            index + 1
+        ));
+    }
+    if let Some(index) = cues
+        .windows(2)
+        .position(|pair| matches!(pair, [a, b] if b.start.0 < a.start.0))
+    {
+        return Some(format!("subtitle {} is out of order", index + 2));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -419,6 +456,32 @@ mod tests {
         p.next_id = 1;
         let problems = p.check();
         assert!(has_code(&problems, "nextId"));
+        Ok(())
+    }
+
+    /// Edited subtitles must each start before they end, in order.
+    #[test]
+    fn edited_subtitles_are_checked() -> Result<(), Box<dyn Error>> {
+        use crate::model::SubtitleCue;
+        let mut p = valid_project()?;
+        let cue = |start, end| SubtitleCue {
+            start: Tick(start),
+            end: Tick(end),
+            text: "a".to_owned(),
+            look: crate::CueLook::default(),
+        };
+        let asset = p.assets.get_mut(&AssetId(1)).ok_or("missing asset")?;
+        asset.cues = Some(vec![cue(0, 10), cue(5, 20)]);
+        assert!(!has_code(&p.check(), "subtitleCues"));
+        for bad in [
+            vec![cue(10, 10)],
+            vec![cue(-1, 5)],
+            vec![cue(20, 30), cue(0, 10)],
+        ] {
+            let asset = p.assets.get_mut(&AssetId(1)).ok_or("missing asset")?;
+            asset.cues = Some(bad);
+            assert!(has_code(&p.check(), "subtitleCues"));
+        }
         Ok(())
     }
 

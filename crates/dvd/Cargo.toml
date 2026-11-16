@@ -25,5 +25,5 @@ thiserror.workspace = true
 workspace = true
 
 [dev-dependencies]
-craft-video.workspace = true
+craft-video = { workspace = true, features = ["mpeg2-decode"] }
 png.workspace = true

@@ -39,6 +39,26 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: false,
     },
     CommandSpec {
+        id: "asset.compositions",
+        label: "EffectCraft のプロジェクトのコンポジション",
+        menu: &["アセット"],
+        shortcut: None,
+        params: r#"{"asset": id}"#,
+        enabled: always_enabled,
+        run: run_compositions,
+        journal: false,
+    },
+    CommandSpec {
+        id: "asset.setComposition",
+        label: "アセットのコンポジションを選ぶ",
+        menu: &["アセット"],
+        shortcut: None,
+        params: r#"{"asset": id, "composition": string | null}"#,
+        enabled: always_enabled,
+        run: run_set_composition,
+        journal: true,
+    },
+    CommandSpec {
         id: "asset.probe",
         label: "アセットの長さを調べる",
         menu: &["アセット"],
@@ -92,7 +112,7 @@ fn run_frame(session: &mut Session, params: &Value) -> CommandResult {
     // "bars": false gives the picture without its letterbox bars (a video thumbnail stretches it over its area).
     let bright = matches!(params.get("bright"), Some(Value::Bool(true)));
     let bars = !matches!(params.get("bars"), Some(Value::Bool(false)));
-    let reader = disccraft_transcode::FrameReader::open(Path::new(&asset.path))
+    let reader = disccraft_transcode::FrameReader::open(&asset.media_file())
         .map_err(|error| error.to_string())?;
     let seconds = if bright {
         reader
@@ -131,7 +151,8 @@ fn run_thumbnail(session: &mut Session, params: &Value) -> CommandResult {
         .get(&AssetId(id))
         .ok_or_else(|| format!("asset.thumbnail: unknown asset: {id}"))?;
 
-    let path = Path::new(&asset.path);
+    let media = asset.media_file();
+    let path: &Path = &media;
     let (width, height, data, stride) = match asset.kind {
         AssetKind::Video => {
             let (width, height, rgb) =
@@ -276,7 +297,70 @@ fn run_list(session: &mut Session, _params: &Value) -> CommandResult {
     Ok(Value::Array(assets))
 }
 
+/// The compositions of an EffectCraft project asset: their names, the one the project has active, and the one
+/// chosen for the asset (`null`: the active one).
+fn run_compositions(session: &mut Session, params: &Value) -> CommandResult {
+    let id = AssetId(req_u64(params, "asset")?);
+    let asset = session
+        .project
+        .assets
+        .get(&id)
+        .ok_or_else(|| format!("asset {} does not exist", id.0))?;
+    let path = Path::new(&asset.path);
+    if !disccraft_motion::is_project(path) {
+        return Err("the asset is not an EffectCraft project".to_string());
+    }
+    let (names, active) =
+        disccraft_motion::compositions(path).map_err(|error| error.to_string())?;
+    let text = |name: &Option<String>| name.clone().map_or(Value::Null, Value::String);
+    Ok(object(&[
+        (
+            "compositions",
+            Value::Array(names.into_iter().map(Value::String).collect()),
+        ),
+        ("active", text(&active)),
+        ("chosen", text(&asset.composition)),
+    ]))
+}
+
+/// Chooses the composition an EffectCraft project asset shows (`null`: the project's active one).
+fn run_set_composition(session: &mut Session, params: &Value) -> CommandResult {
+    let id = AssetId(req_u64(params, "asset")?);
+    let composition = match params.get("composition") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| "parameter \"composition\" must be a string or null".to_string())?
+                .to_owned(),
+        ),
+    };
+    session
+        .project
+        .set_asset_composition(id, composition)
+        .map_err(|error| error.to_string())?;
+    session.sync_compositions();
+    Ok(empty_object())
+}
+
 /// Probes the duration of a video or audio asset.
+/// The length of a DTS file (`.dts`), which is not decoded but put on a DVD as it is: from its first frame and
+/// its size.
+fn dts_seconds(path: &Path) -> Option<f64> {
+    use std::io::Read as _;
+    if !path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("dts"))
+    {
+        return None;
+    }
+    let mut file = std::fs::File::open(path).ok()?;
+    let total = file.metadata().ok()?.len();
+    let mut head = [0u8; 64];
+    let read = file.read(&mut head).ok()?;
+    disccraft_psmux::es::dts::seconds_of(head.get(..read)?, total)
+}
+
 fn run_probe(session: &mut Session, params: &Value) -> CommandResult {
     let id = req_u64(params, "asset")?;
     let asset = session
@@ -291,7 +375,7 @@ fn run_probe(session: &mut Session, params: &Value) -> CommandResult {
     let mut seconds = None;
     match asset.kind {
         AssetKind::Video => {
-            if let Ok(probe) = disccraft_transcode::probe_video(Path::new(&asset.path)) {
+            if let Ok(probe) = disccraft_transcode::probe_video(&asset.media_file()) {
                 seconds = Some(probe.seconds);
                 let _ = fields.insert("width".to_string(), Value::from(probe.width));
                 let _ = fields.insert("height".to_string(), Value::from(probe.height));
@@ -303,7 +387,8 @@ fn run_probe(session: &mut Session, params: &Value) -> CommandResult {
             }
         }
         AssetKind::Audio => {
-            seconds = disccraft_transcode::probe_audio_seconds(Path::new(&asset.path)).ok();
+            seconds = dts_seconds(Path::new(&asset.path))
+                .or_else(|| disccraft_transcode::probe_audio_seconds(&asset.media_file()).ok());
         }
         _ => {}
     }
@@ -409,6 +494,8 @@ mod tests {
             path: "image.png".to_string(),
             kind: AssetKind::Image,
             offline: false,
+            cues: None,
+            composition: None,
             description: String::new(),
         };
         let _ = session.project.assets.insert(AssetId(7), asset);

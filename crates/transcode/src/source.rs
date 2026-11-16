@@ -87,6 +87,9 @@ impl Source {
     }
 
     fn open_media(path: &Path) -> Result<Self, TranscodeError> {
+        // A SoundCraft session is opened as its mixdown.
+        let resolved = crate::session::resolved(path)?;
+        let path = resolved.as_ref();
         let reader = FileReader::open(path).map_err(|error| io_error(path, error))?;
         let name = path
             .file_name()

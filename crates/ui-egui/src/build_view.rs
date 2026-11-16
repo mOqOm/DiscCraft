@@ -140,7 +140,7 @@ impl DiscCraftApp {
             )
             .clicked()
         {
-            self.start_build();
+            self.request_build();
         }
     }
 
@@ -451,11 +451,16 @@ impl DiscCraftApp {
                 egui::ScrollArea::vertical()
                     .max_height(140.0)
                     .show(ui, |ui| {
-                        for problem in &self.problems {
-                            let color = problem_color(&problem.severity);
-                            let text = format!("[{}] {}", problem.severity, problem.message);
-
-                            ui.colored_label(color, text);
+                        // The same lines as the Check Project window: the item's name and what is wrong.
+                        let all: Vec<&crate::build_panel::ProblemView> =
+                            self.problems.iter().collect();
+                        for row in crate::check_window::check_rows(&self.session.project, &all) {
+                            for (severity, text) in &row.problems {
+                                ui.colored_label(
+                                    problem_color(severity),
+                                    format!("{}: {text}", row.name),
+                                );
+                            }
                         }
                     });
             }

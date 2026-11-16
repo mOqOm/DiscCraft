@@ -7,14 +7,15 @@ filmcraft-time
 filmcraft-geom
 filmcraft-color
 filmcraft-bitstream
-filmcraft-h264enc
 filmcraft-frame
 filmcraft-media
 filmcraft-text
 filmcraft-audio-dsp
 filmcraft-codecs
+filmcraft-project
+filmcraft-format
 
-Pinned revision: 19d46c0748cf5c0ef5b0b2a421b85e8ae6d99db6
+Pinned revision: 01a36c1c493bc2f696383ed098fa1f826e5a0854
 
 Source files ported from FilmCraft (same license; ported at da535c18433dbe046553733b0ab08ce9bd736a51, unchanged in
 FilmCraft up to the pinned revision above):
@@ -33,20 +34,21 @@ adapted to a DiscCraft timeline's chapter points and playhead)
 
 This product includes software from PhotoCraft (https://github.com/storytold/photocraft), licensed under the MIT License or the Apache License 2.0, at your option.
 Crates used: photocraft-io, photocraft-doc, photocraft-compose, photocraft-geom, photocraft-raster.
-Pinned revision: 0fb40c534a8f2ca2e1aa6182f7ab06ae9fbed32e
+Pinned revision: 5bdbcc1181bb17134430fb927ec6945e7d3c6a31
 
 This product includes software from EffectCraft (https://github.com/storytold/effectcraft), licensed under the MIT License or the Apache License 2.0, at your option.
-Crates used: effectcraft-project, effectcraft-render, effectcraft-media, effectcraft-time, effectcraft-raster.
-Pinned revision: 69bce0ec66f4cb2b9a169b6a19f4d2363faadad3
+Crates used: effectcraft-engine, effectcraft-host (and, through them, EffectCraft's project, render, media and export crates).
+Pinned revision: d6c9ad664342c19e1ed473b4356292647117be62
 
 This product includes software from SoundCraft (https://github.com/storytold/soundcraft), licensed under the MIT License or the Apache License 2.0, at your option.
 Crates used: soundcraft-engine, soundcraft-dsp.
-Pinned revision: 1775ce506103248e96886c502c582ee7047e9c26
+Pinned revision: 2688ccac8859c45cc0830fb193c5979952507b16
 
 This product includes software from craft-libs (https://github.com/storytold/craft-libs), licensed under the MIT License
 or the Apache License 2.0, at your option. FilmCraft, PhotoCraft, EffectCraft and SoundCraft pull in its crates at their own
 revisions. DiscCraft uses directly craft-audio (its AC-3 encoder, which makes the transcoded soundtracks Dolby Digital;
-revision 47107f660191de2f0b425569506f4daa4faadac9) and craft-ui (its docking, which arranges the panels and workspaces;
-same revision), and in tests only craft-video (MPEG-2 decoder, revision
-47107f660191de2f0b425569506f4daa4faadac9) and craft-psd (PSD writer, revision 09dcbc225b95232998498a40ca56e24716571d53). Its vendored Hayro crates are patched to
+revision 156b491b91f3693f4fce53bf69bb97791f51198f), craft-video (its H.264 encoder, formerly FilmCraft's
+filmcraft-h264enc, which makes the HD Blu-ray video; the same revision; in tests also its MPEG-2 decoder) and craft-ui
+(its docking, which arranges the panels and workspaces; revision 47107f660191de2f0b425569506f4daa4faadac9), and in tests
+only craft-psd (PSD writer, revision ad8faa1c136ce289e9f132c9137d0cd913bd4ef6). Its vendored Hayro crates are patched to
 revision 47107f660191de2f0b425569506f4daa4faadac9 in Cargo.toml.

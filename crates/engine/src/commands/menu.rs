@@ -153,6 +153,36 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "button.setLabelOffset",
+        label: "ボタンの文字の位置を設定",
+        menu: &["ボタン"],
+        shortcut: None,
+        params: r#"{"menu": id, "button": index, "x": int, "y": int} (元の場所からのずれ。ボタンの外に出すとボタンの範囲が広がる)"#,
+        enabled: always_enabled,
+        run: run_set_label_offset,
+        journal: true,
+    },
+    CommandSpec {
+        id: "button.setThumbnailOffset",
+        label: "ボタンのビデオサムネールの位置を設定",
+        menu: &["ボタン"],
+        shortcut: None,
+        params: r#"{"menu": id, "button": index, "x": int, "y": int} (元の場所からのずれ。ボタンの外に出すとボタンの範囲が広がる)"#,
+        enabled: always_enabled,
+        run: run_set_thumbnail_offset,
+        journal: true,
+    },
+    CommandSpec {
+        id: "button.setThumbnailArea",
+        label: "ボタンのビデオサムネールの範囲を設定",
+        menu: &["ボタン"],
+        shortcut: None,
+        params: r#"{"menu": id, "button": index, "area": {"x": int, "y": int, "w": int, "h": int}} (フレームの座標。ボタンの中)"#,
+        enabled: always_enabled,
+        run: run_set_thumbnail_area,
+        journal: true,
+    },
+    CommandSpec {
         id: "button.setRect",
         label: "ボタンの位置と大きさを設定",
         menu: &["ボタン"],
@@ -440,6 +470,14 @@ fn run_create(session: &mut Session, params: &Value) -> CommandResult {
         .project
         .add_menu(name)
         .map_err(|error| error.to_string())?;
+    // As in Encore, the first menu becomes the disc's title button.
+    session.project.adopt_title_remote(id);
+    // Encore's blank menu comes with guides on the action-safe (5%) and title-safe (10%) lines, hidden until
+    // the guides are shown.
+    let frame = disccraft_project::frame_size(&session.project.settings);
+    if let Some(menu) = session.project.menu_mut(id) {
+        menu.guides = disccraft_project::safe_area_guides(frame);
+    }
 
     Ok(object(&[("menu", Value::from(id.0))]))
 }
@@ -837,7 +875,140 @@ fn run_set_rect(session: &mut Session, params: &Value) -> CommandResult {
         return Err(format!("button index {button} is out of range"));
     };
 
-    target.rect = rect;
+    target.set_rect(rect);
+    Ok(empty_object())
+}
+
+/// Fits button `index`'s rectangle to its content (Encore's bounds of a button set): when the content is moved out
+/// of its box or turned, the rectangle becomes the area the content covers and the box is kept relative to it;
+/// otherwise the button is its box again.
+pub(crate) fn refit_button(menu: &mut Menu, index: usize, frame: (u16, u16)) -> Result<(), String> {
+    let button = menu
+        .buttons
+        .get(index)
+        .ok_or_else(|| format!("button index {index} is out of range"))?
+        .clone();
+    let content = button.content_box();
+    let extent = disccraft_menu::button_extent(menu, &button, frame);
+    let turned = disccraft_project::normalized_angle(i32::from(button.orientation.angle)) != 0;
+    let target = menu
+        .buttons
+        .get_mut(index)
+        .ok_or_else(|| format!("button index {index} is out of range"))?;
+    if !turned && extent == content {
+        target.rect = content;
+        target.body = None;
+    } else {
+        let relative =
+            |start: u16, from: u16| i16::try_from(i32::from(start) - i32::from(from)).unwrap_or(0);
+        target.body = Some(disccraft_project::ContentBox {
+            x: relative(content.x, extent.x),
+            y: relative(content.y, extent.y),
+            w: content.w,
+            h: content.h,
+        });
+        target.rect = extent;
+    }
+    Ok(())
+}
+
+/// Whether `rect` lies inside a frame of `frame` size.
+fn inside_frame(rect: Rect, frame: (u16, u16)) -> bool {
+    u32::from(rect.x) + u32::from(rect.w) <= u32::from(frame.0)
+        && u32::from(rect.y) + u32::from(rect.h) <= u32::from(frame.1)
+}
+
+/// An integer parameter as i16.
+fn coordinate(params: &Value, name: &str) -> Result<i16, String> {
+    params
+        .get(name)
+        .and_then(Value::as_i64)
+        .and_then(|value| i16::try_from(value).ok())
+        .ok_or_else(|| format!("parameter \"{name}\" must be an integer"))
+}
+
+/// Moves a button's text from its place (Encore's Direct Select tool on the text layer). The text may leave the
+/// button, whose rectangle then grows to take it in (it must stay inside the frame and clear of the other buttons).
+fn run_set_label_offset(session: &mut Session, params: &Value) -> CommandResult {
+    let menu_id = MenuId(req_u64(params, "menu")?);
+    let button = req_usize(params, "button")?;
+    let offset = [coordinate(params, "x")?, coordinate(params, "y")?];
+    let frame = disccraft_project::frame_size(&session.project.settings);
+    let Some(menu) = session.project.menu_mut(menu_id) else {
+        return Err(format!("menu {} does not exist", menu_id.0));
+    };
+    let Some(target) = menu.buttons.get_mut(button) else {
+        return Err(format!("button index {button} is out of range"));
+    };
+    target.label_offset = offset;
+    let moved = target.clone();
+    if disccraft_menu::label_bounds(menu, &moved).is_some_and(|bounds| !inside_frame(bounds, frame))
+    {
+        return Err("the button's text would leave the frame".to_string());
+    }
+    refit_button(menu, button, frame)?;
+    Ok(empty_object())
+}
+
+/// Moves a button's video thumbnail from its place (the Direct Select tool on Encore's `(%)` layer); the button's
+/// rectangle grows to take it in.
+fn run_set_thumbnail_offset(session: &mut Session, params: &Value) -> CommandResult {
+    let menu_id = MenuId(req_u64(params, "menu")?);
+    let button = req_usize(params, "button")?;
+    let offset = [coordinate(params, "x")?, coordinate(params, "y")?];
+    let frame = disccraft_project::frame_size(&session.project.settings);
+    let Some(menu) = session.project.menu_mut(menu_id) else {
+        return Err(format!("menu {} does not exist", menu_id.0));
+    };
+    let Some(target) = menu.buttons.get_mut(button) else {
+        return Err(format!("button index {button} is out of range"));
+    };
+    if target.thumbnail.is_none() {
+        return Err("the button has no video thumbnail".to_string());
+    }
+    target.thumbnail_offset = offset;
+    let placed = target.thumbnail_placed().map(|area| {
+        disccraft_project::rotated_bounds_about(
+            area,
+            target.content_centre(),
+            target.orientation.angle,
+        )
+    });
+    let left_or_top = |value: i16, start: u16| i32::from(start) + i32::from(value) < 0;
+    let thumbnail = target.thumbnail_rect();
+    if thumbnail
+        .is_some_and(|area| left_or_top(offset[0], area.x) || left_or_top(offset[1], area.y))
+        || placed.is_some_and(|area| !inside_frame(area, frame))
+    {
+        return Err("the video thumbnail would leave the frame".to_string());
+    }
+    refit_button(menu, button, frame)?;
+    Ok(empty_object())
+}
+
+/// Places a button's video thumbnail (Encore's `(%)` layer): a rectangle of the frame inside the button's content
+/// box, kept as a part of the box so it moves and scales with it.
+fn run_set_thumbnail_area(session: &mut Session, params: &Value) -> CommandResult {
+    let menu_id = MenuId(req_u64(params, "menu")?);
+    let button = req_usize(params, "button")?;
+    let area = req_rect(params, "area")?;
+    let Some(menu) = session.project.menu_mut(menu_id) else {
+        return Err(format!("menu {} does not exist", menu_id.0));
+    };
+    let Some(target) = menu.buttons.get_mut(button) else {
+        return Err(format!("button index {button} is out of range"));
+    };
+    let rect = target.content_box();
+    let inside = area.w >= 1
+        && area.h >= 1
+        && area.x >= rect.x
+        && area.y >= rect.y
+        && u32::from(area.x) + u32::from(area.w) <= u32::from(rect.x) + u32::from(rect.w)
+        && u32::from(area.y) + u32::from(area.h) <= u32::from(rect.y) + u32::from(rect.h);
+    if !inside {
+        return Err("the video thumbnail must lie inside its button".to_string());
+    }
+    target.thumbnail = disccraft_project::ThumbnailArea::within(rect, area);
     Ok(empty_object())
 }
 
@@ -1344,8 +1515,13 @@ fn psd_button(found: &PsdMenuButton) -> disccraft_project::Button {
         label_font_style: None,
         shadow: None,
         orientation: Default::default(),
+        hidden: false,
+        locked: false,
         thumbnail: found.thumbnail,
         subpicture: found.subpicture.clone(),
+        label_offset: [0, 0],
+        thumbnail_offset: [0, 0],
+        body: None,
     }
 }
 
@@ -1389,6 +1565,7 @@ fn run_import(session: &mut Session, params: &Value) -> CommandResult {
                 .map_err(|error| error.to_string())?
         }
     };
+    session.project.adopt_title_remote(menu_id);
     let Some(menu) = session.project.menu_mut(menu_id) else {
         return Err(format!("menu {} does not exist", menu_id.0));
     };
@@ -2390,6 +2567,168 @@ mod tests {
         session.undo()?;
         assert_eq!(session.project.menus.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M6.193 (Encore): a button's text moved out of the button grows the button to take it in (its content keeps
+    /// a box of its own) and moved back gives the plain button again; a part moved onto another button is allowed,
+    /// as Encore allows it, and the project check reports the overlap (M6.194); a button turned freely covers its
+    /// turned content; all undo.
+    #[test]
+    fn a_button_grows_to_its_moved_or_turned_content() -> Result<(), Box<dyn Error>> {
+        let mut session = Session::new();
+        let menu = session.project.add_menu(None)?;
+        let rect = disccraft_project::Rect {
+            x: 100,
+            y: 100,
+            w: 200,
+            h: 60,
+        };
+        let _ = session
+            .project
+            .add_button(menu, "Play".to_owned(), Some(rect), Link::NotSet)?;
+        let other = disccraft_project::Rect {
+            x: 100,
+            y: 300,
+            w: 200,
+            h: 60,
+        };
+        let _ = session
+            .project
+            .add_button(menu, "Other".to_owned(), Some(other), Link::NotSet)?;
+        let first = |session: &Session| {
+            session
+                .project
+                .menu(menu)
+                .and_then(|m| m.buttons.first())
+                .cloned()
+                .ok_or("no button")
+        };
+        // Out to the right: the rectangle reaches the text; the content box stays where the button was.
+        session.execute(
+            "button.setLabelOffset",
+            &serde_json::json!({"menu": menu.0, "button": 0, "x": 220, "y": 0}),
+        )?;
+        let grown = first(&session)?;
+        assert_eq!((grown.rect.x, grown.rect.y, grown.rect.h), (100, 100, 60));
+        assert!(grown.rect.w > 300, "{:?}", grown.rect);
+        assert_eq!(grown.content_box(), rect);
+        // Back to its place: the plain button again.
+        session.execute(
+            "button.setLabelOffset",
+            &serde_json::json!({"menu": menu.0, "button": 0, "x": 0, "y": 0}),
+        )?;
+        let back = first(&session)?;
+        assert_eq!((back.rect, back.body), (rect, None));
+        // Down onto the other button: allowed (Encore), and the check reports the overlap until it is undone.
+        session.execute(
+            "button.setLabelOffset",
+            &serde_json::json!({"menu": menu.0, "button": 0, "x": 0, "y": 200}),
+        )?;
+        assert!(first(&session)?.rect.h > 200);
+        assert!(
+            session
+                .project
+                .check()
+                .iter()
+                .any(|problem| problem.code == "buttonsOverlap")
+        );
+        session.execute("edit.undo", &serde_json::json!({}))?;
+        assert_eq!(first(&session)?.rect, rect);
+        // Turned a quarter: on its side about (200, 130), 60 wide and 200 high.
+        session.execute(
+            "menu.setAngle",
+            &serde_json::json!({"menu": menu.0, "buttons": [0], "degrees": 90}),
+        )?;
+        let turned = first(&session)?;
+        assert_eq!(
+            turned.rect,
+            disccraft_project::Rect {
+                x: 170,
+                y: 30,
+                w: 60,
+                h: 200
+            }
+        );
+        assert_eq!(turned.content_box(), rect);
+        // Moving the turned button moves its content with it.
+        session.execute(
+            "button.setRect",
+            &serde_json::json!({"menu": menu.0, "button": 0, "rect": {"x": 180, "y": 40, "w": 60, "h": 200}}),
+        )?;
+        assert_eq!(
+            first(&session)?.content_box(),
+            disccraft_project::Rect {
+                x: 110,
+                y: 110,
+                ..rect
+            }
+        );
+        session.execute("edit.undo", &serde_json::json!({}))?;
+        session.execute("edit.undo", &serde_json::json!({}))?;
+        assert_eq!((first(&session)?.rect, first(&session)?.body), (rect, None));
+        Ok(())
+    }
+
+    /// M6.190: the Direct Select tool's commands move a button's text inside the button and place its video
+    /// thumbnail inside it; anything leaving the button is refused, and both undo.
+    #[test]
+    fn a_buttons_text_and_thumbnail_move_inside_it() -> Result<(), Box<dyn Error>> {
+        let mut session = Session::new();
+        let menu = session.project.add_menu(None)?;
+        let rect = disccraft_project::Rect {
+            x: 100,
+            y: 100,
+            w: 300,
+            h: 100,
+        };
+        let _ = session
+            .project
+            .add_button(menu, "Go".to_owned(), Some(rect), Link::NotSet)?;
+        let at = |session: &Session| {
+            session
+                .project
+                .menu(menu)
+                .and_then(|m| m.buttons.first())
+                .map(|b| (b.label_offset, b.thumbnail))
+        };
+        session.execute(
+            "button.setLabelOffset",
+            &serde_json::json!({"menu": menu.0, "button": 0, "x": 60, "y": -5}),
+        )?;
+        assert_eq!(at(&session).map(|a| a.0), Some([60, -5]));
+        assert!(
+            session
+                .execute(
+                    "button.setLabelOffset",
+                    &serde_json::json!({"menu": menu.0, "button": 0, "x": 900, "y": 0}),
+                )
+                .is_err()
+        );
+        session.execute(
+            "button.setThumbnailArea",
+            &serde_json::json!({"menu": menu.0, "button": 0, "area": {"x": 100, "y": 100, "w": 150, "h": 50}}),
+        )?;
+        assert_eq!(
+            at(&session).and_then(|a| a.1),
+            Some(disccraft_project::ThumbnailArea {
+                x: 0,
+                y: 0,
+                w: 5_000,
+                h: 5_000
+            })
+        );
+        assert!(
+            session
+                .execute(
+                    "button.setThumbnailArea",
+                    &serde_json::json!({"menu": menu.0, "button": 0, "area": {"x": 90, "y": 100, "w": 50, "h": 50}}),
+                )
+                .is_err()
+        );
+        session.execute("edit.undo", &serde_json::json!({}))?;
+        session.execute("edit.undo", &serde_json::json!({}))?;
+        assert_eq!(at(&session), Some(([0, 0], None)));
         Ok(())
     }
 

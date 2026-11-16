@@ -104,9 +104,12 @@ impl DiscCraftApp {
             .iter()
             .enumerate()
             .map(|(index, graphic)| {
-                self.graphic_drag
+                let rect = self
+                    .graphic_drag
                     .filter(|drag| drag.menu == menu.id && drag.index == index)
-                    .map_or(graphic.rect, |drag| drag.now)
+                    .map_or(graphic.rect, |drag| drag.now);
+                // As drawn: turned by its free angle.
+                disccraft_project::rotated_bounds(rect, graphic.orientation.angle)
             })
             .collect()
     }
@@ -150,10 +153,16 @@ impl DiscCraftApp {
         point: egui::Pos2,
     ) -> Option<(usize, DragKind)> {
         let selected = self.selected_menu_graphic(menu.id);
+        // A hidden or locked graphic (the Layers panel) is not picked.
         self.graphic_rects(menu)
             .iter()
             .enumerate()
             .rev()
+            .filter(|(index, _)| {
+                menu.graphics
+                    .get(*index)
+                    .is_some_and(|graphic| !graphic.hidden && !graphic.locked)
+            })
             .find_map(|(index, rect)| {
                 let on_canvas = to_canvas(*rect, frame, canvas);
                 if !on_canvas.contains(point) {

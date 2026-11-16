@@ -74,6 +74,7 @@ pub(crate) fn build_title_set(
             &loaded.program_cells,
             loaded.layer_break_cell,
         ),
+        loaded.palette,
     )?;
     // The colours the title's subtitles draw with (drawn text's, and passed-through subpictures' own).
     pgc.palette = loaded.palette;
@@ -110,6 +111,13 @@ pub(crate) fn build_title_set(
         video: VideoAttr {
             standard,
             wide: loaded.wide,
+            // The title's own picture size (a video used as it is may be one of the smaller DVD sizes).
+            resolution: disccraft_ifo::Resolution::of_picture(
+                loaded.video.sequence.width,
+                loaded.video.sequence.height,
+                standard,
+            )
+            .ok_or_else(|| invalid("the video's picture size is not a DVD size"))?,
         },
         audio: audio_attrs,
         pgcs,
@@ -374,6 +382,10 @@ fn mux_input<'a>(loaded: &'a LoadedTitle) -> MuxInput<'a> {
                 stream,
                 data: data.as_slice(),
             },
+            LoadedAudio::Dts { stream, data, .. } => AudioSource::Dts {
+                stream,
+                data: data.as_slice(),
+            },
             LoadedAudio::Lpcm { stream, .. } => AudioSource::Lpcm(stream),
         })
         .collect();
@@ -410,6 +422,9 @@ fn build_audio_attrs(audio: &[LoadedAudio]) -> Result<Vec<AudioAttr>, DvdError> 
             LoadedAudio::Ac3 {
                 stream, language, ..
             } => (AudioCoding::Ac3, channels_u8(stream.channels)?, *language),
+            LoadedAudio::Dts {
+                stream, language, ..
+            } => (AudioCoding::Dts, stream.channels, *language),
             LoadedAudio::Lpcm { stream, language } => {
                 (AudioCoding::Lpcm, channels_u8(stream.channels)?, *language)
             }
@@ -434,6 +449,7 @@ fn build_pgc(
     standard: Standard,
     nav: &TitleNav,
     (cell_still, program_cells, layer_break_cell): (u8, &[usize], Option<usize>),
+    palette: [u32; 16],
 ) -> Result<Pgc, DvdError> {
     if layout.cells.is_empty() {
         return Err(invalid("no cells"));
@@ -489,7 +505,7 @@ fn build_pgc(
         cell_commands: Vec::new(),
         subpicture_streams: u8::try_from(subtitle_streams)
             .map_err(|_| DvdError::Invalid("too many subtitle streams".to_string()))?,
-        palette: crate::source::text_palette(),
+        palette,
         ..Pgc::default()
     })
 }

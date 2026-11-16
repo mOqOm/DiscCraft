@@ -477,6 +477,7 @@ mod tests {
                 audio_clips: Vec::new(),
                 loop_audio: false,
                 fit_to_audio: false,
+                subtitle_colors: None,
             },
         );
 
@@ -505,6 +506,7 @@ mod tests {
                 audio_clips: Vec::new(),
                 loop_audio: false,
                 fit_to_audio: false,
+                subtitle_colors: None,
             },
         );
 
@@ -565,6 +567,14 @@ mod tests {
                 duration: Tick(5000 * 254_016_000),
                 scale: crate::lists::SlideScale::ScaleAndMatte,
                 transition: None,
+                subtitle: false,
+                name: String::new(),
+                description: String::new(),
+                subtitle_without_name: false,
+                subtitle_description: false,
+                subtitle_stroke: crate::SlideStroke::default(),
+                subtitle_align: 100,
+                subtitle_group: 0,
             });
 
         let problems = problems_for(&project);
@@ -587,6 +597,14 @@ mod tests {
                 duration: Tick(5000 * 254_016_000),
                 scale: crate::lists::SlideScale::ScaleAndMatte,
                 transition: None,
+                subtitle: false,
+                name: String::new(),
+                description: String::new(),
+                subtitle_without_name: false,
+                subtitle_description: false,
+                subtitle_stroke: crate::SlideStroke::default(),
+                subtitle_align: 100,
+                subtitle_group: 0,
             });
 
         let problems = problems_for(&project);
@@ -609,6 +627,14 @@ mod tests {
                 duration: Tick(100 * 254_016_000),
                 scale: crate::lists::SlideScale::ScaleAndMatte,
                 transition: None,
+                subtitle: false,
+                name: String::new(),
+                description: String::new(),
+                subtitle_without_name: false,
+                subtitle_description: false,
+                subtitle_stroke: crate::SlideStroke::default(),
+                subtitle_align: 100,
+                subtitle_group: 0,
             });
 
         let problems = problems_for(&project);

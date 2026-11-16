@@ -147,6 +147,44 @@ mod tests {
     use serde_json::json;
     use std::error::Error;
 
+    /// As in Encore, the first timeline made becomes the disc's first play and the first menu its title button;
+    /// later ones, and links already set, change nothing.
+    #[test]
+    fn the_first_timeline_and_menu_become_the_discs_links() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::Link;
+        let mut session = Session::new();
+        let asset = session
+            .project
+            .add_asset(std::path::Path::new("movie.mp4"))?
+            .0;
+        assert_eq!(session.project.settings.first_play, Link::NotSet);
+        let first = session.execute("timeline.create", &json!({ "asset": asset }))?;
+        let first = first
+            .get("timeline")
+            .and_then(|v| v.as_u64())
+            .ok_or("timeline")?;
+        let _ = session.execute("timeline.create", &json!({ "asset": asset }))?;
+        assert!(matches!(
+            session.project.settings.first_play,
+            Link::Timeline { id, chapter: 0 } if id.0 == first
+        ));
+        assert_eq!(session.project.settings.title_remote, Link::NotSet);
+        let menu = session.execute("menu.create", &json!({}))?;
+        let menu = menu.get("menu").and_then(|v| v.as_u64()).ok_or("menu")?;
+        let _ = session.execute("menu.create", &json!({}))?;
+        assert!(matches!(
+            session.project.settings.title_remote,
+            Link::Menu { id, button: None } if id.0 == menu
+        ));
+        // Undoing the creation undoes the link with it.
+        for _ in 0..4 {
+            session.execute("edit.undo", &json!({}))?;
+        }
+        assert_eq!(session.project.settings.first_play, Link::NotSet);
+        assert_eq!(session.project.settings.title_remote, Link::NotSet);
+        Ok(())
+    }
+
     #[test]
     fn flowchart_nodes_move_check_their_input_and_undo() -> Result<(), Box<dyn Error>> {
         let mut session = Session::new();

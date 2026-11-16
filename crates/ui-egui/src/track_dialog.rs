@@ -97,20 +97,75 @@ impl DiscCraftApp {
             return;
         };
         let asset = self.track_assets(kind).first().map(|(id, _)| *id);
-        // 言語の初めは、ディスクのオーディオの言語、なければ DiscCraft の表示言語（M13.8 と同じ）。
-        let language = self
-            .session
-            .project
-            .settings
-            .audio_language
-            .clone()
-            .unwrap_or_else(|| crate::i18n::current().code().to_owned());
+        let language = self.default_track_language();
         self.track_dialog = Some(TrackDialog {
             timeline,
             kind,
             asset,
             language,
         });
+    }
+
+    /// 新しいトラックの言語の初め: ディスクのオーディオの言語、なければ DiscCraft の表示言語（M13.8 と同じ）。
+    pub(crate) fn default_track_language(&self) -> String {
+        self.session
+            .project
+            .settings
+            .audio_language
+            .clone()
+            .unwrap_or_else(|| crate::i18n::current().code().to_owned())
+    }
+
+    /// プロジェクトパネルからタイムラインビューアへドロップされた項目（Encore と同じく、素材をタイムラインへ
+    /// ドラッグして足す）: 音声と音つきの映像は音声トラック、字幕は字幕トラックとして、その場で足す（取り消せる）。
+    pub(crate) fn drop_on_timeline(&mut self, timeline: TimelineId, item: u64) {
+        let asset = AssetId(item);
+        let Some(kind) = self
+            .session
+            .project
+            .assets
+            .get(&asset)
+            .map(|asset| asset.kind)
+        else {
+            self.status =
+                tl!("Drop audio, a video with sound or subtitles onto a timeline").to_string();
+            return;
+        };
+        // Encore: a video dropped on the video track is butted on to the end of the clips, with a chapter at the
+        // join. A video with sound adds its sound as an audio track, as before.
+        if kind == disccraft_project::AssetKind::Video && !self.asset_probe(asset).audio {
+            if self
+                .run_command(
+                    "timeline.appendVideo",
+                    serde_json::json!({ "timeline": timeline.0, "asset": item }),
+                )
+                .is_some()
+            {
+                self.status = tl!("Added a video clip").to_string();
+            }
+            return;
+        }
+        let track = match kind {
+            disccraft_project::AssetKind::Audio => Some(TrackKind::Audio),
+            disccraft_project::AssetKind::Video if self.asset_probe(asset).audio => {
+                Some(TrackKind::Audio)
+            }
+            disccraft_project::AssetKind::Subtitle => Some(TrackKind::Subtitle),
+            _ => None,
+        };
+        let Some(track) = track else {
+            self.status =
+                tl!("Drop audio, a video with sound or subtitles onto a timeline").to_string();
+            return;
+        };
+        let language = self.default_track_language();
+        let (command, params) = track.add_command(timeline.0, item, &language);
+        if self.run_command(command, params).is_some() {
+            self.status = match track {
+                TrackKind::Audio => tl!("Added an audio track").to_string(),
+                TrackKind::Subtitle => tl!("Added a subtitle track").to_string(),
+            };
+        }
     }
 
     /// `asset` を選んだ状態でトラックの追加ダイアログを開く（字幕を読み込み… の続き）。

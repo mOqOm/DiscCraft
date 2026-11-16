@@ -145,6 +145,44 @@ pub struct Button {
     /// subpicture or the frame.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subpicture: Option<crate::subpicture::Subpicture>,
+    /// Where the button's text is moved from its place in the button's content box, in frame pixels (x, y), before
+    /// the content is turned: Encore's Direct Select tool moving the text layer of the button set.
+    #[serde(default, skip_serializing_if = "is_zero_offset")]
+    pub label_offset: [i16; 2],
+    /// Where the button's video thumbnail is moved from its place, in frame pixels, before the content is turned
+    /// (the Direct Select tool on Encore's `(%)` layer).
+    #[serde(default, skip_serializing_if = "is_zero_offset")]
+    pub thumbnail_offset: [i16; 2],
+    /// The box the button's own content (its text, video thumbnail and subpicture) is laid out in and turned about,
+    /// relative to `rect`'s top-left corner, when the content was moved out of the button or turned by a free angle
+    /// (Encore's button set, whose bounds are its layers'): `rect` is then the area the content covers, which the
+    /// highlight and the remote use. `None`: the content box is `rect` itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<ContentBox>,
+    /// Hidden (Encore's eye on the button set in the Layers panel): its text and video thumbnail are not drawn in
+    /// the menu viewer nor on the disc; it stays a button (its highlight and links work).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+    /// Locked (Encore's lock in the Layers panel): cannot be picked or moved in the menu viewer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
+}
+
+/// A button's content box relative to its rectangle's top-left corner (see [`Button::body`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentBox {
+    /// Left edge from the rectangle's left edge (negative: to the left of it).
+    pub x: i16,
+    /// Top edge from the rectangle's top edge.
+    pub y: i16,
+    /// Width.
+    pub w: u16,
+    /// Height.
+    pub h: u16,
+}
+
+fn is_zero_offset(offset: &[i16; 2]) -> bool {
+    *offset == [0, 0]
 }
 
 impl Button {
@@ -397,6 +435,16 @@ pub struct MenuText {
     /// Mirrored or turned (Encore's Object ▸ Flip / Rotate).
     #[serde(default, skip_serializing_if = "Orientation::is_identity")]
     pub orientation: Orientation,
+    /// Written top to bottom (Encore's Vertical Text tool): Japanese characters upright, other runs (Latin letters,
+    /// digits) turned a quarter clockwise; each line is a column, the columns run right to left.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vertical: bool,
+    /// Hidden (Encore's eye in the Layers panel): not drawn in the menu viewer nor on the disc.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+    /// Locked (Encore's lock in the Layers panel): cannot be picked or moved in the menu viewer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
 }
 
 /// Character and paragraph formatting of a [`MenuText`] (the parts of Encore's Character panel DiscCraft draws):
@@ -540,8 +588,9 @@ impl TextScript {
     }
 }
 
-/// How an object is mirrored and turned (Encore's Object ▸ Flip Horizontal / Flip Vertical / Rotate ▸): first
-/// mirrored left to right when `flip`, then turned `turns` quarter turns clockwise about its centre.
+/// How an object is mirrored and turned (Encore's Object ▸ Flip Horizontal / Flip Vertical / Rotate ▸ and its
+/// Rotate tool): first mirrored left to right when `flip`, then turned `turns` quarter turns clockwise about its
+/// centre, then turned `angle` more about the same centre.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Orientation {
@@ -549,12 +598,96 @@ pub struct Orientation {
     pub flip: bool,
     /// Quarter turns clockwise (0 to 3).
     pub turns: u8,
+    /// A free turn clockwise on screen after the quarter turns, in tenths of a degree (-1799 to 1800; Encore's
+    /// Rotate tool). The object's own box (its position and size) stays as it is; it is drawn turned about the
+    /// box's centre.
+    #[serde(skip_serializing_if = "is_zero_angle")]
+    pub angle: i16,
+}
+
+fn is_zero_angle(angle: &i16) -> bool {
+    *angle == 0
+}
+
+/// `tenths` of a degree as the same turn within -1799 to 1800.
+pub fn normalized_angle(tenths: i32) -> i16 {
+    let turn = tenths.rem_euclid(3600);
+    let signed = if turn > 1800 { turn - 3600 } else { turn };
+    i16::try_from(signed).unwrap_or(0)
+}
+
+/// The frame rectangle `rect` covers when it is turned by `angle` (tenths of a degree) about the point `pivot`: the
+/// bounds of its turned corners, kept at the frame's top and left edge.
+pub fn rotated_bounds_about(rect: Rect, pivot: (f32, f32), angle: i16) -> Rect {
+    if normalized_angle(i32::from(angle)) == 0 {
+        return rect;
+    }
+    let (sin, cos) = (f32::from(angle) / 10.0).to_radians().sin_cos();
+    let (x0, y0) = (f32::from(rect.x), f32::from(rect.y));
+    let (x1, y1) = (x0 + f32::from(rect.w), y0 + f32::from(rect.h));
+    let turned = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| {
+        let (dx, dy) = (x - pivot.0, y - pivot.1);
+        (pivot.0 + dx * cos - dy * sin, pivot.1 + dx * sin + dy * cos)
+    });
+    let left = turned.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+    let top = turned.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+    let right = turned.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+    let bottom = turned.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+    // Finite (from u16 corners); `as` saturates into u16.
+    let x = left.floor().max(0.0) as u16;
+    let y = top.floor().max(0.0) as u16;
+    Rect {
+        x,
+        y,
+        w: (right.ceil() - f32::from(x)).max(1.0) as u16,
+        h: (bottom.ceil() - f32::from(y)).max(1.0) as u16,
+    }
+}
+
+/// The frame rectangle `rect` covers when it is turned by `angle` (tenths of a degree) about its centre: the
+/// bounds of the turned box (the box itself when it is not turned), kept at the frame's top and left edge.
+pub fn rotated_bounds(rect: Rect, angle: i16) -> Rect {
+    if normalized_angle(i32::from(angle)) == 0 {
+        return rect;
+    }
+    let radians = f32::from(angle) / 10.0 * std::f32::consts::PI / 180.0;
+    let (sin, cos) = (radians.sin().abs(), radians.cos().abs());
+    let (w, h) = (f32::from(rect.w), f32::from(rect.h));
+    let (bw, bh) = (w * cos + h * sin, w * sin + h * cos);
+    let (cx, cy) = (f32::from(rect.x) + w * 0.5, f32::from(rect.y) + h * 0.5);
+    let x0 = (cx - bw * 0.5).floor();
+    let y0 = (cy - bh * 0.5).floor();
+    let x1 = (cx + bw * 0.5).ceil();
+    let y1 = (cy + bh * 0.5).ceil();
+    // Finite (from u16 sides); `as` saturates into u16.
+    let x = x0.max(0.0) as u16;
+    let y = y0.max(0.0) as u16;
+    Rect {
+        x,
+        y,
+        w: ((x1 - f32::from(x)).max(1.0)) as u16,
+        h: ((y1 - f32::from(y)).max(1.0)) as u16,
+    }
 }
 
 impl Orientation {
     /// Whether the object is drawn as it is (nothing to save).
     pub fn is_identity(&self) -> bool {
-        !self.flip && self.turns.is_multiple_of(4)
+        !self.flip && self.turns.is_multiple_of(4) && normalized_angle(i32::from(self.angle)) == 0
+    }
+
+    /// The free turn in radians (clockwise on screen).
+    pub fn angle_radians(&self) -> f32 {
+        f32::from(self.angle) / 10.0 * std::f32::consts::PI / 180.0
+    }
+
+    /// The same orientation with the free turn set to `tenths` of a degree.
+    #[must_use]
+    pub fn with_angle(self, tenths: i32) -> Self {
+        Self {
+            angle: normalized_angle(tenths),
+            ..self
+        }
     }
 
     /// Whether the object lies on its side (its drawn width is its upright height).
@@ -568,6 +701,8 @@ impl Orientation {
         Self {
             flip: !self.flip,
             turns: (4 - self.turns % 4) % 4,
+            // A mirror turns the other way.
+            angle: normalized_angle(-i32::from(self.angle)),
         }
     }
 
@@ -577,6 +712,7 @@ impl Orientation {
         Self {
             flip: !self.flip,
             turns: (6 - self.turns % 4) % 4,
+            angle: normalized_angle(-i32::from(self.angle)),
         }
     }
 
@@ -586,6 +722,7 @@ impl Orientation {
         Self {
             flip: self.flip,
             turns: (self.turns % 4 + quarter_turns % 4) % 4,
+            angle: self.angle,
         }
     }
 
@@ -596,6 +733,16 @@ impl Orientation {
         for _ in 0..self.turns % 4 {
             // A quarter turn clockwise on screen takes (x, y) to (-y, x).
             (a, b, c, d) = (-b, a, -d, c);
+        }
+        if normalized_angle(i32::from(self.angle)) != 0 {
+            // Then the free turn: clockwise on screen takes (x, y) to (x cos - y sin, x sin + y cos).
+            let (sin, cos) = self.angle_radians().sin_cos();
+            (a, b, c, d) = (
+                cos * a - sin * b,
+                sin * a + cos * b,
+                cos * c - sin * d,
+                sin * c + cos * d,
+            );
         }
         [a, b, c, d]
     }
@@ -1218,6 +1365,29 @@ impl ButtonDefaults {
 /// The most guides on one menu.
 pub const MAX_MENU_GUIDES: usize = 64;
 
+/// The guides Encore CS6's blank menu starts with: the action-safe lines (5% in from each edge) and the title-safe
+/// lines (10% in), four each way (1920x1080: x 96 / 192 / 1728 / 1824, y 54 / 108 / 972 / 1026).
+pub fn safe_area_guides(frame: (u16, u16)) -> Vec<Guide> {
+    let lines = |length: u16| {
+        let (action, title) = (length / 20, length / 10);
+        [
+            action,
+            title,
+            length.saturating_sub(title),
+            length.saturating_sub(action),
+        ]
+    };
+    let across = lines(frame.1).into_iter().map(|position| Guide {
+        orientation: GuideOrientation::Horizontal,
+        position,
+    });
+    let down = lines(frame.0).into_iter().map(|position| Guide {
+        orientation: GuideOrientation::Vertical,
+        position,
+    });
+    down.chain(across).collect()
+}
+
 /// A guide line in the menu viewer (Encore's guides): buttons snap to it while dragged. Guides are kept with the
 /// menu and never reach the disc.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1434,6 +1604,11 @@ impl Project {
             orientation: Default::default(),
             thumbnail: None,
             subpicture: None,
+            label_offset: [0, 0],
+            thumbnail_offset: [0, 0],
+            body: None,
+            hidden: false,
+            locked: false,
         });
 
         Ok(index)
@@ -1626,8 +1801,52 @@ mod orientation_tests {
         let mirrored = Orientation {
             flip: true,
             turns: 0,
+            angle: 0,
         };
         assert_eq!(mirrored.upright_pixel(0, 0, 3, 2), (2, 0));
+    }
+
+    /// M6.191: the free turn (tenths of a degree) wraps into -179.9..180, turns the matrix clockwise on screen, is
+    /// mirrored by a flip, kept by quarter turns, and makes the turned box's bounds.
+    #[test]
+    fn a_free_turn_turns_the_matrix_and_the_bounds() {
+        use super::{normalized_angle, rotated_bounds};
+        assert_eq!(normalized_angle(3600 + 300), 300);
+        assert_eq!(normalized_angle(-1900), 1700);
+        assert_eq!(normalized_angle(1800), 1800);
+        let turned = Orientation::default().with_angle(900);
+        // A quarter by the free turn draws (1, 0) at (0, 1), as a quarter turn does.
+        let [a, b, c, d] = turned.matrix();
+        assert!(
+            a.abs() < 1e-5 && (b - 1.0).abs() < 1e-5 && (c + 1.0).abs() < 1e-5 && d.abs() < 1e-5
+        );
+        assert!(!turned.is_identity());
+        assert_eq!(turned.flipped_horizontally().angle, -900);
+        assert_eq!(turned.rotated(1).angle, 900);
+        assert!(Orientation::default().with_angle(3600).is_identity());
+        let rect = super::Rect {
+            x: 100,
+            y: 100,
+            w: 200,
+            h: 100,
+        };
+        assert_eq!(rotated_bounds(rect, 0), rect);
+        // On its side about the centre (200, 150): 100 wide, 200 high.
+        assert_eq!(
+            rotated_bounds(rect, 900),
+            super::Rect {
+                x: 150,
+                y: 50,
+                w: 100,
+                h: 200
+            }
+        );
+        let diagonal = rotated_bounds(rect, 450);
+        // 300 / √2 ≈ 212.1 each way.
+        assert!(
+            (212..=214).contains(&diagonal.w) && (212..=214).contains(&diagonal.h),
+            "{diagonal:?}"
+        );
     }
 }
 

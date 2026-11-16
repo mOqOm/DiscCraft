@@ -114,40 +114,34 @@ impl Language {
             .is_some()
     }
 
-    /// The first of the user's preferred languages (BCP 47 or POSIX locale tags such as
-    /// `ja_JP.UTF-8`, most preferred first) that the interface has, else the default.
-    ///
-    /// Ported from FilmCraft's `Language::from_locales`.
-    pub(crate) fn from_locales(tags: &[String]) -> Self {
-        const PRIMARY: [(&str, Language); 2] = [("en", Language::En), ("ja", Language::Ja)];
-
-        tags.iter()
-            .find_map(|tag| {
-                let primary = tag.split(['-', '_', '.', '@']).next().unwrap_or_default();
-                PRIMARY
-                    .iter()
-                    .find(|(code, _)| primary.eq_ignore_ascii_case(code))
-                    .map(|(_, language)| *language)
-            })
-            .unwrap_or_default()
+    /// The interface language for an operating system whose display language is `tag` (a BCP 47 or POSIX locale
+    /// tag such as `ja-JP` or `ja_JP.UTF-8`): Japanese for Japanese, English for English and for every language the
+    /// interface does not have.
+    pub(crate) fn from_locale(tag: &str) -> Self {
+        let primary = tag.split(['-', '_', '.', '@']).next().unwrap_or_default();
+        if primary.eq_ignore_ascii_case("ja") {
+            Self::Ja
+        } else {
+            Self::En
+        }
     }
 }
 
-/// The interface language to start with: the saved choice, else the system locale, else Japanese.
+/// The interface language to start with when the user has not chosen one: the operating system's display language
+/// (Japanese on a Japanese system, English on an English one), and English on a system in any other language or
+/// when the system does not say.
 ///
-/// The system locale is read from the usual environment variables. Windows sets none of them, so
-/// there the saved choice is the only signal; reading the shell's UI language needs an OS call,
-/// which belongs in `platform` (the only crate allowed `unsafe`) and is a follow-up.
+/// The display language comes from the operating system (`sys-locale`: the user's preferred UI language on
+/// Windows, the locale on macOS and Linux), else from the usual environment variables.
 pub(crate) fn detected() -> Language {
-    let mut tags = Vec::new();
-
-    for variable in ["LC_ALL", "LC_MESSAGES", "LANG"] {
-        if let Some(value) = std::env::var_os(variable) {
-            tags.push(value.to_string_lossy().into_owned());
-        }
-    }
-
-    Language::from_locales(&tags)
+    let system = sys_locale::get_locale().or_else(|| {
+        ["LC_ALL", "LC_MESSAGES", "LANG"]
+            .into_iter()
+            .filter_map(std::env::var_os)
+            .map(|value| value.to_string_lossy().into_owned())
+            .find(|value| !value.is_empty())
+    });
+    system.map_or(Language::En, |tag| Language::from_locale(&tag))
 }
 
 thread_local! {
@@ -346,26 +340,18 @@ mod tests {
     }
 
     #[test]
-    fn locales_pick_the_first_supported_language() {
-        let tags = |items: &[&str]| -> Vec<String> {
-            items.iter().map(|item| (*item).to_string()).collect()
-        };
-
-        assert_eq!(
-            Language::from_locales(&tags(&["ja_JP.UTF-8"])),
-            Language::Ja
-        );
-        assert_eq!(Language::from_locales(&tags(&["en-GB"])), Language::En);
-        // An unsupported locale falls back to the default.
-        assert_eq!(
-            Language::from_locales(&tags(&["de_DE.UTF-8"])),
-            Language::Ja
-        );
-        // The most preferred tag wins.
-        assert_eq!(
-            Language::from_locales(&tags(&["fr-CA", "ja", "en"])),
-            Language::Ja
-        );
-        assert_eq!(Language::from_locales(&tags(&[])), Language::Ja);
+    fn the_system_language_picks_japanese_or_english() {
+        assert_eq!(Language::from_locale("ja_JP.UTF-8"), Language::Ja);
+        assert_eq!(Language::from_locale("ja-JP"), Language::Ja);
+        assert_eq!(Language::from_locale("JA"), Language::Ja);
+        assert_eq!(Language::from_locale("en-GB"), Language::En);
+        assert_eq!(Language::from_locale("en_US.UTF-8"), Language::En);
+        // A language the interface does not have, and no language at all, are English.
+        assert_eq!(Language::from_locale("de_DE.UTF-8"), Language::En);
+        assert_eq!(Language::from_locale("zh-Hans-CN"), Language::En);
+        assert_eq!(Language::from_locale("C"), Language::En);
+        assert_eq!(Language::from_locale(""), Language::En);
+        // Whatever the system says, detection gives a language the interface has.
+        assert!(Language::ALL.contains(&super::detected()));
     }
 }

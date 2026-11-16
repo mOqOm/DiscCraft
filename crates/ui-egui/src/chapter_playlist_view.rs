@@ -291,7 +291,7 @@ impl DiscCraftApp {
 
     /// 各チャプターの長さ（秒）: 次のチャプターまで、最後は本編の終わりまで（長さが分からなければ 0）。
     pub(crate) fn chapter_spans(&mut self, timeline: &Timeline) -> Vec<f64> {
-        let duration = self.asset_seconds(timeline.video).unwrap_or(0.0);
+        let duration = self.timeline_seconds(timeline.id);
         let starts: Vec<f64> = timeline
             .chapters
             .iter()

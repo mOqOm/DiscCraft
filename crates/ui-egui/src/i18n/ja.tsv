@@ -268,7 +268,6 @@
 	Library	ライブラリ
 	Choose a slideshow	スライドショーを選択してください
 	Open a menu to see its layers.	メニューを開くと、そのレイヤーが表示されます。
-	Button {n}: {name}	ボタン {n}: {name}
 	Type	種類
 	Duration	デュレーション
 	Default button	初期設定ボタン
@@ -520,7 +519,6 @@
 	Select two or more buttons	ボタンを 2 つ以上選んでください
 	{n} buttons selected	{n} 個のボタンを選択中
 	There is no room for the buttons on this menu	このメニューにはボタンを置く場所がありません
-	Buttons cannot overlap	ボタンは重ねられません
 	Arrange	アレンジ
 	Bring to Front	最前面へ
 	Bring Forward	前面へ
@@ -555,9 +553,8 @@
 	Subtitle {n}:	字幕 {n}:
 	Description:	説明:
 	Also the volume label of the ISO image (letters and digits only)	ISO イメージのボリュームラベルにもなります（英数字のみ）
-	Text: {text}	テキスト: {text}
 	Selection Tool	選択ツール
-	Text Tool	テキストツール
+	Text Tool	横書き文字ツール
 	Zoom Tool	ズームツール
 	Text	テキスト
 	Text:	テキスト:
@@ -991,3 +988,108 @@
 	The break is not at the start of a cell.	ブレークがセルの先頭にありません。
 	As set.	指定どおりです。
 	Not where it was set (frame {frame}).	指定した位置（フレーム {frame}）と違います。
+	Move Tool	移動ツール
+	Direct Select Tool	ダイレクト選択ツール
+	Rotate Tool	回転ツール
+	Direction:	方向:
+	Horizontal	横書き
+	Vertical	縦書き
+	Vertical Text Tool	縦書き文字ツール
+	Buttons overlap: fix them before building a DVD (Check Project)	ボタンが重なっています。DVD はビルドの前に直してください（プロジェクトをチェック）
+	No files DiscCraft can import were dropped	読み込めるファイルがありませんでした
+	Imported {count} files	{count} 個のファイルを読み込みました
+	Drop to import {count} items into the project	ドロップすると {count} 個をプロジェクトに読み込みます
+	Drop audio, a video with sound or subtitles onto a timeline	タイムラインには音声、音つきの映像、字幕をドロップできます
+	Added an audio track	音声トラックを追加しました
+	Added a subtitle track	字幕トラックを追加しました
+	Subpicture	サブピクチャ
+	Layer {state}	レイヤーを{state}
+	shown	表示しました
+	hidden	隠しました
+	unlocked	ロック解除しました
+	locked	ロックしました
+	Show / Hide Safe Areas	セーフエリアの表示 / 非表示
+	Previous Subtitle	前の字幕
+	Next Subtitle	次の字幕
+	Trim Subtitle In Point to Here	字幕インポイントをここまでトリム
+	Trim Subtitle Out Point to Here	字幕アウトポイントをここまでトリム
+	Add Subtitle	字幕を追加
+	Type the subtitle	字幕を入力
+	Double-click to change the subtitle's text	ダブルクリックで字幕の文字を変更
+	Text Script	テキストスクリプト
+	Show	表示
+	Ignore and Continue	無視して続行
+	The project has problems, so the disc may not play correctly. Do you want to look at them?	プロジェクトに問題があるため、ディスクが正常に再生されない可能性があります。確認しますか?
+	The destination path is not valid.	保存先パスが無効です。
+	Added a video clip	ビデオクリップを追加しました
+	Clear Video Clip	ビデオクリップを消去
+	Create Subtitle	字幕を作成
+	Create a subtitle that matches the slide	スライドに一致する字幕を作成
+	Hear This Track in Monitor	このトラックをモニターで聞く
+	The link is not set.	リンクが設定されていません。
+	The end action is not set.	エンドアクションが設定されていません。
+	Orphaned timeline	孤立したタイムライン
+	Orphaned menu	孤立したメニュー
+	{count} errors	{count} 個のエラー
+	Include:	次を含む:
+	Stroke:	ストローク:
+	Vertical Alignment:	整列:
+	Thin	細
+	Medium	中
+	Thick	太
+	Timeline Default	タイムラインの初期設定
+	Fill, stroke and anti-alias colors with their opacity	塗り・ストローク・アンチエイリアスのカラーと不透明度
+	Create anti-alias color from fill and stroke	塗りおよびストロークからアンチエイリアスカラーを作成
+	Reset to Default	初期設定に戻す
+	FilmCraft Project	FilmCraft のプロジェクト
+	The FilmCraft project has no sequences.	FilmCraft のプロジェクトにシーケンスがありません。
+	Import FilmCraft Markers	FilmCraft のマーカーを読み込み
+	Import FilmCraft Markers…	FilmCraft のマーカーを読み込み…
+	Sequence:	シーケンス:
+	{name} ({chapters} chapter markers, {markers} markers)	{name}（チャプターマーカー {chapters} 個、マーカー {markers} 個）
+	Chapter markers only	チャプターマーカーだけ
+	All markers	すべてのマーカー
+	Added {added} chapters from FilmCraft markers ({skipped} left out)	FilmCraft のマーカーからチャプターを {added} 個追加しました（{skipped} 個は入れられませんでした）
+	FilmCraft is still exporting.	FilmCraft がまだ書き出し中です。
+	FilmCraft (filmcraft-cli) was not found.	FilmCraft（filmcraft-cli）が見つかりません。
+	FilmCraft is exporting {name}…	FilmCraft で {name} を書き出しています…
+	Made timeline {name} from FilmCraft ({added} chapters)	FilmCraft からタイムライン {name} を作りました（チャプター {added} 個）
+	New Timeline from FilmCraft Sequence	FilmCraft のシーケンスからタイムラインを作成
+	New Timeline from FilmCraft Sequence…	FilmCraft のシーケンスからタイムラインを作成…
+	Composition:	コンポジション:
+	Active in the Project ({name})	プロジェクトでアクティブ（{name}）
+	Active in the Project	プロジェクトでアクティブ
+	First Play is not set.	ファーストプレイが設定されていません。
+	The menu has no buttons.	メニューにボタンがありません。
+	Buttons overlap.	ボタンが重なっています。
+	The button lies outside the frame.	ボタンがフレームの外にあります。
+	The default button does not exist.	初期設定ボタンがありません。
+	There are too many buttons.	ボタンが多すぎます。
+	A layer lies outside the frame.	レイヤーがフレームの外にあります。
+	The slideshow has no slides.	スライドショーにスライドがありません。
+	The playlist has no items.	再生リストに項目がありません。
+	The chapter playlist has no entries.	チャプター再生リストにエントリがありません。
+	The file is offline.	ファイルがオフラインです。
+	There are more than 99 chapters.	チャプターが 99 個を超えています。
+	There are more than 8 audio tracks.	オーディオトラックが 8 本を超えています。
+	There are more than 32 subtitle tracks.	字幕トラックが 32 本を超えています。
+	The first chapter is not at the start.	最初のチャプターが先頭にありません。
+	The chapters are out of order.	チャプターの順序が正しくありません。
+	Timeline Bitrate Too High	高すぎるタイムラインビットレート
+	Subtitle Text Overflow	字幕テキストのオーバーフロー
+	The timeline's bit rate is too high.	タイムラインのビットレートが高すぎます。
+	Subtitle text does not fit.	字幕のテキストが収まりません。
+	Subtitle overflow: subtitle track {n}, {a} to {b}	字幕のオーバーフロー: 字幕トラック {n}、{a} から {b} まで
+	Subtitle overflow: slide {n}	字幕のオーバーフロー: スライド {n}
+	Subtitle Spacing	字幕の間隔
+	Subtitles are less than 5 frames apart: subtitle track {n}, {a} to {b}	字幕の間隔が 5 フレーム未満です: 字幕トラック {n}、{a} から {b} まで
+	Subtitles are less than 5 frames apart.	字幕の間隔が 5 フレーム未満です。
+	Subtitle Clip	字幕クリップ
+	Track Setting (Group {n})	トラックの設定（グループ {n}）
+	Extra Thick	極太
+	Subtitle Color Set	字幕のカラーセット
+	Export…	書き出し…
+	Justify:	揃え:
+	Left	左
+	Center	中央
+	Right	右

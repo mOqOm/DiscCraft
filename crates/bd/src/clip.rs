@@ -245,11 +245,6 @@ fn pg_units(track: &SubtitleTrack, width: u16, height: u16) -> Result<Vec<EsUnit
             })
             .collect();
     }
-    let palette = vec![
-        disccraft_pgs::rgba_to_entry(0, 0, 0, 0, 0),
-        disccraft_pgs::rgba_to_entry(1, 255, 255, 255, 255),
-        disccraft_pgs::rgba_to_entry(2, 0, 0, 0, 255),
-    ];
     let mut subtitles = Vec::with_capacity(track.cues.len());
     for cue in &track.cues {
         subtitles.push(disccraft_pgs::Subtitle {
@@ -260,7 +255,15 @@ fn pg_units(track: &SubtitleTrack, width: u16, height: u16) -> Result<Vec<EsUnit
             width: cue.bitmap.width,
             height: cue.bitmap.height,
             pixels: cue.bitmap.pixels.clone(),
-            palette: palette.clone(),
+            palette: {
+                let [[fr, fg, fb, fa], [sr, sg, sb, sa], [ar, ag, ab, aa]] = cue.colors;
+                vec![
+                    disccraft_pgs::rgba_to_entry(0, 0, 0, 0, 0),
+                    disccraft_pgs::rgba_to_entry(1, fr, fg, fb, fa),
+                    disccraft_pgs::rgba_to_entry(2, sr, sg, sb, sa),
+                    disccraft_pgs::rgba_to_entry(3, ar, ag, ab, aa),
+                ]
+            },
         });
     }
     let segments = disccraft_pgs::encode_subtitles(&subtitles, width, height)
@@ -391,6 +394,12 @@ fn audio_inputs(title: &TitleStreams) -> Result<(Vec<EsInput>, Vec<Stream>), BdE
                     units,
                 });
                 streams.push(Stream { pid, coding });
+            }
+            // A DTS track goes on a DVD as it is; the Blu-ray stream for it is not written yet.
+            TitleAudio::Dts { .. } => {
+                return Err(BdError::Unsupported(
+                    "a DTS audio track cannot be put on a Blu-ray disc yet".to_string(),
+                ));
             }
         }
     }

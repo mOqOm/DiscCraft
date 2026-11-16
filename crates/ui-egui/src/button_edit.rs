@@ -331,10 +331,20 @@ impl DiscCraftApp {
         self.explain_overlap();
     }
 
-    /// ボタンが重なるために engine に断られたときは、検査の内部の言葉の代わりに分かる言葉で出す。
-    fn explain_overlap(&mut self) {
-        if self.status.contains("buttonsOverlap") {
-            self.status = tl!("Buttons cannot overlap").to_string();
+    /// ボタンを動かした / 広げた / 回した結果、メニューのボタンが重なったら（Encore と同じく重ねられる）、
+    /// ステータスバーで知らせる。DVD はビルドの前に直す必要がある（プロジェクトをチェックの「重なったボタン」）。
+    pub(crate) fn explain_overlap(&mut self) {
+        let Selection::Menu(menu) = self.selection else {
+            return;
+        };
+        if self
+            .session
+            .project
+            .menu(menu)
+            .is_some_and(disccraft_project::has_overlapping_buttons)
+        {
+            self.status =
+                tl!("Buttons overlap: fix them before building a DVD (Check Project)").to_string();
         }
     }
 

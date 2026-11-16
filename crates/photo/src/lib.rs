@@ -114,6 +114,19 @@ pub fn is_psd(path: &Path) -> bool {
     }
 }
 
+/// Whether the path looks like a PhotoCraft document (`.pcraft`, PhotoCraft's own format; case-insensitive).
+pub fn is_pcraft(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pcraft"))
+}
+
+/// Whether the path looks like a layered document DiscCraft reads as a picture or a menu: a Photoshop document
+/// or a PhotoCraft one. Both go through PhotoCraft's own reader and compositor.
+pub fn is_document(path: &Path) -> bool {
+    is_psd(path) || is_pcraft(path)
+}
+
 /// Read a PSD / PSB file and composite every visible layer (PhotoCraft's compositor: blend modes, opacity, masks, groups).
 pub fn load_image(path: &Path) -> Result<Image8, PhotoError> {
     let (doc, canvas) = load_document(path)?;

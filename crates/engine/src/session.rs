@@ -5,6 +5,10 @@ use disccraft_project::{Project, Severity, has_errors, load, save as project_sav
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
+/// Project check errors an edit may bring in, as Encore lets them be made in its editors: overlapping buttons (a
+/// button moved, grown or turned onto another). The project check reports them and a DVD build refuses them.
+const EDITS_MAY_MAKE: &[&str] = &["buttonsOverlap"];
+
 /// Maximum number of undo snapshots retained.
 pub const UNDO_LIMIT: usize = 100;
 
@@ -19,6 +23,8 @@ pub struct Session {
     pub dirty: bool,
     /// VM preview of a built disc (not part of the document, not undoable).
     pub(crate) preview: Preview,
+    /// GOP starts of the video files chapters were placed on (not part of the document).
+    pub(crate) gops: crate::gop::GopCache,
     undo: Vec<Project>,
     redo: Vec<Project>,
     /// The label of the command behind each undo snapshot (same order as `undo`).
@@ -41,6 +47,7 @@ impl Session {
             path: Some(path.to_path_buf()),
             dirty: false,
             preview: Preview::default(),
+            gops: crate::gop::GopCache::default(),
             undo: Vec::new(),
             redo: Vec::new(),
             undo_labels: Vec::new(),
@@ -64,11 +71,27 @@ impl Session {
         Ok(target)
     }
 
+    /// Tells the media reader which composition each EffectCraft project asset shows, so that every use of the
+    /// asset (length, pictures, the build) renders the chosen one.
+    pub(crate) fn sync_compositions(&self) {
+        let chosen = self
+            .project
+            .assets
+            .values()
+            .filter_map(|asset| {
+                let name = asset.composition.clone()?;
+                Some((PathBuf::from(&asset.path), name))
+            })
+            .collect();
+        disccraft_transcode::set_compositions(chosen);
+    }
+
     /// Executes a command by id.
     pub fn execute(&mut self, id: &str, params: &Value) -> CommandResult {
         let Some(spec) = find_command(id) else {
             return Err(format!("unknown command: {id}"));
         };
+        self.sync_compositions();
 
         if let Err(reason) = (spec.enabled)(self) {
             return Err(format!("{}: {}", spec.id, reason));
@@ -84,13 +107,18 @@ impl Session {
             match result {
                 Ok(value) => {
                     // Reject only errors this command introduced, so a project loaded with
-                    // existing errors can still be edited (and repaired).
+                    // existing errors can still be edited (and repaired). Errors Encore lets an
+                    // edit make (overlapping buttons) are left to the project check and the build.
                     let before = snapshot.check();
                     let new_errors: Vec<_> = self
                         .project
                         .check()
                         .into_iter()
-                        .filter(|p| p.severity == Severity::Error && !before.contains(p))
+                        .filter(|p| {
+                            p.severity == Severity::Error
+                                && !before.contains(p)
+                                && !EDITS_MAY_MAKE.contains(&p.code.as_str())
+                        })
                         .collect();
                     if has_errors(&new_errors) {
                         self.project = snapshot;

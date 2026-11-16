@@ -164,18 +164,39 @@ fn rect_in_frame(rect: &Rect, frame_w: u16, frame_h: u16) -> bool {
         && bottom.is_some_and(|bottom| bottom <= u32::from(frame_h))
 }
 
+/// Overlapping buttons: editing may make them (as in Encore), the check reports them and a DVD build refuses them
+/// (a disc's button areas must not overlap).
 fn check_overlaps(menu: &Menu, problems: &mut Vec<Problem>) {
-    for (index, first) in menu.buttons.iter().enumerate() {
-        for second in menu.buttons.iter().skip(index.saturating_add(1)) {
-            if rects_overlap(&first.rect, &second.rect) {
-                problems.push(error(
-                    "buttonsOverlap",
-                    format!("menu {} has overlapping buttons", menu.id.0),
-                ));
-                return;
-            }
-        }
+    if has_overlapping_buttons(menu) {
+        problems.push(error(
+            "buttonsOverlap",
+            format!("menu {} has overlapping buttons", menu.id.0),
+        ));
     }
+}
+
+/// Whether two of `menu`'s buttons share any area.
+pub fn has_overlapping_buttons(menu: &Menu) -> bool {
+    menu.buttons.iter().enumerate().any(|(index, first)| {
+        menu.buttons
+            .iter()
+            .skip(index.saturating_add(1))
+            .any(|second| rects_overlap(&first.rect, &second.rect))
+    })
+}
+
+/// For each button of `menu`, whether it overlaps another one (Encore outlines those in red in the Menu Viewer).
+pub fn overlapping_buttons(menu: &Menu) -> Vec<bool> {
+    menu.buttons
+        .iter()
+        .enumerate()
+        .map(|(index, button)| {
+            menu.buttons
+                .iter()
+                .enumerate()
+                .any(|(other, second)| other != index && rects_overlap(&button.rect, &second.rect))
+        })
+        .collect()
 }
 
 /// Whether two rectangles share any area (touching edges is fine).
@@ -441,6 +462,11 @@ mod tests {
                     orientation: Default::default(),
                     thumbnail: None,
                     subpicture: None,
+                    label_offset: [0, 0],
+                    thumbnail_offset: [0, 0],
+                    body: None,
+                    hidden: false,
+                    locked: false,
                 });
             }
         }
@@ -489,6 +515,18 @@ mod tests {
 
         let problems = problems_for(&project);
         assert!(has_error_code(&problems, "buttonsOverlap"));
+
+        // Each overlapping button is told apart (the Menu Viewer outlines them in red); one clear of the others
+        // is not.
+        let apart = Rect {
+            x: 300,
+            y: 200,
+            w: 100,
+            h: 20,
+        };
+        project.add_button(menu, "C".to_string(), Some(apart), Link::Stop)?;
+        let menu = project.menu(menu).ok_or("missing menu")?;
+        assert_eq!(super::overlapping_buttons(menu), vec![true, true, false]);
 
         Ok(())
     }

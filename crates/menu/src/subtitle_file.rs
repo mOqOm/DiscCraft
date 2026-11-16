@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use disccraft_project::{DiscSettings, Tick, parse_time};
+use disccraft_project::{DiscSettings, Tick, format_time, parse_time};
 
 use crate::MenuError;
 use crate::subtitle::{
@@ -43,6 +43,30 @@ impl SubtitleFormat {
             _ if text.contains("-->") => Self::Srt,
             _ => Self::TextScript,
         }
+    }
+}
+
+/// A subtitle asset's cues: the ones edited in the project (Encore's subtitles added and trimmed in the Monitor) when
+/// it has them, else its file's ([`read_subtitles`]).
+///
+/// # Errors
+///
+/// When the file is read and cannot be ([`read_subtitles`]).
+pub fn asset_cues(
+    asset: &disccraft_project::Asset,
+    settings: &DiscSettings,
+) -> Result<Vec<Cue>, MenuError> {
+    match &asset.cues {
+        Some(cues) => Ok(cues
+            .iter()
+            .map(|cue| Cue {
+                start: cue.start,
+                end: cue.end,
+                text: cue.text.clone(),
+                look: cue.look,
+            })
+            .collect()),
+        None => read_subtitles(Path::new(&asset.path), settings),
     }
 }
 
@@ -127,25 +151,33 @@ pub fn parse_vtt(text: &str) -> Result<Vec<Cue>, MenuError> {
 /// Parses a text script: each cue line holds a start and an end timecode (`HH:MM:SS:FF`, `HH;MM;SS;FF` at the
 /// project's frame rate, or `HH:MM:SS.mmm`) and then the text. A line that does not start with a timecode continues
 /// the text of the cue above it on a new line. Empty lines and lines starting with `#` are skipped.
+///
+/// Encore's own export is read as it is written: a cue number before the two timecodes is skipped, and a lone
+/// carriage return inside a cue is a line break (its lines end with CR LF).
 pub fn parse_text_script(text: &str, settings: &DiscSettings) -> Result<Vec<Cue>, MenuError> {
     if text.len() > MAX_SRT_BYTES {
         return Err(MenuError::Invalid("script input is too large".to_string()));
     }
     let body = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut cues: Vec<Cue> = Vec::new();
-    for (index, raw_line) in body.split('\n').enumerate() {
-        let line = raw_line.trim_end_matches('\r').trim();
+    for (index, raw_line) in body.split(['\n', '\r']).enumerate() {
+        let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let (first, rest) = next_token(line);
+        let (first, rest) = next_token(without_cue_number(line, settings));
         let (second, rest) = next_token(rest);
         let times = (script_time(first, settings), script_time(second, settings));
         match times {
             (Some(start), Some(end)) => {
                 let text = rest.trim().to_string();
                 if end > start && !text.is_empty() {
-                    cues.push(Cue { start, end, text });
+                    cues.push(Cue {
+                        start,
+                        end,
+                        text,
+                        look: disccraft_project::CueLook::default(),
+                    });
                 }
             }
             _ => match cues.last_mut() {
@@ -176,6 +208,19 @@ fn next_token(text: &str) -> (&str, &str) {
     text.split_at(end)
 }
 
+/// `line` without the cue number Encore writes before the two timecodes; other lines are returned as they are, so
+/// that text which merely starts with a number stays text.
+fn without_cue_number<'a>(line: &'a str, settings: &DiscSettings) -> &'a str {
+    let (number, rest) = next_token(line);
+    let (start, after) = next_token(rest);
+    let (end, _) = next_token(after);
+    let numbered = !number.is_empty()
+        && number.chars().all(|c| c.is_ascii_digit())
+        && script_time(start, settings).is_some()
+        && script_time(end, settings).is_some();
+    if numbered { rest } else { line }
+}
+
 /// One timecode of a text script: frames at the project's rate, or milliseconds.
 fn script_time(token: &str, settings: &DiscSettings) -> Option<Tick> {
     if token.contains(['.', ',']) {
@@ -203,6 +248,27 @@ pub fn write_srt(cues: &[Cue]) -> String {
     out
 }
 
+/// Writes cues as the text script Encore CS6 exports (Timeline ▸ Export Subtitles ▸ Text Script), so that the file
+/// goes back into Encore: UTF-16 LE with a byte-order mark, one cue a line as `number start end text` with
+/// timecodes at the project's frame rate, CR LF between cues and a lone CR for a line break inside one.
+pub fn write_text_script(cues: &[Cue], settings: &DiscSettings) -> Vec<u8> {
+    let mut text = String::new();
+    for (index, cue) in cues.iter().enumerate() {
+        text.push_str(&format!(
+            "{} {} {} {}\r\n",
+            index.saturating_add(1),
+            format_time(cue.start, settings),
+            format_time(cue.end, settings),
+            cue.text.replace("\r\n", "\r").replace('\n', "\r")
+        ));
+    }
+    let mut out = vec![0xFF, 0xFE];
+    for unit in text.encode_utf16() {
+        out.extend_from_slice(&unit.to_le_bytes());
+    }
+    out
+}
+
 fn srt_time(tick: Tick) -> String {
     let ms = u64::try_from(tick.0.max(0)).unwrap_or(0) / crate::subtitle::TICKS_PER_MS;
     format!(
@@ -218,9 +284,10 @@ fn srt_time(tick: Tick) -> String {
 mod tests {
     use super::{
         SubtitleFormat, decode_text, parse_text_script, parse_vtt, read_subtitles, write_srt,
+        write_text_script,
     };
     use crate::subtitle::parse_srt;
-    use disccraft_project::{DiscSettings, Tick, VideoStandard};
+    use disccraft_project::{DiscSettings, Tick, VideoStandard, parse_time};
     use std::error::Error;
     use std::path::Path;
 
@@ -258,6 +325,45 @@ mod tests {
         // 2 seconds and 12 frames at 25 fps.
         assert_eq!(first.end, Tick(2480 * MS));
         assert!(parse_text_script("not a cue\n", &settings).is_err());
+        Ok(())
+    }
+
+    /// The export is what Encore CS6 writes, byte for byte (measured 2026-11-15), and reads back the same.
+    #[test]
+    fn text_script_is_written_as_encore_writes_it() -> Result<(), Box<dyn Error>> {
+        let settings = DiscSettings::default();
+        let cues = parse_text_script(
+            "00;00;02;00 00;00;04;00 A\nCCCAA\n00;00;06;00 00;00;08;00 BBB\n",
+            &settings,
+        )?;
+        let bytes = write_text_script(&cues, &settings);
+        let expected =
+            "\u{feff}1 00;00;02;00 00;00;04;00 A\rCCCAA\r\n2 00;00;06;00 00;00;08;00 BBB\r\n";
+        let units: Vec<u8> = expected.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert_eq!(bytes, units);
+        let back = parse_text_script(&decode_text(&bytes), &settings)?;
+        assert_eq!(back.len(), 2);
+        assert_eq!(back.first().ok_or("cue")?.text, "A\nCCCAA");
+        Ok(())
+    }
+
+    #[test]
+    fn text_script_reads_what_encore_exports() -> Result<(), Box<dyn Error>> {
+        // A number, two drop-frame timecodes and the text; CR LF between cues and a lone CR inside one.
+        let settings = DiscSettings::default();
+        let text =
+            "\u{feff}1 00;00;02;00 00;00;04;00 A\rCCCAA\r\n2 00;00;06;00 00;00;08;00 BBB\r\n";
+        let cues = parse_text_script(text, &settings)?;
+        assert_eq!(cues.len(), 2);
+        let first = cues.first().ok_or("cue")?;
+        assert_eq!(first.text, "A\nCCCAA");
+        assert_eq!(first.start, parse_time("00;00;02;00", &settings)?);
+        assert_eq!(first.end, parse_time("00;00;04;00", &settings)?);
+        let second = cues.get(1).ok_or("cue")?;
+        assert_eq!(second.text, "BBB");
+        // A line of text that starts with a number is still text.
+        let cues = parse_text_script("00;00;01;00 00;00;02;00 One\n2 more lines\n", &settings)?;
+        assert_eq!(cues.first().ok_or("cue")?.text, "One\n2 more lines");
         Ok(())
     }
 

@@ -19,6 +19,29 @@ pub(crate) struct SubtitleCue {
     pub(crate) start: f64,
     pub(crate) end: f64,
     pub(crate) text: String,
+    /// The subtitle's own colour group, stroke and place.
+    pub(crate) look: disccraft_project::CueLook,
+}
+
+/// A subtitle's look from a `subtitle.cues` entry (`group` counts from 1 there).
+pub(crate) fn parse_look(cue: &Value) -> disccraft_project::CueLook {
+    let small = |key: &str| {
+        cue.get(key)
+            .and_then(Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+    };
+    disccraft_project::CueLook {
+        group: small("group").and_then(|group| group.checked_sub(1)),
+        stroke: cue
+            .get("stroke")
+            .and_then(Value::as_str)
+            .and_then(disccraft_project::SlideStroke::parse),
+        align: small("align"),
+        justify: cue
+            .get("justify")
+            .and_then(Value::as_str)
+            .and_then(disccraft_project::SubtitleJustify::parse),
+    }
 }
 
 /// 字幕ファイルの名前の最後の部分が言語コードなら取り出す（`movie.en.srt` → `en`）。
@@ -52,6 +75,7 @@ impl DiscCraftApp {
                     start: cue.get("start")?.as_f64()?,
                     end: cue.get("end")?.as_f64()?,
                     text: cue.get("text")?.as_str()?.to_owned(),
+                    look: parse_look(cue),
                 })
             })
             .collect();
@@ -83,7 +107,11 @@ impl DiscCraftApp {
         &mut self,
         timeline: TimelineId,
         seconds: f64,
-    ) -> Option<String> {
+    ) -> Option<(
+        String,
+        disccraft_project::SubtitleGroup,
+        disccraft_project::CueLook,
+    )> {
         let track = self.shown_subtitle(timeline)?;
         let asset = self
             .session
@@ -93,7 +121,47 @@ impl DiscCraftApp {
             .get(track)?
             .asset;
         let cues = self.subtitle_cues(asset);
-        cue_at(&cues, seconds).map(|cue| cue.text.clone())
+        let cue = cue_at(&cues, seconds)?;
+        Some((
+            cue.text.clone(),
+            self.cue_colors(timeline, track, cue.look),
+            cue.look,
+        ))
+    }
+
+    /// 字幕の色: その字幕のグループ、なければトラックのグループの色。
+    pub(crate) fn cue_colors(
+        &self,
+        timeline: TimelineId,
+        track: usize,
+        look: disccraft_project::CueLook,
+    ) -> disccraft_project::SubtitleGroup {
+        match look.group {
+            Some(group) => self
+                .session
+                .project
+                .timeline_subtitle_colors(timeline)
+                .group(group),
+            None => self.subtitle_track_colors(timeline, track),
+        }
+    }
+
+    /// 字幕トラックのカラーグループの色（タイムラインのカラーセットから）。
+    pub(crate) fn subtitle_track_colors(
+        &self,
+        timeline: TimelineId,
+        track: usize,
+    ) -> disccraft_project::SubtitleGroup {
+        let group = self
+            .session
+            .project
+            .timeline(timeline)
+            .and_then(|found| found.subtitles.get(track))
+            .map_or(0, |track| track.group);
+        self.session
+            .project
+            .timeline_subtitle_colors(timeline)
+            .group(group)
     }
 
     /// モニターに出す字幕トラック（なければ `None`）。
@@ -153,6 +221,8 @@ impl DiscCraftApp {
             .unwrap_or_else(|| "subtitles".to_owned());
         let Some(path) = FileDialog::new()
             .add_filter("SRT", &["srt"])
+            // Encore の「字幕の書き出し ▸ テキストスクリプト」と同じ形式（Encore に読み込める）。
+            .add_filter(tl!("Text Script"), &["txt"])
             .set_file_name(format!("{name}.srt"))
             .save_file()
         else {
@@ -222,11 +292,13 @@ mod tests {
                 start: 1.0,
                 end: 2.0,
                 text: "a".to_owned(),
+                look: disccraft_project::CueLook::default(),
             },
             SubtitleCue {
                 start: 3.0,
                 end: 4.0,
                 text: "b".to_owned(),
+                look: disccraft_project::CueLook::default(),
             },
         ];
         assert_eq!(cue_at(&cues, 1.5).map(|cue| cue.text.as_str()), Some("a"));

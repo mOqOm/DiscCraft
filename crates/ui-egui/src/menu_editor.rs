@@ -96,6 +96,28 @@ pub(crate) const HANDLE: f32 = 10.0;
 /// チェックが要求するボタンの最小辺。
 pub(crate) const MIN_SIDE: u16 = 8;
 
+/// The safe areas over a picture drawn in `rect` (the menu viewer's and the monitor's): action safe (90 %) and
+/// title safe (80 %) of the picture, as Encore outlines them.
+pub(crate) fn paint_safe_areas(painter: &egui::Painter, rect: egui::Rect) {
+    for (fraction, color) in [
+        (0.10_f32, egui::Color32::from_white_alpha(90)),
+        (0.05_f32, egui::Color32::from_white_alpha(45)),
+    ] {
+        let inset_x = (rect.width() * fraction * 0.5)
+            .min(rect.width() * 0.4)
+            .max(0.0);
+        let inset_y = (rect.height() * fraction * 0.5)
+            .min(rect.height() * 0.4)
+            .max(0.0);
+        let _ = painter.rect_stroke(
+            rect.shrink2(egui::vec2(inset_x, inset_y)),
+            0.0,
+            egui::Stroke::new(1.0, color),
+            egui::StrokeKind::Inside,
+        );
+    }
+}
+
 /// キャンバス上の矩形をディスク座標へ変換する。
 ///
 /// DVD のピクセルは正方形ではないため、x と y で拡大率が異なる。
@@ -210,6 +232,9 @@ pub(crate) fn dragged_rect(
     clamp_rect(rect, frame)
 }
 
+/// The outline of a button that overlaps another one (red, as in Encore's Menu Viewer).
+const OVERLAP_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0x30, 0x30);
+
 impl DiscCraftApp {
     pub(crate) fn menu_editor(&mut self, ui: &mut Ui, id: MenuId) {
         let Some(menu) = self.session.project.menu(id).cloned() else {
@@ -288,10 +313,15 @@ impl DiscCraftApp {
         let canvas = response.rect;
 
         self.draw_safe_areas(ui, canvas);
-        self.accept_canvas_drop(ui, menu, frame, &response);
+        // Encore: while the button routes are shown, dropping a project item on the menu makes nothing.
+        if !self.show_routing {
+            self.accept_canvas_drop(ui, menu, frame, &response);
+        }
         self.draw_menu_graphics(ui, menu, frame, canvas);
         self.draw_menu_texts(ui, menu, frame, canvas);
         self.draw_buttons(ui, menu, frame, canvas, None);
+        self.draw_selected_part(ui, menu, frame, canvas);
+        self.draw_rotate_preview(ui, menu, frame, canvas);
         self.draw_guides(ui, menu, frame, canvas);
         if self.show_routing {
             self.draw_route_crosses(ui, menu, frame, canvas);
@@ -318,7 +348,11 @@ impl DiscCraftApp {
                         }
                     })
                 }
+                crate::menu_text::Tool::Move => Some(egui::CursorIcon::Move),
+                crate::menu_text::Tool::DirectSelection => None,
+                crate::menu_text::Tool::Rotate => Some(egui::CursorIcon::Crosshair),
                 crate::menu_text::Tool::Text => Some(egui::CursorIcon::Text),
+                crate::menu_text::Tool::VerticalText => Some(egui::CursorIcon::VerticalText),
                 crate::menu_text::Tool::Zoom if ui.input(|i| i.modifiers.alt) => {
                     Some(egui::CursorIcon::ZoomOut)
                 }
@@ -382,13 +416,14 @@ impl DiscCraftApp {
     /// メニューの静止画だけをキャンバスに描く（モニター用。ドラッグは受け付けない）。
     ///
     /// `highlight` はリモコンでハイライトされているボタン（0 始まり）。
+    /// Returns where the menu's picture is drawn.
     pub(crate) fn menu_canvas(
         &mut self,
         ui: &mut Ui,
         menu: &Menu,
         highlight: Option<usize>,
         zoom: crate::monitor::MonitorZoom,
-    ) {
+    ) -> Option<egui::Rect> {
         let previewed = self
             .shadow_preview(menu)
             .or_else(|| self.color_set_preview(menu));
@@ -404,11 +439,11 @@ impl DiscCraftApp {
         }
 
         let Some(cached) = &self.menu_texture else {
-            return;
+            return None;
         };
 
         if cached.width == 0 || cached.height == 0 {
-            return;
+            return None;
         }
 
         // 拡大率に合わせた 4:3 の大きさ（全体表示はパネルに収める）。
@@ -417,6 +452,7 @@ impl DiscCraftApp {
 
         let response = ui.add(egui::Image::new((cached.handle.id(), size)));
         self.draw_buttons(ui, menu, frame, response.rect, highlight);
+        Some(response.rect)
     }
 
     /// 下のツールバー: 拡大率 | セーフエリア・ボタンルート | 標準・選択時・アクティベート時 | ボタンを追加。
@@ -520,28 +556,8 @@ impl DiscCraftApp {
 
     /// タイトルセーフ（5%）とアクションセーフ（10%）の枠。
     fn draw_safe_areas(&self, ui: &Ui, canvas: egui::Rect) {
-        if !self.show_safe_areas {
-            return;
-        }
-
-        for (fraction, color) in [
-            (0.10_f32, egui::Color32::from_white_alpha(90)),
-            (0.05_f32, egui::Color32::from_white_alpha(45)),
-        ] {
-            let inset_x = (canvas.width() * fraction * 0.5)
-                .min(canvas.width() * 0.4)
-                .max(0.0);
-            let inset_y = (canvas.height() * fraction * 0.5)
-                .min(canvas.height() * 0.4)
-                .max(0.0);
-            let rect = canvas.shrink2(egui::vec2(inset_x, inset_y));
-
-            let _ = ui.painter().rect_stroke(
-                rect,
-                0.0,
-                egui::Stroke::new(1.0, color),
-                egui::StrokeKind::Inside,
-            );
+        if self.show_safe_areas {
+            paint_safe_areas(ui.painter(), canvas);
         }
     }
 
@@ -555,6 +571,11 @@ impl DiscCraftApp {
     ) {
         // リサイズのハンドルは、ボタンを 1 つだけ選んでいるときに出す。
         let single = self.selected_buttons.len() == 1;
+        // Encore outlines overlapping buttons in red while the menu is edited (not in the monitor).
+        let overlapping = match highlight {
+            Some(_) => Vec::new(),
+            None => disccraft_project::overlapping_buttons(menu),
+        };
         for (index, button) in menu.buttons.iter().enumerate() {
             let rect = self.drag_rect_of(menu.id, index).unwrap_or(button.rect);
 
@@ -645,12 +666,15 @@ impl DiscCraftApp {
                 _ => egui::Color32::from_white_alpha(if active { 160 } else { 70 }),
             };
 
-            let _ = ui.painter().rect_stroke(
-                canvas_rect,
-                0.0,
-                egui::Stroke::new(if active { 2.0 } else { 1.0 }, color),
-                egui::StrokeKind::Inside,
-            );
+            let overlaps = overlapping.get(index).copied().unwrap_or(false);
+            let stroke = if overlaps {
+                egui::Stroke::new(2.0, OVERLAP_COLOR)
+            } else {
+                egui::Stroke::new(if active { 2.0 } else { 1.0 }, color)
+            };
+            let _ = ui
+                .painter()
+                .rect_stroke(canvas_rect, 0.0, stroke, egui::StrokeKind::Inside);
 
             // 絵のないビデオサムネール（リンクがない、ビデオ以外へのリンク）は、編集画面だけ点線で場所を示す。
             if highlight.is_none()
@@ -725,6 +749,14 @@ impl DiscCraftApp {
             self.continue_graphic_drag(ui, menu, frame, canvas);
             return;
         }
+        if self.part_drag.is_some() {
+            self.continue_part_drag(ui, menu, frame, canvas);
+            return;
+        }
+        if self.rotate_drag.is_some() {
+            self.continue_rotate_drag(ui, menu, frame, canvas);
+            return;
+        }
         if self.route_drag.is_some() {
             self.continue_route_drag(ui, menu, frame, canvas);
             return;
@@ -747,13 +779,14 @@ impl DiscCraftApp {
         };
         // テキストツールは、離したときにその位置へテキストを置く（押したときに置くと、離したクリックで
         // テキストの入力欄のフォーカスが外れる）。
-        if self.tool == crate::menu_text::Tool::Text {
+        let vertical = self.tool == crate::menu_text::Tool::VerticalText;
+        if self.tool == crate::menu_text::Tool::Text || vertical {
             if ui.input(|i| i.pointer.primary_released()) && under_pointer && canvas.contains(point)
             {
                 let (x, y) = to_frame_point(point, frame, canvas);
                 let x = u16::try_from(x.min(i32::from(frame.0.saturating_sub(1)))).unwrap_or(0);
                 let y = u16::try_from(y.min(i32::from(frame.1.saturating_sub(1)))).unwrap_or(0);
-                self.add_menu_text(menu.id, x, y);
+                self.add_menu_text(menu.id, x, y, vertical);
             }
             return;
         }
@@ -769,6 +802,21 @@ impl DiscCraftApp {
         // ズームツールは拡大（Alt で縮小）する。
         if self.tool == crate::menu_text::Tool::Zoom {
             self.zoom_menu_viewer(!modifiers.alt);
+            return;
+        }
+        // ダイレクト選択ツールは、ボタンの中の部品（文字 / ビデオサムネール）を選んで動かす。
+        if self.tool == crate::menu_text::Tool::DirectSelection {
+            self.press_direct_selection(menu, frame, canvas, point, released);
+            return;
+        }
+        // 回転ツールは、選んでいるテキスト / 画像を中心のまわりに回す。
+        if self.tool == crate::menu_text::Tool::Rotate {
+            self.press_rotate_tool(menu, frame, canvas, point, released);
+            return;
+        }
+        // 移動ツールは、どこからドラッグしても選んでいるものを動かす。
+        if self.tool == crate::menu_text::Tool::Move {
+            self.press_move_tool(menu, frame, canvas, point, released);
             return;
         }
 
@@ -953,6 +1001,10 @@ impl DiscCraftApp {
         self.marquee = None;
         let mut hits = marquee.base.clone();
         for (index, button) in menu.buttons.iter().enumerate() {
+            // Hidden and locked buttons (the Layers panel) are not picked.
+            if button.hidden || button.locked {
+                continue;
+            }
             if area.intersects(to_canvas(button.rect, frame, canvas)) && !hits.contains(&index) {
                 hits.push(index);
             }
@@ -964,7 +1016,7 @@ impl DiscCraftApp {
         }
     }
 
-    fn hit_button(
+    pub(crate) fn hit_button(
         &self,
         menu: &Menu,
         frame: (u16, u16),
@@ -972,6 +1024,10 @@ impl DiscCraftApp {
         point: egui::Pos2,
     ) -> Option<(usize, DragKind)> {
         for (index, button) in menu.buttons.iter().enumerate() {
+            // A hidden or locked button (the Layers panel) is not picked in the viewer.
+            if button.hidden || button.locked {
+                continue;
+            }
             let rect = to_canvas(button.rect, frame, canvas);
 
             let handle = egui::Rect::from_min_size(

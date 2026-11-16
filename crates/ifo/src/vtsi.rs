@@ -76,9 +76,13 @@ pub fn write_vtsi(v: &Vtsi) -> Result<Vec<u8>, IfoError> {
     w.put_u32(0x0D8, 0);
     w.put_u32(0x0DC, 0);
 
-    let video = v.video.to_bytes();
-    w.put_slice(0x100, &video);
-    w.put_slice(0x200, &video);
+    // The menus of the title set are made by DiscCraft at full size, whatever the title's own picture size is.
+    let menu_video = VideoAttr {
+        resolution: crate::Resolution::Full,
+        ..v.video
+    };
+    w.put_slice(0x100, &menu_video.to_bytes());
+    w.put_slice(0x200, &v.video.to_bytes());
 
     w.put_u16(
         0x202,
@@ -574,7 +578,12 @@ fn derive_title_vobs(last_title_set: u32, ifo_sectors: usize) -> Result<u32, Ifo
 fn read_video(r: &Reader<'_>) -> Result<VideoAttr, IfoError> {
     let vmgm = VideoAttr::from_bytes(read_array2(r, 0x100)?)?;
     let vts = VideoAttr::from_bytes(read_array2(r, 0x200)?)?;
-    if vmgm != vts {
+    // The menus are at full size; the title may have one of the smaller picture sizes.
+    let same = VideoAttr {
+        resolution: vmgm.resolution,
+        ..vts
+    };
+    if vmgm != same {
         return Err(IfoError("video attributes mismatch".to_string()));
     }
     Ok(vts)
@@ -1039,6 +1048,7 @@ mod tests {
             video: VideoAttr {
                 standard: Standard::Ntsc,
                 wide: false,
+                resolution: crate::Resolution::Full,
             },
             audio: vec![AudioAttr {
                 coding: AudioCoding::Ac3,

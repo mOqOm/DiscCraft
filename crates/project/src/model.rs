@@ -308,6 +308,51 @@ pub enum AssetKind {
     Other,
 }
 
+impl Asset {
+    /// The path the asset's media is opened by: the file's path, or for an EffectCraft project shown as a chosen
+    /// composition a name under the project file (`<project>.ecproj/<composition>.ecproj`; no such file exists).
+    /// The media reader (`disccraft-transcode`) takes that name apart again, so two assets of one project file can
+    /// show different compositions. Characters that would split the name (`/`, `\`, `%`) are written `%XX`.
+    #[must_use]
+    pub fn media_path(&self) -> std::borrow::Cow<'_, str> {
+        let is_composition_project = std::path::Path::new(&self.path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("ecproj"));
+        match self.composition.as_deref() {
+            Some(name) if is_composition_project && !name.is_empty() => {
+                let mut media = String::with_capacity(self.path.len().saturating_add(name.len()));
+                media.push_str(&self.path);
+                media.push(std::path::MAIN_SEPARATOR);
+                for character in name.chars() {
+                    match character {
+                        '/' => media.push_str("%2F"),
+                        '\\' => media.push_str("%5C"),
+                        '%' => media.push_str("%25"),
+                        other => media.push(other),
+                    }
+                }
+                media.push_str(".ecproj");
+                std::borrow::Cow::Owned(media)
+            }
+            _ => std::borrow::Cow::Borrowed(&self.path),
+        }
+    }
+
+    /// [`Asset::media_path`] as a path.
+    #[must_use]
+    pub fn media_file(&self) -> std::borrow::Cow<'_, std::path::Path> {
+        match self.media_path() {
+            std::borrow::Cow::Borrowed(path) => {
+                std::borrow::Cow::Borrowed(std::path::Path::new(path))
+            }
+            std::borrow::Cow::Owned(path) => {
+                std::borrow::Cow::Owned(std::path::PathBuf::from(path))
+            }
+        }
+    }
+}
+
 impl AssetKind {
     /// Guess an asset kind from a file extension.
     pub fn guess_from_path(path: &Path) -> Self {
@@ -322,12 +367,12 @@ impl AssetKind {
             | Some("ecproj") => {
                 AssetKind::Video
             }
-            Some("wav") | Some("ac3") | Some("aif") | Some("aiff") | Some("mp3") | Some("m4a")
+            Some("wav") | Some("ac3") | Some("dts") | Some("aif") | Some("aiff") | Some("mp3") | Some("m4a")
             // SoundCraft sessions are mixed down to audio.
             | Some("flac") | Some("scraft") => AssetKind::Audio,
             Some("png") | Some("jpg") | Some("jpeg") | Some("bmp") | Some("tif") | Some("tiff")
-            // Vector drawings are rendered at the size they are shown at.
-            | Some("psd") | Some("svg") => AssetKind::Image,
+            // Vector drawings are rendered at the size they are shown at; PhotoCraft documents are composited.
+            | Some("psd") | Some("psb") | Some("pcraft") | Some("svg") => AssetKind::Image,
             // Subtitle files; a .txt is read as a timecoded subtitle script. VobSub (.idx, with its .sub) and PGS
             // (.sup) are a DVD's and a Blu-ray's own subtitles, passed through.
             Some("srt") | Some("vtt") | Some("txt") | Some("idx") | Some("sup") => AssetKind::Subtitle,
@@ -353,7 +398,110 @@ pub struct Asset {
     /// Free description (kept in the project only).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    /// A subtitle asset's cues as edited in the project (Encore's subtitle clips added and trimmed in the Monitor):
+    /// they take the place of the file's from the first edit on, and the file is left as it is. `None`: the file's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cues: Option<Vec<SubtitleCue>>,
+    /// The composition of an EffectCraft project (`.ecproj`) this asset shows; `None`: the one the project has
+    /// active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composition: Option<String>,
 }
+
+/// One subtitle (a cue) edited in the project: shown from `start` until `end`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleCue {
+    /// First tick at which it is shown.
+    pub start: Tick,
+    /// First tick at which it is no longer shown.
+    pub end: Tick,
+    /// The text, one line per line of the subtitle.
+    pub text: String,
+    /// The subtitle's own colour group, stroke and place (Encore's subtitle clip properties).
+    #[serde(default, flatten)]
+    pub look: CueLook,
+}
+
+/// How one subtitle is drawn where it differs from its track: Encore's Highlight (colour group), Stroke and
+/// Alignment of a subtitle clip. `None` takes the track's group, the medium stroke and the bottom.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CueLook {
+    /// The colour group (from 0) of the timeline colour set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<u8>,
+    /// The outline around the letters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke: Option<crate::SlideStroke>,
+    /// Where it sits from the top (0) to the bottom (100), in percent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub align: Option<u8>,
+    /// Which side its lines are set to (Encore: the paragraph alignment of the subtitle's text).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub justify: Option<SubtitleJustify>,
+}
+
+/// The side a subtitle's lines are set to, inside the title-safe width.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SubtitleJustify {
+    /// From the left edge of the title-safe area (Encore's default for a new subtitle).
+    Left,
+    /// Centred (DiscCraft's default, as subtitle files are usually shown).
+    #[default]
+    Center,
+    /// To the right edge of the title-safe area.
+    Right,
+}
+
+impl SubtitleJustify {
+    /// Every choice, left to right.
+    pub const ALL: [SubtitleJustify; 3] = [
+        SubtitleJustify::Left,
+        SubtitleJustify::Center,
+        SubtitleJustify::Right,
+    ];
+
+    /// The name in command parameters.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SubtitleJustify::Left => "left",
+            SubtitleJustify::Center => "center",
+            SubtitleJustify::Right => "right",
+        }
+    }
+
+    /// Parses a command parameter.
+    pub fn parse(text: &str) -> Option<SubtitleJustify> {
+        Self::ALL.into_iter().find(|side| side.as_str() == text)
+    }
+}
+
+impl CueLook {
+    /// Whether the values are ones a subtitle can have (a group of the set, at most 100 percent).
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        self.group
+            .is_none_or(|group| group < SubtitleColorSet::GROUPS)
+            && self.align.is_none_or(|align| align <= 100)
+    }
+
+    /// The outline's width in pixels (the medium stroke unless the subtitle has its own).
+    #[must_use]
+    pub fn outline(&self) -> u8 {
+        self.stroke.unwrap_or_default().pixels()
+    }
+
+    /// The place from the top in percent (the bottom unless the subtitle has its own).
+    #[must_use]
+    pub fn vertical(&self) -> u8 {
+        self.align.unwrap_or(100).min(100)
+    }
+}
+
+/// The most cues a subtitle asset keeps in the project.
+pub const MAX_SUBTITLE_CUES: usize = 20_000;
 
 /// Timeline chapter marker.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -391,7 +539,192 @@ pub struct SubtitleTrack {
     /// Language code.
     #[serde(default)]
     pub language: String,
+    /// The colour group (from 0) of the timeline colour set that the track's subtitles use.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub group: u8,
 }
+
+/// One colour of a subtitle: its RGB value and its opacity in percent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleColor {
+    /// Red, green, blue.
+    pub rgb: [u8; 3],
+    /// Opacity, 0 to 100 percent.
+    pub opacity: u8,
+}
+
+/// One colour group of a timeline colour set: the letters and their stroke.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleGroup {
+    /// The letters.
+    pub fill: SubtitleColor,
+    /// The outline around them.
+    pub stroke: SubtitleColor,
+    /// The colour of the half-covered pixels at the letters' edges (Encore's Anti-alias); `None` makes it from the
+    /// fill and the stroke, as Encore's "Create anti-alias color from fill and stroke" does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub antialias: Option<SubtitleColor>,
+}
+
+impl SubtitleGroup {
+    /// The anti-alias colour: the group's own, or halfway between the fill and the stroke (Encore's default
+    /// set has it there: fill 234 and stroke 16 give 125).
+    #[must_use]
+    pub fn antialias_color(&self) -> SubtitleColor {
+        self.antialias.unwrap_or_else(|| {
+            let mid =
+                |a: u8, b: u8| u8::try_from((u16::from(a) + u16::from(b)) / 2).unwrap_or(u8::MAX);
+            let [fr, fg, fb] = self.fill.rgb;
+            let [sr, sg, sb] = self.stroke.rgb;
+            SubtitleColor {
+                rgb: [mid(fr, sr), mid(fg, sg), mid(fb, sb)],
+                opacity: mid(self.fill.opacity, self.stroke.opacity),
+            }
+        })
+    }
+}
+
+/// A timeline colour set (Encore's Timeline Color Set): three colour groups; each subtitle uses one of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleColorSet {
+    /// Groups 1 to 3.
+    pub groups: [SubtitleGroup; 3],
+}
+
+impl Default for SubtitleColorSet {
+    /// Encore CS6's "Timeline Default" set, as its Timeline Color Set dialog shows it: pale yellow, pale pink and
+    /// pale blue letters, each with a near-black stroke, all fully opaque (colours read from the dialog's swatches).
+    fn default() -> Self {
+        let group = |rgb: [u8; 3]| SubtitleGroup {
+            fill: SubtitleColor { rgb, opacity: 100 },
+            stroke: SubtitleColor {
+                rgb: [16, 16, 16],
+                opacity: 100,
+            },
+            antialias: None,
+        };
+        Self {
+            groups: [
+                group([234, 234, 176]),
+                group([234, 199, 234]),
+                group([196, 196, 233]),
+            ],
+        }
+    }
+}
+
+impl SubtitleColorSet {
+    /// How many groups a set has.
+    pub const GROUPS: u8 = 3;
+
+    /// The group numbered `index` from 0 (a number past the last counts as the first).
+    #[must_use]
+    pub fn group(&self, index: u8) -> SubtitleGroup {
+        let [first, second, third] = self.groups;
+        match index {
+            1 => second,
+            2 => third,
+            _ => first,
+        }
+    }
+}
+
+fn is_zero_u8(value: &u8) -> bool {
+    *value == 0
+}
+
+impl Project {
+    /// Chooses the composition an EffectCraft project asset shows (`None`: the project's active one).
+    pub fn set_asset_composition(
+        &mut self,
+        id: AssetId,
+        composition: Option<String>,
+    ) -> Result<(), ProjectError> {
+        let asset = self
+            .assets
+            .get_mut(&id)
+            .ok_or_else(|| ProjectError::Invalid("asset does not exist".to_string()))?;
+        asset.composition = composition
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty());
+        Ok(())
+    }
+
+    /// The colour set of a timeline's subtitles: its own, or the default.
+    #[must_use]
+    pub fn timeline_subtitle_colors(&self, id: TimelineId) -> SubtitleColorSet {
+        self.timeline(id)
+            .and_then(|timeline| timeline.subtitle_colors)
+            .unwrap_or_default()
+    }
+
+    /// Gives a timeline its own colour set (`None`: back to the default).
+    pub fn set_timeline_subtitle_colors(
+        &mut self,
+        id: TimelineId,
+        colors: Option<SubtitleColorSet>,
+    ) -> Result<(), ProjectError> {
+        if let Some(set) = &colors
+            && set.groups.iter().any(|group| {
+                group.fill.opacity > 100
+                    || group.stroke.opacity > 100
+                    || group.antialias.is_some_and(|color| color.opacity > 100)
+            })
+        {
+            return Err(ProjectError::Invalid(
+                "opacity is 0 to 100 percent".to_string(),
+            ));
+        }
+        let timeline = self
+            .timelines
+            .get_mut(&id)
+            .ok_or_else(|| ProjectError::Invalid("timeline does not exist".to_string()))?;
+        timeline.subtitle_colors = colors.filter(|set| *set != SubtitleColorSet::default());
+        Ok(())
+    }
+
+    /// The colour group (from 0) a subtitle track's subtitles use.
+    pub fn set_subtitle_track_group(
+        &mut self,
+        id: TimelineId,
+        track: usize,
+        group: u8,
+    ) -> Result<(), ProjectError> {
+        if group >= SubtitleColorSet::GROUPS {
+            return Err(ProjectError::Invalid(
+                "a colour set has three groups".to_string(),
+            ));
+        }
+        let track = self
+            .timelines
+            .get_mut(&id)
+            .ok_or_else(|| ProjectError::Invalid("timeline does not exist".to_string()))?
+            .subtitles
+            .get_mut(track)
+            .ok_or_else(|| ProjectError::Invalid("subtitle track does not exist".to_string()))?;
+        track.group = group;
+        Ok(())
+    }
+}
+
+/// The part of a video clip that plays, in frames of its file (Encore: a clip's trimmed in and out points, which
+/// fall on GOP starts). The default is the whole clip.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipTrim {
+    /// The first frame that plays.
+    #[serde(default)]
+    pub start: u32,
+    /// The frame after the last that plays; `None` plays to the end of the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<u32>,
+}
+
+/// The most video clips on one timeline.
+pub const MAX_TIMELINE_CLIPS: usize = 99;
 
 /// One authored title timeline.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -403,6 +736,17 @@ pub struct Timeline {
     pub name: String,
     /// Primary video asset.
     pub video: AssetId,
+    /// The video clips after the first, each starting where the one before ends (Encore: more videos dropped on
+    /// the video track are butted on to the end).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub more_video: Vec<AssetId>,
+    /// How each video clip is trimmed, by clip (0 = the first); clips past the end of the list are whole.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub video_trims: Vec<ClipTrim>,
+    /// The empty stretch in front of each video clip, by clip, in frames of the disc's standard (Encore: a clip
+    /// moved along the track leaves a gap, which plays black); clips past the end of the list have none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub video_gaps: Vec<u32>,
     /// Audio tracks.
     #[serde(default)]
     pub audio: Vec<AudioTrack>,
@@ -418,6 +762,9 @@ pub struct Timeline {
     /// Menu remote target.
     #[serde(default)]
     pub menu_remote: Link,
+    /// The timeline's own colour set for its subtitles (`None`: the default set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle_colors: Option<SubtitleColorSet>,
     /// Optional override link.
     #[serde(default)]
     pub override_link: Option<Link>,
@@ -434,6 +781,28 @@ pub struct Timeline {
 }
 
 impl Timeline {
+    /// How clip `clip` (0 = the first) is trimmed.
+    pub fn video_trim(&self, clip: usize) -> ClipTrim {
+        self.video_trims.get(clip).copied().unwrap_or_default()
+    }
+
+    /// The frames of empty track in front of clip `clip` (0 = the first).
+    pub fn video_gap(&self, clip: usize) -> u32 {
+        self.video_gaps.get(clip).copied().unwrap_or(0)
+    }
+
+    /// Whether any clip has an empty stretch in front of it.
+    pub fn has_video_gaps(&self) -> bool {
+        self.video_gaps.iter().any(|gap| *gap > 0)
+    }
+
+    /// The video clips in playing order: the first and the ones butted on to it.
+    pub fn videos(&self) -> Vec<AssetId> {
+        std::iter::once(self.video)
+            .chain(self.more_video.iter().copied())
+            .collect()
+    }
+
     /// Whether this timeline is 16:9: its own choice, else the disc's.
     pub fn wide(&self, settings: &DiscSettings) -> bool {
         self.widescreen.unwrap_or(settings.widescreen)
@@ -478,8 +847,50 @@ pub struct Project {
     /// disc → the node's top-left). Nodes not listed are laid out automatically.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub flowchart: BTreeMap<u64, FlowPoint>,
+    /// The project's named subtitle colour sets (Encore: the colour sets made with New in the Timeline Color Set
+    /// dialog), by name. A timeline or a slideshow takes a copy of one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub subtitle_color_sets: BTreeMap<String, SubtitleColorSet>,
     #[serde(default = "default_next_id")]
     pub next_id: u64,
+}
+
+/// The most named colour sets a project keeps.
+pub const MAX_COLOR_SETS: usize = 64;
+/// The longest name of a colour set, in characters.
+pub const MAX_COLOR_SET_NAME: usize = 64;
+
+impl Project {
+    /// Keeps `set` in the project under `name` (replacing a set of that name).
+    pub fn save_subtitle_color_set(
+        &mut self,
+        name: &str,
+        set: SubtitleColorSet,
+    ) -> Result<(), ProjectError> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > MAX_COLOR_SET_NAME {
+            return Err(ProjectError::Invalid(
+                "a colour set needs a name of at most 64 characters".to_string(),
+            ));
+        }
+        if !self.subtitle_color_sets.contains_key(name)
+            && self.subtitle_color_sets.len() >= MAX_COLOR_SETS
+        {
+            return Err(ProjectError::Invalid(
+                "the project has too many colour sets".to_string(),
+            ));
+        }
+        let _ = self.subtitle_color_sets.insert(name.to_owned(), set);
+        Ok(())
+    }
+
+    /// Takes the named colour set out of the project (the timelines that took a copy keep their colours).
+    pub fn remove_subtitle_color_set(&mut self, name: &str) -> Result<(), ProjectError> {
+        self.subtitle_color_sets
+            .remove(name.trim())
+            .map(|_| ())
+            .ok_or_else(|| ProjectError::Invalid(format!("there is no colour set \"{name}\"")))
+    }
 }
 
 impl Default for Project {
@@ -494,6 +905,7 @@ impl Default for Project {
             chapter_playlists: BTreeMap::new(),
             folders: BTreeMap::new(),
             placements: BTreeMap::new(),
+            subtitle_color_sets: BTreeMap::new(),
             flowchart: BTreeMap::new(),
             next_id: 1,
         }
@@ -595,6 +1007,8 @@ impl Project {
                 path: path_string,
                 kind,
                 offline,
+                cues: None,
+                composition: None,
                 description: String::new(),
             },
         );
@@ -602,6 +1016,28 @@ impl Project {
     }
 
     /// Add a timeline referencing an existing video asset.
+    /// Makes `timeline` the disc's first play when none is set yet, as Encore does for the first timeline
+    /// brought into a project.
+    pub fn adopt_first_play(&mut self, timeline: TimelineId) {
+        if self.settings.first_play == Link::NotSet && self.timelines.contains_key(&timeline) {
+            self.settings.first_play = Link::Timeline {
+                id: timeline,
+                chapter: 0,
+            };
+        }
+    }
+
+    /// Makes `menu` (its default button) the disc's title button when none is set yet, as Encore does for the
+    /// first menu made in a project.
+    pub fn adopt_title_remote(&mut self, menu: crate::ids::MenuId) {
+        if self.settings.title_remote == Link::NotSet && self.menus.contains_key(&menu) {
+            self.settings.title_remote = Link::Menu {
+                id: menu,
+                button: None,
+            };
+        }
+    }
+
     pub fn add_timeline(
         &mut self,
         video: AssetId,
@@ -627,6 +1063,10 @@ impl Project {
                 id,
                 name,
                 video,
+                more_video: Vec::new(),
+                video_gaps: Vec::new(),
+                subtitle_colors: None,
+                video_trims: Vec::new(),
                 audio: Vec::new(),
                 subtitles: Vec::new(),
                 chapters: vec![Chapter {
@@ -635,7 +1075,8 @@ impl Project {
                     poster: None,
                 }],
                 end_action: Link::NotSet,
-                menu_remote: Link::NotSet,
+                // Encore CS6: a new timeline's Menu Remote is "Return to Last Menu".
+                menu_remote: Link::LastMenu,
                 override_link: None,
                 prohibited_ops: Vec::new(),
                 description: String::new(),
@@ -683,6 +1124,254 @@ impl Project {
             },
         );
         Ok(pos)
+    }
+
+    /// Butts video `asset` on to the end of timeline `tl` (Encore: a video dropped on the video track goes to the
+    /// end of the clips, wherever it is dropped) and puts a chapter at the join, `join` (the length of the clips
+    /// so far), unless one is there already. Returns the index of the chapter at the join.
+    pub fn append_timeline_video(
+        &mut self,
+        tl: TimelineId,
+        asset: AssetId,
+        join: Tick,
+    ) -> Result<usize, ProjectError> {
+        let is_video = self
+            .assets
+            .get(&asset)
+            .is_some_and(|found| found.kind == AssetKind::Video);
+        if !is_video {
+            return Err(ProjectError::Invalid(
+                "only a video asset goes on the video track".to_string(),
+            ));
+        }
+        if join <= Tick::ZERO {
+            return Err(ProjectError::Invalid(
+                "the clips before the new one have no length".to_string(),
+            ));
+        }
+        let timeline = self
+            .timelines
+            .get_mut(&tl)
+            .ok_or_else(|| ProjectError::Invalid("timeline does not exist".to_string()))?;
+        if timeline.more_video.len() >= MAX_TIMELINE_CLIPS.saturating_sub(1) {
+            return Err(ProjectError::Invalid(format!(
+                "a timeline holds at most {MAX_TIMELINE_CLIPS} video clips"
+            )));
+        }
+        timeline.more_video.push(asset);
+        if let Some(index) = timeline.chapters.iter().position(|c| c.time == join) {
+            return Ok(index);
+        }
+        self.add_chapter(tl, join, None)
+    }
+
+    /// Takes video clip `clip` (1 = the second; the first stays) off timeline `tl`. The clip plays from `start` for
+    /// `duration`: its chapters go with it, and the clips and chapters after it move up by `duration`.
+    pub fn remove_timeline_video(
+        &mut self,
+        tl: TimelineId,
+        clip: usize,
+        (start, duration): (Tick, Tick),
+    ) -> Result<(), ProjectError> {
+        let timeline = self
+            .timelines
+            .get_mut(&tl)
+            .ok_or_else(|| ProjectError::Invalid("timeline does not exist".to_string()))?;
+        if clip > timeline.more_video.len() {
+            return Err(ProjectError::Invalid(
+                "there is no such video clip to remove".to_string(),
+            ));
+        }
+        match clip.checked_sub(1) {
+            Some(index) => {
+                let _ = timeline.more_video.remove(index);
+            }
+            // The first clip goes and the second takes its place; a timeline keeps at least one clip.
+            None => {
+                if timeline.more_video.is_empty() {
+                    return Err(ProjectError::Invalid(
+                        "a timeline's only video clip cannot be removed".to_string(),
+                    ));
+                }
+                timeline.video = timeline.more_video.remove(0);
+            }
+        }
+        if clip < timeline.video_trims.len() {
+            let _ = timeline.video_trims.remove(clip);
+        }
+        // The empty stretch in front of the clip goes with it (the caller's range covers it).
+        if clip < timeline.video_gaps.len() {
+            let _ = timeline.video_gaps.remove(clip);
+        }
+        self.cut_timeline_range(tl, (start, duration), false)
+    }
+
+    /// Moves clip `clip` along the track (Encore: a clip dragged to another place): `gap` frames of empty track are
+    /// in front of it now, and `next_gap` in front of the clip after it (so that one stays where it is). The
+    /// chapters inside the clip, which plays at `span` (start, length), move with it by `by`; the first chapter, at
+    /// the very start of the timeline, stays.
+    pub fn move_timeline_video(
+        &mut self,
+        tl: TimelineId,
+        clip: usize,
+        (gap, next_gap): (u32, Option<u32>),
+        span: (Tick, Tick),
+        by: Tick,
+    ) -> Result<(), ProjectError> {
+        let timeline = self
+            .timelines
+            .get_mut(&tl)
+            .ok_or_else(|| ProjectError::Invalid("timeline does not exist".to_string()))?;
+        if clip > timeline.more_video.len() {
+            return Err(ProjectError::Invalid(
+                "there is no such video clip".to_string(),
+            ));
+        }
+        let mut set = |index: usize, frames: u32| {
+            if timeline.video_gaps.len() <= index {
+                timeline.video_gaps.resize(index.saturating_add(1), 0);
+            }
+            if let Some(slot) = timeline.video_gaps.get_mut(index) {
+                *slot = frames;
+            }
+        };
+        set(clip, gap);
+        if let Some(next) = next_gap {
+            set(clip.saturating_add(1), next);
+        }
+        while timeline.video_gaps.last() == Some(&0) {
+            let _ = timeline.video_gaps.pop();
+        }
+        let end = span.0.0.saturating_add(span.1.0);
+        for chapter in &mut timeline.chapters {
+            if chapter.time.0 > 0 && chapter.time.0 >= span.0.0 && chapter.time.0 < end {
+                chapter.time = Tick(chapter.time.0.saturating_add(by.0).max(0));
+            }
+        }
+        timeline.chapters.sort_by_key(|chapter| chapter.time);
+        timeline.chapters.dedup_by_key(|chapter| chapter.time);
+        Ok(())
+    }
+
+    /// Sets how clip `clip` (0 = the first) of timeline `tl` is trimmed. `cut` is the part of the timeline that
+    /// goes away, as (start, length): its chapters go with it (one sitting exactly on its start stays when
+    /// `keep_first`: the chapter at a clip's head), and what follows moves up.
+    pub fn trim_timeline_video(
+        &mut self,
+        tl: TimelineId,
+        clip: usize,
+        trim: ClipTrim,
+        cut: Option<((Tick, Tick), bool)>,
+    ) -> Result<(), ProjectError> {
+        let timeline = self
+            .timelines
+            .get_mut(&tl)
+            .ok_or_else(|| ProjectError::Invalid("timeline does not exist".to_string()))?;
+        if clip > timeline.more_video.len() {
+            return Err(ProjectError::Invalid(
+                "there is no such video clip".to_string(),
+            ));
+        }
+        if trim.end.is_some_and(|end| end <= trim.start) {
+            return Err(ProjectError::Invalid(
+                "a trimmed clip must keep some frames".to_string(),
+            ));
+        }
+        if timeline.video_trims.len() <= clip {
+            timeline
+                .video_trims
+                .resize(clip.saturating_add(1), ClipTrim::default());
+        }
+        if let Some(slot) = timeline.video_trims.get_mut(clip) {
+            *slot = trim;
+        }
+        while timeline.video_trims.last() == Some(&ClipTrim::default()) {
+            let _ = timeline.video_trims.pop();
+        }
+        match cut {
+            Some((range, keep_first)) => self.cut_timeline_range(tl, range, keep_first),
+            None => Ok(()),
+        }
+    }
+
+    /// Makes room in timeline `tl`: the chapters at or after `from` (after it only, when `after_only`: the chapter
+    /// at a clip's head stays) move later by `by`. The first chapter never moves.
+    pub fn shift_timeline_chapters(
+        &mut self,
+        tl: TimelineId,
+        from: Tick,
+        by: Tick,
+        after_only: bool,
+    ) -> Result<(), ProjectError> {
+        let timeline = self
+            .timelines
+            .get_mut(&tl)
+            .ok_or_else(|| ProjectError::Invalid("timeline does not exist".to_string()))?;
+        for chapter in timeline.chapters.iter_mut().skip(1) {
+            let moves = if after_only {
+                chapter.time > from
+            } else {
+                chapter.time >= from
+            };
+            if moves {
+                chapter.time = Tick(chapter.time.0.saturating_add(by.0));
+                chapter.poster = chapter
+                    .poster
+                    .map(|poster| Tick(poster.0.saturating_add(by.0)));
+            }
+        }
+        Ok(())
+    }
+
+    /// Takes `duration` out of timeline `tl` at `start`: the chapters in it go (the first chapter never does; one
+    /// exactly at `start` stays when `keep_first`), and the chapters after it move up by `duration`.
+    fn cut_timeline_range(
+        &mut self,
+        tl: TimelineId,
+        (start, duration): (Tick, Tick),
+        keep_first: bool,
+    ) -> Result<(), ProjectError> {
+        let timeline = self
+            .timelines
+            .get_mut(&tl)
+            .ok_or_else(|| ProjectError::Invalid("timeline does not exist".to_string()))?;
+        let end = Tick(start.0.saturating_add(duration.0));
+        let gone: Vec<usize> = timeline
+            .chapters
+            .iter()
+            .enumerate()
+            .filter(|(at, chapter)| {
+                let inside = chapter.time >= start && chapter.time < end;
+                *at > 0 && inside && !(keep_first && chapter.time == start)
+            })
+            .map(|(at, _)| at)
+            .collect();
+        for at in gone.into_iter().rev() {
+            self.remove_chapter(tl, at)?;
+        }
+        let Some(timeline) = self.timelines.get_mut(&tl) else {
+            return Ok(());
+        };
+        for chapter in &mut timeline.chapters {
+            if chapter.time >= end {
+                chapter.time = Tick(chapter.time.0.saturating_sub(duration.0));
+                chapter.poster = chapter
+                    .poster
+                    .map(|poster| Tick(poster.0.saturating_sub(duration.0)));
+            }
+        }
+        // A chapter that moved up on to one that stayed: one of the two is enough.
+        let doubled: Vec<usize> = timeline
+            .chapters
+            .windows(2)
+            .enumerate()
+            .filter(|(_, pair)| matches!(pair, [a, b] if a.time == b.time))
+            .map(|(at, _)| at.saturating_add(1))
+            .collect();
+        for at in doubled.into_iter().rev() {
+            self.remove_chapter(tl, at)?;
+        }
+        Ok(())
     }
 
     /// Remove a chapter by index; the first chapter cannot be removed.
@@ -865,6 +1554,38 @@ mod flowchart_tests {
 
 #[cfg(test)]
 mod tests {
+    /// An EffectCraft project shown as a chosen composition is opened by a name under the project file; any
+    /// other asset by its own path.
+    #[test]
+    fn a_chosen_composition_is_part_of_the_media_path() {
+        let mut project = Project::default();
+        let Ok(id) = project.add_asset(std::path::Path::new("demo.ecproj")) else {
+            return;
+        };
+        let path = project.assets.get(&id).map(|asset| asset.path.clone());
+        let media = |project: &Project| {
+            project
+                .assets
+                .get(&id)
+                .map(|asset| asset.media_path().into_owned())
+        };
+        assert_eq!(media(&project), path);
+        if let Some(asset) = project.assets.get_mut(&id) {
+            asset.composition = Some("Lower/Third 100%".to_owned());
+        }
+        let separator = std::path::MAIN_SEPARATOR;
+        assert_eq!(
+            media(&project),
+            path.as_ref()
+                .map(|path| format!("{path}{separator}Lower%2FThird 100%25.ecproj"))
+        );
+        // A composition on a file that is not an EffectCraft project changes nothing.
+        if let Some(asset) = project.assets.get_mut(&id) {
+            asset.path = "clip.mp4".to_owned();
+        }
+        assert_eq!(media(&project).as_deref(), Some("clip.mp4"));
+    }
+
     #[test]
     fn bdxl_capacities_are_offered_for_blu_ray() -> Result<(), Box<dyn std::error::Error>> {
         use super::{Capacity, DiscKind};

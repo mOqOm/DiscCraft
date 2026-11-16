@@ -9,13 +9,63 @@ pub enum Standard {
     Pal,
 }
 
-/// M2 video attributes: MPEG-2, 4:3, 720 wide.
+/// The picture size of a title set's video, as the video attributes name it (the "source resolution" field; the
+/// first size of each pair is for 525/60 discs, the second for 625/50).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Resolution {
+    /// 720x480 / 720x576.
+    #[default]
+    Full,
+    /// 704x480 / 704x576.
+    Cropped,
+    /// 352x480 / 352x576.
+    Half,
+    /// 352x240 / 352x288.
+    Quarter,
+}
+
+impl Resolution {
+    /// The field's value.
+    fn code(self) -> u8 {
+        match self {
+            Resolution::Full => 0,
+            Resolution::Cropped => 1,
+            Resolution::Half => 2,
+            Resolution::Quarter => 3,
+        }
+    }
+
+    /// The size of a picture `width` x `height` on a disc of `standard`, when it is one a DVD has.
+    #[must_use]
+    pub fn of_picture(width: u16, height: u16, standard: Standard) -> Option<Resolution> {
+        let (full, half) = match standard {
+            Standard::Ntsc => (480, 240),
+            Standard::Pal => (576, 288),
+        };
+        match (width, height) {
+            (720, h) if h == full => Some(Resolution::Full),
+            (704, h) if h == full => Some(Resolution::Cropped),
+            (352, h) if h == full => Some(Resolution::Half),
+            (352, h) if h == half => Some(Resolution::Quarter),
+            _ => None,
+        }
+    }
+}
+
+/// Video attributes: MPEG-2, 4:3 or 16:9, one of the DVD picture sizes.
+///
+/// Byte 1 holds the source resolution in bits 5 to 3 (0 = 720x480/576, 1 = 704x480/576, 2 = 352x480/576,
+/// 3 = 352x240/288), between the line 21 flags (bits 7 and 6) and the letterboxed flag (bit 2), as the DVD-Video
+/// information pages (dvd.sourceforge.net/dvdinfo/ifo.html) and the Linux DVB API documentation of
+/// `video_attributes_t` both give it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoAttr {
     /// Selected video standard.
     pub standard: Standard,
     /// 16:9 (anamorphic) instead of 4:3; automatic pan/scan is then disallowed, letterbox allowed.
     pub wide: bool,
+    /// The picture size.
+    pub resolution: Resolution,
 }
 
 impl VideoAttr {
@@ -29,7 +79,7 @@ impl VideoAttr {
         // 16:9: no pan/scan vectors, letterbox allowed. 4:3: neither display conversion applies, both disallowed
         // (as Encore and other authoring tools write it).
         let aspect = if self.wide { 0x0C | 0x02 } else { 0x03 };
-        [standard | aspect, 0x00]
+        [standard | aspect, self.resolution.code() << 3]
     }
 
     /// Decode the two-byte DVD video attribute field, accepting only M2 values.
@@ -44,10 +94,21 @@ impl VideoAttr {
             0x0E => true,
             _ => return Err(IfoError("unsupported video aspect flags".to_string())),
         };
-        if b[1] != 0 {
+        // Only the resolution bits may be set (no line 21 data, not letterboxed, camera mode).
+        if b[1] & !0x18 != 0 {
             return Err(IfoError("unsupported video attributes".to_string()));
         }
-        Ok(Self { standard, wide })
+        let resolution = match b[1] >> 3 {
+            0 => Resolution::Full,
+            1 => Resolution::Cropped,
+            2 => Resolution::Half,
+            _ => Resolution::Quarter,
+        };
+        Ok(Self {
+            standard,
+            wide,
+            resolution,
+        })
     }
 }
 
@@ -58,6 +119,8 @@ pub enum AudioCoding {
     Ac3,
     /// LPCM.
     Lpcm,
+    /// DTS.
+    Dts,
 }
 
 /// M2 audio attributes: 48 kHz, 16-bit/LPCM or AC-3, optional ISO 639-1 language.
@@ -77,6 +140,7 @@ impl AudioAttr {
         let coding = match self.coding {
             AudioCoding::Ac3 => 0,
             AudioCoding::Lpcm => 4,
+            AudioCoding::Dts => 6,
         };
         let lang_type = if self.language.is_some() { 1 } else { 0 };
         let ch = self.channels.saturating_sub(1).min(7);
@@ -98,6 +162,7 @@ impl AudioAttr {
         let coding = match b[0] >> 5 {
             0 => AudioCoding::Ac3,
             4 => AudioCoding::Lpcm,
+            6 => AudioCoding::Dts,
             _ => return Err(IfoError("unsupported audio coding".to_string())),
         };
         let lang_type = (b[0] >> 2) & 0x03;

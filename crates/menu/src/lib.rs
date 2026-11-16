@@ -21,6 +21,7 @@ mod route;
 mod shadow;
 pub mod subtitle;
 pub mod subtitle_file;
+mod text_block;
 
 use disccraft_project::frame_size;
 use thiserror::Error;
@@ -393,7 +394,13 @@ pub fn menu_psd_layers(
             }
         }
         let mut children = Vec::new();
-        if let Some(area) = button.thumbnail_rect() {
+        if let Some(area) = button.thumbnail_placed().map(|area| {
+            disccraft_project::rotated_bounds_about(
+                area,
+                button.content_centre(),
+                button.orientation.angle,
+            )
+        }) {
             // Encore's video thumbnail layer: a grey placeholder where the video goes.
             let mut placeholder = vec![0u8; usize::from(width) * usize::from(height) * 4];
             for y in area.y..area.y.saturating_add(area.h).min(height) {
@@ -470,6 +477,30 @@ pub fn label_rgba(
 /// The frame rectangle a menu text object covers (for selecting and outlining it in an editor).
 pub fn text_rect(menu: &Menu, text: &disccraft_project::MenuText) -> Rect {
     draw::text_rect(menu, text)
+}
+
+/// The frame rectangle a menu text object covers as it is drawn, turned by its free angle (Encore's Rotate tool):
+/// for selecting and outlining it. Its box before the turn is [`text_rect`].
+pub fn text_bounds(menu: &Menu, text: &disccraft_project::MenuText) -> Rect {
+    draw::text_bounds(menu, text)
+}
+
+/// The frame rectangle a graphic covers as it is drawn: its box turned by its free angle.
+pub fn graphic_bounds(graphic: &disccraft_project::MenuGraphic) -> Rect {
+    graphic::drawn_rect(graphic)
+}
+
+/// The frame rectangle a button's text covers where it is drawn (Encore's text layer of a button set, for
+/// selecting it with the Direct Select tool); `None` for a button without text.
+pub fn label_bounds(menu: &Menu, button: &disccraft_project::Button) -> Option<Rect> {
+    draw::label_bounds(menu, button)
+}
+
+/// The frame rectangle a button's content covers as it is drawn (its content box, text and video thumbnail, moved
+/// and turned), inside the frame of `frame` size: Encore's bounds of the button set, which the button's rectangle
+/// becomes when its content is moved out of it or turned.
+pub fn button_extent(menu: &Menu, button: &disccraft_project::Button, frame: (u16, u16)) -> Rect {
+    draw::button_extent(menu, button, frame)
 }
 
 /// Render `menu` over a caller-supplied background frame (RGB24, frame size of the project) — one frame of a motion menu.
@@ -626,6 +657,221 @@ mod tests {
         Ok(())
     }
 
+    /// M6.197: a hidden text (the Layers panel's eye) is not drawn on the menu.
+    #[test]
+    fn a_hidden_text_is_not_drawn() -> Result<(), Box<dyn Error>> {
+        let mut project = Project::default();
+        let menu_id = project.add_menu(None)?;
+        let _ = project.add_button(menu_id, String::new(), None, Link::NotSet)?;
+        let menu = project.menu_mut(menu_id).ok_or("menu")?;
+        menu.background = MenuBackground::Color { color: [0, 0, 0] };
+        menu.texts.push(disccraft_project::MenuText {
+            text: "Shown".to_owned(),
+            x: 300,
+            y: 300,
+            size: 40,
+            color: Some([255, 255, 255]),
+            font: None,
+            font_style: None,
+            format: Default::default(),
+            shadow: None,
+            orientation: Default::default(),
+            vertical: false,
+            hidden: false,
+            locked: false,
+        });
+        let lit = |project: &Project| -> Result<usize, Box<dyn Error>> {
+            let menu = project.menu(menu_id).ok_or("menu")?;
+            let picture = render_menu(project, menu)?;
+            Ok(picture
+                .rgb
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .filter(|px| px.iter().all(|v| *v > 128))
+                .count())
+        };
+        assert!(lit(&project)? > 50);
+        if let Some(text) = project.menu_mut(menu_id).and_then(|m| m.texts.first_mut()) {
+            text.hidden = true;
+        }
+        assert_eq!(lit(&project)?, 0);
+        Ok(())
+    }
+
+    /// M6.192: a vertical text stands in a column (taller than wide, as wide as the horizontal text is tall), each
+    /// line is a column to the left of the one before, its box starts at its x, y, and the drawn pixels lie in it.
+    #[test]
+    fn a_vertical_text_stands_in_columns() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::{MenuText, Orientation};
+        let mut project = Project::default();
+        let menu_id = project.add_menu(None)?;
+        project.menu_mut(menu_id).ok_or("menu")?.background =
+            MenuBackground::Color { color: [0, 0, 0] };
+        let text = MenuText {
+            text: "縦書きDVD".to_owned(),
+            x: 300,
+            y: 60,
+            size: 40,
+            color: Some([255, 255, 255]),
+            font: None,
+            font_style: None,
+            format: Default::default(),
+            shadow: None,
+            orientation: Orientation::default(),
+            hidden: false,
+            locked: false,
+            vertical: true,
+        };
+        let horizontal = MenuText {
+            vertical: false,
+            ..text.clone()
+        };
+        let menu = project.menu(menu_id).ok_or("menu")?.clone();
+        let flat = super::text_rect(&menu, &horizontal);
+        let standing = super::text_rect(&menu, &text);
+        assert_eq!((standing.x, standing.y), (300, 60));
+        assert!(standing.h > standing.w * 3, "{standing:?}");
+        assert!(
+            standing.w < flat.h * 2 && standing.h > flat.w / 2,
+            "{flat:?} {standing:?}"
+        );
+        // Two lines: two columns, about twice as wide.
+        let two = MenuText {
+            text: "縦書き
+二行目"
+                .to_owned(),
+            ..text.clone()
+        };
+        let wide = super::text_rect(&menu, &two);
+        assert!(wide.w > standing.w * 3 / 2, "{standing:?} {wide:?}");
+        // The pixels lie in the box: render it and find the lit columns and rows.
+        let mut with_text = menu.clone();
+        with_text.texts.push(text.clone());
+        let picture = render_menu(&project, &with_text)
+            .or_else(|_| super::render_menu_preview(&project, &with_text))?;
+        let width = usize::from(picture.width);
+        let lit: Vec<(usize, usize)> = picture
+            .rgb
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .enumerate()
+            .filter(|(_, px)| px.iter().all(|v| *v > 128))
+            .map(|(i, _)| (i % width, i / width))
+            .collect();
+        assert!(!lit.is_empty());
+        let (min_x, max_x) = (
+            lit.iter().map(|p| p.0).min().unwrap_or(0),
+            lit.iter().map(|p| p.0).max().unwrap_or(0),
+        );
+        let (min_y, max_y) = (
+            lit.iter().map(|p| p.1).min().unwrap_or(0),
+            lit.iter().map(|p| p.1).max().unwrap_or(0),
+        );
+        assert!(
+            min_x >= 299 && max_x <= usize::from(standing.x + standing.w) + 1,
+            "{min_x}..{max_x} {standing:?}"
+        );
+        assert!(
+            min_y >= 59 && max_y <= usize::from(standing.y + standing.h) + 1,
+            "{min_y}..{max_y} {standing:?}"
+        );
+        assert!(max_y - min_y > (max_x - min_x) * 3, "a tall column");
+        Ok(())
+    }
+
+    /// M6.191: a graphic and a text turned by a free angle are drawn turned about their box's centre: a square
+    /// turned 45° covers its diagonal tips but no longer its corners, and a turned text covers taller bounds.
+    #[test]
+    fn a_free_turn_turns_graphics_and_texts_about_their_centre() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::{GraphicKind, MenuGraphic, MenuText, Orientation, ShapeKind};
+        let mut project = Project::default();
+        let menu_id = project.add_menu(None)?;
+        project.menu_mut(menu_id).ok_or("menu")?.background =
+            MenuBackground::Color { color: [0, 0, 0] };
+        let square = Rect {
+            x: 200,
+            y: 150,
+            w: 100,
+            h: 100,
+        };
+        let _ = project.add_menu_graphic(
+            menu_id,
+            MenuGraphic {
+                rect: square,
+                kind: GraphicKind::Shape {
+                    shape: ShapeKind::Rectangle,
+                    color: [255, 255, 255],
+                },
+                opacity: 100,
+                shadow: None,
+                orientation: Orientation::default().with_angle(450),
+                hidden: false,
+                locked: false,
+            },
+        )?;
+        let menu = project.menu(menu_id).ok_or("menu")?.clone();
+        let picture = super::render_menu_preview(&project, &menu)?;
+        let lit = |x: usize, y: usize| {
+            picture
+                .rgb
+                .get((y * usize::from(picture.width) + x) * 3)
+                .is_some_and(|value| *value > 128)
+        };
+        // Centre (250, 200): the corner of the upright square is dark, the diagonal tip (half-diagonal ≈ 70.7 px
+        // straight up) lit.
+        assert!(lit(250, 200));
+        assert!(!lit(203, 153), "the corner is turned away");
+        assert!(lit(250, 134), "the tip points up");
+        assert!(!lit(250, 125));
+        let bounds = super::graphic_bounds(menu.graphics.first().ok_or("graphic")?);
+        assert!((140..=143).contains(&bounds.w), "{bounds:?}");
+
+        let text = MenuText {
+            text: "Rotate".to_owned(),
+            x: 100,
+            y: 300,
+            size: 40,
+            color: None,
+            font: None,
+            font_style: None,
+            format: Default::default(),
+            shadow: None,
+            orientation: Orientation::default(),
+            hidden: false,
+            locked: false,
+            vertical: false,
+        };
+        let flat = super::text_bounds(&menu, &text);
+        let turned = MenuText {
+            orientation: Orientation::default().with_angle(900),
+            ..text.clone()
+        };
+        let standing = super::text_bounds(&menu, &turned);
+        // The box stays; its bounds stand up about the same centre.
+        assert_eq!(
+            super::text_rect(&menu, &turned),
+            super::text_rect(&menu, &text)
+        );
+        assert!(
+            standing.h > flat.h && standing.w < flat.w,
+            "{flat:?} -> {standing:?}"
+        );
+        let centre = |r: Rect| {
+            (
+                i32::from(r.x) * 2 + i32::from(r.w),
+                i32::from(r.y) * 2 + i32::from(r.h),
+            )
+        };
+        let (a, b) = (centre(flat), centre(standing));
+        assert!(
+            (a.0 - b.0).abs() <= 2 && (a.1 - b.1).abs() <= 2,
+            "{a:?} {b:?}"
+        );
+        Ok(())
+    }
+
     /// Graphic layers draw over the background and under the texts: an ellipse's middle shows its colour, its
     /// corner shows the background; a half-transparent image blends; a PSD export gets one layer per graphic.
     #[test]
@@ -671,6 +917,8 @@ mod tests {
                 opacity: 100,
                 shadow: None,
                 orientation: Default::default(),
+                hidden: false,
+                locked: false,
             },
         )?;
         let _ = project.add_menu_graphic(
@@ -686,6 +934,8 @@ mod tests {
                 opacity: 50,
                 shadow: None,
                 orientation: Default::default(),
+                hidden: false,
+                locked: false,
             },
         )?;
         let menu = project.menu(menu_id).ok_or("menu")?.clone();
@@ -701,6 +951,167 @@ mod tests {
 
         let (_, _, layers) = super::menu_psd_layers(&project, &menu, None)?;
         assert_eq!(layers.len(), 3);
+        Ok(())
+    }
+
+    /// M6.190: a button's text is drawn moved by its offset (the Direct Select tool), its bounds follow, and an
+    /// offset is limited so the text stays inside the button.
+    #[test]
+    fn a_buttons_text_moves_by_its_offset_inside_the_button() -> Result<(), Box<dyn Error>> {
+        let mut project = Project::default();
+        let menu_id = project.add_menu(None)?;
+        let rect = Rect {
+            x: 100,
+            y: 100,
+            w: 300,
+            h: 60,
+        };
+        let _ = project.add_button(menu_id, "Go".to_owned(), Some(rect), Link::NotSet)?;
+        if let Some(menu) = project.menu_mut(menu_id) {
+            menu.background = MenuBackground::Color { color: [0, 0, 0] };
+            menu.text_color = [255, 255, 255];
+        }
+        let menu = project.menu(menu_id).ok_or("menu")?.clone();
+        let button = menu.buttons.first().ok_or("button")?.clone();
+        let centred = super::label_bounds(&menu, &button).ok_or("bounds")?;
+        // Centred in the button.
+        let middle = |r: Rect| (i32::from(r.x) * 2 + i32::from(r.w)) / 2;
+        assert!((middle(centred) - 250).abs() <= 1, "{centred:?}");
+        // Moved 80 px to the right: the bounds follow, and the drawn text with them.
+        let offset = [80, 0];
+        let moved = disccraft_project::Button {
+            label_offset: offset,
+            ..button.clone()
+        };
+        let bounds = super::label_bounds(&menu, &moved).ok_or("bounds")?;
+        assert_eq!(i32::from(bounds.x), i32::from(centred.x) + 80);
+        let lit_columns =
+            |menu: &disccraft_project::Menu| -> Result<(usize, usize), Box<dyn Error>> {
+                let mut project = project.clone();
+                if let Some(slot) = project.menu_mut(menu_id) {
+                    *slot = menu.clone();
+                }
+                let picture = render_menu(&project, menu)?;
+                let width = usize::from(picture.width);
+                let lit: Vec<usize> = picture
+                    .rgb
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, px)| px.iter().any(|v| *v > 128))
+                    .map(|(i, _)| i % width)
+                    .collect();
+                Ok((
+                    lit.iter().copied().min().unwrap_or(0),
+                    lit.iter().copied().max().unwrap_or(0),
+                ))
+            };
+        let mut moved_menu = menu.clone();
+        if let Some(slot) = moved_menu.buttons.first_mut() {
+            slot.label_offset = offset;
+        }
+        let (left, _) = lit_columns(&menu)?;
+        let (moved_left, _) = lit_columns(&moved_menu)?;
+        assert!(
+            (moved_left as i64 - left as i64 - 80).abs() <= 1,
+            "{left} -> {moved_left}"
+        );
+        // M6.193: moved out of the button (Encore), the button's extent grows to take the text in; inside, the
+        // extent is the button itself.
+        assert_eq!(super::button_extent(&menu, &button, (720, 480)), rect);
+        let out = disccraft_project::Button {
+            label_offset: [250, 0],
+            ..button.clone()
+        };
+        let text = super::label_bounds(&menu, &out).ok_or("bounds")?;
+        let extent = super::button_extent(&menu, &out, (720, 480));
+        assert_eq!((extent.x, extent.y), (rect.x, rect.y));
+        assert_eq!(extent.x + extent.w, text.x + text.w, "{extent:?} {text:?}");
+        assert!(text.x + text.w > rect.x + rect.w);
+        Ok(())
+    }
+
+    /// M6.194: a button's content turned by a free angle turns about its content box's centre: its text is drawn
+    /// turned (its bounds stand up at a quarter turn) and the extent is the turned box's bounds.
+    #[test]
+    fn a_buttons_content_turns_about_its_box() -> Result<(), Box<dyn Error>> {
+        let mut project = Project::default();
+        let menu_id = project.add_menu(None)?;
+        let rect = Rect {
+            x: 200,
+            y: 200,
+            w: 200,
+            h: 60,
+        };
+        let _ = project.add_button(menu_id, "Play".to_owned(), Some(rect), Link::NotSet)?;
+        let menu = project.menu(menu_id).ok_or("menu")?.clone();
+        let button = menu.buttons.first().ok_or("button")?.clone();
+        let flat = super::label_bounds(&menu, &button).ok_or("bounds")?;
+        let turned = disccraft_project::Button {
+            orientation: button.orientation.with_angle(900),
+            ..button.clone()
+        };
+        let standing = super::label_bounds(&menu, &turned).ok_or("bounds")?;
+        assert!(
+            standing.h > standing.w && flat.w > flat.h,
+            "{flat:?} {standing:?}"
+        );
+        // On its side about (300, 230): 60 wide, 200 high.
+        let extent = super::button_extent(&menu, &turned, (720, 480));
+        assert_eq!(
+            extent,
+            Rect {
+                x: 270,
+                y: 130,
+                w: 60,
+                h: 200
+            }
+        );
+        // The disc's highlight (a text subpicture) is the turned text: standing up inside the button's area.
+        let mut on_disc = menu.clone();
+        if let Some(slot) = on_disc.buttons.first_mut() {
+            *slot = disccraft_project::Button {
+                rect: extent,
+                body: Some(disccraft_project::ContentBox {
+                    x: -70,
+                    y: 70,
+                    w: 200,
+                    h: 60,
+                }),
+                text_subpicture: true,
+                ..turned.clone()
+            };
+        }
+        let rendered = render_menu(&project, &on_disc)?;
+        let layer = &rendered.highlight;
+        let width = usize::from(layer.width);
+        let lit: Vec<(usize, usize)> = layer
+            .pixels
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| **value != 0)
+            .map(|(i, _)| {
+                (
+                    usize::from(layer.x) + i % width,
+                    usize::from(layer.y) + i / width,
+                )
+            })
+            .collect();
+        assert!(!lit.is_empty());
+        let span = |pick: fn(&(usize, usize)) -> usize| {
+            let values: Vec<usize> = lit.iter().map(pick).collect();
+            (
+                values.iter().copied().min().unwrap_or(0),
+                values.iter().copied().max().unwrap_or(0),
+            )
+        };
+        let ((x0, x1), (y0, y1)) = (span(|p| p.0), span(|p| p.1));
+        assert!(y1 - y0 > x1 - x0, "standing: {x0}..{x1} x {y0}..{y1}");
+        assert!(
+            x0 >= 270 && x1 < 330 && y0 >= 130 && y1 < 330,
+            "{x0}..{x1} x {y0}..{y1}"
+        );
         Ok(())
     }
 
@@ -857,6 +1268,8 @@ mod tests {
                 },
                 opacity: 100,
                 orientation: Default::default(),
+                hidden: false,
+                locked: false,
                 shadow: Some(disccraft_project::DropShadow {
                     color: [0, 0, 255],
                     opacity: 100,
@@ -942,6 +1355,8 @@ mod tests {
                 opacity: 100,
                 shadow: None,
                 orientation,
+                hidden: false,
+                locked: false,
             }];
             super::render_menu_preview(&project, &menu)
         };
@@ -962,6 +1377,7 @@ mod tests {
             disccraft_project::Orientation {
                 flip: true,
                 turns: 0,
+                angle: 0,
             },
             wide,
         )?;
@@ -978,6 +1394,7 @@ mod tests {
             disccraft_project::Orientation {
                 flip: false,
                 turns: 1,
+                angle: 0,
             },
             tall,
         )?;
@@ -1007,6 +1424,9 @@ mod tests {
             format: disccraft_project::TextFormat::default(),
             shadow: None,
             orientation: disccraft_project::Orientation::default(),
+            hidden: false,
+            locked: false,
+            vertical: false,
         });
         // (pixels partly lit, total light) of the picture with `mode`.
         let measure =
@@ -1107,6 +1527,9 @@ mod tests {
             format: disccraft_project::TextFormat::default(),
             shadow: None,
             orientation: disccraft_project::Orientation::default(),
+            hidden: false,
+            locked: false,
+            vertical: false,
         });
         let ink = |menu: &disccraft_project::Menu| -> Result<f64, Box<dyn Error>> {
             let rendered = super::render_menu_preview(&project, menu)?;
@@ -1141,6 +1564,9 @@ mod tests {
             format: disccraft_project::TextFormat::default(),
             shadow: None,
             orientation: disccraft_project::Orientation::default(),
+            hidden: false,
+            locked: false,
+            vertical: false,
         });
         let with = |change: &dyn Fn(&mut disccraft_project::TextFormat)| {
             let mut changed = menu.clone();
@@ -1212,6 +1638,9 @@ mod tests {
             format: disccraft_project::TextFormat::default(),
             shadow: None,
             orientation: disccraft_project::Orientation::default(),
+            hidden: false,
+            locked: false,
+            vertical: false,
         });
         let flat = super::text_rect(&menu, menu.texts.first().ok_or("text")?);
         let mut turned = menu.clone();
@@ -1344,6 +1773,9 @@ mod tests {
             format: disccraft_project::TextFormat::default(),
             shadow: None,
             orientation: Default::default(),
+            hidden: false,
+            locked: false,
+            vertical: false,
             text: "Welcome".to_owned(),
             x: 60,
             y: 40,

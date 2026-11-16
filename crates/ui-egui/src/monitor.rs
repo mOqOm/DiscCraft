@@ -136,6 +136,36 @@ pub(crate) struct PreviewMenu {
     pub(crate) button: u8,
 }
 
+/// Encore's monitor button セーフエリアの表示 / 非表示 in `rect`: flips `shown` when it is pressed and looks pressed
+/// while the safe areas are shown.
+pub(crate) fn safe_area_button(ui: &mut Ui, rect: egui::Rect, shown: &mut bool) {
+    let response = ui
+        .interact(
+            rect,
+            ui.scope_id().with("monitor_safe_areas"),
+            egui::Sense::click(),
+        )
+        .on_hover_text(tl!("Show / Hide Safe Areas"));
+    if response.clicked() {
+        *shown = !*shown;
+    }
+    let visuals = ui.style().interact_selectable(&response, *shown);
+    if *shown || response.hovered() {
+        ui.painter().rect(
+            rect,
+            2.0,
+            visuals.weak_bg_fill,
+            visuals.bg_stroke,
+            egui::StrokeKind::Inside,
+        );
+    }
+    crate::tool_icons::paint(
+        ui.painter(),
+        egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0)),
+        crate::tool_icons::Glyph::SafeArea,
+        visuals.fg_stroke.color,
+    );
+}
 impl DiscCraftApp {
     /// モニターパネル。Encore のプレビューと同じく、上に映像（メニュー）、下に操作バーを置く。
     pub(crate) fn monitor_view(&mut self, ui: &mut Ui) {
@@ -178,6 +208,7 @@ impl DiscCraftApp {
             (false, Some(id)) => Some(id),
             _ => None,
         };
+        self.drop_stale_subtitle_edit(timeline);
         egui::Panel::bottom("monitor_controls")
             .resizable(false)
             .show(ui, |ui| match timeline {
@@ -215,8 +246,26 @@ impl DiscCraftApp {
                         egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                         egui::Color32::WHITE,
                     );
-                    if let Some(text) = &subtitle {
-                        draw_subtitle(ui.painter(), screen.intersect(area), text);
+                    let shown = screen.intersect(area);
+                    if self.subtitle_edit.is_some() {
+                        // 字幕を追加したあと / ダブルクリックしたあとは、字幕の場所で入力する（Encore と同じ）。
+                        self.subtitle_edit_box(ui, shown);
+                    } else if let (Some((text, colors, look)), Some(id)) = (&subtitle, timeline) {
+                        let at = draw_subtitle(ui.painter(), shown, text, (*colors, *look));
+                        let response = ui
+                            .interact(
+                                at,
+                                ui.scope_id().with("monitor_subtitle"),
+                                egui::Sense::click(),
+                            )
+                            .on_hover_text(tl!("Double-click to change the subtitle's text"));
+                        if response.double_clicked() {
+                            let seconds = crate::timeline_view::playhead_seconds(ui.ctx(), id);
+                            self.edit_shown_subtitle(id, seconds);
+                        }
+                    }
+                    if self.show_monitor_safe_areas {
+                        crate::menu_editor::paint_safe_areas(ui.painter(), picture);
                     }
                     return;
                 }
@@ -231,8 +280,16 @@ impl DiscCraftApp {
                         egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                         egui::Color32::WHITE,
                     );
-                    if let Some(text) = &picture.subtitle {
-                        draw_subtitle(ui.painter(), frame.intersect(area), text);
+                    if let Some((text, colors, look)) = &picture.subtitle {
+                        let _ = draw_subtitle(
+                            ui.painter(),
+                            frame.intersect(area),
+                            text,
+                            (*colors, *look),
+                        );
+                    }
+                    if self.show_monitor_safe_areas {
+                        crate::menu_editor::paint_safe_areas(ui.painter(), frame);
                     }
                     // Blu-ray のポップアップメニュー（ビルドした Blu-ray のプレビュー）。
                     if let Some(popup) = &state.popup {
@@ -282,10 +339,12 @@ impl DiscCraftApp {
         let start = ui.cursor().min.x;
         let gap = ui.spacing().item_spacing.x;
 
-        // 左: 拡大率。
+        // 左: 拡大率と、Encore と同じセーフエリアの表示 / 非表示。
         let mut zoom = self.monitor_zoom;
         zoom_combo(ui, "monitor_zoom", &mut zoom);
         self.monitor_zoom = zoom;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 22.0), egui::Sense::hover());
+        safe_area_button(ui, rect, &mut self.show_monitor_safe_areas);
 
         // 中央: プレビュー中はリモコン、それ以外はタイムラインの移動ボタン。
         let center_at = start + (total - center_width) / 2.0;
@@ -342,13 +401,25 @@ impl DiscCraftApp {
     /// `asset.frame` で取り直す（マウスのボタンを押している間は取り直さない）。
     fn timeline_frame(&mut self, ctx: &egui::Context) -> Option<(egui::TextureHandle, String)> {
         let id = self.viewer_timeline()?;
-        let video = self.session.project.timeline(id)?.video;
         let (num, den) = crate::timeline_view::frame_rate(self.session.project.settings.standard);
         let fps = f64::from(num) / f64::from(den.max(1));
         let seconds = crate::timeline_view::playhead_seconds(ctx, id);
         // `as` saturates; the frame number is only a cache key.
         let frame = (seconds * fps).round() as i64;
         let timecode = crate::timeline_view::timecode(seconds, num, den);
+        // The clip under the playhead and the place in its file (Encore: several clips on the video track).
+        let clips = self.timeline_clips(id);
+        // A gap between clips shows black, as it plays on the disc.
+        if crate::playback::in_gap(&clips, seconds) && !self.is_playing() {
+            let black = ctx.load_texture(
+                "monitor_gap_black",
+                egui::ColorImage::filled([4, 3], egui::Color32::BLACK),
+                egui::TextureOptions::NEAREST,
+            );
+            return Some((black, timecode));
+        }
+        let (clip, local) = crate::playback::clip_at(&clips, seconds)?;
+        let video = clip.asset;
 
         let cached = self
             .monitor_frame
@@ -375,7 +446,8 @@ impl DiscCraftApp {
             self.monitor_source = disccraft_engine::FrameSource::open(&path).ok();
         }
         let size = self.monitor_frame_size(id);
-        let at = f64::from(u32::try_from(frame.max(0)).unwrap_or(u32::MAX)) / fps;
+        // The frame of the file: the position in the clip, on the frame grid.
+        let at = (local * fps).round().max(0.0) / fps;
         let picture = self.monitor_source.as_ref()?.frame(at, size).ok()?;
         let texture = rgb_texture(ctx, "monitor_frame", &picture)?;
         self.monitor_frame = Some((video.0, frame, texture.clone()));
@@ -412,7 +484,11 @@ impl DiscCraftApp {
 
         let zoom = self.monitor_zoom;
         ui.centered_and_justified(|ui| {
-            self.menu_canvas(ui, &project_menu, Some(highlight), zoom);
+            if let Some(canvas) = self.menu_canvas(ui, &project_menu, Some(highlight), zoom)
+                && self.show_monitor_safe_areas
+            {
+                crate::menu_editor::paint_safe_areas(ui.painter(), canvas);
+            }
         });
     }
 
@@ -644,27 +720,59 @@ pub(crate) fn zoom_combo(ui: &mut Ui, id: &str, zoom: &mut MonitorZoom) {
         .on_hover_text(tl!("Magnification"));
 }
 
-/// 字幕を映像の下の方に、黒い縁取りの白い文字で重ねる。
-pub(crate) fn draw_subtitle(painter: &egui::Painter, picture: egui::Rect, text: &str) {
+/// A colour of a timeline colour set as an egui colour (its opacity as alpha).
+pub(crate) fn subtitle_color(color: disccraft_project::SubtitleColor) -> egui::Color32 {
+    let [r, g, b] = color.rgb;
+    let alpha = (u16::from(color.opacity.min(100)) * 255 + 50) / 100;
+    egui::Color32::from_rgba_unmultiplied(r, g, b, u8::try_from(alpha).unwrap_or(255))
+}
+
+/// 字幕を映像の下の方に、カラーグループの色（文字とストローク）で重ねる。
+pub(crate) fn draw_subtitle(
+    painter: &egui::Painter,
+    picture: egui::Rect,
+    text: &str,
+    (colors, look): (disccraft_project::SubtitleGroup, disccraft_project::CueLook),
+) -> egui::Rect {
     let size = (picture.height() / 18.0).clamp(10.0, 40.0);
     let font = egui::FontId::proportional(size);
-    let anchor = egui::pos2(picture.center().x, picture.max.y - picture.height() * 0.06);
-    for (dx, dy) in [(-1.5, 0.0), (1.5, 0.0), (0.0, -1.5), (0.0, 1.5)] {
+    // The subtitle area leaves a margin at the top and the bottom; the place is a percentage of the way down.
+    let margin = picture.height() * 0.06;
+    let lines = text.lines().count().max(1) as f32;
+    let room = (picture.height() - margin * 2.0 - size * 1.2 * lines).max(0.0);
+    let bottom =
+        picture.min.y + margin + size * 1.2 * lines + room * f32::from(look.vertical()) / 100.0;
+    // Left and right stand on the title-safe edges (a tenth of the width in), as on the disc.
+    let (x, side) = match look.justify.unwrap_or_default() {
+        disccraft_project::SubtitleJustify::Left => (
+            picture.min.x + picture.width() * 0.10,
+            egui::Align2::LEFT_BOTTOM,
+        ),
+        disccraft_project::SubtitleJustify::Center => {
+            (picture.center().x, egui::Align2::CENTER_BOTTOM)
+        }
+        disccraft_project::SubtitleJustify::Right => (
+            picture.max.x - picture.width() * 0.10,
+            egui::Align2::RIGHT_BOTTOM,
+        ),
+    };
+    let anchor = egui::pos2(x, bottom);
+    let edge = f32::from(look.outline()) * 0.75;
+    let offsets: &[(f32, f32)] = if edge > 0.0 {
+        &[(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)]
+    } else {
+        &[]
+    };
+    for (dx, dy) in offsets.iter().map(|(dx, dy)| (dx * edge, dy * edge)) {
         painter.text(
             anchor + egui::vec2(dx, dy),
-            egui::Align2::CENTER_BOTTOM,
+            side,
             text,
             font.clone(),
-            egui::Color32::BLACK,
+            subtitle_color(colors.stroke),
         );
     }
-    painter.text(
-        anchor,
-        egui::Align2::CENTER_BOTTOM,
-        text,
-        font,
-        egui::Color32::WHITE,
-    );
+    painter.text(anchor, side, text, font, subtitle_color(colors.fill))
 }
 
 /// `preview.*` の戻り値を画面表示用にまとめる。
@@ -797,12 +905,14 @@ pub(crate) fn chapter_number(points: &[f64], now: f64) -> usize {
         .max(1)
 }
 
-/// `now` より前の最後のチャプターポイント（なければ 0）。同じ位置にいるときはひとつ前へ戻る。
-pub(crate) fn prev_point(points: &[f64], now: f64) -> f64 {
+/// `now` より前の最後のチャプターポイント（なければ 0）。Encore と同じく、チャプターの途中からはそのチャプターの頭へ、
+/// 頭にいるとき（頭から `frame` 秒 = 1 フレーム以内）はひとつ前のチャプターの頭へ戻る。
+pub(crate) fn prev_point(points: &[f64], now: f64, frame: f64) -> f64 {
+    let slack = frame.max(0.0) + 0.001;
     points
         .iter()
         .copied()
-        .filter(|point| *point < now - 0.001)
+        .filter(|point| *point < now - slack)
         .fold(0.0, f64::max)
 }
 
@@ -861,9 +971,14 @@ mod tests {
     #[test]
     fn chapter_navigation_steps_between_points() {
         let points = [0.0, 60.0, 120.0];
-        assert!((super::prev_point(&points, 90.0) - 60.0).abs() < 1e-9);
-        assert!((super::prev_point(&points, 60.0) - 0.0).abs() < 1e-9);
-        assert!((super::prev_point(&points, 0.0) - 0.0).abs() < 1e-9);
+        let frame = 1.0 / 30.0;
+        assert!((super::prev_point(&points, 90.0, frame) - 60.0).abs() < 1e-9);
+        assert!((super::prev_point(&points, 60.0, frame) - 0.0).abs() < 1e-9);
+        assert!((super::prev_point(&points, 0.0, frame) - 0.0).abs() < 1e-9);
+        // One frame after a chapter's start still counts as its start (measured in Encore: from 10;00, with a
+        // chapter at 9;29, the previous chapter is the one before); later it goes to that chapter's start.
+        assert!((super::prev_point(&points, 60.0 + frame, frame) - 0.0).abs() < 1e-9);
+        assert!((super::prev_point(&points, 60.0 + 2.5 * frame, frame) - 60.0).abs() < 1e-9);
         assert_eq!(super::next_point(&points, 60.0), Some(120.0));
         assert_eq!(super::next_point(&points, 120.0), None);
     }

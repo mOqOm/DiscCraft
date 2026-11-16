@@ -10,12 +10,14 @@ publish.workspace = true
 [dependencies]
 disccraft-mpeg2venc.workspace = true
 disccraft-photo.workspace = true
+disccraft-sound.workspace = true
+disccraft-motion.workspace = true
 disccraft-psmux.workspace = true
 filmcraft-media.workspace = true
 filmcraft-codecs.workspace = true
 filmcraft-frame.workspace = true
 filmcraft-time.workspace = true
-filmcraft-h264enc.workspace = true
+craft-video = { workspace = true, features = ["h264-encode"] }
 thiserror.workspace = true
 
 [lints]

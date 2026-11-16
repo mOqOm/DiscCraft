@@ -358,9 +358,19 @@ pub(crate) fn reset_layout(id: &WorkspaceId) -> DockLayout {
     }
 }
 
-/// 保存された表示言語を読む。保存がなければシステム言語。
+/// 起動時の表示言語: 利用者が自分で選んだ言語があればそれ、なければ OS の表示言語（日本語なら日本語、英語と
+/// それ以外は英語）。選んでいない間は、起動のたびに OS の言語に従う。
 pub(crate) fn load_language() -> Language {
-    load_settings().language.unwrap_or_else(i18n::detected)
+    startup_language(&load_settings(), i18n::detected)
+}
+
+/// [`load_language`] の判定。前の版は選んでいなくても言語を書き込んでいたので、`language_chosen` のない設定の
+/// 言語は選んだものとは見ない。
+fn startup_language(settings: &Saved, system: impl FnOnce() -> Language) -> Language {
+    match settings.language {
+        Some(language) if settings.language_chosen => language,
+        _ => system(),
+    }
 }
 
 /// 最近使ったプロジェクト（新しい順）。
@@ -406,7 +416,7 @@ pub(crate) fn save_workspace(
         WorkspaceId::Preset(_) => true,
         WorkspaceId::User(name) => users.contains(name),
     });
-    settings.language = Some(i18n::current());
+    // 表示言語はここでは書かない（利用者が選んだときだけ `save_language` が書く）。
     save(&settings)
 }
 
@@ -414,6 +424,7 @@ pub(crate) fn save_workspace(
 pub(crate) fn save_language(language: Language) -> Result<(), String> {
     let mut settings = load_settings();
     settings.language = Some(language);
+    settings.language_chosen = true;
     save(&settings)
 }
 
@@ -480,9 +491,12 @@ pub(crate) struct Saved {
     /// 表の列の幅（「表:列」ごと。見出しの右端をドラッグして決めたもの）。
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub(crate) column_widths: crate::theme::ColumnWidths,
-    /// 保存された表示言語。`None` は未設定（システム言語を使う）。
+    /// 保存された表示言語。`language_chosen` のときだけ使う。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) language: Option<Language>,
+    /// 利用者が表示言語を自分で選んだ（ウィンドウ ▸ 言語、環境設定）。選んでいない間は OS の表示言語に従う。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) language_chosen: bool,
     /// 最近使ったプロジェクト（新しい順）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) recent: Vec<PathBuf>,
@@ -503,6 +517,28 @@ mod tests {
 
     fn front(dock: &Dock, panel: Panel) -> bool {
         dock.layout.panel_state(&panel) == PanelState::Front
+    }
+
+    /// Until the user chooses a language the system's is used at every start; a chosen one stays. A language an
+    /// older version wrote without being asked does not count as chosen.
+    #[test]
+    fn the_startup_language_follows_the_system_until_one_is_chosen() {
+        let system = || Language::En;
+        let mut settings = Saved::default();
+        assert_eq!(super::startup_language(&settings, system), Language::En);
+        settings.language = Some(Language::Ja);
+        assert_eq!(super::startup_language(&settings, system), Language::En);
+        settings.language_chosen = true;
+        assert_eq!(super::startup_language(&settings, system), Language::Ja);
+        assert_eq!(
+            super::startup_language(&settings, || Language::Ja),
+            Language::Ja
+        );
+        // An old settings file: a language and no flag.
+        let old: Saved = serde_json::from_str(r#"{"language":"ja"}"#).unwrap_or_default();
+        assert_eq!(old.language, Some(Language::Ja));
+        assert!(!old.language_chosen);
+        assert_eq!(super::startup_language(&old, system), Language::En);
     }
 
     #[test]

@@ -87,6 +87,7 @@ Subtitle test
     p.timeline_mut(t).unwrap().subtitles.push(SubtitleTrack {
         asset: s,
         language: "en".to_string(),
+        group: 0,
     });
     p.add_chapter(t, Tick(63 * TICKS_PER_SECOND), None).unwrap();
     p.add_chapter(t, Tick(127 * TICKS_PER_SECOND), None)
@@ -370,4 +371,362 @@ fn a_motion_menu_becomes_a_clip_that_loops_with_its_sound() {
         })
         .collect();
     assert!(errors.is_empty(), "decode errors: {stderr}");
+}
+
+/// M6.219: an HD (H.264) title of two trimmed video clips with a gap between them is one stream of the parts: the
+/// frames of each part at the HD rate, black for the gap, each part starting on a key frame, decodable without
+/// errors. Needs the `ntsc.m2v` fixture the
+/// DVD tests make and ffmpeg / ffprobe; skipped without them.
+#[test]
+fn an_hd_title_joins_trimmed_clips() {
+    let (Some(ffmpeg), Some(ffprobe)) = (
+        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
+        tool("DISCCRAFT_FFPROBE", "ffprobe"),
+    ) else {
+        eprintln!("ffmpeg / ffprobe not found; skipping");
+        return;
+    };
+    let video = fixtures().join("ntsc.m2v");
+    if !video.is_file() {
+        eprintln!("ntsc.m2v fixture not found; skipping");
+        return;
+    }
+    let mut p = Project::default();
+    p.settings.kind = DiscKind::BluRay;
+    p.settings.bd_video = disccraft_project::BdVideo::Hd720p23;
+    let v = p.add_asset(&video).unwrap();
+    let t = p.add_timeline(v, Some("Main".to_string())).unwrap();
+    // The first clip is 599 frames of 1001/30000 s.
+    let _ = p
+        .append_timeline_video(t, v, Tick(599 * 8_475_667_200))
+        .unwrap();
+    // GOP starts of the fixture (13 pictures a GOP): 104 frames of the first clip, 78 of the second.
+    p.timeline_mut(t).unwrap().video_trims = vec![
+        disccraft_project::ClipTrim {
+            start: 0,
+            end: Some(104),
+        },
+        disccraft_project::ClipTrim {
+            start: 52,
+            end: Some(130),
+        },
+    ];
+    // The second clip starts 45 frames (1.5 s) after the first ends: 36 black frames at 23.976.
+    p.timeline_mut(t).unwrap().video_gaps = vec![0, 45];
+    p.settings.first_play = Link::Timeline { id: t, chapter: 0 };
+
+    let out = fixtures().join("bd_hd_join_out");
+    let _ = std::fs::remove_dir_all(&out);
+    let report = build_bdmv(&p, &out).unwrap();
+    assert_eq!(report.titles.len(), 1);
+    let stream = out.join("BDMV/STREAM/00001.m2ts");
+
+    // 104 frames of 29.97 are 83 of 23.976, then 36 black frames, then 78 frames as 62: the gap starts at
+    // packet 84 and the second clip at packet 120, each with a key frame.
+    let probe = Command::new(&ffprobe)
+        .args(["-v", "error", "-select_streams", "v:0"])
+        .args(["-show_entries", "stream=codec_name,width,height"])
+        .args(["-show_entries", "packet=flags", "-of", "csv=p=0"])
+        .arg(&stream)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&probe.stdout);
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let packets: Vec<&&str> = lines.iter().filter(|l| l.contains('_')).collect();
+    assert_eq!(packets.len(), 181, "{text}");
+    assert!(
+        packets.get(83).is_some_and(|flags| flags.starts_with('K')),
+        "{text}"
+    );
+    assert!(
+        packets.get(119).is_some_and(|flags| flags.starts_with('K')),
+        "{text}"
+    );
+    assert!(
+        lines.iter().any(|l| l.starts_with("h264,1280,720")),
+        "{text}"
+    );
+
+    let decode = Command::new(&ffmpeg)
+        .args(["-v", "error", "-xerror", "-i"])
+        .arg(&stream)
+        .args(["-f", "null", "-"])
+        .output()
+        .unwrap();
+    assert!(
+        decode.status.success() && decode.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&decode.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// M6.221: a subtitle track's colour group reaches the Blu-ray's subtitle stream. With group 2 set to red letters,
+/// the picture ffmpeg draws with the subtitle over it has red where the default (white) subtitle has none: at the
+/// bottom centre the test picture is yellow and blue. Needs the `ntsc.m2v` fixture and ffmpeg; skipped without.
+#[test]
+fn a_subtitle_takes_its_colour_group_on_blu_ray() {
+    let Some(ffmpeg) = tool("DISCCRAFT_FFMPEG", "ffmpeg") else {
+        eprintln!("ffmpeg not found; skipping");
+        return;
+    };
+    let video = fixtures().join("ntsc.m2v");
+    if !video.is_file() {
+        eprintln!("ntsc.m2v fixture not found; skipping");
+        return;
+    }
+    let srt = fixtures().join("bd_colour_sub.srt");
+    std::fs::write(&srt, "1\n00:00:01,000 --> 00:00:04,000\nWWWWWWWW\n\n").unwrap();
+    let build = |group: u8, name: &str| {
+        let mut p = Project::default();
+        p.settings.kind = DiscKind::BluRay;
+        let v = p.add_asset(&video).unwrap();
+        let s = p.add_asset(&srt).unwrap();
+        let t = p.add_timeline(v, Some("Main".to_string())).unwrap();
+        p.timeline_mut(t).unwrap().subtitles.push(SubtitleTrack {
+            asset: s,
+            language: "en".to_string(),
+            group,
+        });
+        let mut colors = disccraft_project::SubtitleColorSet::default();
+        colors.groups[1].fill.rgb = [255, 0, 0];
+        p.set_timeline_subtitle_colors(t, Some(colors)).unwrap();
+        p.settings.first_play = Link::Timeline { id: t, chapter: 0 };
+        let out = fixtures().join(name);
+        let _ = std::fs::remove_dir_all(&out);
+        let _ = build_bdmv(&p, &out).unwrap();
+        // One frame at two seconds with the subtitle drawn over it, as raw RGB.
+        let frame = Command::new(&ffmpeg)
+            .args(["-v", "error", "-i"])
+            .arg(out.join("BDMV/STREAM/00001.m2ts"))
+            .args(["-filter_complex", "[0:v][0:s:0]overlay", "-ss", "2"])
+            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&out);
+        assert_eq!(
+            frame.stdout.len(),
+            720 * 480 * 3,
+            "{}",
+            String::from_utf8_lossy(&frame.stderr)
+        );
+        // Red pixels in the bottom centre (x 240..480, y 380..470).
+        let mut red = 0_usize;
+        for y in 380..470_usize {
+            for x in 240..480_usize {
+                let i = (y * 720 + x) * 3;
+                if let [r, g, b] = frame.stdout[i..i + 3]
+                    && r > 180
+                    && g < 80
+                    && b < 80
+                {
+                    red += 1;
+                }
+            }
+        }
+        red
+    };
+    let white = build(0, "bd_colour_white_out");
+    let red = build(1, "bd_colour_red_out");
+    assert!(white < 20, "white subtitle: {white} red pixels");
+    assert!(red > 300, "red subtitle: {red} red pixels");
+}
+
+/// A slideshow's "Create Subtitle" slides get their subtitle on an HD Blu-ray title too (a presentation graphics
+/// stream in the clip), and a show without such slides has none. Needs the slide pictures the GUI demo makes and
+/// ffprobe; skipped without them.
+#[test]
+fn an_hd_slideshow_carries_its_slides_subtitles() {
+    let Some(ffprobe) = tool("DISCCRAFT_FFPROBE", "ffprobe") else {
+        eprintln!("ffprobe not found; skipping");
+        return;
+    };
+    let (first, second) = (fixtures().join("slide1.png"), fixtures().join("slide2.png"));
+    if !first.is_file() || !second.is_file() {
+        eprintln!("slide fixtures not found; skipping");
+        return;
+    }
+    let codecs = |subtitle: bool, name: &str| {
+        let mut p = Project::default();
+        p.settings.kind = DiscKind::BluRay;
+        p.settings.bd_video = disccraft_project::BdVideo::Hd720p23;
+        let a = p.add_asset(&first).unwrap();
+        let b = p.add_asset(&second).unwrap();
+        let show = p.add_slideshow(Some("Slides".to_string())).unwrap();
+        let _ = p.add_slide(show, a, Tick(TICKS_PER_SECOND)).unwrap();
+        let _ = p.add_slide(show, b, Tick(TICKS_PER_SECOND)).unwrap();
+        if subtitle {
+            p.set_slide_subtitle(show, 1, true).unwrap();
+            let mut colors = disccraft_project::SubtitleColorSet::default();
+            colors.groups[0].fill.rgb = [255, 200, 0];
+            p.set_slideshow_subtitle_colors(show, Some(colors)).unwrap();
+        }
+        p.settings.first_play = Link::Slideshow { id: show };
+        let out = fixtures().join(name);
+        let _ = std::fs::remove_dir_all(&out);
+        let _ = build_bdmv(&p, &out).unwrap();
+        let probe = Command::new(&ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(out.join("BDMV/STREAM/00001.m2ts"))
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&out);
+        String::from_utf8_lossy(&probe.stdout).into_owned()
+    };
+    let plain = codecs(false, "bd_hd_slides_plain_out");
+    assert!(plain.contains("h264") && !plain.contains("pgs"), "{plain}");
+    let titled = codecs(true, "bd_hd_slides_titled_out");
+    assert!(
+        titled.contains("h264") && titled.contains("hdmv_pgs_subtitle"),
+        "{titled}"
+    );
+}
+
+/// An HD Blu-ray title makes no DVD (MPEG-2) transcode of its video on the way: the cache holds the H.264 encode
+/// and a short black stand-in, not an MPEG-2 file of the source's length; the title still gets the source's sound
+/// (as AC-3) and its video. Needs the `h264_aac.mp4` fixture the transcode tests make and ffprobe; skipped without.
+/// An HD disc's slideshow is encoded from its slides as H.264 only: no MPEG-2 encode of the show is left in the
+/// cache, and the clip has the pictures and the show's sound at the show's length.
+#[test]
+fn an_hd_slideshow_makes_no_dvd_encode() {
+    let Some(ffprobe) = tool("DISCCRAFT_FFPROBE", "ffprobe") else {
+        eprintln!("ffprobe not found; skipping");
+        return;
+    };
+    let (first, second) = (fixtures().join("slide1.png"), fixtures().join("slide2.png"));
+    if !first.is_file() || !second.is_file() {
+        eprintln!("slide fixtures not found; skipping");
+        return;
+    }
+    let mut p = Project::default();
+    p.settings.kind = DiscKind::BluRay;
+    p.settings.bd_video = disccraft_project::BdVideo::Hd720p23;
+    let a = p.add_asset(&first).unwrap();
+    let b = p.add_asset(&second).unwrap();
+    let show = p.add_slideshow(Some("Show".to_string())).unwrap();
+    let _ = p.add_slide(show, a, Tick(TICKS_PER_SECOND)).unwrap();
+    let _ = p.add_slide(show, b, Tick(TICKS_PER_SECOND)).unwrap();
+    p.settings.first_play = Link::Slideshow { id: show };
+
+    let out = fixtures().join("bd_hd_show_no_sd_out");
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = build_bdmv(&p, &out).unwrap();
+
+    let mpeg2: Vec<(String, u64)> = std::fs::read_dir(out.join("disccraft-cache"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "m2v"))
+        .map(|entry| {
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                entry.metadata().map_or(0, |metadata| metadata.len()),
+            )
+        })
+        .collect();
+    assert_eq!(mpeg2.len(), 1, "{mpeg2:?}");
+    assert!(
+        mpeg2
+            .iter()
+            .all(|(name, size)| name.starts_with("stand-in") && *size < 200_000),
+        "{mpeg2:?}"
+    );
+
+    let probe = Command::new(&ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_name,duration",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(out.join("BDMV/STREAM/00001.m2ts"))
+        .output()
+        .unwrap();
+    let streams = String::from_utf8_lossy(&probe.stdout);
+    assert!(
+        streams.contains("h264") && streams.contains("ac3"),
+        "{streams}"
+    );
+    assert!(!streams.contains("mpeg2video"), "{streams}");
+    // Two slides of one second each: the pictures and the sound are both about two seconds long.
+    let lengths: Vec<f64> = streams
+        .lines()
+        .filter_map(|line| line.split(',').nth(1)?.trim().parse().ok())
+        .collect();
+    // (ffprobe lists the streams once more under the program.)
+    assert!(lengths.len() >= 2, "{streams}");
+    assert!(
+        lengths.iter().all(|length| (1.9..2.2).contains(length)),
+        "{streams}"
+    );
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn an_hd_title_makes_no_dvd_transcode() {
+    let Some(ffprobe) = tool("DISCCRAFT_FFPROBE", "ffprobe") else {
+        eprintln!("ffprobe not found; skipping");
+        return;
+    };
+    let video = fixtures().join("h264_aac.mp4");
+    if !video.is_file() {
+        eprintln!("h264_aac.mp4 fixture not found; skipping");
+        return;
+    }
+    let mut p = Project::default();
+    p.settings.kind = DiscKind::BluRay;
+    p.settings.bd_video = disccraft_project::BdVideo::Hd720p23;
+    let v = p.add_asset(&video).unwrap();
+    let t = p.add_timeline(v, Some("Main".to_string())).unwrap();
+    p.settings.first_play = Link::Timeline { id: t, chapter: 0 };
+
+    let out = fixtures().join("bd_hd_no_sd_out");
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = build_bdmv(&p, &out).unwrap();
+
+    // No MPEG-2 video is made of the timeline: the title comes with its sound, chapters and timing only.
+    let mpeg2: Vec<(String, u64)> = std::fs::read_dir(out.join("disccraft-cache"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "m2v"))
+        .map(|entry| {
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                entry.metadata().map_or(0, |metadata| metadata.len()),
+            )
+        })
+        .collect();
+    assert!(mpeg2.is_empty(), "{mpeg2:?}");
+
+    let probe = Command::new(&ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(out.join("BDMV/STREAM/00001.m2ts"))
+        .output()
+        .unwrap();
+    let codecs = String::from_utf8_lossy(&probe.stdout);
+    assert!(
+        codecs.contains("h264") && codecs.contains("ac3"),
+        "{codecs}"
+    );
+    assert!(!codecs.contains("mpeg2video"), "{codecs}");
+    let _ = std::fs::remove_dir_all(&out);
 }

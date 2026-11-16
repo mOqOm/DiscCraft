@@ -15,10 +15,17 @@ disccraft-project.workspace = true
 disccraft-vm.workspace = true
 disccraft-transcode.workspace = true
 disccraft-photo.workspace = true
+disccraft-film.workspace = true
+disccraft-psmux.workspace = true
+disccraft-motion.workspace = true
 disccraft-menu.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 filmcraft-time.workspace = true
+
+[dev-dependencies]
+filmcraft-project.workspace = true
+filmcraft-format.workspace = true
 
 [lints]
 workspace = true

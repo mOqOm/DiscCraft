@@ -9,7 +9,8 @@ fn video_attributes() {
     assert_eq!(
         VideoAttr {
             standard: Standard::Ntsc,
-            wide: false
+            wide: false,
+            resolution: disccraft_ifo::Resolution::Full,
         }
         .to_bytes(),
         // 4:3: neither automatic pan/scan nor letterbox (they apply to 16:9 only).
@@ -18,7 +19,8 @@ fn video_attributes() {
     assert_eq!(
         VideoAttr {
             standard: Standard::Pal,
-            wide: false
+            wide: false,
+            resolution: disccraft_ifo::Resolution::Full,
         }
         .to_bytes(),
         [0x53, 0x00]
@@ -26,7 +28,8 @@ fn video_attributes() {
     assert_eq!(
         VideoAttr {
             standard: Standard::Ntsc,
-            wide: true
+            wide: true,
+            resolution: disccraft_ifo::Resolution::Full,
         }
         .to_bytes(),
         [0x4e, 0x00]
@@ -133,4 +136,33 @@ fn first_play_pgc_round_trip() {
     for end in 0..bytes.len() {
         let _ = read_pgc(&bytes[..end]);
     }
+}
+
+/// The picture size sits in bits 5 to 3 of the second attribute byte (0 = 720, 1 = 704, 2 = 352 at full height,
+/// 3 = 352 at half height), and reads back.
+#[test]
+fn video_attributes_carry_the_picture_size() {
+    use disccraft_ifo::Resolution;
+    for (resolution, byte) in [
+        (Resolution::Full, 0x00),
+        (Resolution::Cropped, 0x08),
+        (Resolution::Half, 0x10),
+        (Resolution::Quarter, 0x18),
+    ] {
+        let attr = VideoAttr {
+            standard: Standard::Ntsc,
+            wide: false,
+            resolution,
+        };
+        assert_eq!(attr.to_bytes(), [0x43, byte]);
+        assert_eq!(VideoAttr::from_bytes([0x43, byte]).unwrap(), attr);
+    }
+    assert_eq!(
+        Resolution::of_picture(352, 288, Standard::Pal),
+        Some(Resolution::Quarter)
+    );
+    assert_eq!(Resolution::of_picture(352, 288, Standard::Ntsc), None);
+    assert_eq!(Resolution::of_picture(640, 480, Standard::Ntsc), None);
+    // Other bits of the second byte are not ours to read.
+    assert!(VideoAttr::from_bytes([0x43, 0x80]).is_err());
 }

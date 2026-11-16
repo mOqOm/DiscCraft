@@ -173,7 +173,7 @@ impl DiscCraftApp {
             };
             let highlight = usize::from(menu.button.saturating_sub(1));
             ui.centered_and_justified(|ui| {
-                self.menu_canvas(ui, &project_menu, Some(highlight), zoom);
+                let _ = self.menu_canvas(ui, &project_menu, Some(highlight), zoom);
             });
             return;
         }
@@ -187,8 +187,13 @@ impl DiscCraftApp {
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
-            if let Some(text) = &picture.subtitle {
-                crate::monitor::draw_subtitle(ui.painter(), frame.intersect(area), text);
+            if let Some((text, colors, look)) = &picture.subtitle {
+                crate::monitor::draw_subtitle(
+                    ui.painter(),
+                    frame.intersect(area),
+                    text,
+                    (*colors, *look),
+                );
             }
             // Blu-ray のポップアップメニュー: タイトルは再生を続け、その上にメニューとハイライトを重ねる。
             if let Some(popup) = &state.popup {

@@ -17,6 +17,8 @@ mod audio;
 pub mod hd;
 mod picture;
 mod pulldown;
+mod session;
+pub use session::{document_metadata, document_of, set_compositions};
 pub mod slideshow;
 mod source;
 mod wav;

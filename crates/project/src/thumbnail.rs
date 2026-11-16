@@ -98,13 +98,80 @@ impl ThumbnailArea {
 impl Button {
     /// The frame rectangle of the button's video thumbnail, when it has one.
     pub fn thumbnail_rect(&self) -> Option<Rect> {
-        self.thumbnail.map(|area| area.rect_in(self.rect))
+        self.thumbnail.map(|area| area.rect_in(self.content_box()))
     }
 
-    /// Where the button's text goes: the part of the button its video thumbnail leaves (below it, else above it),
-    /// or the whole button.
+    /// The box the button's own content (text, video thumbnail, subpicture) is laid out in and turned about: its
+    /// [`Button::body`] placed by its rectangle, or the rectangle itself.
+    pub fn content_box(&self) -> Rect {
+        let Some(body) = self.body else {
+            return self.rect;
+        };
+        let place = |start: u16, offset: i16| {
+            u16::try_from((i32::from(start) + i32::from(offset)).max(0)).unwrap_or(u16::MAX)
+        };
+        Rect {
+            x: place(self.rect.x, body.x),
+            y: place(self.rect.y, body.y),
+            w: body.w.max(1),
+            h: body.h.max(1),
+        }
+    }
+
+    /// Moves and resizes the button to `rect`, its content with it: a content box of its own (and the moved text and
+    /// thumbnail) scale by the change of size, as Encore scales a button set's layers.
+    pub fn set_rect(&mut self, rect: Rect) {
+        let old = self.rect;
+        if old.w != rect.w || old.h != rect.h {
+            let sx = f32::from(rect.w) / f32::from(old.w.max(1));
+            let sy = f32::from(rect.h) / f32::from(old.h.max(1));
+            // Finite ratios of u16 sides; `as` saturates.
+            let scaled = |value: i16, by: f32| (f32::from(value) * by).round() as i16;
+            let side = |value: u16, by: f32| ((f32::from(value) * by).round() as u16).max(1);
+            if let Some(body) = self.body.as_mut() {
+                body.x = scaled(body.x, sx);
+                body.y = scaled(body.y, sy);
+                body.w = side(body.w, sx);
+                body.h = side(body.h, sy);
+            }
+            self.label_offset = [
+                scaled(self.label_offset[0], sx),
+                scaled(self.label_offset[1], sy),
+            ];
+            self.thumbnail_offset = [
+                scaled(self.thumbnail_offset[0], sx),
+                scaled(self.thumbnail_offset[1], sy),
+            ];
+        }
+        self.rect = rect;
+    }
+
+    /// The centre of the content box, which the content turns about.
+    pub fn content_centre(&self) -> (f32, f32) {
+        let body = self.content_box();
+        (
+            f32::from(body.x) + f32::from(body.w) * 0.5,
+            f32::from(body.y) + f32::from(body.h) * 0.5,
+        )
+    }
+
+    /// Where the video thumbnail is drawn before the content is turned: its place moved by its offset.
+    pub fn thumbnail_placed(&self) -> Option<Rect> {
+        let area = self.thumbnail_rect()?;
+        let shift = |start: u16, offset: i16| {
+            u16::try_from((i32::from(start) + i32::from(offset)).max(0)).unwrap_or(u16::MAX)
+        };
+        Some(Rect {
+            x: shift(area.x, self.thumbnail_offset[0]),
+            y: shift(area.y, self.thumbnail_offset[1]),
+            ..area
+        })
+    }
+
+    /// Where the button's text goes: the part of the content box its video thumbnail leaves (below it, else above
+    /// it), or the whole box.
     pub fn label_rect(&self) -> Rect {
-        let rect = self.rect;
+        let rect = self.content_box();
         let Some(area) = self.thumbnail_rect() else {
             return rect;
         };

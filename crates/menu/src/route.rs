@@ -54,12 +54,8 @@ fn automatic_routes(menu: &Menu, rects: &[Rect], options: &RouteOptions) -> Vec<
         .iter()
         .filter_map(|index| rects.get(*index).copied())
         .collect();
-    let centres: Vec<Centre> = own_rects.iter().copied().map(Centre::from_rect).collect();
-    let layout = Layout {
-        rects: &own_rects,
-        centres: &centres,
-        options,
-    };
+    let router = Router::new(&own_rects, options);
+    let own_routes = router.routes();
     // A one-based number among the other buttons, as a one-based number in the menu.
     let to_menu = |target: u8| -> u8 {
         usize::from(target)
@@ -87,15 +83,20 @@ fn automatic_routes(menu: &Menu, rects: &[Rect], options: &RouteOptions) -> Vec<
             *slot = if !moves {
                 one_based(index)
             } else {
-                let near = choose_direction(&centres, sub, direction);
-                if near != 0 {
-                    to_menu(near)
+                if let Some(near) = router.direct(sub, direction) {
+                    to_menu(one_based(near))
                 } else if index == first && matches!(direction, Direction::Up | Direction::Left) {
                     or_own(previous, index)
                 } else if index == last && matches!(direction, Direction::Down | Direction::Right) {
                     or_own(next, index)
                 } else {
-                    to_menu(layout.choose(sub, direction))
+                    to_menu(
+                        own_routes
+                            .get(sub)
+                            .and_then(|route| route.get(direction.slot()))
+                            .copied()
+                            .map_or(0, one_based),
+                    )
                 }
             };
         }
@@ -138,38 +139,104 @@ pub fn auto_route_with(rects: &[Rect], options: &RouteOptions) -> Vec<(u8, u8, u
     if rects.len() == 1 {
         return vec![(0, 0, 0, 0)];
     }
-    let centres: Vec<Centre> = rects.iter().copied().map(Centre::from_rect).collect();
-    let layout = Layout {
-        rects,
-        centres: &centres,
-        options,
-    };
-
-    rects
-        .iter()
-        .enumerate()
-        .map(|(index, _)| {
+    // Two buttons go to each other in all four directions, wherever they are (seen in Encore CS6 with its default
+    // options, 2026-11-15: two left-aligned text buttons, one above the other, also went left / right to each other).
+    let all_ways =
+        options.vertical && options.vertical_wrap && options.horizontal && options.horizontal_wrap;
+    if rects.len() == 2 && all_ways {
+        return vec![(2, 2, 2, 2), (1, 1, 1, 1)];
+    }
+    Router::new(rects, options)
+        .routes()
+        .into_iter()
+        .map(|[up, down, left, right]| {
             (
-                layout.choose(index, Direction::Up),
-                layout.choose(index, Direction::Down),
-                layout.choose(index, Direction::Left),
-                layout.choose(index, Direction::Right),
+                one_based(up),
+                one_based(down),
+                one_based(left),
+                one_based(right),
             )
         })
         .collect()
 }
 
-/// The buttons and options the routing is worked out from.
-struct Layout<'a> {
-    rects: &'a [Rect],
-    centres: &'a [Centre],
+/// Buttons whose centres, left / top edges or right / bottom edges are this close are lined up (Encore CS6: a
+/// button 9 px off its column still belongs to it, one 10 px off does not).
+const LINE_TOLERANCE: i64 = 9;
+/// With nothing strictly in a direction, a button up to about 110° round from it is still taken (Encore CS6 took
+/// one at 107.6° and left one at 116.6°): the cosine of that angle.
+const WIDE_COS: f64 = -0.342;
+
+/// Encore CS6's automatic routing, as measured on its menus (docs/encore-behavior.md 9.2):
+///
+/// - Buttons that overlap along x form a column when they are all lined up (by centre or by an edge, within
+///   [`LINE_TOLERANCE`]); rows likewise along y. One button out of line breaks the column for all of them.
+/// - In a column, up / down go to the neighbours and wrap at the ends (to the other end, or on to the next
+///   column); the same for left / right in a row. Without wrapping, the ends look around as below.
+/// - A button in a row but in no column stays put on up / down (and the other way round) while wrapping is on.
+/// - A button in no row and no column goes to the nearest button in each direction; so does every direction that
+///   has no line when wrapping is off. "Nearest" favours buttons straight ahead (distance over the cosine of the
+///   angle off the direction); with nothing ahead, a button a little past the side still counts.
+/// - A button in no row and no column is entered from one button only: the nearest one, in the direction it lies.
+struct Router<'a> {
+    centres: Vec<Centre>,
     options: &'a RouteOptions,
+    /// Each button's column (index into `columns`) when it is in one of two or more.
+    column_of: Vec<Option<usize>>,
+    /// The columns, each top to bottom.
+    columns: Vec<Vec<usize>>,
+    row_of: Vec<Option<usize>>,
+    /// The rows, each left to right.
+    rows: Vec<Vec<usize>>,
 }
 
-impl Layout<'_> {
-    /// The button `direction` goes to from button `index` (one-based; the button itself when it does not move).
-    fn choose(&self, index: usize, direction: Direction) -> u8 {
-        let vertical = matches!(direction, Direction::Up | Direction::Down);
+impl<'a> Router<'a> {
+    fn new(rects: &[Rect], options: &'a RouteOptions) -> Self {
+        let centres: Vec<Centre> = rects.iter().copied().map(Centre::from_rect).collect();
+        let (column_of, columns) = lines(rects, &centres, true);
+        let (row_of, rows) = lines(rects, &centres, false);
+        Self {
+            centres,
+            options,
+            column_of,
+            columns,
+            row_of,
+            rows,
+        }
+    }
+
+    /// The line (column for `vertical`, else row) button `index` is in, and its place in it.
+    fn line(&self, index: usize, vertical: bool) -> Option<(&[usize], usize)> {
+        let (of, all) = if vertical {
+            (&self.column_of, &self.columns)
+        } else {
+            (&self.row_of, &self.rows)
+        };
+        let line = all.get((*of.get(index)?)?)?;
+        let place = line.iter().position(|member| *member == index)?;
+        Some((line.as_slice(), place))
+    }
+
+    /// The button next to `index` in `direction` without wrapping: its neighbour in the line, or — with no line
+    /// that way — the nearest button strictly in that direction.
+    fn direct(&self, index: usize, direction: Direction) -> Option<usize> {
+        let vertical = direction.vertical();
+        match self.line(index, vertical) {
+            Some((line, place)) => {
+                let next = if direction.forward() {
+                    place.checked_add(1)
+                } else {
+                    place.checked_sub(1)
+                };
+                next.and_then(|at| line.get(at)).copied()
+            }
+            None => self.ahead(index, direction),
+        }
+    }
+
+    /// Where `direction` goes from button `index` (zero-based; the button itself when it stays).
+    fn route(&self, index: usize, direction: Direction) -> usize {
+        let vertical = direction.vertical();
         let (moves, wraps, mode) = if vertical {
             (
                 self.options.vertical,
@@ -184,104 +251,286 @@ impl Layout<'_> {
             )
         };
         if !moves {
-            return one_based(index);
+            return index;
         }
-        let target = choose_direction(self.centres, index, direction);
-        if target != 0 {
-            return target;
+        let Some((line, place)) = self.line(index, vertical) else {
+            // No line this way. With wrapping on, a button that has a line the other way stays put.
+            if wraps && self.line(index, !vertical).is_some() {
+                return index;
+            }
+            return self.around(index, direction).unwrap_or(index);
+        };
+        if let Some(next) = self.direct(index, direction) {
+            return next;
         }
         if !wraps {
-            return one_based(index);
+            return self.around(index, direction).unwrap_or(index);
         }
-        let forward = matches!(direction, Direction::Down | Direction::Right);
-        let line = match mode {
-            WrapMode::SameLine => self.line_of(index, vertical),
-            WrapMode::NextLine => self.next_line(index, vertical, forward),
+        let forward = direction.forward();
+        let target = match mode {
+            WrapMode::SameLine => line,
+            WrapMode::NextLine => self.next_line(index, vertical, forward).unwrap_or(line),
         };
         // Down / right wrap to the start of the line (top / left), up / left to its end.
-        self.extreme(&line, vertical, forward)
-            .map_or_else(|| one_based(index), one_based)
+        let end = if forward {
+            target.first()
+        } else {
+            target.last()
+        };
+        let _ = place;
+        end.copied().unwrap_or(index)
     }
 
-    /// Whether buttons `a` and `b` share a column (`vertical`: their x ranges overlap) or a row.
-    fn same_line(&self, a: usize, b: usize, vertical: bool) -> bool {
-        let (Some(a), Some(b)) = (self.rects.get(a), self.rects.get(b)) else {
-            return false;
+    /// The column after (`forward`) or before the one button `index` is in, round to the first / last past the
+    /// end. Every button outside a column counts as a column of its own.
+    fn next_line(&self, index: usize, vertical: bool, forward: bool) -> Option<&[usize]> {
+        let (of, all) = if vertical {
+            (&self.column_of, &self.columns)
+        } else {
+            (&self.row_of, &self.rows)
         };
-        let span = |rect: &Rect| {
-            if vertical {
-                (u32::from(rect.x), u32::from(rect.x) + u32::from(rect.w))
-            } else {
-                (u32::from(rect.y), u32::from(rect.y) + u32::from(rect.h))
+        let key = |line: &[usize]| -> i64 {
+            let sum: i64 = line
+                .iter()
+                .filter_map(|member| self.centres.get(*member))
+                .map(|centre| if vertical { centre.x } else { centre.y })
+                .sum();
+            sum.checked_div(i64::try_from(line.len()).unwrap_or(1).max(1))
+                .unwrap_or(0)
+        };
+        let own = (*of.get(index)?)?;
+        let mut order: Vec<usize> = (0..all.len()).collect();
+        order.sort_by_key(|line| (all.get(*line).map_or(0, |members| key(members)), *line));
+        let place = order.iter().position(|line| *line == own)?;
+        let count = order.len();
+        let next = if forward {
+            place.checked_add(1)?.checked_rem(count)?
+        } else {
+            place
+                .checked_add(count)?
+                .checked_sub(1)?
+                .checked_rem(count)?
+        };
+        all.get(*order.get(next)?).map(Vec::as_slice)
+    }
+
+    /// The nearest button strictly in `direction` from `index`: the smallest distance over the cosine of the
+    /// angle off the direction (distance squared over the step in the direction), the lower number on a tie.
+    fn ahead(&self, index: usize, direction: Direction) -> Option<usize> {
+        let from = self.centres.get(index)?;
+        let mut best: Option<(i128, i128, usize)> = None;
+        for (other, centre) in self.centres.iter().enumerate() {
+            if other == index {
+                continue;
             }
-        };
-        let (a0, a1) = span(a);
-        let (b0, b1) = span(b);
-        a0 < b1 && b0 < a1
+            let (step, squared) = direction.step(from, centre);
+            if step <= 0 {
+                continue;
+            }
+            let better = best.is_none_or(|(best_squared, best_step, _)| {
+                // squared / step < best_squared / best_step, without dividing.
+                squared.saturating_mul(best_step) < best_squared.saturating_mul(step)
+            });
+            if better {
+                best = Some((squared, step, other));
+            }
+        }
+        best.map(|(_, _, other)| other)
     }
 
-    /// The buttons in button `index`'s column (`vertical`) or row, itself included.
-    fn line_of(&self, index: usize, vertical: bool) -> Vec<usize> {
-        (0..self.rects.len())
-            .filter(|other| *other == index || self.same_line(index, *other, vertical))
-            .collect()
+    /// [`Self::ahead`], or with nothing ahead the closest button no more than about 110° round from `direction`.
+    fn around(&self, index: usize, direction: Direction) -> Option<usize> {
+        if let Some(found) = self.ahead(index, direction) {
+            return Some(found);
+        }
+        let from = self.centres.get(index)?;
+        let mut best: Option<(i128, usize)> = None;
+        for (other, centre) in self.centres.iter().enumerate() {
+            if other == index {
+                continue;
+            }
+            let (step, squared) = direction.step(from, centre);
+            // `as` is exact enough for pixel distances.
+            let distance = (squared as f64).sqrt();
+            if distance <= 0.0 || (step as f64) < WIDE_COS * distance {
+                continue;
+            }
+            if best.is_none_or(|(best_squared, _)| squared < best_squared) {
+                best = Some((squared, other));
+            }
+        }
+        best.map(|(_, other)| other)
     }
 
-    /// The column after (`forward`) or before button `index`'s, or the first / last one past the end; its own
-    /// when there is no other.
-    fn next_line(&self, index: usize, vertical: bool, forward: bool) -> Vec<usize> {
-        let key = |i: usize| {
-            self.centres
-                .get(i)
-                .map_or(0, |centre| if vertical { centre.x } else { centre.y })
-        };
-        let mine = key(index);
-        let others: Vec<usize> = (0..self.rects.len())
-            .filter(|other| *other != index && !self.same_line(index, *other, vertical))
+    /// Every button's (up, down, left, right), zero-based.
+    fn routes(&self) -> Vec<[usize; 4]> {
+        let directions = [
+            Direction::Up,
+            Direction::Down,
+            Direction::Left,
+            Direction::Right,
+        ];
+        let mut routes: Vec<[usize; 4]> = (0..self.centres.len())
+            .map(|index| directions.map(|direction| self.route(index, direction)))
             .collect();
-        let after = |i: &usize| {
-            if forward {
-                key(*i) > mine
-            } else {
-                key(*i) < mine
+        // A button in no row and no column is entered from its nearest button, in the direction it lies.
+        for (loose, centre) in self.centres.iter().enumerate() {
+            if self.line(loose, true).is_some() || self.line(loose, false).is_some() {
+                continue;
             }
-        };
-        let pick = |candidates: Vec<usize>| {
-            if forward {
-                candidates.into_iter().min_by_key(|i| (key(*i), *i))
+            let nearest = self
+                .centres
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != loose)
+                .min_by_key(|(other, from)| (Direction::Up.step(from, centre).1, *other));
+            let Some((nearest, from)) = nearest else {
+                continue;
+            };
+            let (dx, dy) = (centre.x - from.x, centre.y - from.y);
+            let direction = if dx.abs() >= dy.abs() {
+                if dx >= 0 {
+                    Direction::Right
+                } else {
+                    Direction::Left
+                }
+            } else if dy >= 0 {
+                Direction::Down
             } else {
-                candidates
-                    .into_iter()
-                    .max_by_key(|i| (key(*i), std::cmp::Reverse(*i)))
+                Direction::Up
+            };
+            let (moves, wraps) = if direction.vertical() {
+                (self.options.vertical, self.options.vertical_wrap)
+            } else {
+                (self.options.horizontal, self.options.horizontal_wrap)
+            };
+            if moves
+                && wraps
+                && let Some(slot) = routes
+                    .get_mut(nearest)
+                    .and_then(|route| route.get_mut(direction.slot()))
+            {
+                *slot = loose;
             }
-        };
-        let beyond: Vec<usize> = others.iter().copied().filter(after).collect();
-        let anchor = if beyond.is_empty() {
-            pick(others)
-        } else {
-            pick(beyond)
-        };
-        anchor.map_or_else(
-            || self.line_of(index, vertical),
-            |anchor| self.line_of(anchor, vertical),
-        )
+        }
+        routes
     }
+}
 
-    /// The first (`first`: top / left-most) or last button of `line`.
-    fn extreme(&self, line: &[usize], vertical: bool, first: bool) -> Option<usize> {
-        let key = |i: usize| {
-            self.centres
-                .get(i)
-                .map_or(0, |centre| if vertical { centre.y } else { centre.x })
-        };
-        if first {
-            line.iter().copied().min_by_key(|i| (key(*i), *i))
+/// The columns (`vertical`) or rows of the buttons: each button's line when it is in one of two or more buttons,
+/// and the lines in order along themselves.
+///
+/// Buttons whose centres line up are a line, whatever else is around them. Buttons lined up only by an edge
+/// (text buttons typed from the same x) are a line when every button they overlap across the line's direction
+/// is lined up with them too: one button out of line there breaks it for all of them.
+fn lines(
+    rects: &[Rect],
+    centres: &[Centre],
+    vertical: bool,
+) -> (Vec<Option<usize>>, Vec<Vec<usize>>) {
+    let span = |rect: &Rect| -> (i64, i64) {
+        if vertical {
+            (i64::from(rect.x), i64::from(rect.x) + i64::from(rect.w))
         } else {
-            line.iter()
-                .copied()
-                .max_by_key(|i| (key(*i), std::cmp::Reverse(*i)))
+            (i64::from(rect.y), i64::from(rect.y) + i64::from(rect.h))
+        }
+    };
+    let across = |index: usize| -> i64 {
+        centres
+            .get(index)
+            .map_or(0, |centre| if vertical { centre.x } else { centre.y })
+    };
+    let along = |index: usize| -> i64 {
+        centres
+            .get(index)
+            .map_or(0, |centre| if vertical { centre.y } else { centre.x })
+    };
+    let count = rects.len();
+    // Buttons joined by `joined`, as one group id per button.
+    let groups = |joined: &dyn Fn(usize, usize) -> bool| -> Vec<usize> {
+        let mut group: Vec<usize> = (0..count).collect();
+        for a in 0..count {
+            for b in a.saturating_add(1)..count {
+                if !joined(a, b) {
+                    continue;
+                }
+                let (from, to) = (
+                    group.get(b).copied().unwrap_or(b),
+                    group.get(a).copied().unwrap_or(a),
+                );
+                for slot in &mut group {
+                    if *slot == from {
+                        *slot = to;
+                    }
+                }
+            }
+        }
+        group
+    };
+    let members_of = |group: &[usize], id: usize| -> Vec<usize> {
+        (0..count)
+            .filter(|index| group.get(*index) == Some(&id))
+            .collect()
+    };
+    let overlapping = groups(&|a, b| match (rects.get(a), rects.get(b)) {
+        (Some(first), Some(second)) => {
+            let ((a0, a1), (b0, b1)) = (span(first), span(second));
+            a0 < b1 && b0 < a1
+        }
+        _ => false,
+    });
+    let centred = groups(&|a, b| (across(a) - across(b)).abs() <= LINE_TOLERANCE);
+
+    let mut found: Vec<Vec<usize>> = Vec::new();
+    let mut placed = vec![false; count];
+    // Whole overlapping groups lined up by an edge.
+    for id in 0..count {
+        let members = members_of(&overlapping, id);
+        if members.len() < 2 {
+            continue;
+        }
+        let spread = |edge: &dyn Fn(&Rect) -> i64| -> Option<i64> {
+            let values: Vec<i64> = members
+                .iter()
+                .filter_map(|index| rects.get(*index))
+                .map(edge)
+                .collect();
+            Some(values.iter().max()? - values.iter().min()?)
+        };
+        let by_edge = [spread(&|rect| span(rect).0), spread(&|rect| span(rect).1)]
+            .into_iter()
+            .flatten()
+            .any(|spread| spread <= LINE_TOLERANCE);
+        if by_edge {
+            for member in &members {
+                if let Some(slot) = placed.get_mut(*member) {
+                    *slot = true;
+                }
+            }
+            found.push(members);
         }
     }
+    // Buttons lined up by their centres.
+    for id in 0..count {
+        let members: Vec<usize> = members_of(&centred, id)
+            .into_iter()
+            .filter(|index| placed.get(*index) == Some(&false))
+            .collect();
+        if members.len() >= 2 {
+            found.push(members);
+        }
+    }
+
+    let mut of = vec![None; count];
+    for (line, members) in found.iter_mut().enumerate() {
+        members.sort_by_key(|index| (along(*index), *index));
+        for member in members.iter() {
+            if let Some(slot) = of.get_mut(*member) {
+                *slot = Some(line);
+            }
+        }
+    }
+    (of, found)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -307,57 +556,37 @@ enum Direction {
     Right,
 }
 
-fn choose_direction(centres: &[Centre], index: usize, direction: Direction) -> u8 {
-    let Some(current) = centres.get(index) else {
-        return 0;
-    };
+impl Direction {
+    fn vertical(self) -> bool {
+        matches!(self, Self::Up | Self::Down)
+    }
 
-    let mut best: Option<(i64, usize)> = None;
+    /// Down and right count forwards.
+    fn forward(self) -> bool {
+        matches!(self, Self::Down | Self::Right)
+    }
 
-    for (other_index, other) in centres.iter().enumerate() {
-        if other_index == index {
-            continue;
+    /// The place of this direction in an (up, down, left, right) route.
+    fn slot(self) -> usize {
+        match self {
+            Self::Up => 0,
+            Self::Down => 1,
+            Self::Left => 2,
+            Self::Right => 3,
         }
-        if !is_candidate(direction, current, other) {
-            continue;
-        }
+    }
 
-        let score = score(direction, current, other);
-        let better = match best {
-            None => true,
-            Some((best_score, best_index)) => {
-                score < best_score || (score == best_score && other_index < best_index)
-            }
+    /// How far `to` lies from `from` in this direction (negative: behind), and their distance squared.
+    fn step(self, from: &Centre, to: &Centre) -> (i128, i128) {
+        let (dx, dy) = (i128::from(to.x - from.x), i128::from(to.y - from.y));
+        let step = match self {
+            Self::Up => -dy,
+            Self::Down => dy,
+            Self::Left => -dx,
+            Self::Right => dx,
         };
-
-        if better {
-            best = Some((score, other_index));
-        }
+        (step, dx * dx + dy * dy)
     }
-
-    best.map_or(0, |(_, other_index)| one_based(other_index))
-}
-
-fn is_candidate(direction: Direction, current: &Centre, other: &Centre) -> bool {
-    match direction {
-        Direction::Up => other.y < current.y,
-        Direction::Down => other.y > current.y,
-        Direction::Left => other.x < current.x,
-        Direction::Right => other.x > current.x,
-    }
-}
-
-fn score(direction: Direction, current: &Centre, other: &Centre) -> i64 {
-    let (primary, secondary) = match direction {
-        Direction::Up | Direction::Down => {
-            ((current.y - other.y).abs(), (current.x - other.x).abs())
-        }
-        Direction::Left | Direction::Right => {
-            ((current.x - other.x).abs(), (current.y - other.y).abs())
-        }
-    };
-
-    primary.saturating_add(secondary.saturating_mul(2))
 }
 
 fn one_based(index: usize) -> u8 {
@@ -470,6 +699,37 @@ mod tests {
         assert_eq!(routes, vec![(0, 0, 0, 0)]);
     }
 
+    /// Encore CS6: with two buttons, every direction goes to the other one.
+    #[test]
+    fn two_buttons_go_to_each_other_every_way() {
+        let rects = [
+            Rect {
+                x: 200,
+                y: 100,
+                w: 40,
+                h: 40,
+            },
+            Rect {
+                x: 200,
+                y: 800,
+                w: 400,
+                h: 40,
+            },
+        ];
+        let routes = auto_route_with(&rects, &RouteOptions::default());
+        assert_eq!(routes, vec![(2, 2, 2, 2), (1, 1, 1, 1)]);
+        // Without wrapping the layout decides, as before.
+        let plain = RouteOptions {
+            vertical_wrap: false,
+            horizontal_wrap: false,
+            ..RouteOptions::default()
+        };
+        assert_eq!(
+            auto_route_with(&rects, &plain).first().map(|r| r.1),
+            Some(2)
+        );
+    }
+
     #[test]
     fn switched_off_directions_and_wraps_stay_put() {
         let options = RouteOptions {
@@ -479,8 +739,142 @@ mod tests {
         };
         let routes = auto_route_with(&grid(), &options);
         assert_eq!((routes[0].0, routes[0].1), (1, 1));
-        // 1 right still moves to 2; 2 right does not wrap.
+        // 1 right still moves to 2. Without wrapping, 2 right looks around and takes the button straight below it
+        // (as Encore CS6 does with wrapping off: the top right button's right went to the bottom right one).
         assert_eq!(routes[0].3, 2);
-        assert_eq!(routes[1].3, 2);
+        assert_eq!(routes[1].3, 4);
+    }
+
+    /// Buttons of 241 x 38 by their centres, as on the 1920 x 1080 menu measured in Encore CS6.
+    fn buttons(centres: &[(u16, u16)]) -> Vec<Rect> {
+        centres
+            .iter()
+            .map(|(x, y)| Rect {
+                x: x - 120,
+                y: y - 19,
+                w: 241,
+                h: 38,
+            })
+            .collect()
+    }
+
+    /// Top left, bottom left, bottom right, and the fourth button at `fourth` (Encore's numbering in the test).
+    fn layout(fourth: (u16, u16)) -> Vec<Rect> {
+        buttons(&[(559, 288), (559, 824), (1368, 824), fourth])
+    }
+
+    fn off() -> RouteOptions {
+        RouteOptions {
+            vertical_wrap: false,
+            horizontal_wrap: false,
+            ..RouteOptions::default()
+        }
+    }
+
+    /// The layouts measured in Encore CS6 on 2026-11-15 (docs/encore-behavior.md 9.2), wrapping on.
+    #[test]
+    fn routes_match_encore_with_wrapping() {
+        let on = RouteOptions::default();
+        let route = |fourth| auto_route_with(&layout(fourth), &on);
+        // The grid.
+        assert_eq!(
+            route((1368, 288)),
+            vec![(2, 2, 4, 4), (1, 1, 3, 3), (4, 4, 2, 2), (3, 3, 1, 1)]
+        );
+        // The fourth button 9 px off its column still belongs to it; 10 px off it does not, and then neither it
+        // nor the button below goes up / down (they are still in their rows).
+        assert_eq!(route((1377, 288)), route((1368, 288)));
+        assert_eq!(
+            route((1378, 288)),
+            vec![(2, 2, 4, 4), (1, 1, 3, 3), (3, 3, 2, 2), (4, 4, 1, 1)]
+        );
+        assert_eq!(route((1386, 288)), route((1378, 288)));
+        // Rows have the same tolerance.
+        assert_eq!(route((1368, 297)), route((1368, 288)));
+        assert_eq!(
+            route((1368, 298)),
+            vec![(2, 2, 1, 1), (1, 1, 3, 3), (4, 4, 2, 2), (3, 3, 4, 4)]
+        );
+        // E: 30 px right and 21 px down, in no row and no column. Its nearest button (below it) goes up to it.
+        assert_eq!(
+            route((1398, 309)),
+            vec![(2, 2, 1, 1), (1, 1, 3, 3), (4, 3, 2, 2), (1, 3, 1, 3)]
+        );
+        // F: in the middle. Its nearest button (top left) goes right to it.
+        assert_eq!(
+            route((963, 538)),
+            vec![(2, 2, 1, 4), (1, 1, 3, 3), (3, 3, 2, 2), (1, 2, 1, 3)]
+        );
+        // H: above and right of the bottom left button, which now goes right to it instead of along its row.
+        assert_eq!(
+            route((773, 717)),
+            vec![(2, 2, 1, 1), (1, 1, 3, 4), (3, 3, 2, 2), (1, 2, 2, 3)]
+        );
+        // I: out to the right. The bottom right button goes right to it instead of wrapping.
+        assert_eq!(
+            route((1728, 538)),
+            vec![(2, 2, 1, 1), (1, 1, 3, 3), (3, 3, 2, 4), (1, 3, 3, 4)]
+        );
+    }
+
+    /// The same layouts with wrapping off: the ends look around instead of staying put.
+    #[test]
+    fn routes_match_encore_without_wrapping() {
+        let route = |fourth| auto_route_with(&layout(fourth), &off());
+        let grid = vec![(4, 2, 2, 4), (1, 3, 1, 3), (4, 2, 2, 4), (1, 3, 1, 3)];
+        assert_eq!(route((1368, 288)), grid);
+        assert_eq!(route((1398, 309)), grid);
+        assert_eq!(
+            route((963, 538)),
+            vec![(1, 2, 2, 4), (1, 3, 1, 3), (4, 2, 2, 3), (1, 2, 1, 3)]
+        );
+    }
+
+    /// Text buttons of different widths typed from the same x: a column while their left edges line up, and no
+    /// column at all — not even for the two still lined up — once one of them is 10 px off.
+    #[test]
+    fn left_aligned_buttons_of_different_widths_are_a_column() {
+        let trio = |middle_x: u16| {
+            vec![
+                Rect {
+                    x: 200,
+                    y: 163,
+                    w: 40,
+                    h: 40,
+                },
+                Rect {
+                    x: middle_x,
+                    y: 523,
+                    w: 385,
+                    h: 40,
+                },
+                Rect {
+                    x: 200,
+                    y: 881,
+                    w: 180,
+                    h: 40,
+                },
+            ]
+        };
+        let on = RouteOptions::default();
+        assert_eq!(
+            auto_route_with(&trio(200), &on),
+            vec![(3, 2, 1, 1), (1, 3, 2, 2), (2, 1, 3, 3)]
+        );
+        assert_eq!(
+            auto_route_with(&trio(210), &on),
+            vec![(1, 2, 3, 2), (1, 3, 1, 3), (2, 3, 1, 2)]
+        );
+    }
+
+    /// Four buttons on a diagonal share no row and no column: each goes up / left to the one before and down /
+    /// right to the one after, and the two ends stay put.
+    #[test]
+    fn a_diagonal_goes_along_itself() {
+        let rects = buttons(&[(309, 128), (764, 356), (1172, 678), (1604, 955)]);
+        assert_eq!(
+            auto_route_with(&rects, &RouteOptions::default()),
+            vec![(1, 2, 1, 2), (1, 3, 1, 3), (2, 4, 2, 4), (3, 4, 3, 4)]
+        );
     }
 }

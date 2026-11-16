@@ -8,6 +8,7 @@
     clippy::unreachable
 )]
 
+pub mod demux;
 pub mod es;
 pub mod mux;
 pub mod sink;

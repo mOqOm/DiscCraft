@@ -10,7 +10,8 @@ use disccraft_project::{
     VideoStandard,
 };
 use disccraft_transcode::slideshow::{
-    SlideFit, SlideInput, SlideTransition, Transition, render_slideshow, render_slideshow_hd,
+    SlideFit, SlideInput, SlideTransition, Transition, render_slideshow, render_slideshow_audio,
+    render_slideshow_hd,
 };
 use disccraft_transcode::{Standard, TranscodeOptions, probe_seconds, transcode, transcode_audio};
 
@@ -55,6 +56,8 @@ pub(crate) struct Budget {
 pub(crate) enum PreparedAudio {
     /// AC-3 elementary stream passed through.
     Ac3(PathBuf),
+    /// DTS elementary stream passed through.
+    Dts(PathBuf),
     /// AC-3 demuxed from a program or transport stream, starting `delay` (27 MHz) after the title's first picture
     /// as it did there.
     DelayedAc3 { path: PathBuf, delay: i64 },
@@ -92,21 +95,162 @@ struct Scan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AudioKind {
     Ac3,
+    Dts,
     Wav,
     Transcode,
 }
 
-/// Return whether a video asset can be passed through unchanged.
+/// Return whether a video asset can be passed through unchanged: an MPEG-2 video elementary stream (`.m2v` /
+/// `.mpv`) or the video of an MPEG-2 program stream (`.mpg`, `.vob` and the like, whatever the name) whose sequence
+/// header fits the disc. Such a video is repackaged, not encoded again.
 pub(crate) fn is_passthrough(path: &Path, standard: VideoStandard) -> bool {
-    if !has_passthrough_extension(path) {
-        return false;
-    }
-
     let Some(data) = read_head(path) else {
         return false;
     };
+    if disccraft_psmux::demux::is_program_stream(&data) {
+        return program_stream_fits(path, standard);
+    }
+    has_passthrough_extension(path) && first_sequence_header_matches(&data, standard)
+}
 
-    first_sequence_header_matches(&data, standard)
+/// Whether the file at `path` is an MPEG-2 program stream (a `.mpg` / `.vob`): video and sound packed together.
+fn is_program_stream_file(path: &Path) -> bool {
+    read_head(path).is_some_and(|head| disccraft_psmux::demux::is_program_stream(&head))
+}
+
+/// Whether the program stream at `path` carries video that goes on a disc of `standard` as it is: the sequence
+/// header of the start of its video is looked at, as for an elementary stream.
+fn program_stream_fits(path: &Path, standard: VideoStandard) -> bool {
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut head = Vec::new();
+    let limit = u64::try_from(HEAD_BYTES).unwrap_or(u64::MAX);
+    disccraft_psmux::demux::demux(&mut file, Some(&mut head), None, Some(limit)).is_ok()
+        && first_sequence_header_matches(&head, standard)
+}
+
+/// The video elementary stream and the AC-3 sound (when it has any) of the program stream at `path`, taken out
+/// once into the cache: the video goes on the disc as it is (repackaged, not encoded again), and so does the
+/// sound. `None` for the sound when the stream has no AC-3.
+fn demuxed_streams(path: &Path, cache_dir: &Path) -> Result<(PathBuf, Option<PathBuf>), DvdError> {
+    let metadata =
+        disccraft_transcode::document_metadata(path).map_err(|err| crate::io_error(path, err))?;
+    let (secs, nanos) = modified_time(&metadata)?;
+    let mut seed = fnv1a64(absolute_path_string(path).as_bytes(), FNV_OFFSET);
+    seed = fnv1a64(metadata.len().to_string().as_bytes(), seed);
+    seed = fnv1a64(secs.to_string().as_bytes(), seed);
+    seed = fnv1a64(nanos.to_string().as_bytes(), seed);
+    seed = fnv1a64(b"demux", seed);
+    seed = fnv1a64(CACHE_VERSION.as_bytes(), seed);
+    let video = cache_dir.join(format!("{seed:016x}.demux.m2v"));
+    let sound = cache_dir.join(format!("{seed:016x}.demux.ac3"));
+    let marker = cache_dir.join(format!("{seed:016x}.demux.ok"));
+    if !(marker.is_file() && video.is_file()) {
+        fs::create_dir_all(cache_dir).map_err(|err| crate::io_error(cache_dir, err))?;
+        let number = part_number();
+        let video_part = cache_dir.join(format!("{seed:016x}.demux.{number}.m2v.part"));
+        let sound_part = cache_dir.join(format!("{seed:016x}.demux.{number}.ac3.part"));
+        let taken = (|| -> Result<disccraft_psmux::demux::Demuxed, DvdError> {
+            use std::io::Write;
+            let input = fs::File::open(path).map_err(|err| crate::io_error(path, err))?;
+            let mut input = std::io::BufReader::with_capacity(1 << 20, input);
+            let create = |part: &Path| {
+                fs::File::create(part)
+                    .map(|file| std::io::BufWriter::with_capacity(1 << 20, file))
+                    .map_err(|err| crate::io_error(part, err))
+            };
+            let (mut video_out, mut sound_out) = (create(&video_part)?, create(&sound_part)?);
+            let found = disccraft_psmux::demux::demux(
+                &mut input,
+                Some(&mut video_out),
+                Some(&mut sound_out),
+                None,
+            )
+            .map_err(|err| crate::io_error(path, err))?;
+            video_out
+                .flush()
+                .map_err(|err| crate::io_error(&video_part, err))?;
+            sound_out
+                .flush()
+                .map_err(|err| crate::io_error(&sound_part, err))?;
+            Ok(found)
+        })();
+        let found = match taken {
+            Ok(found) if found.video_bytes > 0 => found,
+            other => {
+                let _ = fs::remove_file(&video_part);
+                let _ = fs::remove_file(&sound_part);
+                return Err(other.err().unwrap_or_else(|| {
+                    DvdError::Unsupported(format!(
+                        "{}: no video in the program stream",
+                        path.display()
+                    ))
+                }));
+            }
+        };
+        fs::rename(&video_part, &video).map_err(|err| crate::io_error(&video, err))?;
+        if found.ac3_bytes > 0 {
+            fs::rename(&sound_part, &sound).map_err(|err| crate::io_error(&sound, err))?;
+        } else {
+            let _ = fs::remove_file(&sound_part);
+            let _ = fs::remove_file(&sound);
+        }
+        fs::write(&marker, b"ok").map_err(|err| crate::io_error(&marker, err))?;
+    }
+    Ok((video.clone(), sound.is_file().then_some(sound)))
+}
+
+/// The file whose bytes are the video elementary stream of a video that goes on the disc as it is: the file itself,
+/// or for a program stream its video taken out into the cache.
+fn passthrough_video(path: &Path, cache_dir: &Path) -> Result<PathBuf, DvdError> {
+    if is_program_stream_file(path) {
+        Ok(demuxed_streams(path, cache_dir)?.0)
+    } else {
+        Ok(path.to_path_buf())
+    }
+}
+
+/// The source's own sound as AC-3, for a title whose video is not transcoded with its sound: a program stream's
+/// AC-3 as it is, any other sound decoded and encoded (kept in the cache). `None` when the video has no sound.
+fn own_sound(input: &Path, cache_dir: &Path) -> Result<Option<PathBuf>, DvdError> {
+    if is_program_stream_file(input)
+        && let (_, Some(sound)) = demuxed_streams(input, cache_dir)?
+    {
+        return Ok(Some(sound));
+    }
+    let metadata =
+        disccraft_transcode::document_metadata(input).map_err(|err| crate::io_error(input, err))?;
+    let (secs, nanos) = modified_time(&metadata)?;
+    let mut seed = fnv1a64(absolute_path_string(input).as_bytes(), FNV_OFFSET);
+    seed = fnv1a64(metadata.len().to_string().as_bytes(), seed);
+    seed = fnv1a64(secs.to_string().as_bytes(), seed);
+    seed = fnv1a64(nanos.to_string().as_bytes(), seed);
+    seed = fnv1a64(b"own sound", seed);
+    seed = fnv1a64(CACHE_VERSION.as_bytes(), seed);
+    let wav = cache_dir.join(format!("{seed:016x}.sound.wav"));
+    let silent = cache_dir.join(format!("{seed:016x}.sound.none"));
+    if wav.is_file() {
+        return Ok(Some(ac3_soundtrack(&wav)?));
+    }
+    if silent.is_file() {
+        return Ok(None);
+    }
+    fs::create_dir_all(cache_dir).map_err(|err| crate::io_error(cache_dir, err))?;
+    let part = cache_dir.join(format!("{seed:016x}.sound.{}.wav.part", part_number()));
+    match transcode_audio(input, &part, None) {
+        Ok(_) => {
+            fs::rename(&part, &wav).map_err(|err| crate::io_error(&wav, err))?;
+            Ok(Some(ac3_soundtrack(&wav)?))
+        }
+        // A video without sound (or one whose sound cannot be read): the title has no soundtrack of its own, as
+        // after a transcode of such a video. Remembered, so the next build does not look again.
+        Err(_) => {
+            let _ = fs::remove_file(&part);
+            fs::write(&silent, b"").map_err(|err| crate::io_error(&silent, err))?;
+            Ok(None)
+        }
+    }
 }
 
 /// Whether a video asset's video goes on the disc as it is: a raw elementary stream ([`is_passthrough`]), or the
@@ -170,6 +314,11 @@ pub(crate) fn prepare_all_of(
     progress: &mut dyn FnMut(&str, f32),
     timelines: bool,
 ) -> Result<(), DvdError> {
+    // Nothing to make ahead when the titles' video is made elsewhere (HD Blu-ray titles): neither the timelines'
+    // nor the slideshows' DVD video is wanted.
+    if !timelines {
+        return Ok(());
+    }
     enum Job<'a> {
         Timeline(&'a Timeline),
         Slideshow(&'a Slideshow),
@@ -179,6 +328,7 @@ pub(crate) fn prepare_all_of(
     let mut jobs: Vec<Job<'_>> = project
         .timelines
         .values()
+        // Not the timelines when their video is made elsewhere (HD Blu-ray titles).
         .filter(|timeline| timelines && videos.insert(timeline.video))
         .map(Job::Timeline)
         .collect();
@@ -209,6 +359,80 @@ pub(crate) fn part_number() -> u64 {
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// A short black MPEG-2 video in the cache: the DVD video of a title whose pictures are made elsewhere.
+fn stand_in_video(
+    cache_dir: &Path,
+    standard: VideoStandard,
+    wide: bool,
+) -> Result<PathBuf, DvdError> {
+    fs::create_dir_all(cache_dir).map_err(|err| crate::io_error(cache_dir, err))?;
+    let stand_in = cache_dir.join(format!(
+        "stand-in.{CACHE_VERSION}.{}.{}.m2v",
+        standard_tag(standard),
+        if wide { "wide" } else { "full" }
+    ));
+    if !stand_in.is_file() {
+        let frames = match standard {
+            VideoStandard::Ntsc => 15,
+            VideoStandard::Pal => 12,
+        };
+        let part = cache_dir.join(format!("stand-in.{}.part", part_number()));
+        fs::write(&part, black_video(frames, standard, wide)?)
+            .map_err(|err| crate::io_error(&part, err))?;
+        fs::rename(&part, &stand_in).map_err(|err| crate::io_error(&stand_in, err))?;
+    }
+    Ok(stand_in)
+}
+
+/// Prepares a slideshow whose pictures are made elsewhere (an HD Blu-ray title is encoded from the slides as
+/// H.264): its sound as usual, and in place of the DVD video a short black stand-in. No MPEG-2 encode of the slides runs, where [`prepare_slideshow`] would spend
+/// the time on one that is thrown away.
+///
+/// # Errors
+///
+/// I/O or invalid-project errors when cache or asset access fails, [`DvdError::Unsupported`] when the sound
+/// cannot be made.
+pub(crate) fn prepare_slideshow_without_video(
+    project: &Project,
+    slideshow: &Slideshow,
+    cache_dir: &Path,
+) -> Result<PreparedTitle, DvdError> {
+    let standard = project.settings.standard;
+    let stand_in = stand_in_video(cache_dir, standard, project.settings.widescreen)?;
+
+    let mut seed = fnv1a64(b"slideshow-sound", FNV_OFFSET);
+    seed = fnv1a64(CACHE_VERSION.as_bytes(), seed);
+    seed = fnv1a64(standard_tag(standard).as_bytes(), seed);
+    seed = slideshow_seed(project, slideshow, seed)?;
+    let audio_out = cache_dir.join(format!("{seed:016x}.wav"));
+    if !audio_out.is_file() {
+        let part = cache_dir.join(format!("{seed:016x}.{}.wav.part", part_number()));
+        let slides = slideshow_inputs(project, slideshow)?;
+        let audio = slideshow_audio_paths(project, slideshow)?;
+        if let Err(err) = render_slideshow_audio(
+            &slides,
+            &audio,
+            slideshow.loop_audio,
+            &part,
+            transcode_standard(standard),
+        ) {
+            let _ = fs::remove_file(&part);
+            return Err(DvdError::Unsupported(format!(
+                "slideshow {} audio: {err}",
+                slideshow.name
+            )));
+        }
+        fs::rename(&part, &audio_out).map_err(|err| crate::io_error(&audio_out, err))?;
+    }
+    Ok(PreparedTitle {
+        video_path: stand_in,
+        transcoded_audio: Some(ac3_soundtrack(&audio_out)?),
+        transcoded: true,
+        soundtrack_delay: 0,
+        audio_tracks: Vec::new(),
+    })
+}
+
 /// # Errors
 ///
 /// Returns [`DvdError::Unsupported`] when transcoding fails, and I/O or
@@ -224,13 +448,17 @@ pub(crate) fn prepare_title(
         .assets
         .get(&timeline.video)
         .ok_or_else(|| DvdError::Invalid("referenced asset does not exist".to_string()))?;
-    let input = Path::new(asset.path.as_str());
+    let media = asset.media_file();
+    let input: &Path = &media;
 
     let audio_tracks = prepare_audio_tracks(project, timeline, cache_dir)?;
 
-    if is_passthrough(input, project.settings.standard) {
+    if !timeline.more_video.is_empty()
+        || !timeline.video_trims.is_empty()
+        || timeline.has_video_gaps()
+    {
         return Ok(PreparedTitle {
-            video_path: input.to_path_buf(),
+            video_path: joined_clips(project, timeline, cache_dir, budget, progress)?,
             transcoded_audio: None,
             transcoded: false,
             soundtrack_delay: 0,
@@ -266,6 +494,23 @@ pub(crate) fn prepare_title(
             transcoded_audio,
             transcoded: false,
             soundtrack_delay,
+            audio_tracks,
+        });
+    }
+
+    if passes_through(project, input) {
+        // A program stream's video is taken out and used as it is; its sound comes along when the timeline has no
+        // audio track of its own (as the sound of a transcoded video does).
+        let transcoded_audio = if is_program_stream_file(input) && timeline.audio.is_empty() {
+            own_sound(input, cache_dir)?
+        } else {
+            None
+        };
+        return Ok(PreparedTitle {
+            video_path: passthrough_video(input, cache_dir)?,
+            transcoded_audio,
+            transcoded: false,
+            soundtrack_delay: 0,
             audio_tracks,
         });
     }
@@ -334,9 +579,14 @@ pub(crate) fn prepare_title_sound(
         .assets
         .get(&timeline.video)
         .ok_or_else(|| DvdError::Invalid("referenced asset does not exist".to_string()))?;
-    let input = Path::new(asset.path.as_str());
+    let media = asset.media_file();
+    let input: &Path = &media;
     let audio_tracks = prepare_audio_tracks(project, timeline, cache_dir)?;
-    let has_sound = || disccraft_transcode::probe_video(input).is_ok_and(|probe| probe.has_audio);
+    // The source's own sound, as a transcode of the whole title would bring it: only a timeline of one clip.
+    let has_sound = || {
+        timeline.more_video.is_empty()
+            && disccraft_transcode::probe_video(input).is_ok_and(|probe| probe.has_audio)
+    };
     // A program or transport stream's AC-3 the disc can carry goes on it as it is, keeping its delay.
     let container = container_ac3(input, project.settings.kind);
     let (transcoded_audio, soundtrack_delay) = match (timeline.audio.is_empty(), container) {
@@ -505,8 +755,14 @@ fn scan_timeline(
     scan: &mut Scan,
 ) -> Result<(), DvdError> {
     let video_path = asset_path(project, timeline.video)?;
+    let video_path: &Path = &video_path;
 
-    if video_passes_through(video_path, project.settings.standard) {
+    // More than one clip: joined as they are (the build refuses clips that would need a transcode).
+    if !timeline.more_video.is_empty()
+        || !timeline.video_trims.is_empty()
+        || timeline.has_video_gaps()
+        || passes_through(project, video_path)
+    {
         scan_passthrough(project, timeline, probe, scan)
     } else {
         scan_transcode(project, timeline, video_path, probe, scan)
@@ -521,20 +777,35 @@ fn scan_passthrough(
     scan: &mut Scan,
 ) -> Result<(), DvdError> {
     let video_path = asset_path(project, timeline.video)?;
-    // A container's video is its MPEG-2 alone.
-    let video_bytes = match container_video(video_path, project.settings.standard) {
-        Some((bytes, _)) => bytes,
-        None => file_size(video_path)?,
-    };
-    scan.passthrough_bits = add_bits(scan.passthrough_bits, video_bytes)?;
+    let video_path: &Path = &video_path;
+    for video in timeline.videos() {
+        let path = asset_path(project, video)?;
+        let path: &Path = &path;
+        if passes_through(project, path) {
+            // A container's video is its MPEG-2 alone.
+            let video_bytes = match container_video(path, project.settings.standard) {
+                Some((bytes, _)) => bytes,
+                None => file_size(path)?,
+            };
+            scan.passthrough_bits = add_bits(scan.passthrough_bits, video_bytes)?;
+        } else {
+            // A clip of a joined timeline that needs a transcode: its picture takes part of the bitrate budget.
+            scan.transcode_seconds += positive_seconds(probe(path)?)?;
+            scan.transcode_count = scan
+                .transcode_count
+                .checked_add(1)
+                .ok_or_else(|| DvdError::Invalid("too many timelines".to_string()))?;
+        }
+    }
 
     let mut seconds: Option<f64> = None;
 
     for track in &timeline.audio {
         let audio_path = asset_path(project, track.asset)?;
+        let audio_path: &Path = &audio_path;
 
         match audio_kind(audio_path) {
-            AudioKind::Ac3 | AudioKind::Wav => {
+            AudioKind::Ac3 | AudioKind::Dts | AudioKind::Wav => {
                 scan.passthrough_bits = add_bits(scan.passthrough_bits, file_size(audio_path)?)?;
             }
             AudioKind::Transcode if container_ac3(audio_path, project.settings.kind).is_some() => {
@@ -661,6 +932,7 @@ fn audio_bitrate_for_title(
 
     for track in &timeline.audio {
         let path = asset_path(project, track.asset)?;
+        let path: &Path = &path;
         let bitrate = track_audio_bitrate(path, seconds)?;
         total = total
             .checked_add(u64::from(bitrate))
@@ -674,12 +946,12 @@ fn audio_bitrate_for_title(
 fn track_audio_bitrate(path: &Path, seconds: f64) -> Result<u32, DvdError> {
     // A program or transport stream's AC-3 that goes on the disc as it is counts at its own rate.
     let ac3_bytes = match audio_kind(path) {
-        AudioKind::Ac3 => Some(file_size(path)?),
+        AudioKind::Ac3 | AudioKind::Dts => Some(file_size(path)?),
         AudioKind::Transcode => container_ac3(path, DiscKind::Dvd).map(|(bytes, _)| bytes),
         AudioKind::Wav => None,
     };
     match (audio_kind(path), ac3_bytes) {
-        (AudioKind::Ac3, Some(bytes)) | (AudioKind::Transcode, Some(bytes)) => {
+        (AudioKind::Ac3 | AudioKind::Dts, Some(bytes)) | (AudioKind::Transcode, Some(bytes)) => {
             let bits = bytes
                 .checked_mul(8)
                 .ok_or_else(|| DvdError::Invalid("audio size overflow".to_string()))?;
@@ -693,7 +965,7 @@ fn track_audio_bitrate(path: &Path, seconds: f64) -> Result<u32, DvdError> {
                 .map_err(|_| DvdError::Invalid("audio bitrate exceeds u32".to_string()))
         }
         (AudioKind::Wav, _) => Ok(LPCM_STEREO_BITRATE),
-        (AudioKind::Ac3 | AudioKind::Transcode, None) => Ok(AC3_STEREO_BITRATE),
+        (AudioKind::Ac3 | AudioKind::Dts | AudioKind::Transcode, None) => Ok(AC3_STEREO_BITRATE),
     }
 }
 
@@ -764,6 +1036,281 @@ fn add_bits(total: u64, bytes: u64) -> Result<u64, DvdError> {
         .ok_or_else(|| DvdError::Invalid("passthrough size overflow".to_string()))
 }
 
+/// The video of a timeline with more than one clip: the clips' elementary streams one after another, as one file
+/// in the cache (a clip's sequence end code is left out, so the stream runs on into the next clip). Every clip
+/// must be an MPEG-2 elementary stream of the disc's standard that is used as it is.
+///
+/// # Errors
+///
+/// [`DvdError::Unsupported`] when a clip would need a transcode.
+fn joined_clips(
+    project: &Project,
+    timeline: &Timeline,
+    cache_dir: &Path,
+    budget: &Budget,
+    progress: &mut dyn FnMut(&str, f32),
+) -> Result<PathBuf, DvdError> {
+    let mut seed = fnv1a64(b"joined clips", FNV_OFFSET);
+    let mut clips = Vec::new();
+    let mut joined_size: Option<u16> = None;
+    for (index, video) in timeline.videos().into_iter().enumerate() {
+        let source = asset_path(project, video)?;
+        let source: &Path = &source;
+        let trim = timeline.video_trim(index);
+        // A clip that needs a transcode is transcoded on its own (as a timeline of that one video would be), and
+        // its result is joined. Only a stream that is used as it is can be trimmed: its GOPs are known.
+        let path: PathBuf = if passes_through(project, source) {
+            passthrough_video(source, cache_dir)?
+        } else {
+            if trim != disccraft_project::ClipTrim::default() {
+                return Err(DvdError::Unsupported(format!(
+                    "timeline \"{}\": only an MPEG-2 video stream that needs no transcode can be trimmed \
+                     ({} is not)",
+                    timeline.name,
+                    source.display()
+                )));
+            }
+            let mut one = timeline.clone();
+            one.video = video;
+            one.more_video.clear();
+            one.video_trims.clear();
+            prepare_title(project, &one, cache_dir, budget, progress)?.video_path
+        };
+        let metadata = fs::metadata(&path).map_err(|err| crate::io_error(&path, err))?;
+        let (secs, nanos) = modified_time(&metadata)?;
+        seed = fnv1a64(absolute_path_string(&path).as_bytes(), seed);
+        seed = fnv1a64(metadata.len().to_string().as_bytes(), seed);
+        seed = fnv1a64(secs.to_string().as_bytes(), seed);
+        seed = fnv1a64(nanos.to_string().as_bytes(), seed);
+        seed = fnv1a64(
+            format!("trim:{}:{:?}", trim.start, trim.end).as_bytes(),
+            seed,
+        );
+        // The clips of one title share a picture size (a title has one); a gap's black is made at full size.
+        let size = if passes_through(project, source) {
+            dvd_picture_size(source, project.settings.standard).unwrap_or((720, 0))
+        } else {
+            (720, 0)
+        };
+        let first_size = *joined_size.get_or_insert(size.0);
+        if first_size != size.0 || (timeline.has_video_gaps() && size.0 != 720) {
+            return Err(DvdError::Unsupported(format!(
+                "timeline \"{}\": its video clips must have the same picture width (and 720 when there are \
+                 gaps between them)",
+                timeline.name
+            )));
+        }
+        let gap = timeline.video_gap(index);
+        if gap > 0 {
+            seed = fnv1a64(
+                format!("gap:{gap}:{}", timeline.wide(&project.settings)).as_bytes(),
+                seed,
+            );
+        }
+        clips.push((path, trim, gap));
+    }
+    seed = fnv1a64(CACHE_VERSION.as_bytes(), seed);
+    let joined = cache_dir.join(format!("{seed:016x}.joined.m2v"));
+    if joined.is_file() {
+        return Ok(joined);
+    }
+    fs::create_dir_all(cache_dir).map_err(|err| crate::io_error(cache_dir, err))?;
+    let part = cache_dir.join(format!("{seed:016x}.joined.{}.part", part_number()));
+    let last = clips.len().saturating_sub(1);
+    let written = (|| -> Result<(), DvdError> {
+        use std::io::Write;
+        let file = fs::File::create(&part).map_err(|err| crate::io_error(&part, err))?;
+        let mut out = std::io::BufWriter::new(file);
+        for (index, (path, trim, gap)) in clips.iter().enumerate() {
+            // The empty stretch in front of the clip plays black.
+            if *gap > 0 {
+                let black = black_video(
+                    *gap,
+                    project.settings.standard,
+                    timeline.wide(&project.settings),
+                )?;
+                out.write_all(&black)
+                    .map_err(|err| crate::io_error(&part, err))?;
+            }
+            write_clip(path, *trim, index == last, &mut out)?;
+        }
+        out.flush().map_err(|err| crate::io_error(&part, err))
+    })();
+    if let Err(error) = written {
+        let _ = fs::remove_file(&part);
+        return Err(error);
+    }
+    fs::rename(&part, &joined).map_err(|err| crate::io_error(&joined, err))?;
+    Ok(joined)
+}
+
+/// The most frames of black one gap is encoded as (three hours of NTSC; a longer gap is refused).
+const MAX_GAP_FRAMES: u32 = 30 * 60 * 60 * 3;
+
+/// `frames` pictures of black as an MPEG-2 elementary stream of the disc's standard (closed GOPs, its own sequence
+/// header, no sequence end code): what plays in a gap between video clips.
+fn black_video(frames: u32, standard: VideoStandard, wide: bool) -> Result<Vec<u8>, DvdError> {
+    use disccraft_mpeg2venc::Frame420;
+    use disccraft_mpeg2venc::encoder::{Encoder, EncoderConfig};
+    if frames > MAX_GAP_FRAMES {
+        return Err(DvdError::Unsupported(
+            "a gap between video clips is too long".to_string(),
+        ));
+    }
+    let (standard, height, gop_size) = match standard {
+        VideoStandard::Ntsc => (disccraft_mpeg2venc::Standard::Ntsc, 480_u16, 15_u16),
+        VideoStandard::Pal => (disccraft_mpeg2venc::Standard::Pal, 576, 12),
+    };
+    let encode = |error: disccraft_mpeg2venc::EncodeError| DvdError::Invalid(error.0);
+    let mut encoder = Encoder::new(EncoderConfig {
+        standard,
+        gop_size,
+        bitrate: 1_000_000,
+        max_bitrate: 8_000_000,
+        wide,
+    })
+    .map_err(encode)?;
+    let (width, luma) = (720_u16, usize::from(height) * 720);
+    let black = Frame420 {
+        width,
+        height,
+        y: vec![16; luma],
+        cb: vec![128; luma / 4],
+        cr: vec![128; luma / 4],
+    };
+    let mut stream = Vec::new();
+    for _ in 0..frames {
+        stream.extend_from_slice(&encoder.encode_frame(&black).map_err(encode)?);
+    }
+    Ok(stream)
+}
+
+/// Writes the trimmed part of the MPEG-2 elementary stream at `path` to `out`: the headers before its first GOP
+/// (every clip brings its own sequence header), then the GOPs from the trim's start up to its end. A sequence end
+/// code is left out unless this is the last clip (it would end the stream there), and a GOP that starts a trimmed
+/// clip without being closed is marked as a broken link (its leading B pictures need the GOP before it, which is
+/// gone).
+fn write_clip(
+    path: &Path,
+    trim: disccraft_project::ClipTrim,
+    is_last: bool,
+    out: &mut impl std::io::Write,
+) -> Result<(), DvdError> {
+    use std::io::{Seek, SeekFrom};
+    let io = |err: std::io::Error| crate::io_error(path, err);
+    let mut input = fs::File::open(path).map_err(io)?;
+    let mut length = input.metadata().map_err(io)?.len();
+    if length >= 4 {
+        let mut tail = [0_u8; 4];
+        let _ = input.seek(SeekFrom::End(-4)).map_err(io)?;
+        input.read_exact(&mut tail).map_err(io)?;
+        let ends = tail == [0, 0, 1, 0xB7];
+        // The end code goes when another clip follows, or when the clip's end is trimmed off.
+        if ends && (!is_last || trim.end.is_some()) {
+            length = length.saturating_sub(4);
+        }
+    }
+    let _ = input.seek(SeekFrom::Start(0)).map_err(io)?;
+    if trim == disccraft_project::ClipTrim::default() {
+        let _ = std::io::copy(&mut input.take(length), out).map_err(io)?;
+        return Ok(());
+    }
+
+    let gops = gop_offsets(path)?;
+    let offset_of = |frame: u32| {
+        gops.iter()
+            .find(|(_, pictures, _)| *pictures == frame)
+            .map(|(offset, _, _)| *offset)
+    };
+    // Where the clip stops: in front of the headers of the GOP that starts on the end frame.
+    let end_of = |frame: u32| {
+        gops.iter()
+            .find(|(_, pictures, _)| *pictures == frame)
+            .map(|(_, _, headers)| *headers)
+    };
+    let invalid = || {
+        DvdError::Invalid(format!(
+            "{}: the clip's trim is not on a GOP start",
+            path.display()
+        ))
+    };
+    let first = gops
+        .first()
+        .map(|(offset, _, _)| *offset)
+        .ok_or_else(invalid)?;
+    let from = offset_of(trim.start).ok_or_else(invalid)?;
+    let to = match trim.end {
+        Some(end) => end_of(end).unwrap_or(length).min(length),
+        None => length,
+    };
+    if to <= from {
+        return Err(invalid());
+    }
+    // The headers before the first GOP.
+    let _ = std::io::copy(&mut (&mut input).take(first), out).map_err(io)?;
+    let _ = input.seek(SeekFrom::Start(from)).map_err(io)?;
+    let mut head = [0_u8; 8];
+    let head_len = usize::try_from(to.saturating_sub(from).min(8)).unwrap_or(8);
+    let head = head.get_mut(..head_len).ok_or_else(invalid)?;
+    input.read_exact(head).map_err(io)?;
+    // Group header: start code, 25 bits of time code, closed_gop, broken_link.
+    if trim.start > 0
+        && let Some(flags) = head.get_mut(7)
+        && *flags & 0x40 == 0
+    {
+        *flags |= 0x20;
+    }
+    out.write_all(head).map_err(io)?;
+    let rest = to
+        .saturating_sub(from)
+        .saturating_sub(u64::try_from(head_len).unwrap_or(8));
+    let _ = std::io::copy(&mut input.take(rest), out).map_err(io)?;
+    Ok(())
+}
+
+/// The GOPs of the MPEG-2 video elementary stream at `path`: the byte offset of each group start code, the
+/// number of pictures before it (the frame the GOP starts on, in display order), and where the GOP's own headers
+/// begin (the sequence header in front of the group start code when there is one, else the group start code).
+fn gop_offsets(path: &Path) -> Result<Vec<(u64, u32, u64)>, DvdError> {
+    let io = |err: std::io::Error| crate::io_error(path, err);
+    let mut input = std::io::BufReader::new(fs::File::open(path).map_err(io)?);
+    let mut gops = Vec::new();
+    let mut pictures = 0_u32;
+    // The sequence header seen since the last picture began.
+    let mut header: Option<u64> = None;
+    let mut window = [0xFF_u8; 3];
+    let mut position = 0_u64;
+    let mut buffer = vec![0_u8; 1 << 20];
+    loop {
+        let read = match input.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(io(error)),
+        };
+        for &byte in buffer.get(..read).unwrap_or_default() {
+            if window == [0, 0, 1] {
+                match byte {
+                    0x00 => {
+                        pictures = pictures.saturating_add(1);
+                        header = None;
+                    }
+                    0xB3 => header = header.or(Some(position.saturating_sub(3))),
+                    // The start code began three bytes back.
+                    0xB8 => {
+                        let start = position.saturating_sub(3);
+                        gops.push((start, pictures, header.take().unwrap_or(start)));
+                    }
+                    _ => {}
+                }
+            }
+            window = [window[1], window[2], byte];
+            position = position.saturating_add(1);
+        }
+    }
+    Ok(gops)
+}
+
 /// Return the file size in bytes.
 fn file_size(path: &Path) -> Result<u64, DvdError> {
     fs::metadata(path)
@@ -772,11 +1319,11 @@ fn file_size(path: &Path) -> Result<u64, DvdError> {
 }
 
 /// Borrow the filesystem path for an asset id.
-fn asset_path(project: &Project, id: AssetId) -> Result<&Path, DvdError> {
+fn asset_path(project: &Project, id: AssetId) -> Result<std::borrow::Cow<'_, Path>, DvdError> {
     project
         .assets
         .get(&id)
-        .map(|asset| Path::new(asset.path.as_str()))
+        .map(disccraft_project::Asset::media_file)
         .ok_or_else(|| DvdError::Invalid("referenced asset does not exist".to_string()))
 }
 
@@ -793,10 +1340,12 @@ fn prepare_audio_tracks(
             .assets
             .get(&track.asset)
             .ok_or_else(|| DvdError::Invalid("referenced asset does not exist".to_string()))?;
-        let path = Path::new(asset.path.as_str());
+        let media = asset.media_file();
+        let path: &Path = &media;
 
         let prepared = match audio_kind(path) {
             AudioKind::Ac3 => PreparedAudio::Ac3(path.to_path_buf()),
+            AudioKind::Dts => PreparedAudio::Dts(path.to_path_buf()),
             AudioKind::Wav => PreparedAudio::Wav(path.to_path_buf()),
             AudioKind::Transcode => match container_ac3(path, project.settings.kind) {
                 // The AC-3 of a program or transport stream, as it is, when a DVD can carry it.
@@ -804,6 +1353,12 @@ fn prepare_audio_tracks(
                     path: crate::demux::demux_to_cache(path, cache_dir, crate::demux::Part::Ac3)?,
                     delay,
                 },
+                // The AC-3 sound of a program stream read by the muxer's own demuxer.
+                None if is_program_stream_file(path)
+                    && let (_, Some(sound)) = demuxed_streams(path, cache_dir)? =>
+                {
+                    PreparedAudio::Ac3(sound)
+                }
                 None => {
                     let key = audio_cache_key(path)?;
                     let wav = transcode_audio_to_cache(path, cache_dir, &key)?;
@@ -822,6 +1377,7 @@ fn prepare_audio_tracks(
 fn audio_kind(path: &Path) -> AudioKind {
     match path.extension().and_then(|ext| ext.to_str()) {
         Some(ext) if ext.eq_ignore_ascii_case("ac3") => AudioKind::Ac3,
+        Some(ext) if ext.eq_ignore_ascii_case("dts") => AudioKind::Dts,
         Some(ext) if ext.eq_ignore_ascii_case("wav") => AudioKind::Wav,
         _ => AudioKind::Transcode,
     }
@@ -873,46 +1429,179 @@ pub(crate) fn first_sequence_header_matches(data: &[u8], standard: VideoStandard
 
 /// Check whether a sequence header matches DVD passthrough constraints.
 fn sequence_header_matches(slice: &[u8], standard: VideoStandard) -> bool {
-    let (want_height, want_rate) = match standard {
-        VideoStandard::Ntsc => (480u16, 4u8),
-        VideoStandard::Pal => (576u16, 3u8),
-    };
+    sequence_header_size(slice, standard).is_some_and(|(width, _)| width == 720)
+}
 
-    let Some(b0) = slice.get(4) else {
-        return false;
+/// The picture size of a sequence header that goes on a DVD of `standard` as it is: one of the DVD sizes (720 or
+/// 704 wide at full height; 352 wide at full or half height, 4:3 only), at the standard's frame rate, 4:3 or 16:9,
+/// within the bit rate a DVD plays. `None` for anything else.
+fn sequence_header_size(slice: &[u8], standard: VideoStandard) -> Option<(u16, u16)> {
+    let (ifo_standard, want_rate) = match standard {
+        VideoStandard::Ntsc => (disccraft_ifo::Standard::Ntsc, 4u8),
+        VideoStandard::Pal => (disccraft_ifo::Standard::Pal, 3u8),
     };
-    let Some(b1) = slice.get(5) else {
-        return false;
-    };
-    let Some(b2) = slice.get(6) else {
-        return false;
-    };
-    let Some(b3) = slice.get(7) else {
-        return false;
-    };
-    let Some(b4) = slice.get(8) else {
-        return false;
-    };
-    let Some(b5) = slice.get(9) else {
-        return false;
-    };
-    let Some(b6) = slice.get(10) else {
-        return false;
-    };
+    let byte = |index: usize| slice.get(index).copied();
+    let (b0, b1, b2, b3) = (byte(4)?, byte(5)?, byte(6)?, byte(7)?);
+    let (b4, b5, b6) = (byte(8)?, byte(9)?, byte(10)?);
 
-    let width = (u16::from(*b0) << 4) | (u16::from(*b1) >> 4);
-    let height = (u16::from(*b1 & 0x0F) << 8) | u16::from(*b2);
-    let aspect = *b3 >> 4;
-    let rate = *b3 & 0x0F;
-    let bit_rate = (u32::from(*b4) << 10) | (u32::from(*b5) << 2) | (u32::from(*b6) >> 6);
+    let width = (u16::from(b0) << 4) | (u16::from(b1) >> 4);
+    let height = (u16::from(b1 & 0x0F) << 8) | u16::from(b2);
+    let aspect = b3 >> 4;
+    let rate = b3 & 0x0F;
+    let bit_rate = (u32::from(b4) << 10) | (u32::from(b5) << 2) | (u32::from(b6) >> 6);
 
-    width == 720
-        && height == want_height
-        && (aspect == 2 || aspect == 3)
+    let resolution = disccraft_ifo::Resolution::of_picture(width, height, ifo_standard)?;
+    let small = matches!(
+        resolution,
+        disccraft_ifo::Resolution::Half | disccraft_ifo::Resolution::Quarter
+    );
+    let fits = (aspect == 2 || (aspect == 3 && !small))
         && rate == want_rate
         && bit_rate
             .checked_mul(400)
-            .is_some_and(|bits| bits <= MAX_MUX_VIDEO_BITRATE)
+            .is_some_and(|bits| bits <= MAX_MUX_VIDEO_BITRATE);
+    fits.then_some((width, height))
+}
+
+/// The picture size in the first sequence header of `data`, when it goes on a DVD as it is.
+fn first_sequence_header_size(data: &[u8], standard: VideoStandard) -> Option<(u16, u16)> {
+    let mut pos = 0usize;
+    while let Some(slice) = data.get(pos..pos.saturating_add(SEQUENCE_HEADER_BYTES)) {
+        if slice.starts_with(&[0x00, 0x00, 0x01, 0xB3]) {
+            return sequence_header_size(slice, standard);
+        }
+        pos = pos.saturating_add(1);
+    }
+    None
+}
+
+/// The bit rate (bit/s) in the first sequence header of the video at `path` (an elementary stream, or the video of
+/// a program stream): the most the stream says it uses.
+fn header_bit_rate(path: &Path) -> Option<u32> {
+    let mut data = read_head(path)?;
+    if disccraft_psmux::demux::is_program_stream(&data) {
+        let mut file = fs::File::open(path).ok()?;
+        let mut head = Vec::new();
+        let limit = u64::try_from(HEAD_BYTES).unwrap_or(u64::MAX);
+        disccraft_psmux::demux::demux(&mut file, Some(&mut head), None, Some(limit)).ok()?;
+        data = head;
+    }
+    let at = data
+        .windows(4)
+        .position(|window| window == [0x00, 0x00, 0x01, 0xB3])?;
+    let byte = |index: usize| data.get(at.checked_add(index)?).copied().map(u32::from);
+    let rate = (byte(8)? << 10) | (byte(9)? << 2) | (byte(10)? >> 6);
+    rate.checked_mul(400)
+}
+
+/// What the streams of a timeline ask of a DVD each second, for a timeline whose video goes on the disc as it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TimelineRate {
+    /// The timeline's id.
+    pub timeline: u64,
+    /// The video's bit rate (the highest of its clips' sequence headers), in bit/s.
+    pub video: u32,
+    /// The audio tracks' bit rates added up, in bit/s.
+    pub audio: u32,
+}
+
+impl TimelineRate {
+    /// The most a DVD's video, audio and subtitles may use together, in bit/s.
+    pub const LIMIT: u32 = MAX_MUX_VIDEO_BITRATE;
+
+    /// Video and audio together.
+    #[must_use]
+    pub fn total(&self) -> u32 {
+        self.video.saturating_add(self.audio)
+    }
+}
+
+/// The stream rates of the timelines whose video goes on a DVD as it is (the transcoded ones get a rate that
+/// fits, from the disc's budget). Timelines whose files cannot be read are left out.
+#[must_use]
+pub fn timeline_rates(project: &Project) -> Vec<TimelineRate> {
+    project
+        .timelines
+        .values()
+        .filter_map(|timeline| {
+            let video = timeline
+                .videos()
+                .iter()
+                .filter_map(|id| {
+                    let path = asset_path(project, *id).ok()?;
+                    let path: &Path = &path;
+                    passes_through(project, path)
+                        .then(|| header_bit_rate(path))
+                        .flatten()
+                })
+                .max()?;
+            let audio = if timeline.audio.is_empty() {
+                // The sound a program stream brings along; an elementary stream has none.
+                let own = asset_path(project, timeline.video).is_ok_and(|path| {
+                    timeline.more_video.is_empty() && is_program_stream_file(&path)
+                });
+                if own { AC3_STEREO_BITRATE } else { 0 }
+            } else {
+                timeline
+                    .audio
+                    .iter()
+                    .filter_map(|track| asset_path(project, track.asset).ok())
+                    .map(|path| match audio_kind(&path) {
+                        AudioKind::Ac3 => read_head(&path)
+                            .and_then(|head| {
+                                disccraft_psmux::es::ac3::first_frame_bit_rate_kbps(&head)
+                            })
+                            .and_then(|kbps| kbps.checked_mul(1000))
+                            .unwrap_or(AC3_STEREO_BITRATE),
+                        AudioKind::Dts => read_head(&path)
+                            .and_then(|head| {
+                                disccraft_psmux::es::dts::first_frame_bit_rate_kbps(&head)
+                            })
+                            .and_then(|kbps| kbps.checked_mul(1000))
+                            .unwrap_or(1_509_750),
+                        AudioKind::Wav => LPCM_STEREO_BITRATE,
+                        AudioKind::Transcode => AC3_STEREO_BITRATE,
+                    })
+                    .fold(0u32, u32::saturating_add)
+            };
+            Some(TimelineRate {
+                timeline: timeline.id.0,
+                video,
+                audio,
+            })
+        })
+        .collect()
+}
+
+/// The picture size of a video that goes on a DVD as it is (an elementary stream, or the video of a program
+/// stream): 720 wide, or one of the smaller DVD sizes. `None` when the video would be transcoded.
+fn dvd_picture_size(path: &Path, standard: VideoStandard) -> Option<(u16, u16)> {
+    let data = read_head(path)?;
+    if disccraft_psmux::demux::is_program_stream(&data) {
+        let mut file = fs::File::open(path).ok()?;
+        let mut head = Vec::new();
+        let limit = u64::try_from(HEAD_BYTES).unwrap_or(u64::MAX);
+        disccraft_psmux::demux::demux(&mut file, Some(&mut head), None, Some(limit)).ok()?;
+        return first_sequence_header_size(&head, standard);
+    }
+    if !has_passthrough_extension(path) {
+        return None;
+    }
+    first_sequence_header_size(&data, standard)
+}
+
+/// Whether the video at `path` goes on the project's disc as it is. A DVD takes the smaller DVD picture sizes too
+/// (704x480, 352x480, 352x240 and their 576 / 288 line counterparts); a Blu-ray's SD video is 720 wide only.
+pub(crate) fn passes_through(project: &Project, path: &Path) -> bool {
+    let standard = project.settings.standard;
+    // An elementary stream, or the MPEG-2 of a program or transport stream that fits the standard.
+    if video_passes_through(path, standard) {
+        return true;
+    }
+    match project.settings.kind {
+        disccraft_project::DiscKind::Dvd => dvd_picture_size(path, standard).is_some(),
+        _ => false,
+    }
 }
 
 /// Compute a 16 hex digit cache key for a transcode (`wide`: the title's aspect, and `gop_starts`: the frames its
@@ -923,7 +1612,8 @@ fn cache_key(
     budget: &Budget,
     (wide, gop_starts): (bool, &[u64]),
 ) -> Result<String, DvdError> {
-    let metadata = fs::metadata(input).map_err(|err| crate::io_error(input, err))?;
+    let metadata =
+        disccraft_transcode::document_metadata(input).map_err(|err| crate::io_error(input, err))?;
     let (secs, nanos) = modified_time(&metadata)?;
     let path = absolute_path_string(input);
 
@@ -980,7 +1670,7 @@ fn asset_gop_starts(project: &Project, path: &Path) -> Vec<u64> {
             project
                 .assets
                 .get(&timeline.video)
-                .is_some_and(|asset| Path::new(&asset.path) == path)
+                .is_some_and(|asset| asset.media_file().as_ref() == path)
         })
         .flat_map(|timeline| {
             // The manual layer break of a dual-layer DVD gets its own cell, so its own GOP.
@@ -1008,7 +1698,7 @@ fn asset_wide(project: &Project, path: &Path) -> bool {
             project
                 .assets
                 .get(&timeline.video)
-                .is_some_and(|asset| Path::new(&asset.path) == path)
+                .is_some_and(|asset| asset.media_file().as_ref() == path)
         })
         .map_or(project.settings.widescreen, |timeline| {
             timeline.wide(&project.settings)
@@ -1017,7 +1707,8 @@ fn asset_wide(project: &Project, path: &Path) -> bool {
 
 /// Compute a 16 hex digit cache key for an audio transcode.
 pub(crate) fn audio_cache_key(input: &Path) -> Result<String, DvdError> {
-    let metadata = fs::metadata(input).map_err(|err| crate::io_error(input, err))?;
+    let metadata =
+        disccraft_transcode::document_metadata(input).map_err(|err| crate::io_error(input, err))?;
     let (secs, nanos) = modified_time(&metadata)?;
     let path = absolute_path_string(input);
 
@@ -1064,7 +1755,10 @@ fn slideshow_seed(project: &Project, slideshow: &Slideshow, seed: u64) -> Result
         }
 
         let path = asset_path(project, slide.asset)?;
-        let metadata = fs::metadata(path).map_err(|err| crate::io_error(path, err))?;
+
+        let path: &Path = &path;
+        let metadata = disccraft_transcode::document_metadata(path)
+            .map_err(|err| crate::io_error(path, err))?;
         let (secs, nanos) = modified_time(&metadata)?;
 
         seed = fnv1a64(absolute_path_string(path).as_bytes(), seed);
@@ -1088,7 +1782,9 @@ fn slideshow_seed(project: &Project, slideshow: &Slideshow, seed: u64) -> Result
     }
     for asset in clips {
         let path = asset_path(project, asset)?;
-        let metadata = fs::metadata(path).map_err(|err| crate::io_error(path, err))?;
+        let path: &Path = &path;
+        let metadata = disccraft_transcode::document_metadata(path)
+            .map_err(|err| crate::io_error(path, err))?;
         let (secs, nanos) = modified_time(&metadata)?;
 
         seed = fnv1a64(absolute_path_string(path).as_bytes(), seed);
@@ -1360,6 +2056,7 @@ fn slideshow_inputs(project: &Project, slideshow: &Slideshow) -> Result<Vec<Slid
     let durations = effective_slide_durations(project, slideshow)?;
     for (slide, duration) in slideshow.slides.iter().zip(durations) {
         let path = asset_path(project, slide.asset)?;
+        let path: &Path = &path;
         let seconds = slide_seconds(duration)?;
         inputs.push(SlideInput {
             image: path.to_path_buf(),
@@ -1389,7 +2086,7 @@ fn slideshow_audio_paths(
     slideshow
         .audio_list()
         .into_iter()
-        .map(|asset| asset_path(project, asset).map(Path::to_path_buf))
+        .map(|asset| asset_path(project, asset).map(std::borrow::Cow::into_owned))
         .collect()
 }
 
@@ -1561,6 +2258,35 @@ mod tests {
 
         assert!(is_passthrough(&path, VideoStandard::Ntsc));
         assert!(!is_passthrough(&path, VideoStandard::Pal));
+        // The smaller DVD picture sizes: sequence headers of 704x480, 352x480 and 352x240 at 29.97, 4:3, 4 Mbps;
+        // 352 wide is 4:3 only, and other sizes are not DVD sizes.
+        let header = |width: u16, height: u16, aspect: u8| {
+            let [w_hi, w_lo] = (width << 4).to_be_bytes();
+            let [h_hi, h_lo] = height.to_be_bytes();
+            vec![
+                0,
+                0,
+                1,
+                0xB3,
+                w_hi,
+                w_lo | h_hi,
+                h_lo,
+                (aspect << 4) | 4,
+                0x09,
+                0xC4,
+                0x20,
+            ]
+        };
+        let size = |width, height, aspect| {
+            super::first_sequence_header_size(&header(width, height, aspect), VideoStandard::Ntsc)
+        };
+        assert_eq!(size(720, 480, 2), Some((720, 480)));
+        assert_eq!(size(704, 480, 3), Some((704, 480)));
+        assert_eq!(size(352, 480, 2), Some((352, 480)));
+        assert_eq!(size(352, 240, 2), Some((352, 240)));
+        assert_eq!(size(352, 480, 3), None);
+        assert_eq!(size(640, 480, 2), None);
+        assert_eq!(size(352, 288, 2), None);
         fs::remove_file(&path).unwrap_or(());
 
         let mp4 = temp_path("mp4");
@@ -1851,7 +2577,8 @@ pub fn transcode_status(
         .assets
         .values()
         .map(|asset| {
-            let path = Path::new(asset.path.as_str());
+            let media = asset.media_file();
+            let path: &Path = &media;
             let status = match asset.kind {
                 AssetKind::Video => video_status(project, path, cache_dir, budget.as_ref()),
                 AssetKind::Audio => audio_status(path, cache_dir),
@@ -1871,7 +2598,7 @@ fn video_status(
     cache_dir: Option<&Path>,
     budget: Option<&Budget>,
 ) -> TranscodeStatus {
-    if video_passes_through(path, project.settings.standard) {
+    if passes_through(project, path) {
         return TranscodeStatus::Unneeded;
     }
     let cached = cache_dir
@@ -1916,4 +2643,62 @@ fn audio_status(path: &Path, cache_dir: Option<&Path>) -> TranscodeStatus {
 /// Whether the cache holds a finished `<key>.<extension>` (written with its `<key>.ok` marker).
 fn cached(dir: &Path, key: &str, extension: &str) -> bool {
     dir.join(format!("{key}.ok")).is_file() && dir.join(format!("{key}.{extension}")).is_file()
+}
+
+#[cfg(test)]
+mod clip_tests {
+    use super::write_clip;
+    use disccraft_project::ClipTrim;
+
+    /// A clip whose end is trimmed stops before the sequence header that leads the cut-off GOP: left at the very
+    /// end of a title, that header had nothing after it and the stream no longer parsed.
+    #[test]
+    fn a_trimmed_end_leaves_no_header_behind() -> Result<(), Box<dyn std::error::Error>> {
+        let sequence = [0, 0, 1, 0xB3, 9, 9, 0, 0, 1, 0xB5, 8, 8];
+        let group = [0, 0, 1, 0xB8, 0, 0, 0, 0x40];
+        let picture = [0, 0, 1, 0x00, 7, 7, 0, 0, 1, 0x01, 6, 6];
+        let mut stream = Vec::new();
+        for _ in 0..3 {
+            stream.extend_from_slice(&sequence);
+            stream.extend_from_slice(&group);
+            stream.extend_from_slice(&picture);
+        }
+        stream.extend_from_slice(&[0, 0, 1, 0xB7]);
+        let path =
+            std::env::temp_dir().join(format!("disccraft-clip-trim-{}.m2v", std::process::id()));
+        std::fs::write(&path, &stream)?;
+        let run = |trim: ClipTrim, is_last: bool| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+            let mut out = Vec::new();
+            write_clip(&path, trim, is_last, &mut out)?;
+            Ok(out)
+        };
+        let one: Vec<u8> = [&sequence[..], &group[..], &picture[..]].concat();
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            // The first GOP only.
+            let trim = ClipTrim {
+                start: 0,
+                end: Some(1),
+            };
+            assert_eq!(run(trim, true)?, one);
+            assert_eq!(run(trim, false)?, one);
+            // The middle GOP: the file's headers, then the GOP (closed, so no broken link).
+            let trim = ClipTrim {
+                start: 1,
+                end: Some(2),
+            };
+            assert_eq!(run(trim, true)?, one);
+            // From the last GOP to the end: the end code stays on the last clip only.
+            let trim = ClipTrim {
+                start: 2,
+                end: None,
+            };
+            let mut ended = one.clone();
+            ended.extend_from_slice(&[0, 0, 1, 0xB7]);
+            assert_eq!(run(trim, true)?, ended);
+            assert_eq!(run(trim, false)?, one);
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(&path);
+        result
+    }
 }

@@ -228,13 +228,14 @@ pub(crate) struct PaletteBuilder {
 }
 
 impl PaletteBuilder {
-    /// With the entries SRT subtitles draw with (0 black, 1 white text, 2 black outline) when the title has any.
-    pub(crate) fn new(with_text: bool) -> Self {
-        let entries = if with_text {
-            vec![0x0010_8080, 0x00EB_8080, 0x0010_8080]
-        } else {
-            Vec::new()
-        };
+    /// The number of entries drawn text uses: black, then fill, stroke and anti-alias of the three colour groups.
+    const TEXT_ENTRIES: usize = 10;
+
+    /// With the entries drawn text uses (the first ten of the title's colour set table) when the title has any.
+    pub(crate) fn new(text: Option<[u32; 16]>) -> Self {
+        let entries = text.map_or_else(Vec::new, |table| {
+            table.iter().copied().take(Self::TEXT_ENTRIES).collect()
+        });
         Self { entries }
     }
 
@@ -327,12 +328,16 @@ mod tests {
         source[2] = [0, 0, 0];
         source[3] = [255, 0, 0];
         source[4] = [255, 255, 255];
-        let mut builder = PaletteBuilder::new(true);
+        // A text table with white letters: black at 0, white at 1, the rest of its ten entries black.
+        let mut table = [0x0010_8080u32; 16];
+        table[1] = 0x00EB_8080;
+        let mut builder = PaletteBuilder::new(Some(table));
         builder.remap(&mut unit, &source).unwrap();
-        // White and black are the SRT entries 1 and 0; red is new (3); the other white shares entry 1.
-        assert_eq!(&unit[13..15], &[0x10, 0x31]);
+        // White and black are the text entries 1 and 0; red is new, after the ten text entries (10); the other
+        // white shares entry 1.
+        assert_eq!(&unit[13..15], &[0x10, 0xA1]);
         assert_eq!(&unit[..13], &spu()[..13]);
-        assert_eq!(builder.palette()[3], super::ycrcb([255, 0, 0]));
+        assert_eq!(builder.palette()[10], super::ycrcb([255, 0, 0]));
     }
 
     #[test]

@@ -13,6 +13,16 @@ use super::{always_enabled, empty_object, object};
 
 pub(crate) const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
+        id: "menu.setLayer",
+        label: "レイヤーの表示 / ロックを設定",
+        menu: &["メニュー"],
+        shortcut: None,
+        params: r#"{"menu": id, "kind": "button" | "text" | "graphic", "index": n, "hidden"?: bool, "locked"?: bool}"#,
+        enabled: always_enabled,
+        run: run_set_layer,
+        journal: true,
+    },
+    CommandSpec {
         id: "menu.addImage",
         label: "画像を配置",
         menu: &["メニュー"],
@@ -85,6 +95,46 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
 ];
 
 /// A frame coordinate parameter.
+/// Encore's Layers panel eye and lock on a button set, a text or a graphic: hidden is not drawn (in the viewer nor on
+/// the disc; a hidden button stays a button), locked cannot be picked in the menu viewer.
+fn run_set_layer(session: &mut Session, params: &Value) -> CommandResult {
+    let menu_id = MenuId(req_u64(params, "menu")?);
+    let kind = req_str(params, "kind")?;
+    let index = req_usize(params, "index")?;
+    let flag = |name: &str| match params.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(format!("parameter \"{name}\" must be a boolean")),
+    };
+    let (hidden, locked) = (flag("hidden")?, flag("locked")?);
+    let Some(menu) = session.project.menu_mut(menu_id) else {
+        return Err(format!("menu {} does not exist", menu_id.0));
+    };
+    let (slot_hidden, slot_locked) = match kind.as_str() {
+        "button" => menu
+            .buttons
+            .get_mut(index)
+            .map(|layer| (&mut layer.hidden, &mut layer.locked)),
+        "text" => menu
+            .texts
+            .get_mut(index)
+            .map(|layer| (&mut layer.hidden, &mut layer.locked)),
+        "graphic" => menu
+            .graphics
+            .get_mut(index)
+            .map(|layer| (&mut layer.hidden, &mut layer.locked)),
+        _ => return Err("\"kind\" must be \"button\", \"text\" or \"graphic\"".to_string()),
+    }
+    .ok_or_else(|| format!("{kind} {index} does not exist"))?;
+    if let Some(hidden) = hidden {
+        *slot_hidden = hidden;
+    }
+    if let Some(locked) = locked {
+        *slot_locked = locked;
+    }
+    Ok(empty_object())
+}
+
 fn coord(params: &Value, name: &str) -> Result<Option<u16>, String> {
     opt_u64(params, name)?
         .map(|value| u16::try_from(value).map_err(|_| format!("parameter \"{name}\" is too large")))
@@ -128,6 +178,8 @@ fn add_graphic(session: &mut Session, params: &Value, kind: GraphicKind) -> Comm
                 opacity,
                 shadow: None,
                 orientation: Default::default(),
+                hidden: false,
+                locked: false,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -337,6 +389,9 @@ fn run_convert_to_object(session: &mut Session, params: &Value) -> CommandResult
         format: TextFormat::default(),
         shadow: None,
         orientation: Default::default(),
+        hidden: false,
+        locked: false,
+        vertical: false,
     });
     let text = u64::try_from(menu.texts.len().saturating_sub(1))
         .map_err(|_| "text index is too large".to_string())?;
@@ -359,6 +414,57 @@ mod tests {
     use disccraft_project::{GraphicKind, ShapeKind};
     use serde_json::{Value, json};
     use std::error::Error;
+
+    /// M6.197: the Layers panel's eye and lock set a layer hidden or locked, each on its own; anything else is
+    /// refused; it undoes.
+    #[test]
+    fn layers_are_hidden_and_locked() -> Result<(), Box<dyn Error>> {
+        let mut session = Session::new();
+        let menu = session.project.add_menu(None)?;
+        let _ = session.project.add_button(
+            menu,
+            "Play".to_owned(),
+            None,
+            disccraft_project::Link::NotSet,
+        )?;
+        session.execute(
+            "menu.addText",
+            &json!({"menu": menu.0, "text": "Hello", "x": 10, "y": 10}),
+        )?;
+        session.execute(
+            "menu.setLayer",
+            &json!({"menu": menu.0, "kind": "text", "index": 0, "hidden": true}),
+        )?;
+        session.execute(
+            "menu.setLayer",
+            &json!({"menu": menu.0, "kind": "button", "index": 0, "locked": true}),
+        )?;
+        let state = |session: &Session| {
+            session.project.menu(menu).map(|m| {
+                (
+                    m.texts.first().map(|t| (t.hidden, t.locked)),
+                    m.buttons.first().map(|b| (b.hidden, b.locked)),
+                )
+            })
+        };
+        assert_eq!(
+            state(&session),
+            Some((Some((true, false)), Some((false, true))))
+        );
+        for bad in [
+            json!({"menu": menu.0, "kind": "layer", "index": 0, "hidden": true}),
+            json!({"menu": menu.0, "kind": "graphic", "index": 0, "hidden": true}),
+            json!({"menu": menu.0, "kind": "text", "index": 0, "hidden": "yes"}),
+        ] {
+            assert!(session.execute("menu.setLayer", &bad).is_err(), "{bad}");
+        }
+        session.execute("edit.undo", &json!({}))?;
+        assert_eq!(
+            state(&session),
+            Some((Some((true, false)), Some((false, false))))
+        );
+        Ok(())
+    }
 
     #[test]
     fn graphics_are_added_changed_reordered_and_undone() -> Result<(), Box<dyn Error>> {

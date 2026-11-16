@@ -8,10 +8,10 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use filmcraft_frame::VideoFrame;
-use filmcraft_h264enc::{
+use craft_video::h264::{
     Encoder, EncoderConfig, Packet, PacketFormat, Preset, Profile, RateControl, YuvFrame,
 };
+use filmcraft_frame::VideoFrame;
 use filmcraft_time::Tick;
 
 use crate::source::Source;
@@ -175,9 +175,32 @@ pub fn transcode_h264(
     options: &HdOptions,
     progress: &mut dyn FnMut(f32),
 ) -> Result<u64, TranscodeError> {
+    transcode_h264_range(input, es_out, index_out, options, (Tick(0), None), progress)
+}
+
+/// The part of a source of `total` length that `range` (a start and an end, `None` = the source's end) names:
+/// where it starts and how long it is. A range outside the source is cut to it.
+fn source_range(total: Tick, range: (Tick, Option<Tick>)) -> (Tick, Tick) {
+    let total = total.0.max(0);
+    let start = range.0.0.clamp(0, total);
+    let end = range.1.map_or(total, |end| end.0.clamp(start, total));
+    (Tick(start), Tick(end.saturating_sub(start)))
+}
+
+/// [`transcode_h264`] of a part of the input: from `range.0` to `range.1` of its time (`None`: to its end). The
+/// stream's times start at zero.
+pub fn transcode_h264_range(
+    input: &Path,
+    es_out: &Path,
+    index_out: &Path,
+    options: &HdOptions,
+    range: (Tick, Option<Tick>),
+    progress: &mut dyn FnMut(f32),
+) -> Result<u64, TranscodeError> {
     validate_options(options)?;
     let source = Source::open(input)?;
-    let frames = frame_count(source.info().duration, options)?;
+    let (range_start, range_length) = source_range(source.info().duration, range);
+    let frames = frame_count(range_length, options)?;
 
     let file = File::create(es_out).map_err(|error| io_error(es_out, error))?;
     let mut writer = BufWriter::new(file);
@@ -195,6 +218,7 @@ pub fn transcode_h264(
             for frame_index in 0..frames {
                 let planes = (|| {
                     let time = frame_tick(frame_index, options)?;
+                    let time = Tick(time.0.saturating_add(range_start.0));
                     let frame = source.video_frame(time)?;
                     let rgb = render_rgb_frame(&frame, options)?;
                     rgb_to_yuv(&rgb, options)
@@ -220,6 +244,47 @@ pub fn transcode_h264(
     packets.flush()?;
     write_h264_index(index_out, packets.units())?;
     progress(1.0);
+    Ok(frames)
+}
+
+/// The most black pictures one stream holds (three hours at 60 frames a second).
+const MAX_BLACK_FRAMES: u64 = 60 * 60 * 60 * 3;
+
+/// `frames` black pictures of `options`' size and rate as an H.264 stream with its index, as [`transcode_h264`]
+/// writes them (what plays in a gap between video clips).
+///
+/// # Errors
+///
+/// When there are no or too many frames, or the stream cannot be encoded or written.
+pub fn encode_h264_black(
+    frames: u64,
+    es_out: &Path,
+    index_out: &Path,
+    options: &HdOptions,
+) -> Result<u64, TranscodeError> {
+    validate_options(options)?;
+    if frames == 0 || frames > MAX_BLACK_FRAMES {
+        return Err(TranscodeError::Unsupported(
+            "a gap must be between one frame and three hours".to_string(),
+        ));
+    }
+    let pixels = usize::try_from(options.width)
+        .ok()
+        .and_then(|width| width.checked_mul(usize::try_from(options.height).ok()?))
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or_else(|| TranscodeError::Unsupported("picture too large".to_string()))?;
+    let planes = rgb_to_yuv(&vec![0_u8; pixels], options)?;
+    let file = File::create(es_out).map_err(|error| io_error(es_out, error))?;
+    let mut writer = BufWriter::new(file);
+    let mut encoder = Encoder::new(encoder_config(options))
+        .map_err(|error| TranscodeError::Encode(error.to_string()))?;
+    let mut packets = PacketWriter::new(&mut writer, es_out);
+    for frame_index in 0..frames {
+        encode_planes(&mut encoder, &planes, frame_index, options, &mut packets)?;
+    }
+    finish_encoder(&mut encoder, options, &mut packets)?;
+    packets.flush()?;
+    write_h264_index(index_out, packets.units())?;
     Ok(frames)
 }
 
@@ -1188,7 +1253,7 @@ mod tests {
         write_h264_index,
     };
     use crate::TICKS_PER_SECOND;
-    use filmcraft_h264enc::{
+    use craft_video::h264::{
         Encoder, EncoderConfig, PacketFormat, Preset, Profile, RateControl, YuvFrame,
     };
     use filmcraft_time::Tick;
@@ -1315,6 +1380,30 @@ mod tests {
     }
 
     /// Six seconds at 24000/1001 yields 144 frames (143.86, the nearest).
+    #[test]
+    fn a_range_is_cut_to_the_source() {
+        let total = Tick(10 * TICKS_PER_SECOND);
+        let at = |seconds: i64| Tick(seconds * TICKS_PER_SECOND);
+        assert_eq!(
+            super::source_range(total, (Tick(0), None)),
+            (Tick(0), total)
+        );
+        assert_eq!(
+            super::source_range(total, (at(2), Some(at(5)))),
+            (at(2), at(3))
+        );
+        assert_eq!(
+            super::source_range(total, (at(8), Some(at(20)))),
+            (at(8), at(2))
+        );
+        assert_eq!(super::source_range(total, (at(12), None)), (total, Tick(0)));
+        assert_eq!(
+            super::source_range(total, (at(5), Some(at(3)))),
+            (at(5), Tick(0))
+        );
+    }
+
+    /// Six seconds at 23.976 are 144 frames.
     #[test]
     fn frame_count_six_seconds() {
         let ticks = 6 * TICKS_PER_SECOND;

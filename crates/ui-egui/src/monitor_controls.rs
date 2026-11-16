@@ -54,7 +54,10 @@ impl DiscCraftApp {
         let fps = f64::from(num) / f64::from(den.max(1));
         let step = 1.0 / fps.max(1.0);
         let now = playhead_seconds(&ctx, id);
-        let end = self.asset_seconds(timeline.video).unwrap_or(now).max(step);
+        let end = Some(self.timeline_seconds(id))
+            .filter(|seconds| *seconds > 0.0)
+            .unwrap_or(now)
+            .max(step);
         let points: Vec<f64> = timeline
             .chapters
             .iter()
@@ -85,6 +88,12 @@ impl DiscCraftApp {
             crate::monitor::zoom_combo(ui, "monitor_zoom", &mut zoom);
         });
         self.monitor_zoom = zoom;
+        // Encore と同じく、拡大率の右にセーフエリアの表示 / 非表示。
+        let safe = Rect::from_min_size(
+            pos2(zoom_rect.max.x + 6.0, zoom_rect.min.y),
+            vec2(24.0, 24.0),
+        );
+        crate::monitor::safe_area_button(ui, safe, &mut self.show_monitor_safe_areas);
         let duration = timecode(end, num, den);
         let right = painter.text(
             row1.right_center(),
@@ -93,13 +102,18 @@ impl DiscCraftApp {
             FontId::monospace(13.0),
             style::TEXT_DIM,
         );
-        painter.text(
+        let chapter_label = painter.text(
             pos2(right.left() - 16.0, row1.center().y),
             Align2::RIGHT_CENTER,
             tlf!("Chapter {n}", n = format!("{chapter:02}")),
             FontId::proportional(12.0),
             style::TEXT_DIM,
         );
+        // Encore と同じく、セーフエリアの右に字幕の 5 つのボタン（チャプターの表示と重なるほど狭いときは出さない）。
+        let subtitle_at = pos2(safe.max.x + 10.0, safe.min.y);
+        if subtitle_at.x + 5.0 * 26.0 <= chapter_label.left() - 8.0 {
+            self.subtitle_buttons(ui, subtitle_at, id, now, (num, den));
+        }
 
         // 2 段目: スクラブバー。
         let bar = Rect::from_min_size(
@@ -184,7 +198,9 @@ impl DiscCraftApp {
                 None
             }
             Some(Transport::GoToStart) => Some(0.0),
-            Some(Transport::PreviousChapter) => Some(crate::monitor::prev_point(&points, now)),
+            Some(Transport::PreviousChapter) => {
+                Some(crate::monitor::prev_point(&points, now, step))
+            }
             Some(Transport::StepBack) => Some(step_frames(now, -1, fps, end)),
             Some(Transport::PlayStop) => {
                 self.toggle_playback(&ctx);

@@ -102,6 +102,9 @@ impl DiscCraftApp {
         });
         if let Some(index) = focus {
             self.slide_focus = Some((id, index));
+            // The Properties panel follows: a slide clicked in the viewer shows its sheet (as in Encore), also
+            // when something else, such as an asset in the Project panel, was selected before.
+            self.selection = crate::app::Selection::Slideshow(id);
         }
         // Delete で選んだスライドを外す（入力欄にフォーカスがないとき）。
         if let Some(index) = focused

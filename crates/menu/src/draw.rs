@@ -86,7 +86,18 @@ fn oriented_pen(
     scale: (f32, f32),
     center: (f32, f32),
 ) -> filmcraft_text::Xform {
-    let [x0, y0, x1, y1] = laid.bounds;
+    oriented_pen_of(laid.bounds, sx, orientation, scale, center)
+}
+
+/// [`oriented_pen`] for a block with `bounds` (a vertical text's pieces together).
+fn oriented_pen_of(
+    bounds: [f32; 4],
+    sx: f32,
+    orientation: Orientation,
+    scale: (f32, f32),
+    center: (f32, f32),
+) -> filmcraft_text::Xform {
+    let [x0, y0, x1, y1] = bounds;
     let (cx, cy) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
     let [a, b, c, d] = orientation.matrix();
     // Scaled (Encore's horizontal / vertical scale) before it is turned, squeezed after.
@@ -179,7 +190,17 @@ fn oriented_size(
     orientation: Orientation,
     scale: (f32, f32),
 ) -> (f32, f32) {
-    let [x0, y0, x1, y1] = laid.bounds;
+    oriented_size_of(laid.bounds, sx, orientation, scale)
+}
+
+/// [`oriented_size`] for a block with `bounds`.
+fn oriented_size_of(
+    bounds: [f32; 4],
+    sx: f32,
+    orientation: Orientation,
+    scale: (f32, f32),
+) -> (f32, f32) {
+    let [x0, y0, x1, y1] = bounds;
     let (w, h) = ((x1 - x0) * scale.0, (y1 - y0) * scale.1);
     if orientation.swaps_sides() {
         (h * sx, w)
@@ -193,12 +214,12 @@ pub(crate) fn draw_texts(menu: &Menu, width: u16, height: u16, rgb: &mut [u8]) {
         return;
     }
     let sx = squeeze(menu);
-    for text in &menu.texts {
+    for text in menu.texts.iter().filter(|text| !text.hidden) {
         let family = family_for(text.font.as_deref());
-        let Some((laid, pen)) = text_layout(text, &family, sx) else {
+        let Some((pieces, _)) = text_layout(text, &family, sx) else {
             continue;
         };
-        let (mask, mask_x, mask_y) = render::rasterize(&laid, &pen);
+        let (mask, mask_x, mask_y) = crate::text_block::rasterize_pieces(&pieces);
         let mask = antialiased(mask, text.format.antialias);
         if mask.w == 0 || mask.h == 0 {
             continue;
@@ -240,13 +261,11 @@ pub(crate) fn text_rect(menu: &Menu, text: &MenuText) -> Rect {
     let family = family_for(text.font.as_deref());
     let sx = squeeze(menu);
     let (w, h) = match text_layout(text, &family, sx) {
-        Some((laid, _)) => {
-            let (w, h) = oriented_size(&laid, sx, text.orientation, text_scale(&text.format));
-            (to_side(w), to_side(h))
-        }
+        Some((_, (w, h))) => (to_side(w), to_side(h)),
         None => (size, size),
     };
-    let (min_w, min_h) = if text.orientation.swaps_sides() {
+    // A text standing up (turned on its side, or vertical) is at least its size wide.
+    let (min_w, min_h) = if text.orientation.swaps_sides() != text.vertical {
         (size, size / 2)
     } else {
         (size / 2, size)
@@ -259,6 +278,12 @@ pub(crate) fn text_rect(menu: &Menu, text: &MenuText) -> Rect {
     }
 }
 
+/// The frame rectangle a text object covers as it is drawn: its box ([`text_rect`]) turned by its free angle about
+/// the box's centre (for selecting and outlining it).
+pub(crate) fn text_bounds(menu: &Menu, text: &MenuText) -> Rect {
+    disccraft_project::rotated_bounds(text_rect(menu, text), text.orientation.angle)
+}
+
 /// A measured length as a rectangle side (at least 1 pixel).
 fn to_side(length: f32) -> u16 {
     if length.is_finite() && length > 0.0 {
@@ -269,33 +294,40 @@ fn to_side(length: f32) -> u16 {
     }
 }
 
-/// Lays out a text object and returns the pen position that puts the text's top-left corner at its x, y
-/// (`sx`: the horizontal squeeze the text is drawn with).
+/// Lays out a text object: the pieces to draw (each a layout and its transform into the frame; one for a horizontal
+/// text) and the drawn size of its box, whose top-left corner is the text's x, y before a free turn (`sx`: the
+/// horizontal squeeze the text is drawn with).
 fn text_layout(
     text: &MenuText,
     family: &str,
     sx: f32,
-) -> Option<(Arc<Layout>, filmcraft_text::Xform)> {
+) -> Option<(Vec<crate::text_block::Piece>, (f32, f32))> {
     if text.text.trim().is_empty() {
         return None;
     }
     let size = f32::from(text.size.clamp(MIN_TEXT_SIZE, MAX_TEXT_SIZE));
     let format = text.format;
-    let laid = formatted_layout(
-        &text.text,
-        family,
-        size,
-        text.font_style.as_deref(),
-        &format,
-    );
-    // The drawn (scaled, turned, squeezed) bounds start at the text's x, y.
+    let face = text.font_style.as_deref();
+    let (pieces, bounds) = if text.vertical {
+        crate::text_block::vertical_block(&text.text, family, size, face, &format)
+    } else {
+        let laid = formatted_layout(&text.text, family, size, face, &format);
+        let bounds = laid.bounds;
+        (vec![(laid, crate::text_block::IDENTITY)], bounds)
+    };
+    // The drawn (scaled, turned, squeezed) box starts at the text's x, y.
     let scale = text_scale(&format);
-    let (w, h) = oriented_size(&laid, sx, text.orientation, scale);
+    let (w, h) = oriented_size_of(bounds, sx, text.orientation, scale);
     let center = (f32::from(text.x) + w * 0.5, f32::from(text.y) + h * 0.5);
-    let pen = oriented_pen(&laid, sx, text.orientation, scale, center);
-    pen.iter()
-        .all(|value| value.is_finite())
-        .then_some((laid, pen))
+    let pen = oriented_pen_of(bounds, sx, text.orientation, scale, center);
+    let pieces: Vec<crate::text_block::Piece> = pieces
+        .into_iter()
+        .map(|(laid, xf)| (laid, crate::text_block::compose(&pen, &xf)))
+        .collect();
+    let finite = pieces
+        .iter()
+        .all(|(_, xf)| xf.iter().all(|value| value.is_finite()));
+    (finite && w.is_finite() && h.is_finite()).then_some((pieces, (w, h)))
 }
 
 /// Lays out `text` at `size` in `family` (and `face`, a style of it) with the Character panel's `format`: faux bold
@@ -307,6 +339,18 @@ fn formatted_layout(
     size: f32,
     face: Option<&str>,
     format: &TextFormat,
+) -> Arc<Layout> {
+    formatted_layout_in(text, family, size, face, format, false)
+}
+
+/// [`formatted_layout`], or with `vertical` as a column (characters one under the other, centred on x 0).
+pub(crate) fn formatted_layout_in(
+    text: &str,
+    family: &str,
+    size: f32,
+    face: Option<&str>,
+    format: &TextFormat,
+    vertical: bool,
 ) -> Arc<Layout> {
     let mut style = text_style(family, size);
     if let Some(face) = face.map(str::trim).filter(|face| !face.is_empty()) {
@@ -341,6 +385,7 @@ fn formatted_layout(
             disccraft_project::TextAlign::Right => filmcraft_text::Align::Right,
         },
         leading: f32::from(format.leading),
+        vertical,
         ..ParagraphStyle::default()
     };
     let mut laid = layout(text, &style, &paragraph);
@@ -366,13 +411,20 @@ pub(crate) fn draw_thumbnails(
     pictures: &[crate::ThumbnailPicture<'_>],
 ) {
     for picture in pictures {
-        let Some(area) = menu
+        let Some(button) = menu
             .buttons
             .get(picture.button)
-            .and_then(Button::thumbnail_rect)
+            .filter(|button| !button.hidden)
         else {
             continue;
         };
+        let Some(area) = button.thumbnail_placed() else {
+            continue;
+        };
+        if disccraft_project::normalized_angle(i32::from(button.orientation.angle)) != 0 {
+            draw_turned_thumbnail(button, area, (width, height), rgb, picture);
+            continue;
+        }
         // Inside the frame only (a rectangle from a file may reach far outside it).
         let w = area.w.min(width.saturating_sub(area.x));
         let h = area.h.min(height.saturating_sub(area.y));
@@ -401,12 +453,73 @@ pub(crate) fn draw_thumbnails(
     }
 }
 
+/// The largest side a turned video thumbnail is scaled to before it is turned.
+const MAX_THUMBNAIL_SIDE: u16 = 4096;
+
+/// A video thumbnail turned with its button's content: the picture scaled to the thumbnail's size, then each frame
+/// pixel of the turned area's bounds takes the picture pixel it shows (nearest).
+fn draw_turned_thumbnail(
+    button: &Button,
+    area: Rect,
+    (width, height): (u16, u16),
+    rgb: &mut [u8],
+    picture: &crate::ThumbnailPicture<'_>,
+) {
+    let (w, h) = (
+        area.w.min(MAX_THUMBNAIL_SIDE),
+        area.h.min(MAX_THUMBNAIL_SIDE),
+    );
+    if w == 0 || h == 0 {
+        return;
+    }
+    let mut scaled = vec![0u8; usize::from(w) * usize::from(h) * 3];
+    if !scale_rgb_into(
+        picture.rgb,
+        picture.width,
+        picture.height,
+        w,
+        h,
+        &mut scaled,
+    ) {
+        return;
+    }
+    let pivot = button.content_centre();
+    let angle = button.orientation.angle;
+    let bounds = disccraft_project::rotated_bounds_about(area, pivot, angle);
+    let back = -i32::from(angle);
+    for y in bounds.y..bounds.y.saturating_add(bounds.h).min(height) {
+        for x in bounds.x..bounds.x.saturating_add(bounds.w).min(width) {
+            // The pixel centre turned back about the pivot, into the upright area.
+            let (ux, uy) = turned_about(
+                (f32::from(x) + 0.5, f32::from(y) + 0.5),
+                pivot,
+                disccraft_project::normalized_angle(back),
+            );
+            let (lx, ly) = (ux - f32::from(area.x), uy - f32::from(area.y));
+            if lx < 0.0 || ly < 0.0 || lx >= f32::from(area.w) || ly >= f32::from(area.h) {
+                continue;
+            }
+            // Inside the area; `as` truncates the non-negative position.
+            let sx = ((lx / f32::from(area.w)) * f32::from(w)) as usize;
+            let sy = ((ly / f32::from(area.h)) * f32::from(h)) as usize;
+            let from = (sy * usize::from(w) + sx) * 3;
+            let to = (usize::from(y) * usize::from(width) + usize::from(x)) * 3;
+            if let (Some(source), Some(target)) = (
+                scaled.get(from..from + 3).map(<[u8]>::to_vec),
+                rgb.get_mut(to..to + 3),
+            ) {
+                target.copy_from_slice(&source);
+            }
+        }
+    }
+}
+
 pub(crate) fn draw_labels(menu: &Menu, width: u16, height: u16, rgb: &mut [u8]) {
     let family = family_for(menu.label_font.as_deref());
     let color = menu.text_color;
     let sx = squeeze(menu);
 
-    for button in &menu.buttons {
+    for button in menu.buttons.iter().filter(|button| !button.hidden) {
         draw_label(button, &family, sx, color, width, height, rgb);
     }
 }
@@ -773,20 +886,127 @@ fn label_layout(
         button.label_font_style.as_deref(),
         &button.label_format,
     );
-    let center = (
-        f32::from(rect.x) + f32::from(rect.w) * 0.5,
-        f32::from(rect.y) + f32::from(rect.h) * 0.5,
-    );
     let pen = oriented_pen(
         &laid,
         sx,
         button.orientation,
         text_scale(&button.label_format),
-        center,
+        label_center(button),
     );
     pen.iter()
         .all(|value| value.is_finite())
         .then_some((laid, pen))
+}
+
+/// Where the middle of a button's text is drawn: the middle of its part of the content box, moved by its offset,
+/// then turned with the content about the content box's centre.
+fn label_center(button: &Button) -> (f32, f32) {
+    let rect = button.label_rect();
+    let upright = (
+        f32::from(rect.x) + f32::from(rect.w) * 0.5 + f32::from(button.label_offset[0]),
+        f32::from(rect.y) + f32::from(rect.h) * 0.5 + f32::from(button.label_offset[1]),
+    );
+    turned_about(upright, button.content_centre(), button.orientation.angle)
+}
+
+/// `point` turned by `angle` (tenths of a degree, clockwise on screen) about `pivot`.
+pub(crate) fn turned_about(point: (f32, f32), pivot: (f32, f32), angle: i16) -> (f32, f32) {
+    if disccraft_project::normalized_angle(i32::from(angle)) == 0 {
+        return point;
+    }
+    let (sin, cos) = (f32::from(angle) / 10.0).to_radians().sin_cos();
+    let (dx, dy) = (point.0 - pivot.0, point.1 - pivot.1);
+    (pivot.0 + dx * cos - dy * sin, pivot.1 + dx * sin + dy * cos)
+}
+
+/// The middle and the drawn size of a button's text (as [`label_layout`] draws it); `None` for no text.
+fn label_extent(menu: &Menu, button: &Button) -> Option<((f32, f32), (f32, f32))> {
+    if button.label.is_empty() {
+        return None;
+    }
+    let family = family_for(menu.label_font.as_deref());
+    let rect = button.label_rect();
+    let upright = if button.orientation.swaps_sides() {
+        Rect {
+            w: rect.h,
+            h: rect.w,
+            ..rect
+        }
+    } else {
+        rect
+    };
+    let laid = formatted_layout(
+        &button.label,
+        &family,
+        font_size(upright),
+        button.label_font_style.as_deref(),
+        &button.label_format,
+    );
+    let size = oriented_size(
+        &laid,
+        squeeze(menu),
+        button.orientation,
+        text_scale(&button.label_format),
+    );
+    (size.0.is_finite() && size.1.is_finite()).then_some((label_center(button), size))
+}
+
+/// The frame rectangle a button's text covers where it is drawn (with its offset, turned with the content);
+/// `None` for no text.
+pub(crate) fn label_bounds(menu: &Menu, button: &Button) -> Option<Rect> {
+    let ((cx, cy), (w, h)) = label_extent(menu, button)?;
+    let x0 = (cx - w * 0.5).floor().max(0.0);
+    let y0 = (cy - h * 0.5).floor().max(0.0);
+    // Finite and clamped at 0; `as` saturates at u16::MAX.
+    let upright = Rect {
+        x: x0 as u16,
+        y: y0 as u16,
+        w: to_side(w),
+        h: to_side(h),
+    };
+    Some(disccraft_project::rotated_bounds(
+        upright,
+        button.orientation.angle,
+    ))
+}
+
+/// The frame rectangle a button's content covers as it is drawn: its content box, its text and its video
+/// thumbnail, each where it is (moved, and turned with the content about the content box's centre), kept inside
+/// the frame. Encore's bounds of a button set; the button's rectangle when the content was moved out or turned.
+pub(crate) fn button_extent(menu: &Menu, button: &Button, frame: (u16, u16)) -> Rect {
+    let pivot = button.content_centre();
+    let angle = button.orientation.angle;
+    let mut parts = vec![disccraft_project::rotated_bounds(
+        button.content_box(),
+        angle,
+    )];
+    parts.extend(label_bounds(menu, button));
+    parts.extend(
+        button
+            .thumbnail_placed()
+            .map(|area| disccraft_project::rotated_bounds_about(area, pivot, angle)),
+    );
+    let x0 = parts.iter().map(|r| u32::from(r.x)).min().unwrap_or(0);
+    let y0 = parts.iter().map(|r| u32::from(r.y)).min().unwrap_or(0);
+    let x1 = parts
+        .iter()
+        .map(|r| u32::from(r.x) + u32::from(r.w))
+        .max()
+        .unwrap_or(1)
+        .min(u32::from(frame.0));
+    let y1 = parts
+        .iter()
+        .map(|r| u32::from(r.y) + u32::from(r.h))
+        .max()
+        .unwrap_or(1)
+        .min(u32::from(frame.1));
+    let side = |from: u32, to: u32| u16::try_from(to.saturating_sub(from).max(1)).unwrap_or(1);
+    Rect {
+        x: u16::try_from(x0).unwrap_or(0),
+        y: u16::try_from(y0).unwrap_or(0),
+        w: side(x0, x1),
+        h: side(y0, y1),
+    }
 }
 
 /// A button's text as a coverage mask in frame pixels (for a text subpicture), with where its corner lands.
@@ -804,8 +1024,8 @@ pub(crate) fn text_rgba(menu: &Menu, text: &MenuText, width: u16, height: u16) -
     let mut rgba = vec![0u8; usize::from(width) * usize::from(height) * 4];
     let family = family_for(text.font.as_deref());
     let sx = squeeze(menu);
-    if let Some((laid, pen)) = text_layout(text, &family, sx) {
-        let (mask, mask_x, mask_y) = render::rasterize(&laid, &pen);
+    if let Some((pieces, _)) = text_layout(text, &family, sx) {
+        let (mask, mask_x, mask_y) = crate::text_block::rasterize_pieces(&pieces);
         let mask = antialiased(mask, text.format.antialias);
         let color = text.color.unwrap_or(menu.text_color);
         if let Some(shadow) = &text.shadow

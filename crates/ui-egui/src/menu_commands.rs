@@ -76,7 +76,7 @@ impl DiscCraftApp {
         };
         let Some(path) = FileDialog::new()
             .set_title(title)
-            .add_filter(tl!("Menu files"), &["psd"])
+            .add_filter(tl!("Menu files"), &["psd", "pcraft"])
             .pick_file()
         else {
             return;
@@ -120,7 +120,7 @@ impl DiscCraftApp {
         };
         let Some(path) = FileDialog::new()
             .set_title(tl!("Import as Menu"))
-            .add_filter(tl!("Menu files"), &["psd"])
+            .add_filter(tl!("Menu files"), &["psd", "pcraft"])
             .pick_file()
         else {
             return;
