@@ -107,6 +107,8 @@ disccraft-cli build project.dcproj --iso disc.iso
 
 規格に合わない素材はビルドのときに変換し、出力先の `disccraft-cache` に残す（2 回目からは変換を飛ばす）。
 
+画面ごとの使い方は [ユーザーマニュアル](docs/user-guide.ja.md) にある。
+
 ## AI エージェントから使う（MCP）
 
 `disccraft-cli mcp` は MCP サーバー（標準入出力の JSON-RPC）として動く。ツールは `disccraft_commands`（コマンド一覧）、

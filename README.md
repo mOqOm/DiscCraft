@@ -114,6 +114,8 @@ Example `commands.jsonl` (a DVD with one video and one menu):
 Material that doesn't meet the spec is converted at build time and kept in `disccraft-cache` in the output folder (later
 builds skip the conversion).
 
+The [user manual](docs/user-guide.md) explains the screens one by one.
+
 ## Driving it from an AI agent (MCP)
 
 `disccraft-cli mcp` runs as an MCP server (JSON-RPC over stdio). There are three tools: `disccraft_commands` (the command list),
