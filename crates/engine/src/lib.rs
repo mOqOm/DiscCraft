@@ -17,6 +17,7 @@
 use serde_json::Value;
 
 mod commands;
+mod gop;
 mod params;
 mod player;
 mod session;

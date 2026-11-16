@@ -147,7 +147,41 @@ mod tests {
             .get("menu")
             .and_then(serde_json::Value::as_u64)
             .ok_or("no menu id")?;
+        // A new menu starts with Encore's safe-area guides; these tests start from none.
+        session.execute("menu.clearGuides", &json!({"menu": menu}))?;
         Ok((session, menu))
+    }
+
+    /// As in Encore CS6, a new blank menu has the action-safe and title-safe guides (four each way).
+    #[test]
+    fn a_new_menu_has_the_safe_area_guides() -> Result<(), Box<dyn Error>> {
+        let mut session = Session::new();
+        let created = session.execute("menu.create", &json!({"name": "Main"}))?;
+        let id = created
+            .get("menu")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or("no menu id")?;
+        let menu = session
+            .project
+            .menu(disccraft_project::MenuId(id))
+            .ok_or("menu")?;
+        let positions = |orientation| -> Vec<u16> {
+            menu.guides
+                .iter()
+                .filter(|guide| guide.orientation == orientation)
+                .map(|guide| guide.position)
+                .collect()
+        };
+        // 720x480: 5% and 10% in from each edge.
+        assert_eq!(
+            positions(disccraft_project::GuideOrientation::Vertical),
+            vec![36, 72, 648, 684]
+        );
+        assert_eq!(
+            positions(disccraft_project::GuideOrientation::Horizontal),
+            vec![24, 48, 432, 456]
+        );
+        Ok(())
     }
 
     #[test]

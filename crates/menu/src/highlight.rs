@@ -54,7 +54,7 @@ pub(crate) fn build(menu: &Menu, _width: u16, _height: u16) -> Result<HighlightL
             paint_subpicture(
                 &mut pixels,
                 (x, y, layer_w, layer_h),
-                button.rect,
+                (button.content_box(), button.orientation.angle),
                 (&values, sub_w, sub_h),
             );
             continue;
@@ -270,11 +270,20 @@ fn paint_mask(
 fn paint_subpicture(
     pixels: &mut [u8],
     (layer_x, layer_y, layer_w, layer_h): (u16, u16, u16, u16),
-    rect: Rect,
+    (rect, angle): (Rect, i16),
     (values, sub_w, sub_h): (&[u8], usize, usize),
 ) {
     let (rect_w, rect_h) = (usize::from(rect.w), usize::from(rect.h));
     if rect_w == 0 || rect_h == 0 {
+        return;
+    }
+    if disccraft_project::normalized_angle(i32::from(angle)) != 0 {
+        paint_turned_subpicture(
+            pixels,
+            (layer_x, layer_y, layer_w, layer_h),
+            (rect, angle),
+            (values, sub_w, sub_h),
+        );
         return;
     }
     for row in 0..rect_h {
@@ -308,6 +317,56 @@ fn paint_subpicture(
                 .checked_mul(usize::from(layer_w))
                 .and_then(|n| n.checked_add(x))
                 .and_then(|n| pixels.get_mut(n))
+            {
+                *pixel = value;
+            }
+        }
+    }
+}
+
+/// [`paint_subpicture`] for a button whose content is turned by a free angle about the content box's centre: each
+/// pixel of the turned box's bounds takes the subpicture value it shows (nearest, so the four colours stay).
+fn paint_turned_subpicture(
+    pixels: &mut [u8],
+    (layer_x, layer_y, layer_w, layer_h): (u16, u16, u16, u16),
+    (rect, angle): (Rect, i16),
+    (values, sub_w, sub_h): (&[u8], usize, usize),
+) {
+    let bounds = disccraft_project::rotated_bounds(rect, angle);
+    let (sin, cos) = (f32::from(angle) / 10.0).to_radians().sin_cos();
+    let (w, h) = (f32::from(rect.w), f32::from(rect.h));
+    let (cx, cy) = (f32::from(rect.x) + w * 0.5, f32::from(rect.y) + h * 0.5);
+    for y in bounds.y..bounds.y.saturating_add(bounds.h) {
+        for x in bounds.x..bounds.x.saturating_add(bounds.w) {
+            // The pixel centre turned back into the box.
+            let (px, py) = (f32::from(x) + 0.5 - cx, f32::from(y) + 0.5 - cy);
+            let (lx, ly) = (
+                px * cos + py * sin + w * 0.5,
+                -px * sin + py * cos + h * 0.5,
+            );
+            if lx < 0.0 || ly < 0.0 || lx >= w || ly >= h {
+                continue;
+            }
+            // Inside the box; `as` truncates the non-negative position.
+            let source_col = (lx / w * sub_w as f32) as usize;
+            let source_row = (ly / h * sub_h as f32) as usize;
+            let value = source_row
+                .checked_mul(sub_w)
+                .and_then(|n| n.checked_add(source_col))
+                .and_then(|n| values.get(n))
+                .copied()
+                .unwrap_or(0);
+            if value == 0 {
+                continue;
+            }
+            let (Some(lx), Some(ly)) = (x.checked_sub(layer_x), y.checked_sub(layer_y)) else {
+                continue;
+            };
+            if lx >= layer_w || ly >= layer_h {
+                continue;
+            }
+            if let Some(pixel) =
+                pixels.get_mut(usize::from(ly) * usize::from(layer_w) + usize::from(lx))
             {
                 *pixel = value;
             }

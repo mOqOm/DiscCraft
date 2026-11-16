@@ -427,6 +427,47 @@ fn solid_png(path: &Path, rgb: [u8; 3]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Encore's "Create Subtitle" on a slide: the slideshow's title gets a subtitle stream showing the slide's name.
+#[test]
+fn a_slides_name_becomes_a_subtitle() -> Result<(), Box<dyn Error>> {
+    let ffprobe = ffprobe_path();
+    if !tool_available(&ffprobe) {
+        println!("skipped: ffprobe not found");
+        return Ok(());
+    }
+    let _guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
+    let dir = temp_dir("slide_subtitle");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir)?;
+    let red = dir.join("red.png");
+    let blue = dir.join("blue.png");
+    solid_png(&red, [200, 30, 30])?;
+    solid_png(&blue, [30, 30, 200])?;
+
+    let mut project = Project::default();
+    let red = project.add_asset(&red)?;
+    let blue = project.add_asset(&blue)?;
+    let slides = project.add_slideshow(Some("Slides".to_string()))?;
+    project.add_slide(slides, red, Tick(TICKS_PER_SECOND))?;
+    project.add_slide(slides, blue, Tick(TICKS_PER_SECOND))?;
+    project.settings.first_play = Link::Slideshow { id: slides };
+
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        let plain = dir.join("plain");
+        let _ = build_video_ts(&project, &plain)?;
+        let streams = probe_codecs(&ffprobe, &plain.join("VIDEO_TS").join("VTS_01_1.VOB"))?;
+        assert!(!streams.contains("dvd_subtitle"), "{streams}");
+
+        project.set_slide_subtitle(slides, 1, true)?;
+        let titled = dir.join("titled");
+        let _ = build_video_ts(&project, &titled)?;
+        let streams = probe_codecs(&ffprobe, &titled.join("VIDEO_TS").join("VTS_01_1.VOB"))?;
+        expect_contains(&streams, "dvd_subtitle")
+    })();
+    let _ = fs::remove_dir_all(&dir);
+    result
+}
+
 /// The project preview's model (made without building) is the built disc's, with a moving menu that loops a
 /// counted number of times before its end action, a second menu, a slideshow and a chapter playlist.
 #[test]

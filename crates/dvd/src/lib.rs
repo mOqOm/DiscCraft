@@ -19,7 +19,10 @@ mod preview;
 mod sup;
 mod vobsub;
 pub use demux::demux_h264_for_bd;
-pub use prepare::{Estimate, TranscodeStatus, encode_hd_slideshow, estimate, transcode_status};
+pub use prepare::{
+    Estimate, TimelineRate, TranscodeStatus, encode_hd_slideshow, estimate, timeline_rates,
+    transcode_status,
+};
 pub use sup::PgSegment;
 
 pub use preview::preview_model;
@@ -27,7 +30,7 @@ mod source;
 pub mod streams;
 pub use streams::{
     SubtitleCue, SubtitleTrack, TitleAudio, TitleSource, TitleStreams, load_title_streams,
-    load_title_streams_for_hd, subtitle_tracks_sized,
+    load_title_streams_for_hd, slide_subtitles_sized, subtitle_tracks_sized,
 };
 mod parallel;
 
@@ -627,6 +630,43 @@ pub(crate) fn load_slideshow_title(
         source::audio_language(project),
     )?];
 
+    // Encore's "Create Subtitle": the name of each slide that asks for it, shown while the slide is up.
+    let mut subpictures = Vec::new();
+    let mut subtitle_languages = Vec::new();
+    // The show's own colour set, or the default one.
+    let slide_colors = slideshow.subtitle_colors.unwrap_or_default();
+    if slideshow.slides.iter().any(|slide| slide.subtitle) {
+        let height = if standard == VideoStandard::Ntsc {
+            480
+        } else {
+            576
+        };
+        let mut units = Vec::new();
+        let mut at = 0_i64;
+        for (slide, duration) in slideshow.slides.iter().zip(&durations) {
+            let start = Tick(at);
+            at = at.saturating_add(duration.0);
+            let name = project.slide_subtitle_text(slide);
+            if !name.is_empty() {
+                let cue = disccraft_menu::subtitle::Cue {
+                    start,
+                    end: Tick(at),
+                    text: name,
+                    look: disccraft_project::CueLook::default(),
+                };
+                units.push(source::subtitle_unit_styled(
+                    &cue,
+                    first_pts,
+                    height,
+                    source::slide_cue_style(slide),
+                    source::spu_look(&slide_colors, slide.subtitle_group),
+                )?);
+            }
+        }
+        subpictures.push(units);
+        subtitle_languages.push(source::audio_language(project));
+    }
+
     let program_cells = (0..cell_starts.len()).collect();
     Ok(source::LoadedTitle {
         video,
@@ -638,9 +678,9 @@ pub(crate) fn load_slideshow_title(
         first_pts,
         ntsc: standard == VideoStandard::Ntsc,
         wide: project.settings.widescreen,
-        subpictures: Vec::new(),
-        subtitle_languages: Vec::new(),
-        palette: source::text_palette(),
+        subpictures,
+        subtitle_languages,
+        palette: source::subtitle_palette(&slide_colors),
         // 手動で進める: 各スライドのセルを無限の静止にして、リモコンの次へ / 決定で進む。
         cell_still: if slideshow.manual_advance { 0xFF } else { 0 },
     })

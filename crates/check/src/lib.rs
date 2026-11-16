@@ -16,6 +16,7 @@
 
 mod capacity;
 mod reach;
+mod streams;
 
 pub use disccraft_dvd::Estimate;
 pub use disccraft_project::{Problem, Severity, has_errors};
@@ -32,6 +33,7 @@ pub fn check_project(project: &Project) -> Vec<Problem> {
     if !base_errors {
         check_navigation(project, &mut problems);
         capacity::check(project, &mut problems);
+        streams::check(project, &mut problems);
         problems.extend(
             disccraft_dvd::passthrough_chapter_problems(project)
                 .into_iter()

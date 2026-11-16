@@ -79,6 +79,12 @@ pub struct DiscCraftApp {
     pub(crate) check_window: crate::check_window::CheckWindow,
     /// 未保存の変更の確認のあとに実行する操作。
     pub(crate) pending_action: Option<crate::confirm::PendingAction>,
+    /// ビルドの前のチェックで問題が見つかり、「表示 / 無視して続行 / キャンセル」を出しているか。
+    pub(crate) build_prompt: bool,
+    /// タイムライン ▸ FilmCraft のマーカーを読み込み… のダイアログ（開いている間だけ）。
+    pub(crate) film_marker_dialog: Option<crate::filmcraft::FilmMarkerDialog>,
+    /// FilmCraft で書き出している最中のシーケンス（終わるとタイムラインになる）。
+    pub(crate) film_export: Option<crate::filmcraft::FilmExport>,
     /// 確認済みで、ウィンドウを閉じてよい。
     pub(crate) allow_close: bool,
     /// 環境設定ダイアログ。
@@ -113,6 +119,16 @@ pub struct DiscCraftApp {
     pub(crate) selected_graphic: Option<usize>,
     /// ドラッグ中の画像 / シェイプ。
     pub(crate) graphic_drag: Option<crate::menu_graphic::GraphicDrag>,
+    /// ダイレクト選択ツールで選んでいる、選んでいるボタンの中の部品（文字 / ビデオサムネール）。
+    pub(crate) selected_part: Option<crate::menu_tools::ButtonPart>,
+    /// ダイレクト選択ツールでドラッグ中の部品。
+    pub(crate) part_drag: Option<crate::menu_tools::PartDrag>,
+    /// 回転ツールで回しているテキスト / 画像。
+    pub(crate) rotate_drag: Option<crate::menu_tools::RotateDrag>,
+    /// 最後に押したパネル（Encore と同じく、Delete キーなどはこのパネルの選択に効く）。
+    pub(crate) active_panel: Option<crate::workspace::Panel>,
+    /// レイヤーパネルで閉じているボタンセット（メニューとボタンの番号）。初めは開いている（Encore と同じ）。
+    pub(crate) collapsed_layers: std::collections::HashSet<(MenuId, usize)>,
     /// ドラッグ中のボタンのルート（ルートを手で決めるとき）。
     pub(crate) route_drag: Option<crate::route_drag::RouteDrag>,
     /// 開いている「ユーザー操作」ダイアログ。
@@ -170,8 +186,14 @@ pub struct DiscCraftApp {
     /// モニターに出す字幕トラック（タイムラインごと）。Encore の字幕トラックの見出しの切り替えと同じく 0 本か 1 本で、
     /// 表示の状態なので保存も取り消しもしない。ないときは 1 本目。
     pub(crate) shown_subtitles: std::collections::HashMap<TimelineId, Option<usize>>,
+    /// モニターで聞くオーディオトラック（タイムライン → 選んだときのトラック数と、選んだトラック）。
+    pub(crate) heard_audio: std::collections::HashMap<TimelineId, (usize, usize)>,
+    /// モニターで入力中の字幕（字幕を追加したあとと、モニターの字幕をダブルクリックしたとき）。
+    pub(crate) subtitle_edit: Option<crate::subtitle_edit::SubtitleEdit>,
     /// タイムラインの再生（タイムライン ▸ 再生、Space）。
     pub(crate) playback: Option<crate::playback::Playback>,
+    /// タイムラインのビデオクリップの位置（タイムライン、クリップとトリムのキー、クリップ）。
+    pub(crate) clip_cache: Option<(TimelineId, Vec<u64>, Vec<crate::playback::ClipSpan>)>,
     /// ビルド結果のプレビューで再生しているタイトル。
     pub(crate) preview_playback: Option<crate::preview_playback::PreviewPlayback>,
     /// プロジェクトプレビューの窓（開いているときだけ）。
@@ -211,6 +233,8 @@ pub struct DiscCraftApp {
     /// ドラッグ中のボタンの今の矩形（番号と矩形）。
     pub(crate) drag_rects: Vec<(usize, Rect)>,
     pub(crate) show_safe_areas: bool,
+    /// モニターにセーフエリアを重ねるか（Encore のモニターのボタン。初めは出さない）。
+    pub(crate) show_monitor_safe_areas: bool,
     pub(crate) show_routing: bool,
     /// 表示 ▸ ガイドを表示 / ガイドにスナップ / ガイドをロック。
     pub(crate) show_guides: bool,
@@ -228,6 +252,8 @@ pub struct DiscCraftApp {
     pub(crate) about_open: bool,
     /// タイムラインビューアで選んだチャプターポイント。プロパティパネルはこのときチャプターのシートを出す。
     pub(crate) chapter_focus: Option<(TimelineId, usize)>,
+    /// タイムラインビューアで選んだ字幕（タイムライン、字幕トラック、字幕の番号）。プロパティはそのシートになる。
+    pub(crate) cue_focus: Option<(TimelineId, usize, usize)>,
     /// チャプターのシートの入力欄が表しているチャプター（タイムラインの id, 番号）。
     pub(crate) chapter_key: Option<(u64, usize)>,
     /// チャプターのシートの名前の入力欄。
@@ -291,6 +317,9 @@ impl DiscCraftApp {
             recent: load_recent(),
             check_window: crate::check_window::CheckWindow::default(),
             pending_action: None,
+            build_prompt: false,
+            film_marker_dialog: None,
+            film_export: None,
             allow_close: false,
             prefs: crate::prefs::PrefsWindow::default(),
             library: crate::library_panel::LibraryState::default(),
@@ -300,6 +329,7 @@ impl DiscCraftApp {
             monitor_source: None,
             photocraft_icon: None,
             playback: None,
+            clip_cache: None,
             preview_playback: None,
             project_preview: None,
             preview_paused: false,
@@ -311,6 +341,11 @@ impl DiscCraftApp {
             text_drag: None,
             selected_graphic: None,
             graphic_drag: None,
+            selected_part: None,
+            part_drag: None,
+            rotate_drag: None,
+            active_panel: None,
+            collapsed_layers: std::collections::HashSet::new(),
             route_drag: None,
             user_ops_dialog: None,
             playlist_name_dialog: None,
@@ -321,6 +356,8 @@ impl DiscCraftApp {
             first_frames: std::collections::HashMap::new(),
             timed_frames: std::collections::HashMap::new(),
             shown_subtitles: std::collections::HashMap::new(),
+            heard_audio: std::collections::HashMap::new(),
+            subtitle_edit: None,
             font_families: None,
             external_edits: Vec::new(),
             external_check: 0.0,
@@ -364,6 +401,7 @@ impl DiscCraftApp {
             canvas_drag: None,
             drag_rects: Vec::new(),
             show_safe_areas: true,
+            show_monitor_safe_areas: false,
             show_routing: false,
             show_guides: true,
             snap_to_guides: true,
@@ -374,6 +412,7 @@ impl DiscCraftApp {
             track_dialog: None,
             about_open: false,
             chapter_focus: None,
+            cue_focus: None,
             chapter_key: None,
             chapter_name_value: String::new(),
             chapter_in_value: String::new(),
@@ -442,6 +481,7 @@ impl DiscCraftApp {
         self.poll_preview_playback(ui.ctx());
         self.poll_external_edits(ui.ctx());
         self.draw_groups(ui);
+        self.accept_dropped_files(ui.ctx());
         // パネルが矢印キーを使わなかったときだけ（メニュービューアのボタンを動かすのが先）。
         self.step_frames_by_keys(ui.ctx());
         self.check_window(ui.ctx());
@@ -459,6 +499,9 @@ impl DiscCraftApp {
         self.about_window(ui.ctx());
         self.show_welcome(ui);
         self.show_confirm(ui.ctx());
+        self.show_build_prompt(ui.ctx());
+        self.show_film_marker_dialog(ui.ctx());
+        self.poll_film_export(ui.ctx());
         self.intercept_close(ui.ctx());
     }
 
@@ -764,6 +807,7 @@ impl DiscCraftApp {
 
         match self.session.undo() {
             Ok(()) => {
+                self.subtitle_cache.clear();
                 self.status = tl!("Undone").to_string();
                 self.mark_dirty();
             }
@@ -779,6 +823,7 @@ impl DiscCraftApp {
 
         match self.session.redo() {
             Ok(()) => {
+                self.subtitle_cache.clear();
                 self.status = tl!("Redone").to_string();
                 self.mark_dirty();
             }
@@ -836,6 +881,7 @@ impl DiscCraftApp {
         self.playback = None;
         self.preview_playback = None;
         self.subtitle_cache.clear();
+        self.subtitle_edit = None;
         self.selected_buttons.clear();
         self.button_label_menu = None;
         self.button_label_button = None;
@@ -935,10 +981,12 @@ impl DiscCraftApp {
     pub(crate) fn select(&mut self, selection: Selection) {
         // 項目を選び直したら（同じタイムラインやメニューでも）プロパティはその項目のシートに戻す。
         self.chapter_focus = None;
+        self.cue_focus = None;
         self.slide_focus = None;
         self.selected_buttons.clear();
         self.selected_text = None;
         self.selected_graphic = None;
+        self.selected_part = None;
         if self.selection == selection {
             return;
         }
@@ -983,6 +1031,10 @@ impl DiscCraftApp {
     pub(crate) fn run_command(&mut self, id: &str, params: Value) -> Option<Value> {
         match self.session.execute(id, &params) {
             Ok(value) => {
+                // 字幕の編集と取り消し / やり直しのあとは、覚えている字幕を読み直す（編集した字幕はプロジェクトにある）。
+                if id.starts_with("subtitle.") || id.starts_with("edit.") {
+                    self.subtitle_cache.clear();
+                }
                 self.status = summarize_result(&value);
                 self.mark_dirty();
                 Some(value)
@@ -1063,13 +1115,7 @@ impl DiscCraftApp {
 
     pub(crate) fn import_assets(&mut self) {
         let Some(paths) = FileDialog::new()
-            .add_filter(
-                tl!("Media"),
-                &[
-                    "mp4", "mov", "m4v", "avi", "mkv", "m2v", "wav", "ac3", "mp3", "aac", "flac",
-                    "png", "jpg", "jpeg", "bmp", "tif", "tiff", "psd", "svg", "srt",
-                ],
-            )
+            .add_filter(tl!("Media"), &crate::file_drop::MEDIA_EXTENSIONS)
             .pick_files()
         else {
             self.status = tl!("Import cancelled").to_string();
@@ -1137,7 +1183,9 @@ impl DiscCraftApp {
             .set_title(tl!("Import as Slideshow"))
             .add_filter(
                 tl!("Image files"),
-                &["png", "jpg", "jpeg", "bmp", "tif", "tiff", "psd", "svg"],
+                &[
+                    "png", "jpg", "jpeg", "bmp", "tif", "tiff", "psd", "pcraft", "svg",
+                ],
             )
             .pick_files()
         else {
@@ -1166,10 +1214,16 @@ impl DiscCraftApp {
     }
 
     fn import_asset(&mut self, path: &Path) {
+        let _ = self.import_asset_id(path);
+    }
+
+    /// Imports `path` as an asset (placed in the Project panel's open folder); its id, or `None` when it could not
+    /// be imported (the status bar says why).
+    pub(crate) fn import_asset_id(&mut self, path: &Path) -> Option<u64> {
         let imported = self.run_command("asset.import", crate::gui_params::import_asset(path));
-        if let Some(id) = imported.and_then(|value| value.get("asset").and_then(Value::as_u64)) {
-            self.place_new_item(id);
-        }
+        let id = imported.and_then(|value| value.get("asset").and_then(Value::as_u64))?;
+        self.place_new_item(id);
+        Some(id)
     }
 
     /// Encore の「アセットを置き換え…」「アセットを検索…」: 別のファイルを選んで差し替える（名前とリンクはそのまま。

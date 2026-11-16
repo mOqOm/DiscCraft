@@ -68,6 +68,26 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "slideshow.setSlideSubtitle",
+        label: "スライドの字幕を作成",
+        menu: &["スライドショー"],
+        shortcut: None,
+        params: r#"{"slideshow": id, "slide": index, "on"?: bool, "name"?: bool, "description"?: bool, "stroke"?: "none" | "thin" | "medium" | "thick" | "extraThick", "align"?: 0-100, "group"?: 1-3}"#,
+        enabled: always_enabled,
+        run: run_set_slide_subtitle,
+        journal: true,
+    },
+    CommandSpec {
+        id: "slideshow.setSlideText",
+        label: "スライドの名前と説明を設定",
+        menu: &["スライドショー"],
+        shortcut: None,
+        params: r#"{"slideshow": id, "slide": index, "name"?: string, "description"?: string}"#,
+        enabled: always_enabled,
+        run: run_set_slide_text,
+        journal: true,
+    },
+    CommandSpec {
         id: "slideshow.setSlideTransition",
         label: "スライドのトランジションを設定",
         menu: &["スライドショー"],
@@ -85,6 +105,16 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         params: r#"{"slideshow": id, "kind"?: "none" | "crossDissolve" | "dipToBlack" | "wipe", "seconds"?: number, "timecode"?: string, "time"?: ticks}"#,
         enabled: always_enabled,
         run: run_set_transition,
+        journal: true,
+    },
+    CommandSpec {
+        id: "slideshow.setSubtitleColors",
+        label: "スライドショーの字幕のカラーセットを設定",
+        menu: &["スライドショー"],
+        shortcut: None,
+        params: r#"{"slideshow": id, "groups": [{"fill": [r, g, b], "fillOpacity"?: 0-100, "stroke": [r, g, b], "strokeOpacity"?: 0-100, "antialias"?: [r, g, b], "antialiasOpacity"?: 0-100} x 3] | null}"#,
+        enabled: always_enabled,
+        run: run_set_slideshow_colors,
         journal: true,
     },
     CommandSpec {
@@ -361,6 +391,122 @@ fn run_set_slide_scale(session: &mut Session, params: &Value) -> CommandResult {
     Ok(empty_object())
 }
 
+/// Encore's "Create Subtitle" on a slide: the slide's name is shown as a subtitle while the slide is up.
+fn run_set_slide_subtitle(session: &mut Session, params: &Value) -> CommandResult {
+    let id = req_u64(params, "slideshow")?;
+    let index = req_usize(params, "slide")?;
+    let flag = |name: &str| -> Result<Option<bool>, String> {
+        match params.get(name) {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => value
+                .as_bool()
+                .map(Some)
+                .ok_or_else(|| format!("parameter \"{name}\" must be true or false")),
+        }
+    };
+    let (on, name, description) = (flag("on")?, flag("name")?, flag("description")?);
+    let stroke = match params.get("stroke") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .and_then(disccraft_project::SlideStroke::parse)
+                .ok_or_else(|| {
+                    "parameter \"stroke\" must be none, thin, medium, thick or extraThick"
+                        .to_string()
+                })?,
+        ),
+    };
+    let align = match params.get("align") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|percent| u8::try_from(percent).ok())
+                .ok_or_else(|| "parameter \"align\" must be 0 to 100".to_string())?,
+        ),
+    };
+    let group = match params.get("group") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|group| group.checked_sub(1))
+                .and_then(|group| u8::try_from(group).ok())
+                .ok_or_else(|| "parameter \"group\" must be 1 to 3".to_string())?,
+        ),
+    };
+    if let Some(group) = group {
+        session
+            .project
+            .set_slide_subtitle_group(id, index, group)
+            .map_err(|error| error.to_string())?;
+    }
+    if on.is_none()
+        && name.is_none()
+        && description.is_none()
+        && stroke.is_none()
+        && align.is_none()
+        && group.is_none()
+    {
+        return Err("give \"on\", \"name\", \"description\", \"stroke\" or \"align\"".to_string());
+    }
+    if stroke.is_some() || align.is_some() {
+        session
+            .project
+            .set_slide_subtitle_look(id, index, stroke, align)
+            .map_err(|error| error.to_string())?;
+    }
+    if let Some(on) = on {
+        session
+            .project
+            .set_slide_subtitle(id, index, on)
+            .map_err(|error| error.to_string())?;
+    }
+    if name.is_some() || description.is_some() {
+        let current = session
+            .project
+            .slideshow(id)
+            .and_then(|show| show.slides.get(index))
+            .map(|slide| (!slide.subtitle_without_name, slide.subtitle_description))
+            .ok_or_else(|| "slide does not exist".to_string())?;
+        session
+            .project
+            .set_slide_subtitle_parts(
+                id,
+                index,
+                name.unwrap_or(current.0),
+                description.unwrap_or(current.1),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(empty_object())
+}
+
+/// A slide's name and description (the subtitle of "Create Subtitle" shows them).
+fn run_set_slide_text(session: &mut Session, params: &Value) -> CommandResult {
+    let id = req_u64(params, "slideshow")?;
+    let index = req_usize(params, "slide")?;
+    let text = |name: &str| -> Result<Option<String>, String> {
+        match params.get(name) {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => value
+                .as_str()
+                .map(|text| Some(text.to_owned()))
+                .ok_or_else(|| format!("parameter \"{name}\" must be a string")),
+        }
+    };
+    let (name, description) = (text("name")?, text("description")?);
+    if name.is_none() && description.is_none() {
+        return Err("give \"name\" or \"description\"".to_string());
+    }
+    session
+        .project
+        .set_slide_text(id, index, name, description)
+        .map_err(|error| error.to_string())?;
+    Ok(empty_object())
+}
+
 /// One slide's own transition. `"kind": null` (or no kind) makes the slide follow the show again; without a
 /// duration the slide keeps its own, or takes the show's.
 fn run_set_slide_transition(session: &mut Session, params: &Value) -> CommandResult {
@@ -427,6 +573,17 @@ fn run_set_transition(session: &mut Session, params: &Value) -> CommandResult {
     session
         .project
         .set_transition(id, kind, duration)
+        .map_err(|error| error.to_string())?;
+    Ok(empty_object())
+}
+
+/// The colour set of a slideshow's subtitles (the slides choose a group of it with Highlight).
+fn run_set_slideshow_colors(session: &mut Session, params: &Value) -> CommandResult {
+    let id = req_u64(params, "slideshow")?;
+    let colors = super::timeline::color_set_param(params)?;
+    session
+        .project
+        .set_slideshow_subtitle_colors(id, colors)
         .map_err(|error| error.to_string())?;
     Ok(empty_object())
 }

@@ -35,7 +35,12 @@ pub(crate) struct PreviewPlayback {
 pub(crate) struct PreviewPicture {
     pub(crate) texture: egui::TextureHandle,
     pub(crate) wide: bool,
-    pub(crate) subtitle: Option<String>,
+    /// The subtitle on screen and the colour group it is drawn in.
+    pub(crate) subtitle: Option<(
+        String,
+        disccraft_project::SubtitleGroup,
+        disccraft_project::CueLook,
+    )>,
 }
 
 /// スライドショーの id（題番号の順: ビルドと同じく id の順）。
@@ -96,7 +101,7 @@ pub(crate) fn audio_source(
     project
         .assets
         .get(&asset)
-        .map(|asset| PathBuf::from(&asset.path))
+        .map(|asset| asset.media_file().into_owned())
 }
 
 /// VM が表示にしている字幕ストリーム（1 から）のタイムラインの字幕トラック（0 から）。
@@ -204,7 +209,7 @@ impl DiscCraftApp {
         let Some(video) = project
             .assets
             .get(&timeline.video)
-            .map(|asset| PathBuf::from(&asset.path))
+            .map(|asset| asset.media_file().into_owned())
         else {
             return playback;
         };
@@ -234,6 +239,7 @@ impl DiscCraftApp {
             (Some(device), Some(path)) => Some(PlayerAudio {
                 path,
                 rate: device.rate(),
+                from: None,
             }),
             _ => None,
         };
@@ -281,7 +287,13 @@ impl DiscCraftApp {
                     .get(track)?
                     .asset;
                 let cues = self.subtitle_cues(asset);
-                crate::subtitles::cue_at(&cues, seconds).map(|cue| cue.text.clone())
+                crate::subtitles::cue_at(&cues, seconds).map(|cue| {
+                    (
+                        cue.text.clone(),
+                        self.cue_colors(id, track, cue.look),
+                        cue.look,
+                    )
+                })
             }
             _ => None,
         };
@@ -313,6 +325,10 @@ mod tests {
             id: TimelineId(id),
             name: format!("T{id}"),
             video: AssetId(video),
+            more_video: Vec::new(),
+            video_gaps: Vec::new(),
+            subtitle_colors: None,
+            video_trims: Vec::new(),
             audio: Vec::new(),
             subtitles: Vec::new(),
             chapters: vec![chapter(0)],
@@ -332,6 +348,8 @@ mod tests {
             path: path.to_owned(),
             kind: AssetKind::Video,
             offline: false,
+            cues: None,
+            composition: None,
             description: String::new(),
         }
     }
@@ -432,10 +450,12 @@ mod tests {
             SubtitleTrack {
                 asset: AssetId(5),
                 language: "ja".to_owned(),
+                group: 0,
             },
             SubtitleTrack {
                 asset: AssetId(6),
                 language: "en".to_owned(),
+                group: 0,
             },
         ];
         assert_eq!(subtitle_track(&movie, Some(2)), Some(1));

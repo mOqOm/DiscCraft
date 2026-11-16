@@ -1,8 +1,6 @@
 //! The pictures of a menu's video thumbnails (Encore's `(%)` layers) on a disc: each thumbnail's still picture
 //! (its chapter's poster frame), read from its video.
 
-use std::path::Path;
-
 use disccraft_menu::ThumbnailPicture;
 use disccraft_project::{Menu, Project};
 
@@ -43,7 +41,7 @@ pub fn still_thumbnails(project: &Project, menu: &Menu) -> Vec<ThumbnailFrame> {
                 return still_frame(project, thumbnail.button, thumbnail.source.asset);
             }
             let asset = project.assets.get(&thumbnail.source.asset)?;
-            let reader = disccraft_transcode::FrameReader::open(Path::new(&asset.path)).ok()?;
+            let reader = disccraft_transcode::FrameReader::open(&asset.media_file()).ok()?;
             let start = thumbnail.source.start.seconds();
             let time = if thumbnail.source.poster {
                 start
@@ -113,7 +111,7 @@ impl MovingThumbnails {
             .filter(|thumbnail| !thumbnail.source.still)
             .filter_map(|thumbnail| {
                 let asset = project.assets.get(&thumbnail.source.asset)?;
-                let reader = disccraft_transcode::FrameReader::open(Path::new(&asset.path)).ok()?;
+                let reader = disccraft_transcode::FrameReader::open(&asset.media_file()).ok()?;
                 let start = thumbnail.source.start.seconds().max(0.0);
                 let span = reader.duration_seconds() - start;
                 Some(MovingThumbnail {

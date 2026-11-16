@@ -135,8 +135,13 @@ fn pasted_button(item: &Value) -> Result<Button, String> {
         label_font_style: None,
         shadow: None,
         orientation: Default::default(),
+        hidden: false,
+        locked: false,
         thumbnail: None,
         subpicture: None,
+        label_offset: [0, 0],
+        thumbnail_offset: [0, 0],
+        body: None,
     })
 }
 
@@ -417,7 +422,8 @@ mod tests {
             "menu.alignButtons",
             &json!({ "menu": menu, "buttons": [1], "align": "top", "safeArea": true }),
         )?;
-        assert_eq!(rects(&session, menu).get(1), Some(&(160, 24)));
+        // The title-safe area: 10% in from the top of the 480-line frame.
+        assert_eq!(rects(&session, menu).get(1), Some(&(160, 48)));
         Ok(())
     }
 }

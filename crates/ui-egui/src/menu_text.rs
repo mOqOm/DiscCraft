@@ -1,10 +1,14 @@
-//! Text objects on menus (Encore's text tool) and the tools of the toolbar: the selection tool, the text tool
-//! (click the menu to add a text) and the zoom tool (click to zoom in, Alt+click to zoom out).
+//! Text objects on menus (Encore's text tool) and the tools of the toolbar, in Encore's order: the selection tool,
+//! the direct selection tool (a part inside a button), the rotate tool (any angle), the vertical text tool, the move
+//! tool (drag anywhere to move the selection), the text tool (click the menu to add a text) and the zoom
+//! tool (click to zoom in, Alt+click to zoom out).
 
 use crate::app::{DiscCraftApp, Selection};
 use crate::i18n::tl;
 use crate::menu_editor::{to_canvas, to_frame_point};
-use disccraft_project::{MAX_TEXT_SIZE, MIN_TEXT_SIZE, Menu, MenuId, MenuText, Rect};
+use disccraft_project::{
+    DEFAULT_TEXT_SIZE, MAX_TEXT_SIZE, MIN_TEXT_SIZE, Menu, MenuId, MenuText, Rect,
+};
 use egui::Ui;
 use serde_json::json;
 
@@ -14,33 +18,66 @@ pub(crate) enum Tool {
     /// Select and move buttons and texts.
     #[default]
     Selection,
+    /// Pick a part inside a button (its text or its video thumbnail) and move it inside the button (Encore's Direct
+    /// Select tool).
+    DirectSelection,
+    /// Drag anywhere on the menu to move what is selected; pressing an object that is not selected selects it
+    /// first. A click on nothing keeps the selection (Encore's Move tool).
+    Move,
+    /// Drag round the selected text or graphic to turn it by any angle about its centre (Encore's Rotate tool).
+    Rotate,
     /// Click the menu to add a text there.
     Text,
+    /// Click the menu to add a text written top to bottom there (Encore's Vertical Text tool).
+    VerticalText,
     /// Click to zoom in, Alt+click to zoom out.
     Zoom,
 }
 
 impl Tool {
     /// The tools in toolbar order, with their keys.
-    pub(crate) const ALL: [(Tool, egui::Key); 3] = [
+    pub(crate) const ALL: [(Tool, egui::Key); 7] = [
         (Tool::Selection, egui::Key::V),
+        (Tool::DirectSelection, egui::Key::A),
+        (Tool::Move, egui::Key::M),
+        (Tool::Rotate, egui::Key::R),
         (Tool::Text, egui::Key::T),
+        (Tool::VerticalText, egui::Key::Y),
         (Tool::Zoom, egui::Key::Z),
     ];
 
-    /// The Craft apps' shared icon for the tool (FilmCraft's Selection, Type and Zoom tools).
-    pub(crate) fn icon(self) -> crate::icons::Icon {
+    /// Draws the tool's icon: the Craft apps' shared one (FilmCraft's Selection, Type and Zoom tools) or, for the
+    /// tools they have none for, DiscCraft's own ([`crate::tool_icons`]).
+    pub(crate) fn paint_icon(
+        self,
+        painter: &egui::Painter,
+        rect: egui::Rect,
+        color: egui::Color32,
+    ) {
+        use crate::icons::Icon;
+        use crate::tool_icons::Glyph;
+        let shared = |icon| crate::icons::paint(painter, rect, icon, color);
+        let own = |glyph| crate::tool_icons::paint(painter, rect, glyph, color);
         match self {
-            Tool::Selection => crate::icons::Icon::Selection,
-            Tool::Text => crate::icons::Icon::Type,
-            Tool::Zoom => crate::icons::Icon::Zoom,
+            Tool::Selection => shared(Icon::Selection),
+            Tool::DirectSelection => own(Glyph::DirectSelection),
+            Tool::Move => own(Glyph::Move),
+            Tool::Rotate => own(Glyph::Rotate),
+            Tool::Text => shared(Icon::Type),
+            Tool::VerticalText => own(Glyph::VerticalType),
+            Tool::Zoom => shared(Icon::Zoom),
         }
     }
 
+    /// The tool's name (Encore's tooltip without the key).
     pub(crate) fn label(self) -> &'static str {
         match self {
             Tool::Selection => tl!("Selection Tool"),
+            Tool::DirectSelection => tl!("Direct Select Tool"),
+            Tool::Move => tl!("Move Tool"),
+            Tool::Rotate => tl!("Rotate Tool"),
             Tool::Text => tl!("Text Tool"),
+            Tool::VerticalText => tl!("Vertical Text Tool"),
             Tool::Zoom => tl!("Zoom Tool"),
         }
     }
@@ -99,11 +136,19 @@ impl DiscCraftApp {
         self.selected_text = Some(index);
     }
 
-    /// The text tool: adds "Text" at the clicked point, selects it and puts the cursor in its text field.
-    pub(crate) fn add_menu_text(&mut self, menu: MenuId, x: u16, y: u16) {
+    /// The text tools: add "Text" at the clicked point (the vertical one writes top to bottom, with the click at
+    /// the top of the column's middle, as Encore places it), select it and put the cursor in its text field.
+    pub(crate) fn add_menu_text(&mut self, menu: MenuId, x: u16, y: u16, vertical: bool) {
+        // Half a column (the default size × 1.2) to the left of the click.
+        let half_column = u16::try_from(u32::from(DEFAULT_TEXT_SIZE) * 3 / 5).unwrap_or(0);
+        let x = if vertical {
+            x.saturating_sub(half_column)
+        } else {
+            x
+        };
         let added = self.run_command(
             "menu.addText",
-            json!({"menu": menu.0, "text": tl!("Text"), "x": x, "y": y}),
+            json!({"menu": menu.0, "text": tl!("Text"), "x": x, "y": y, "vertical": vertical}),
         );
         if let Some(index) = added
             .and_then(|value| value.get("index").and_then(serde_json::Value::as_u64))
@@ -133,13 +178,18 @@ impl DiscCraftApp {
             .iter()
             .enumerate()
             .map(|(index, text)| {
-                let mut rect = disccraft_menu::text_rect(menu, text);
+                // As drawn (turned by its free angle), moved by the drag.
+                let mut rect = disccraft_menu::text_bounds(menu, text);
                 if let Some(drag) = self
                     .text_drag
                     .filter(|drag| drag.menu == menu.id && drag.index == index)
                 {
-                    rect.x = drag.now.0;
-                    rect.y = drag.now.1;
+                    let shift = |at: u16, now: u16, start: u16| {
+                        let moved = i32::from(at) + i32::from(now) - i32::from(start);
+                        u16::try_from(moved.max(0)).unwrap_or(at)
+                    };
+                    rect.x = shift(rect.x, drag.now.0, drag.start.0);
+                    rect.y = shift(rect.y, drag.now.1, drag.start.1);
                 }
                 rect
             })
@@ -191,10 +241,16 @@ impl DiscCraftApp {
         canvas: egui::Rect,
         point: egui::Pos2,
     ) -> Option<usize> {
+        // A hidden or locked text (the Layers panel) is not picked.
         self.text_rects(menu)
             .iter()
             .enumerate()
             .rev()
+            .filter(|(index, _)| {
+                menu.texts
+                    .get(*index)
+                    .is_some_and(|text| !text.hidden && !text.locked)
+            })
             .find(|(_, rect)| to_canvas(**rect, frame, canvas).expand(2.0).contains(point))
             .map(|(index, _)| index)
     }
@@ -299,6 +355,22 @@ impl DiscCraftApp {
         });
         if size_changed {
             self.set_text_field(menu, index, json!({ "size": size }));
+        }
+
+        // Encore's text orientation: written across (horizontal text tool) or top to bottom (vertical one).
+        let mut vertical = text.vertical;
+        let mut orientation_changed = false;
+        ui.horizontal(|ui| {
+            crate::properties::prop_label(ui, tl!("Direction:"));
+            orientation_changed |= ui
+                .radio_value(&mut vertical, false, tl!("Horizontal"))
+                .changed();
+            orientation_changed |= ui
+                .radio_value(&mut vertical, true, tl!("Vertical"))
+                .changed();
+        });
+        if orientation_changed && vertical != text.vertical {
+            self.set_text_field(menu, index, json!({ "vertical": vertical }));
         }
 
         let mut own = text.color.is_some();
@@ -682,10 +754,9 @@ impl DiscCraftApp {
                 );
             }
             let side = rect.height() - 6.0;
-            crate::icons::paint(
+            tool.paint_icon(
                 ui.painter(),
                 egui::Rect::from_center_size(rect.center(), egui::vec2(side, side)),
-                tool.icon(),
                 visuals.fg_stroke.color,
             );
         }

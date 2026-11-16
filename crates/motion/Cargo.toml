@@ -1,6 +1,6 @@
 [package]
 name = "disccraft-motion"
-description = "EffectCraft 連携: コンポジションのレンダリング（モーションメニューやタイトルの映像）"
+description = "EffectCraft 連携: プロジェクトのコンポジションをムービーにレンダリングする"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,11 +8,9 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-effectcraft-project.workspace = true
-effectcraft-render.workspace = true
-effectcraft-media.workspace = true
-effectcraft-time.workspace = true
-effectcraft-raster.workspace = true
+effectcraft-engine.workspace = true
+effectcraft-host.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [lints]

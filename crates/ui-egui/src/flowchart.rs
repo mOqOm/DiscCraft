@@ -741,38 +741,14 @@ fn draw_edges(
     rects: &[(NodeId, Rect)],
 ) {
     let color = ui.visuals().widgets.inactive.fg_stroke.color;
-    let bottom = rects
-        .iter()
-        .map(|(_, rect)| rect.max.y)
-        .fold(0.0_f32, f32::max);
     let entries = entry_points(edges, centers, rects);
+    let paths = edge_paths(edges, centers, rects);
 
     for (index, edge) in edges.iter().enumerate() {
-        let Some((_, from)) = centers.iter().find(|(port, _)| *port == edge.from) else {
+        let (Some(Some(to)), Some(Some(path))) = (entries.get(index), paths.get(index)) else {
             continue;
         };
-        let from = *from;
-
-        let Some((_, target)) = rects.iter().find(|(id, _)| *id == edge.to) else {
-            continue;
-        };
-        let target = *target;
-
-        // Each link comes into its own place on the target's left side (`entry_points`).
-        let Some(to) = entries.get(index).copied().flatten() else {
-            continue;
-        };
-        // Back links (to a node on the left) turn in the gap between the two nodes when one is clearly above the
-        // other (nodes moved by hand); otherwise they go around below the nodes, each in its own lane.
-        let source = rects
-            .iter()
-            .map(|(_, rect)| *rect)
-            .find(|rect| (rect.max.x - from.x).abs() < 0.5 && rect.y_range().contains(from.y));
-        let lane = between(source, target).unwrap_or(
-            bottom
-                + BACK_LANE_GAP * (1.0 + f32::from(u16::try_from(index).unwrap_or(u16::MAX) % 8)),
-        );
-        let path = edge_path(from, to, lane);
+        let to = *to;
         let stroke = Stroke::new(1.0, color);
 
         for pair in path.windows(2) {
@@ -841,6 +817,113 @@ const BACK_LANE_GAP: f32 = 10.0;
 const BACK_STUB: f32 = 12.0;
 /// Length of an arrow head.
 const ARROW_HEAD: f32 = 8.0;
+
+/// The node a port at `at` belongs to: the node whose right edge it sits on.
+fn port_owner(rects: &[(NodeId, Rect)], at: Pos2) -> Option<(NodeId, Rect)> {
+    rects
+        .iter()
+        .copied()
+        .find(|(_, rect)| (rect.max.x - at.x).abs() < 0.5 && rect.y_range().contains(at.y))
+}
+
+/// The polyline of every link (`None` for one whose port or target is not drawn). A link to a node on the right
+/// is straight. A link back to a node on the left turns in the gap between the two nodes when one is clearly above
+/// the other (nodes moved by hand), the links sharing one gap each a lane apart so they do not run over each other;
+/// otherwise it goes around below all the nodes, each in its own lane. A link up to a node that also links down to
+/// the link's source (a menu and the playlist its button plays, which comes back to it) goes around below its source
+/// and up on the left of both nodes instead, so it does not cross the link down, which turns in the gap.
+fn edge_paths(
+    edges: &[Edge],
+    centers: &[(Port, Pos2)],
+    rects: &[(NodeId, Rect)],
+) -> Vec<Option<Vec<Pos2>>> {
+    let bottom = rects
+        .iter()
+        .map(|(_, rect)| rect.max.y)
+        .fold(0.0_f32, f32::max);
+    let entries = entry_points(edges, centers, rects);
+    let from_of = |edge: &Edge| {
+        centers
+            .iter()
+            .find(|(port, _)| *port == edge.from)
+            .map(|(_, at)| *at)
+    };
+    let owner_of = |edge: &Edge| from_of(edge).and_then(|at| port_owner(rects, at));
+    let target_of = |edge: &Edge| {
+        rects
+            .iter()
+            .find(|(id, _)| *id == edge.to)
+            .map(|(_, rect)| *rect)
+    };
+    // The links that turn in the gap between their two nodes, by the pair (in order), for their lanes.
+    let mut gaps: Vec<((NodeId, NodeId), usize)> = Vec::new();
+    let mut plans = Vec::with_capacity(edges.len());
+    for edge in edges {
+        let plan = match (from_of(edge), owner_of(edge), target_of(edge)) {
+            (Some(from), Some((source_id, source)), Some(target)) => {
+                let up = target.max.y < source.min.y;
+                let two_way = edges.iter().any(|other| {
+                    other.to == source_id && owner_of(other).is_some_and(|(id, _)| id == edge.to)
+                });
+                let gap = between(Some(source), target).filter(|_| !(up && two_way));
+                if let Some(middle) = gap {
+                    let key = if source_id <= edge.to {
+                        (source_id, edge.to)
+                    } else {
+                        (edge.to, source_id)
+                    };
+                    let slot = gaps.iter().filter(|(pair, _)| *pair == key).count();
+                    gaps.push((key, slot));
+                    Some((
+                        from,
+                        source,
+                        target,
+                        Some((middle, key, slot)),
+                        up && two_way,
+                    ))
+                } else {
+                    Some((from, source, target, None, up && two_way))
+                }
+            }
+            _ => None,
+        };
+        plans.push(plan);
+    }
+    plans
+        .iter()
+        .enumerate()
+        .map(|(index, plan)| {
+            let (from, source, target, gap, around) = (*plan)?;
+            let to = entries.get(index).copied().flatten()?;
+            if around {
+                let below = source.max.y + BACK_LANE_GAP;
+                let left = source.min.x.min(target.min.x) - BACK_STUB * 2.0;
+                let out_x = from.x + BACK_STUB;
+                return Some(vec![
+                    from,
+                    Pos2::new(out_x, from.y),
+                    Pos2::new(out_x, below),
+                    Pos2::new(left, below),
+                    Pos2::new(left, to.y),
+                    to,
+                ]);
+            }
+            let lane = match gap {
+                Some((middle, key, slot)) => {
+                    let count = gaps.iter().filter(|(pair, _)| *pair == key).count();
+                    // `as` is exact for the few links in one gap.
+                    middle + (slot as f32 - (count as f32 - 1.0) * 0.5) * BACK_LANE_GAP
+                }
+                None => {
+                    bottom
+                        + BACK_LANE_GAP
+                            * (1.0 + f32::from(u16::try_from(index).unwrap_or(u16::MAX) % 8))
+                }
+            };
+            Some(edge_path(from, to, lane))
+        })
+        .collect()
+}
 
 /// The middle of the free band between a link's source node and its target when one is clearly above the other.
 fn between(source: Option<Rect>, target: Rect) -> Option<f32> {
@@ -1726,6 +1809,119 @@ mod tests {
             link_to(NodeId::ChapterPlaylist(4)),
             Some(Link::ChapterPlaylist { id: 4 })
         );
+    }
+
+    /// Whether two polylines cross or run over each other anywhere (sharing only an end point does not count).
+    fn paths_meet(a: &[Pos2], b: &[Pos2]) -> bool {
+        let segments = |path: &[Pos2]| -> Vec<(Pos2, Pos2)> {
+            path.windows(2)
+                .filter_map(|pair| match pair {
+                    [p, q] => Some((*p, *q)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let cross = |(p1, p2): (Pos2, Pos2), (q1, q2): (Pos2, Pos2)| {
+            let d =
+                |a: Pos2, b: Pos2, c: Pos2| (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+            let (d1, d2) = (d(q1, q2, p1), d(q1, q2, p2));
+            let (d3, d4) = (d(p1, p2, q1), d(p1, p2, q2));
+            if d1 * d2 < 0.0 && d3 * d4 < 0.0 {
+                return true;
+            }
+            // Collinear and overlapping (axis-aligned runs on one line).
+            let on = |a: Pos2, b: Pos2, c: Pos2| {
+                d(a, b, c).abs() < 1e-3 && c.x > a.x.min(b.x) + 0.5 && c.x < a.x.max(b.x) - 0.5
+                    || d(a, b, c).abs() < 1e-3
+                        && (a.x - b.x).abs() < 1e-3
+                        && c.y > a.y.min(b.y) + 0.5
+                        && c.y < a.y.max(b.y) - 0.5
+            };
+            on(q1, q2, p1) || on(q1, q2, p2) || on(p1, p2, q1) || on(p1, p2, q2)
+        };
+        segments(a)
+            .iter()
+            .any(|s| segments(b).iter().any(|t| cross(*s, *t)))
+    }
+
+    /// A menu whose button plays a playlist moved below it, which comes back to the menu at its end (the user's
+    /// flowchart): the link down turns in the gap, the link back up goes around below the playlist and up on the left,
+    /// and the two never cross or run over each other.
+    #[test]
+    fn a_link_down_and_its_link_back_up_do_not_cross() {
+        use super::{Edge, NodeId, Port, edge_paths};
+        use egui::{Rect, vec2};
+        let menu = MenuId(8);
+        let playlist = NodeId::Playlist(12);
+        let menu_rect = Rect::from_min_size(Pos2::new(205.0, 123.0), vec2(180.0, 112.0));
+        let playlist_rect = Rect::from_min_size(Pos2::new(158.0, 352.0), vec2(180.0, 42.0));
+        let down = Port::Button { menu, index: 4 };
+        let back = Port::EndAction(playlist);
+        let edges = vec![
+            Edge {
+                from: down,
+                to: playlist,
+                label: String::new(),
+            },
+            Edge {
+                from: back,
+                to: NodeId::Menu(menu),
+                label: String::new(),
+            },
+        ];
+        let centers = vec![
+            (down, Pos2::new(menu_rect.max.x, 227.0)),
+            (back, Pos2::new(playlist_rect.max.x, 384.0)),
+        ];
+        let rects = vec![(NodeId::Menu(menu), menu_rect), (playlist, playlist_rect)];
+        let paths = edge_paths(&edges, &centers, &rects);
+        let (Some(Some(first)), Some(Some(second))) = (paths.first(), paths.get(1)) else {
+            panic!("both links are drawn: {paths:?}");
+        };
+        assert!(!paths_meet(first, second), "{first:?} / {second:?}");
+        // The link back goes below the playlist and up left of both nodes.
+        assert!(second.iter().any(|p| p.y > playlist_rect.max.y));
+        assert!(second.iter().any(|p| p.x < playlist_rect.min.x));
+    }
+
+    /// Two links turning in the same gap each get their own lane.
+    #[test]
+    fn links_in_one_gap_get_their_own_lanes() {
+        use super::{Edge, NodeId, Port, edge_paths};
+        use egui::{Rect, vec2};
+        let menu = MenuId(8);
+        let lower = NodeId::Timeline(TimelineId(3));
+        let menu_rect = Rect::from_min_size(Pos2::new(205.0, 123.0), vec2(180.0, 112.0));
+        let lower_rect = Rect::from_min_size(Pos2::new(100.0, 352.0), vec2(180.0, 42.0));
+        let ports = [
+            Port::Button { menu, index: 0 },
+            Port::Button { menu, index: 1 },
+        ];
+        let edges: Vec<Edge> = ports
+            .iter()
+            .map(|port| Edge {
+                from: *port,
+                to: lower,
+                label: String::new(),
+            })
+            .collect();
+        let centers = vec![
+            (ports[0], Pos2::new(385.0, 150.0)),
+            (ports[1], Pos2::new(385.0, 170.0)),
+        ];
+        let rects = vec![(NodeId::Menu(menu), menu_rect), (lower, lower_rect)];
+        let paths = edge_paths(&edges, &centers, &rects);
+        let lane = |index: usize| {
+            paths
+                .get(index)
+                .cloned()
+                .flatten()
+                .and_then(|p| p.get(2).map(|q| q.y))
+        };
+        let (Some(a), Some(b)) = (lane(0), lane(1)) else {
+            panic!("both links turn: {paths:?}");
+        };
+        assert!((a - b).abs() >= 9.0, "{a} {b}");
     }
 
     #[test]

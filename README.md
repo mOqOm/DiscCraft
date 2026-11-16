@@ -1,112 +1,127 @@
 # DiscCraft
 
-**日本語** | [English](README.en.md)
+English | [日本語](README.ja.md)
 
-Pure Rust のオープンソース DVD / Blu-ray オーサリングソフト。Adobe Encore 相当の機能を目指す。
+An open-source DVD / Blu-ray authoring app written in pure Rust, aiming for feature parity with Adobe Encore.
 
-## 概要
+## Overview
 
-DiscCraft は映像・音声・静止画から DVD-Video / Blu-ray（BDMV）を作るオーサリングソフト。メニュー、チャプター、複数の音声・字幕、ナビゲーションを組み立て、規格に合わせてトランスコードし、フォルダ・ISO イメージ・ディスクに書き出す。FilmCraft で編集した作品をディスクにする出口にもなる。
+DiscCraft is an authoring app that turns video, audio and still images into DVD-Video or Blu-ray (BDMV). You assemble menus,
+chapters, multiple audio tracks and subtitles, and navigation, transcode to whatever the spec requires, and write out a folder,
+an ISO image, or a disc. It is also the way out of FilmCraft: turn an edited project into a disc.
 
-ゴール:
+Goals:
 
-- Encore を使っていた人が迷わない画面構成と操作
-- 家庭用プレーヤーで再生できる規格準拠の DVD-Video。次に Blu-ray（HDMV）
-- Pure Rust、クリーンルーム実装、Windows / macOS / Linux
-- すべての操作がコマンド。GUI、CLI、JSON 制御チャネル、MCP サーバーから同じ操作ができる
-- クラッシュしない。作業を失わない
+- A layout and workflow that people coming from Encore will not have to think about
+- Spec-compliant DVD-Video that plays on standalone players. Blu-ray (HDMV) next
+- Pure Rust, clean-room implementation, Windows / macOS / Linux
+- Every action is a command. The same actions are available from the GUI, the CLI, the JSON control channel and the MCP server
+- No crashes. Never lose work
 
-非ゴール:
+Non-goals:
 
-- コピーガード（CSS、AACS など）。ライセンスが必要なため。リージョンコードのフラグ設定だけ対応する
-- BD-J（Java）メニュー。Blu-ray は HDMV のみ
-- DTS、Dolby TrueHD、DTS-HD のエンコード
-- 動画編集。編集は FilmCraft に任せて連携する
+- Copy protection (CSS, AACS, and the like), because they require a license. Only setting the region-code flags is supported
+- BD-J (Java) menus. Blu-ray is HDMV only
+- Encoding DTS, Dolby TrueHD, DTS-HD
+- Video editing. Leave that to FilmCraft and interoperate with it
 
-## 状態
+## Status
 
-開発中（0.1.0）。今できること:
+In development (0.1.0). What works now:
 
-- MP4 / MOV などの素材から、メニュー付きの DVD（`VIDEO_TS` フォルダ、ISO）と Blu-ray（BDMV フォルダ、ISO）を作れる。
-  規格に合わない素材はビルド時に自動で変換する（出力先の `disccraft-cache` に保存）。
-- GUI（`cargo run --release -p disccraft`）は Encore と同じ配置とメニューバー: プロジェクト / メニュー / タイムライン / ビルドのタブ、
-  モニター・メニュービューア・フローチャート、プロパティ、レイヤー / ライブラリ、タイムラインビューア。タブはドラッグで並べ替え・
-  移動・分割・フローティングでき、× で閉じてウィンドウメニューで開き直せる。並びはワークスペースとして名前を付けて保存できる。
-- メニュー: ボタンの配置（複数選択、整列、均等配置、アレンジ、コピーと貼り付け）、リンク（ピックウィップ）、初期設定ボタン、
-  自動アクティベート、背景（色 / 画像 / 動画）とメニューの音声、エンドアクションとデュレーション、チャプターインデックス、ライブラリのプリセット。
-- タイムライン: チャプターポイント、オーディオ / 字幕トラック、エンドアクション、リモートメニュー、再生（Space、音も）。
-- ナビゲーション: ファーストプレイ、タイトルボタン、スライドショー、再生リスト。ファイル ▸ プレビューで、ビルドせずにディスクを
-  プロジェクトプレビューの窓で試せる（自前の VM。リモコンの十字キー、タイトル / メニュー、オーディオ / 字幕、チャプター、一時停止。
-  タイトルは映像と音つきで再生し、終わるとエンドアクションへ。ビルドしたディスクもモニターでプレビューできる）。
-- すべての操作はエンジンのコマンドで、GUI、CLI、MCP から同じことができる。1 回の操作は 1 回で取り消せる。
+- From MP4 / MOV and other source files you can build a DVD with menus (`VIDEO_TS` folder, ISO) and a Blu-ray (BDMV folder, ISO).
+  Sources that do not fit the spec are converted automatically during the build (in `disccraft-cache` next to the output by
+  default; `build --cache <folder>` keeps them in a shared folder outside the output).
+- The GUI (`cargo run --release -p disccraft`) uses Encore's arrangement and menu bar: the Project / Menu / Timeline / Build tabs,
+  the monitor, menu viewer and flowchart, the properties panel, the layers / library panels, and the timeline viewer. Tabs can be
+  dragged to reorder, move, split and float, closed with × and reopened from the window menu. Arrangements can be saved and named
+  as workspaces.
+- Menus: button placement (multi-select, align, distribute, arrange, copy and paste), links (pick whip), default buttons,
+  auto-activate, backgrounds (colour / image / video) and menu audio, end action and duration, chapter index, library presets,
+  image and shape layers (drop shadow, flip, rotate), guides, vertical text, creating a text subpicture.
+- Timeline: one title from several video clips butted together (a dropped clip goes after the clips so far with a chapter at the
+  join; trimming snaps to GOP starts, and sources that need converting and HD are joined at build time too, though on DVD a clip
+  that needs converting cannot be trimmed), chapter points, audio and subtitle tracks (a timeline's colour set picks the subtitle
+  colours), end actions, remote menu, playback (Space, with audio; the speaker in the track header picks which audio track the
+  monitor plays).
+- Navigation: first play, title button, slideshows (a slide's name and description can become a subtitle), playlists, chapter
+  playlists. File ▸ Preview lets you try the disc in the project preview window
+  without building it (our own VM: remote d-pad, title / menu, audio / subtitle, chapter, pause. Titles play with video and audio
+  and continue into their end action on completion. Built discs can be previewed in the monitor too).
+- Every action is an engine command, so the GUI, the CLI and MCP can do the same thing. One user action undoes in one step.
 
-## 機能
+## Features
 
-できること:
+What works today:
 
-- DVD: MPEG-2 / LPCM / AC-3 のパススルーと MPEG-2 への再エンコード、VIDEO_TS フォルダと ISO イメージ（2 層のレイヤーブレイク）
-- DVD: タイトル、チャプター、複数の音声トラック、SRT 字幕、16:9、リージョンコード
-- Blu-ray: BDMV フォルダと ISO イメージ、PG 字幕、IG メニュー（HDMV。常時表示 / ポップアップ、モーションメニュー）、
-  ユーザー操作（UO マスク）。映像は SD（720×480 / 720×576）の MPEG-2 か、HD（1080p 23.976 / 24 / 25 / 29.97 /
-  50 / 59.94、720p 59.94 / 50 / 23.976 / 24）の H.264（タイトル、字幕、メニューとポップアップも HD の大きさ。1080p の 25 / 29.97 /
-  50 / 59.94 は Blu-ray の規格外で、今後削除する予定）
-- メニュー: 静止メニュー、ボタンとハイライト、モーションメニュー、タイムアウト（デュレーションとエンドアクション）、
-  自動アクティベート、PSD 読み込みとレイヤー名によるボタン認識、チャプターインデックス
-- 素材: 映像（MP4 / MOV / MKV / m2v など）、音声（WAV / AC-3 / MP3 / FLAC など）、画像（PNG / JPEG / PSD / TIFF）、
-  ベクター画像（SVG。表示する大きさで描くのでぼけない）、字幕（SRT / WebVTT / タイムコード付きテキスト。UTF-8 / UTF-16 / Shift_JIS）
-- ナビゲーション: ファーストプレイ、タイトルボタン、リモートメニュー、リンク、フローチャート、プレイリスト、スライドショー
-- トランスコード: 自動トランスコード（音声は Dolby Digital（AC-3）192 kbps）、容量に合わせたビットレート配分、キャッシュ
-- 出力: DVD-5 / DVD-9、BD-25 / BD-50、BDXL（100 GB の 3 層、128 GB の片面 4 層）、容量メーター
-- 検証: プロジェクトチェック、VM シミュレータとプレビュー、読み戻し検証
+- DVD: MPEG-2 / LPCM / AC-3 passthrough and re-encoding to MPEG-2, VIDEO_TS folders and ISO images (dual-layer layer break)
+- DVD: titles (including a timeline built from several video clips), chapters, multiple audio tracks, subtitles, 16:9,
+  region codes, playlists and chapter playlists
+- Blu-ray: BDMV folders and ISO images, PG subtitles, IG menus (HDMV; always-on and popup menus, motion menus), user
+  operations (UO masks). Video is SD (720×480 / 720×576) MPEG-2 or HD (1080p 23.976 / 24 / 25 / 29.97 / 50 / 59.94,
+  720p 59.94 / 50 / 23.976 / 24) H.264 (titles, subtitles and menus and popups are at the HD size too; 1080p at 25 / 29.97 /
+  50 / 59.94 is outside the Blu-ray spec and will be removed)
+- Menus: still menus, buttons and highlights, motion menus, timeouts (duration and end action), auto-activate, PSD import with
+  button detection from layer names, chapter index
+- Sources: video (MP4 / MOV / MKV / m2v and more), audio (WAV / AC-3 / MP3 / FLAC and more), images (PNG / JPEG / PSD / TIFF),
+  vector graphics (SVG, drawn at the displayed size so they never blur), subtitles (SRT / WebVTT / timecode text;
+  UTF-8 / UTF-16 / Shift_JIS)
+- Navigation: first play, title button, remote menu, links, flowchart, playlists, slideshows
+- Transcode: automatic transcoding (audio to Dolby Digital (AC-3) at 192 kbps), bitrate allocation to fit the capacity, caching,
+  several sources converted in parallel (the MPEG-2 encoder is multithreaded over macroblock rows)
+- Output: DVD-5 / DVD-9, BD-25 / BD-50, BDXL (100 GB triple layer, 128 GB quad layer), capacity meter
+- Verification: project checks (results grouped per item, in Encore's wording), the VM simulator and preview, read-back
+  verification
 
-## 必要なもの
+## Requirements
 
-Rust stable 1.95 以上（rustup）。Windows を最優先、macOS / Linux も対象。Linux では再生の音（cpal）のために
-ALSA の開発用パッケージ（Debian / Ubuntu の `libasound2-dev`、Fedora の `alsa-lib-devel`）が要る。
+Rust stable 1.95 or newer (rustup). Windows comes first; macOS and Linux are also targets. On Linux, playback audio (cpal) needs
+the ALSA development packages (`libasound2-dev` on Debian / Ubuntu, `alsa-lib-devel` on Fedora).
 
-## ビルドと使い方
+## Building and usage
 
 ```
 cargo build --release
 ```
 
-`target/release` に GUI（`disccraft`）と CLI（`disccraft-cli`）ができる。
+This produces the GUI (`disccraft`) and the CLI (`disccraft-cli`) in `target/release`.
 
-GUI は `disccraft` を起動し、ようこそ画面かファイルメニューから新規プロジェクトを作る。素材を読み込み、タイムラインと
-メニューを作ってリンクし、ビルドパネルからフォルダか ISO イメージに書き出す。
+For the GUI, launch `disccraft` and create a new project from the welcome screen or the File menu. Import assets, create
+timelines and menus and link them, then write the disc to a folder or ISO image from the Build panel.
 
-CLI は、1 行に 1 つのコマンド（JSON）を順に実行してプロジェクトを作り、ビルドする:
+The CLI builds a project by running commands (JSON, one per line) in order, then builds it:
 
 ```
-disccraft-cli commands                           # コマンドの一覧
-disccraft-cli run project.dcproj commands.jsonl  # コマンドを順に実行する（なければプロジェクトを作る）
-disccraft-cli inspect project.dcproj             # プロジェクトとチェックの結果
-disccraft-cli build project.dcproj --out out     # VIDEO_TS / BDMV フォルダに書き出す
+disccraft-cli commands                           # list commands
+disccraft-cli run project.dcproj commands.jsonl  # run commands in order (creates the project if missing)
+disccraft-cli inspect project.dcproj             # show the project and check results
+disccraft-cli build project.dcproj --out out     # write a VIDEO_TS / BDMV folder
 disccraft-cli build project.dcproj --iso disc.iso
 ```
 
-`commands.jsonl` の例（映像 1 本とメニュー 1 枚の DVD）:
+Example `commands.jsonl` (a DVD with one video and one menu):
 
 ```
 {"command": "file.new", "params": {"kind": "dvd", "standard": "ntsc"}}
 {"command": "asset.import", "params": {"path": "movie.mp4"}}
-{"command": "timeline.create", "params": {"asset": 1, "name": "本編"}}
-{"command": "menu.create", "params": {"name": "メイン"}}
-{"command": "menu.addButton", "params": {"menu": 3, "label": "再生", "target": {"timeline": 2}}}
+{"command": "timeline.create", "params": {"asset": 1, "name": "Main feature"}}
+{"command": "menu.create", "params": {"name": "Main"}}
+{"command": "menu.addButton", "params": {"menu": 3, "label": "Play", "target": {"timeline": 2}}}
 {"command": "timeline.setEndAction", "params": {"timeline": 2, "target": "lastMenu"}}
 {"command": "nav.setFirstPlay", "params": {"target": {"menu": 3}}}
 ```
 
-規格に合わない素材はビルドのときに変換し、出力先の `disccraft-cache` に残す（2 回目からは変換を飛ばす）。
+Material that doesn't meet the spec is converted at build time and kept in `disccraft-cache` in the output folder (later
+builds skip the conversion).
 
-## AI エージェントから使う（MCP）
+## Driving it from an AI agent (MCP)
 
-`disccraft-cli mcp` は MCP サーバー（標準入出力の JSON-RPC）として動く。ツールは `disccraft_commands`（コマンド一覧）、
-`disccraft_execute`（エンジンのコマンドを実行）、`disccraft_inspect`（プロジェクトとチェック結果）の 3 つ。
+`disccraft-cli mcp` runs as an MCP server (JSON-RPC over stdio). There are three tools: `disccraft_commands` (the command list),
+`disccraft_execute` (run an engine command) and `disccraft_inspect` (the project and the check results).
 
-MCP クライアントには、コマンドに `<リポジトリのパス>/target/release/disccraft-cli`、引数に `mcp` を登録する（標準入出力でつなぐ）。
+In your MCP client, register `<repository path>/target/release/disccraft-cli` as the command with `mcp` as its argument (connected over stdio).
 
-## 構成
+## Layout
 
 ```
 DiscCraft/
@@ -127,8 +142,8 @@ DiscCraft/
 │  ├─ vm/
 │  ├─ menu/
 │  ├─ motion/
-│  ├─ photo/        （PhotoCraft 連携: PSD など）
-│  ├─ sound/        （SoundCraft 連携）
+│  ├─ photo/        (PhotoCraft integration: PSD and more)
+│  ├─ sound/        (SoundCraft integration)
 │  ├─ nav/
 │  ├─ transcode/
 │  ├─ check/
@@ -142,29 +157,36 @@ DiscCraft/
 └─ assets/
 ```
 
-## FilmCraft の再利用
+## Reusing FilmCraft
 
-FilmCraft (https://github.com/storytold/filmcraft, MIT OR Apache-2.0) の crate を git 依存（rev 固定）で使う。再利用した crate は NOTICE に記載する。
+Crates from FilmCraft (https://github.com/storytold/filmcraft, MIT OR Apache-2.0) are used as git dependencies (pinned rev).
+Reused crates are listed in NOTICE.
 
-| crate | 使い道 |
+| crate | what it is used for |
 |---|---|
-| filmcraft-time | 整数 Tick による正確な時間 |
-| filmcraft-geom | 座標と矩形 |
-| filmcraft-color | 色変換 |
-| filmcraft-bitstream | ビット読み書き |
-| filmcraft-frame | フレーム表現 |
-| filmcraft-media | 素材の読み込み |
-| filmcraft-codecs | MP4 / MOV / MKV / MXF / MPEG-TS / PS などのデコード |
-| filmcraft-h264enc | Blu-ray の映像エンコード |
-| filmcraft-text | メニューの文字描画 |
-| filmcraft-audio-dsp | ラウドネス測定と正規化 |
+| filmcraft-time | exact time with integer ticks |
+| filmcraft-geom | coordinates and rectangles |
+| filmcraft-color | colour conversion |
+| filmcraft-bitstream | bit reading and writing |
+| filmcraft-frame | frame representation |
+| filmcraft-media | reading source media |
+| filmcraft-codecs | decoding MP4 / MOV / MKV / MXF / MPEG-TS / PS and more |
+| filmcraft-text | drawing text in menus |
+| filmcraft-audio-dsp | loudness measurement and normalisation |
+| filmcraft-project, filmcraft-format | reading a FilmCraft project (`.fcproj`): a sequence's markers become chapter points |
 
-FilmCraft の crate は craft-libs（https://github.com/storytold/craft-libs、MIT OR Apache-2.0）の crate（映像・音声のデコードなど）を使う。DiscCraft は craft-libs の craft-audio（AC-3 エンコーダ。変換した音声を Dolby Digital にする）と craft-ui（パネルとワークスペースのドッキング）を使い、テストで craft-video（MPEG-2 エンコーダの出力の検証）と craft-psd（テスト用の PSD の書き出し）も使う。
+FilmCraft's crates build on the craft-libs crates (https://github.com/storytold/craft-libs, MIT OR Apache-2.0) for things such as
+video and audio decoding. DiscCraft uses craft-libs' craft-audio (the AC-3 encoder that turns converted audio into Dolby Digital),
+craft-video (the H.264 encoder for Blu-ray video, which used to be FilmCraft's filmcraft-h264enc; in tests also its MPEG-2 decoder,
+verifying the MPEG-2 encoder's output) and craft-ui (panel and workspace docking), and in tests also craft-psd (writing PSD files
+for tests).
 
-## 商標
+## Trademarks
 
-「DVD」「Blu-ray Disc」は名称の説明的な使用のみで、ロゴは使わない。Adobe Encore は Adobe の商標で、DiscCraft は Adobe と関係がない。
+"DVD" and "Blu-ray Disc" are used descriptively only, and no logos are used. Adobe Encore is a trademark of Adobe, and DiscCraft
+is not affiliated with Adobe.
 
-## ライセンス
+## License
 
-MIT OR Apache-2.0 のデュアルライセンス。詳細は LICENSE-MIT と LICENSE-APACHE を読む。明示的な合意がない限り、このリポジトリへの貢献も同じデュアルライセンスで提供される。
+Dual-licensed under MIT OR Apache-2.0. See LICENSE-MIT and LICENSE-APACHE for details. Unless stated otherwise, contributions to
+this repository are offered under the same dual license.

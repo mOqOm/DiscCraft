@@ -54,6 +54,14 @@ pub enum AudioSource<'a> {
         /// AC-3 elementary stream bytes.
         data: &'a [u8],
     },
+    /// DTS stream and its elementary-stream bytes (private stream 1, substreams 0x88 to 0x8F; the same header in
+    /// front of the frames as AC-3).
+    Dts {
+        /// Parsed DTS stream.
+        stream: &'a crate::es::DtsStream,
+        /// DTS elementary stream bytes.
+        data: &'a [u8],
+    },
     /// DVD LPCM stream parsed from WAV.
     Lpcm(&'a LpcmStream),
 }
@@ -532,7 +540,10 @@ fn build_cells(input: &MuxInput<'_>, gops: &[GopInfo]) -> Result<Vec<CellInfo>, 
         }
 
         let gop = gops.get(best).ok_or_else(|| invalid("missing GOP"))?;
-        if !gop.closed {
+        // The title must start on a closed GOP: nothing comes before it. A later cell (a chapter) may start on an
+        // open GOP, as video that was not encoded for these chapters has them: played through, its leading B
+        // pictures have the GOP before them; jumped to, a player drops them, as after any random access.
+        if idx == 0 && !gop.closed {
             return Err(invalid("first GOP of cell must be closed"));
         }
 
@@ -1408,6 +1419,50 @@ mod tests {
         if mux_vobs(&input, &mut sink).is_ok() {
             return Err(MuxError::Invalid("expected same-GOP error".to_string()));
         }
+        Ok(())
+    }
+
+    /// A chapter may fall on an open GOP (video with B pictures that was not encoded for these chapters).
+    #[test]
+    fn a_later_cell_may_start_on_an_open_gop() -> Result<(), MuxError> {
+        let video_data = build_test_video();
+        let mut video = parse_video_data(&video_data)?;
+        // Every GOP after the first is open.
+        let mut first = true;
+        for pic in &mut video.pictures {
+            if pic.gop_start {
+                if !first {
+                    pic.closed_gop = false;
+                }
+                first = false;
+            }
+        }
+        let last_gop = video
+            .pictures
+            .iter()
+            .rev()
+            .find(|pic| pic.gop_start)
+            .map(|pic| pic.pts)
+            .ok_or_else(|| MuxError::Invalid("no GOP".to_string()))?;
+        let first_pts = video
+            .pictures
+            .iter()
+            .map(|pic| pic.pts)
+            .min()
+            .ok_or_else(|| MuxError::Invalid("no picture".to_string()))?;
+        if last_gop <= first_pts {
+            // The test video has a single GOP: nothing to check here.
+            return Ok(());
+        }
+        let input = basic_input(
+            &video,
+            &video_data,
+            Vec::new(),
+            vec![0, last_gop - first_pts],
+        );
+        let mut sink = MemorySink::default();
+        let layout = mux_vobs(&input, &mut sink)?;
+        assert_eq!(layout.cells.len(), 2);
         Ok(())
     }
 

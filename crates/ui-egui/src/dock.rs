@@ -337,8 +337,14 @@ impl DiscCraftApp {
             .collect()
     }
 
-    /// パネルの中身。
+    /// パネルの中身。押されたパネルを覚える（Delete キーなどの対象）。
     fn panel_body(&mut self, ui: &mut Ui, panel: Panel) {
+        let area = ui.max_rect();
+        if ui.input(|i| {
+            i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|at| area.contains(at))
+        }) {
+            self.active_panel = Some(panel);
+        }
         match panel {
             Panel::Project => self.project_tab(ui),
             // メニューのタブは上下に分かれ、それぞれがスクロールする。
@@ -430,74 +436,9 @@ impl DiscCraftApp {
         self.property_sheet(ui);
     }
 
-    /// レイヤーのタブ。メニュービューアのメニューの背景とボタンを、重なりの上から並べる。
+    /// レイヤーのタブ（Encore と同じ形。layers_panel）。
     fn layers_tab(&mut self, ui: &mut Ui) {
-        let Some(id) = self.viewer_menu() else {
-            ui.label(tl!("Open a menu to see its layers."));
-            return;
-        };
-        let Some(menu) = self.session.project.menu(id).cloned() else {
-            return;
-        };
-
-        let mut clicked = None;
-        let mut clicked_text = None;
-        for (index, button) in menu.buttons.iter().enumerate().rev() {
-            let number = index.saturating_add(1);
-            let name = if button.label.is_empty() {
-                button.name.clone()
-            } else {
-                button.label.clone()
-            };
-            let text = tlf!("Button {n}: {name}", n = number, name = name);
-            let selected = self.selection == Selection::Menu(id) && self.button_selected(index);
-            let response = ui.selectable_label(selected, text);
-            if response.clicked() {
-                let modifiers = ui.input(|i| i.modifiers);
-                clicked = Some((index, modifiers.shift || modifiers.command));
-            }
-        }
-        // テキストはボタンの下、背景の上。
-        for (index, text) in menu.texts.iter().enumerate().rev() {
-            let first = text.text.lines().next().unwrap_or_default();
-            let selected = self.selected_menu_text(id) == Some(index);
-            if ui
-                .selectable_label(selected, tlf!("Text: {text}", text = first))
-                .clicked()
-            {
-                clicked_text = Some(index);
-            }
-        }
-        // 画像 / シェイプはテキストの下、背景の上。
-        let mut clicked_graphic = None;
-        for (index, graphic) in menu.graphics.iter().enumerate().rev() {
-            let selected = self.selected_menu_graphic(id) == Some(index);
-            if ui
-                .selectable_label(selected, self.graphic_layer_name(graphic))
-                .clicked()
-            {
-                clicked_graphic = Some(index);
-            }
-        }
-        ui.label(tl!("Background"));
-        if let Some(index) = clicked_text {
-            self.select_menu_text(id, index);
-            self.show_panel(Panel::MenuViewer);
-        }
-        if let Some(index) = clicked_graphic {
-            self.select_menu_graphic(id, index);
-            self.show_panel(Panel::MenuViewer);
-        }
-
-        // Shift / Ctrl を押しながらのクリックは選択に加える / 外す。
-        match clicked {
-            Some((index, true)) => self.toggle_button(id, index),
-            Some((index, false)) => self.select_only_button(id, index),
-            None => {}
-        }
-        if clicked.is_some() {
-            self.show_panel(Panel::MenuViewer);
-        }
+        self.layers_panel(ui);
     }
 
     /// メニュービューアに出すメニュー（選択中のメニュー、なければ最後に開いたメニュー）。

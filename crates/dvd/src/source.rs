@@ -8,8 +8,7 @@ use disccraft_psmux::es::{
 
 use crate::prepare::{PreparedAudio, PreparedTitle};
 use crate::{DvdError, ticks_to_27m};
-use disccraft_menu::subtitle::{Cue, render_cue};
-use disccraft_menu::subtitle_file::read_subtitles;
+use disccraft_menu::subtitle::{Cue, CueStyle, render_cue_styled};
 use disccraft_project::Tick;
 use disccraft_psmux::mux::{FileBytes, SubpictureUnit, VideoBytes};
 use disccraft_spu::{Bitmap, SpuParams, encode_spu, spu_delay_from_90k};
@@ -49,6 +48,15 @@ pub(crate) enum LoadedAudio {
         /// Parsed AC-3 stream.
         stream: Ac3Stream,
         /// AC-3 elementary bytes.
+        data: Vec<u8>,
+        /// Optional ISO 639-1 language.
+        language: Option<[u8; 2]>,
+    },
+    /// DTS stream and its elementary bytes.
+    Dts {
+        /// Parsed DTS stream.
+        stream: disccraft_psmux::es::DtsStream,
+        /// DTS elementary bytes.
         data: Vec<u8>,
         /// Optional ISO 639-1 language.
         language: Option<[u8; 2]>,
@@ -239,19 +247,38 @@ fn load_subtitles(
     let any_text = paths
         .iter()
         .any(|path| subtitle_file(path) == SubtitleFile::Text);
-    let mut palette = crate::vobsub::PaletteBuilder::new(any_text);
+    let colors = timeline.subtitle_colors.unwrap_or_default();
+    // Drawn text takes the colour set's entries (0 to 9); a VobSub's colours follow them.
+    let mut palette =
+        crate::vobsub::PaletteBuilder::new(any_text.then(|| subtitle_palette(&colors)));
     let mut streams = Vec::new();
     let mut languages = Vec::new();
     for (track, path) in timeline.subtitles.iter().zip(paths) {
         let (units, file_language) = match subtitle_file(path) {
             SubtitleFile::Text => {
-                // SRT, WebVTT or a timecoded text script, in UTF-8 / UTF-16 / Shift_JIS.
-                let cues = read_subtitles(path, &project.settings)
+                let asset = project.assets.get(&track.asset).ok_or_else(|| {
+                    DvdError::Invalid("subtitle asset does not exist".to_string())
+                })?;
+                // SRT, WebVTT or a timecoded text script, in UTF-8 / UTF-16 / Shift_JIS (or the subtitles edited
+                // in the project).
+                let cues = disccraft_menu::subtitle_file::asset_cues(asset, &project.settings)
                     .map_err(|e| DvdError::Invalid(e.to_string()))?;
-                let units = cues
-                    .iter()
-                    .map(|cue| subtitle_unit(cue, first_pts, height))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let mut units = Vec::with_capacity(cues.len());
+                // A subtitle added in the Monitor and not typed yet has nothing to show.
+                for cue in cues.into_iter().filter(|cue| !cue.text.trim().is_empty()) {
+                    // The subtitle's own group, stroke and place where it has them, else the track's.
+                    units.push(subtitle_unit_styled(
+                        &cue,
+                        first_pts,
+                        height,
+                        CueStyle {
+                            outline: cue.look.outline(),
+                            vertical: cue.look.vertical(),
+                            horizontal: cue.look.justify.unwrap_or_default(),
+                        },
+                        spu_look(&colors, cue.look.group.unwrap_or(track.group)),
+                    )?);
+                }
                 (units, None)
             }
             SubtitleFile::VobSub => {
@@ -281,15 +308,78 @@ fn load_subtitles(
     })
 }
 
-fn subtitle_unit(cue: &Cue, first_pts: i64, height: u16) -> Result<SubpictureUnit, DvdError> {
-    let bitmap = render_cue(&cue.text, 720, height)
+/// A title's colour table for a colour set: 0 black, then each group's letters, stroke and anti-alias colour (1 to 3
+/// for group 1, 4 to 6 for group 2, 7 to 9 for group 3), the rest black. Entries are `00 Y Cr Cb`.
+pub(crate) fn subtitle_palette(set: &disccraft_project::SubtitleColorSet) -> [u32; 16] {
+    let black = disccraft_menu::ycrcb_entry([0, 0, 0]);
+    let mut palette = [black; 16];
+    for (index, group) in set.groups.iter().enumerate() {
+        let base = index.saturating_mul(3);
+        for (offset, color) in [
+            (1, group.fill),
+            (2, group.stroke),
+            (3, group.antialias_color()),
+        ] {
+            if let Some(slot) = palette.get_mut(base.saturating_add(offset)) {
+                *slot = disccraft_menu::ycrcb_entry(color.rgb);
+            }
+        }
+    }
+    palette
+}
+
+/// The colour numbers and contrasts of a subpicture of `group` (from 0): pixel 1 the letters, pixel 2 the stroke,
+/// pixel 3 the anti-alias colour.
+pub(crate) fn spu_look(set: &disccraft_project::SubtitleColorSet, group: u8) -> ([u8; 4], [u8; 4]) {
+    let group = group.min(2);
+    let colors = set.group(group);
+    let base = group.saturating_mul(3);
+    // 0 to 100 percent as a contrast of 0 to 15.
+    let contrast = |opacity: u8| {
+        let scaled = (u16::from(opacity.min(100)) * 15 + 50) / 100;
+        u8::try_from(scaled).unwrap_or(15)
+    };
+    (
+        [
+            0,
+            base.saturating_add(1),
+            base.saturating_add(2),
+            base.saturating_add(3),
+        ],
+        [
+            0,
+            contrast(colors.fill.opacity),
+            contrast(colors.stroke.opacity),
+            contrast(colors.antialias_color().opacity),
+        ],
+    )
+}
+
+/// The look of a slide's subtitle: its stroke and its place.
+pub(crate) fn slide_cue_style(slide: &disccraft_project::Slide) -> CueStyle {
+    CueStyle {
+        outline: slide.subtitle_stroke.pixels(),
+        vertical: slide.subtitle_align,
+        horizontal: disccraft_project::SubtitleJustify::Center,
+    }
+}
+
+/// One cue as a DVD subpicture unit, drawn in `style` with the colour numbers and contrasts of its group.
+pub(crate) fn subtitle_unit_styled(
+    cue: &Cue,
+    first_pts: i64,
+    height: u16,
+    style: CueStyle,
+    (colors, alpha): ([u8; 4], [u8; 4]),
+) -> Result<SubpictureUnit, DvdError> {
+    let bitmap = render_cue_styled(&cue.text, 720, height, style)
         .map_err(|e| DvdError::Invalid(format!("subtitle: {e}")))?;
     let duration_90k = ticks_to_27m(Tick(cue.end.0.saturating_sub(cue.start.0))) / 300;
     let params = SpuParams {
         x: bitmap.x,
         y: bitmap.y,
-        colors: [0, 1, 2, 0],
-        alpha: [0, 15, 15, 0],
+        colors,
+        alpha,
         forced: false,
         stop_delay: Some(spu_delay_from_90k(
             u32::try_from(duration_90k).unwrap_or(u32::MAX),
@@ -363,22 +453,28 @@ fn read_path(path: &Path) -> Result<Vec<u8>, DvdError> {
 
 fn validate_video(video: &VideoStream, standard: VideoStandard) -> Result<(), DvdError> {
     let sequence = &video.sequence;
-    let (want_width, want_height, want_rate) = match standard {
-        VideoStandard::Ntsc => (720u16, 480u16, 4u8),
-        VideoStandard::Pal => (720u16, 576u16, 3u8),
+    let (ifo_standard, want_rate) = match standard {
+        VideoStandard::Ntsc => (disccraft_ifo::Standard::Ntsc, 4u8),
+        VideoStandard::Pal => (disccraft_ifo::Standard::Pal, 3u8),
     };
 
-    if sequence.width != want_width {
+    // One of the DVD picture sizes: 720 or 704 wide at full height, 352 wide at full or half height.
+    let Some(resolution) =
+        disccraft_ifo::Resolution::of_picture(sequence.width, sequence.height, ifo_standard)
+    else {
         return Err(DvdError::Unsupported(format!(
-            "video width {} is not {want_width} for {standard:?}",
-            sequence.width
+            "video size {}x{} is not a DVD size for {standard:?}",
+            sequence.width, sequence.height
         )));
-    }
-    if sequence.height != want_height {
-        return Err(DvdError::Unsupported(format!(
-            "video height {} is not {want_height} for {standard:?}",
-            sequence.height
-        )));
+    };
+    let small = matches!(
+        resolution,
+        disccraft_ifo::Resolution::Half | disccraft_ifo::Resolution::Quarter
+    );
+    if small && sequence.aspect_code == 3 {
+        return Err(DvdError::Unsupported(
+            "a 352-wide DVD video must be 4:3".to_string(),
+        ));
     }
     if sequence.frame_rate_code != want_rate {
         return Err(DvdError::Unsupported(format!(
@@ -540,6 +636,17 @@ fn load_audio(
                     language,
                 }
             }
+            PreparedAudio::Dts(path) => {
+                let data = read_path(path)?;
+                let stream = disccraft_psmux::es::parse_dts(&data, first_pts)
+                    .map_err(|err| DvdError::Invalid(format!("DTS parse error: {err}")))?;
+                validate_dts(&stream)?;
+                LoadedAudio::Dts {
+                    stream,
+                    data,
+                    language,
+                }
+            }
             PreparedAudio::Wav(path) => {
                 let data = read_path(path)?;
                 let stream = parse_wav(&data)
@@ -615,6 +722,30 @@ fn validate_ac3(stream: &Ac3Stream) -> Result<(), DvdError> {
     Ok(())
 }
 
+/// A DTS stream a DVD carries as it is: 48 kHz, up to 8 channels, every frame small enough for one pack (a DVD
+/// does not split DTS frames over packs; 2 013 bytes at 1 509.75 kbit/s is the largest in use).
+fn validate_dts(stream: &disccraft_psmux::es::DtsStream) -> Result<(), DvdError> {
+    /// The frame bytes one pack holds behind its headers.
+    const PACK_ROOM: usize = 2016;
+    if stream.sample_rate != 48_000 {
+        return Err(DvdError::Unsupported(format!(
+            "DTS sample rate {} is not 48 kHz",
+            stream.sample_rate
+        )));
+    }
+    if stream.channels == 0 || stream.channels > 8 {
+        return Err(DvdError::Unsupported(
+            "DTS channel count must be 1..=8".to_string(),
+        ));
+    }
+    if stream.frames.iter().any(|frame| frame.len > PACK_ROOM) {
+        return Err(DvdError::Unsupported(
+            "DTS frames are too large for a DVD (the bit rate is over 1 509.75 kbit/s)".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_lpcm(stream: &LpcmStream) -> Result<(), DvdError> {
     if stream.sample_rate != 48_000 {
         return Err(DvdError::Unsupported(format!(
@@ -643,7 +774,50 @@ fn validate_lpcm(stream: &LpcmStream) -> Result<(), DvdError> {
 
 /// The palette of a title whose subtitles are all drawn text (and of one without subtitles).
 pub(crate) fn text_palette() -> [u32; 16] {
-    crate::vobsub::PaletteBuilder::new(true).palette()
+    subtitle_palette(&disccraft_project::SubtitleColorSet::default())
+}
+
+#[cfg(test)]
+mod subtitle_tests {
+    use super::load_subtitles;
+    use disccraft_project::{AssetKind, Project, SubtitleCue, SubtitleTrack, Tick, VideoStandard};
+    use std::path::Path;
+
+    /// Subtitles edited in the Monitor are built from the project, not the file (which need not exist), and one
+    /// added but not typed yet is left off the disc.
+    #[test]
+    fn edited_subtitles_are_built_from_the_project() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::default();
+        let video = project.add_asset(Path::new("movie.mp4"))?;
+        let subs = project.add_asset(Path::new("no-such-file.srt"))?;
+        let timeline = project.add_timeline(video, None)?;
+        let cue = |start: i64, text: &str| SubtitleCue {
+            start: Tick(start * 254_016_000_000),
+            end: Tick((start + 1) * 254_016_000_000),
+            text: text.to_owned(),
+            look: disccraft_project::CueLook::default(),
+        };
+        let asset = project.assets.get_mut(&subs).ok_or("asset")?;
+        assert_eq!(asset.kind, AssetKind::Subtitle);
+        asset.cues = Some(vec![cue(1, "Hello"), cue(3, " "), cue(5, "World")]);
+        let timeline = project.timeline_mut(timeline).ok_or("timeline")?;
+        timeline.subtitles.push(SubtitleTrack {
+            asset: subs,
+            language: "en".to_owned(),
+            group: 0,
+        });
+        let timeline = timeline.clone();
+        let loaded = load_subtitles(&project, &timeline, 0, VideoStandard::Ntsc)?;
+        let (streams, languages) = (loaded.streams, loaded.languages);
+        assert_eq!(streams.first().map(Vec::len), Some(2));
+        assert_eq!(languages, vec![Some(*b"en")]);
+        // Without edited cues the file is read, and a missing file is an error.
+        if let Some(asset) = project.assets.get_mut(&subs) {
+            asset.cues = None;
+        }
+        assert!(load_subtitles(&project, &timeline, 0, VideoStandard::Ntsc).is_err());
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -668,5 +842,44 @@ mod layer_break_tests {
         let (starts, programs, cell) = with_layer_break(&chapters, None, ntsc)?;
         assert_eq!((starts.len(), programs, cell), (3, vec![0, 1, 2], None));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod color_tests {
+    use super::{spu_look, subtitle_palette};
+    use disccraft_project::{SubtitleColor, SubtitleColorSet};
+
+    /// The default colour set is Encore's (group 1: pale yellow letters, near-black stroke, both opaque); the groups
+    /// take the colour numbers 1 to 6 in turn, and an opacity becomes a contrast of 0 to 15.
+    #[test]
+    fn a_colour_set_becomes_the_titles_colour_table() {
+        let mut set = SubtitleColorSet::default();
+        let palette = subtitle_palette(&set);
+        let entry = |rgb| Some(disccraft_menu::ycrcb_entry(rgb));
+        assert_eq!(palette.first().copied(), Some(0x0010_8080));
+        assert_eq!(palette.get(1).copied(), entry([234, 234, 176]));
+        assert_eq!(palette.get(2).copied(), entry([16, 16, 16]));
+        // The anti-alias colour is halfway between the two, as in Encore's default set.
+        assert_eq!(palette.get(3).copied(), entry([125, 125, 96]));
+        assert_eq!(palette.get(7).copied(), entry([196, 196, 233]));
+        assert_eq!(spu_look(&set, 0), ([0, 1, 2, 3], [0, 15, 15, 15]));
+        assert_eq!(spu_look(&set, 2), ([0, 7, 8, 9], [0, 15, 15, 15]));
+
+        if let Some(group) = set.groups.get_mut(1) {
+            group.fill = SubtitleColor {
+                rgb: [255, 0, 0],
+                opacity: 47,
+            };
+            group.stroke.opacity = 0;
+            group.antialias = Some(SubtitleColor {
+                rgb: [0, 0, 255],
+                opacity: 100,
+            });
+        }
+        let palette = subtitle_palette(&set);
+        assert_eq!(palette.get(4).copied(), entry([255, 0, 0]));
+        assert_eq!(palette.get(6).copied(), entry([0, 0, 255]));
+        assert_eq!(spu_look(&set, 1), ([0, 4, 5, 6], [0, 7, 0, 15]));
     }
 }

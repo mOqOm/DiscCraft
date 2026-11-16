@@ -129,6 +129,77 @@ impl SlideScale {
     }
 }
 
+/// The outline of a slide's subtitle (Encore's Stroke).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SlideStroke {
+    /// No outline.
+    None,
+    /// A thin outline.
+    Thin,
+    /// A medium outline (Encore's default).
+    #[default]
+    Medium,
+    /// A thick outline.
+    Thick,
+    /// The thickest outline (Encore's 極太).
+    ExtraThick,
+}
+
+impl SlideStroke {
+    /// Every choice, thinnest first.
+    pub const ALL: [SlideStroke; 5] = [
+        SlideStroke::None,
+        SlideStroke::Thin,
+        SlideStroke::Medium,
+        SlideStroke::Thick,
+        SlideStroke::ExtraThick,
+    ];
+
+    /// The name in command parameters.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SlideStroke::None => "none",
+            SlideStroke::Thin => "thin",
+            SlideStroke::Medium => "medium",
+            SlideStroke::Thick => "thick",
+            SlideStroke::ExtraThick => "extraThick",
+        }
+    }
+
+    /// Parses a command parameter.
+    pub fn parse(text: &str) -> Option<SlideStroke> {
+        Self::ALL.into_iter().find(|stroke| stroke.as_str() == text)
+    }
+
+    /// The outline's width in pixels.
+    pub fn pixels(self) -> u8 {
+        match self {
+            SlideStroke::None => 0,
+            SlideStroke::Thin => 1,
+            SlideStroke::Medium => 2,
+            SlideStroke::Thick => 3,
+            SlideStroke::ExtraThick => 4,
+        }
+    }
+}
+
+fn is_default_stroke(stroke: &SlideStroke) -> bool {
+    *stroke == SlideStroke::Medium
+}
+
+fn is_first_group(group: &u8) -> bool {
+    *group == 0
+}
+
+fn bottom_aligned() -> u8 {
+    100
+}
+
+fn is_bottom_aligned(percent: &u8) -> bool {
+    *percent == 100
+}
+
 fn is_default_scale(scale: &SlideScale) -> bool {
     *scale == SlideScale::ScaleAndMatte
 }
@@ -168,6 +239,30 @@ pub struct Slide {
     /// The transition into this slide when it differs from the show's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition: Option<SlideTransition>,
+    /// Encore's "Create Subtitle": the slide's name is shown as a subtitle while the slide is up.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subtitle: bool,
+    /// The slide's own name; empty means the picture's name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// The slide's description.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Encore's "Include: Name" turned off: the subtitle leaves the name out.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subtitle_without_name: bool,
+    /// Encore's "Include: Description": the subtitle shows the description.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subtitle_description: bool,
+    /// Encore's Stroke of the subtitle: the outline around its letters.
+    #[serde(default, skip_serializing_if = "is_default_stroke")]
+    pub subtitle_stroke: SlideStroke,
+    /// Encore's Alignment of the subtitle: where it sits from the top (0) to the bottom (100), in percent.
+    #[serde(default = "bottom_aligned", skip_serializing_if = "is_bottom_aligned")]
+    pub subtitle_align: u8,
+    /// Encore's Highlight of the subtitle: the colour group (from 0) it uses.
+    #[serde(default, skip_serializing_if = "is_first_group")]
+    pub subtitle_group: u8,
 }
 
 /// Slideshow document object.
@@ -194,6 +289,9 @@ pub struct Slideshow {
     /// the audio.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fit_to_audio: bool,
+    /// The show's own colour set for its slides' subtitles (`None`: the default set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle_colors: Option<crate::SubtitleColorSet>,
     /// Action at slideshow end.
     #[serde(default)]
     pub end_action: Link,
@@ -380,6 +478,7 @@ impl Project {
                 audio_clips: Vec::new(),
                 loop_audio: false,
                 fit_to_audio: false,
+                subtitle_colors: None,
             },
         );
 
@@ -424,6 +523,14 @@ impl Project {
             duration,
             scale: SlideScale::default(),
             transition: None,
+            subtitle: false,
+            name: String::new(),
+            description: String::new(),
+            subtitle_without_name: false,
+            subtitle_description: false,
+            subtitle_stroke: SlideStroke::default(),
+            subtitle_align: 100,
+            subtitle_group: 0,
         });
         Ok(index)
     }
@@ -508,6 +615,24 @@ impl Project {
             .get_mut(index)
             .ok_or_else(|| ProjectError::Invalid("slide index out of range".to_string()))?;
         slide.scale = scale;
+        Ok(())
+    }
+
+    /// Encore's "Create Subtitle" on a slide: its name becomes a subtitle shown while the slide is up.
+    pub fn set_slide_subtitle(
+        &mut self,
+        id: u64,
+        index: usize,
+        on: bool,
+    ) -> Result<(), ProjectError> {
+        let slide = self
+            .slideshows
+            .get_mut(&id)
+            .ok_or_else(|| ProjectError::Invalid("slideshow does not exist".to_string()))?
+            .slides
+            .get_mut(index)
+            .ok_or_else(|| ProjectError::Invalid("slide index out of range".to_string()))?;
+        slide.subtitle = on;
         Ok(())
     }
 
@@ -1068,5 +1193,236 @@ mod tests {
         assert!(project.playlist(99).is_none());
         assert!(project.slideshow_mut(99).is_none());
         assert!(project.playlist_mut(99).is_none());
+    }
+}
+
+impl Project {
+    /// A slide's name: its own, or the picture's when it has none (Encore gives a slide the picture's name and
+    /// keeps it when the picture is replaced).
+    #[must_use]
+    pub fn slide_name(&self, slide: &Slide) -> String {
+        let own = slide.name.trim();
+        if own.is_empty() {
+            self.assets
+                .get(&slide.asset)
+                .map(|asset| asset.name.trim().to_owned())
+                .unwrap_or_default()
+        } else {
+            own.to_owned()
+        }
+    }
+
+    /// The subtitle of a slide with Encore's "Create Subtitle": its name and its description, as "Include" says
+    /// (the name on the first line). Empty when the slide has no subtitle or nothing to show.
+    #[must_use]
+    pub fn slide_subtitle_text(&self, slide: &Slide) -> String {
+        if !slide.subtitle {
+            return String::new();
+        }
+        let mut lines = Vec::new();
+        if !slide.subtitle_without_name {
+            lines.push(self.slide_name(slide));
+        }
+        if slide.subtitle_description {
+            lines.push(slide.description.trim().to_owned());
+        }
+        lines.retain(|line| !line.is_empty());
+        lines.join("\n")
+    }
+
+    /// A slide's name and description (`None` leaves one as it is).
+    pub fn set_slide_text(
+        &mut self,
+        id: u64,
+        index: usize,
+        name: Option<String>,
+        description: Option<String>,
+    ) -> Result<(), ProjectError> {
+        let slide = self
+            .slideshows
+            .get_mut(&id)
+            .ok_or_else(|| ProjectError::Invalid("slideshow does not exist".to_string()))?
+            .slides
+            .get_mut(index)
+            .ok_or_else(|| ProjectError::Invalid("slide index out of range".to_string()))?;
+        if let Some(name) = name {
+            slide.name = name;
+        }
+        if let Some(description) = description {
+            slide.description = description;
+        }
+        Ok(())
+    }
+
+    /// Gives a slideshow its own colour set for its slides' subtitles (`None`: back to the default).
+    pub fn set_slideshow_subtitle_colors(
+        &mut self,
+        id: u64,
+        colors: Option<crate::SubtitleColorSet>,
+    ) -> Result<(), ProjectError> {
+        if let Some(set) = &colors
+            && set
+                .groups
+                .iter()
+                .any(|group| group.fill.opacity > 100 || group.stroke.opacity > 100)
+        {
+            return Err(ProjectError::Invalid(
+                "opacity is 0 to 100 percent".to_string(),
+            ));
+        }
+        let slideshow = self
+            .slideshows
+            .get_mut(&id)
+            .ok_or_else(|| ProjectError::Invalid("slideshow does not exist".to_string()))?;
+        slideshow.subtitle_colors = colors.filter(|set| *set != crate::SubtitleColorSet::default());
+        Ok(())
+    }
+
+    /// Encore's Highlight of a slide's subtitle: its colour group (from 0).
+    pub fn set_slide_subtitle_group(
+        &mut self,
+        id: u64,
+        index: usize,
+        group: u8,
+    ) -> Result<(), ProjectError> {
+        if group >= crate::SubtitleColorSet::GROUPS {
+            return Err(ProjectError::Invalid(
+                "a colour set has three groups".to_string(),
+            ));
+        }
+        let slide = self
+            .slideshows
+            .get_mut(&id)
+            .ok_or_else(|| ProjectError::Invalid("slideshow does not exist".to_string()))?
+            .slides
+            .get_mut(index)
+            .ok_or_else(|| ProjectError::Invalid("slide index out of range".to_string()))?;
+        slide.subtitle_group = group;
+        Ok(())
+    }
+
+    /// Encore's Stroke and Alignment of a slide's subtitle (`None` leaves one as it is; the alignment is a percentage
+    /// from the top, at most 100).
+    pub fn set_slide_subtitle_look(
+        &mut self,
+        id: u64,
+        index: usize,
+        stroke: Option<SlideStroke>,
+        align: Option<u8>,
+    ) -> Result<(), ProjectError> {
+        if align.is_some_and(|align| align > 100) {
+            return Err(ProjectError::Invalid(
+                "subtitle alignment is 0 to 100 percent".to_string(),
+            ));
+        }
+        let slide = self
+            .slideshows
+            .get_mut(&id)
+            .ok_or_else(|| ProjectError::Invalid("slideshow does not exist".to_string()))?
+            .slides
+            .get_mut(index)
+            .ok_or_else(|| ProjectError::Invalid("slide index out of range".to_string()))?;
+        if let Some(stroke) = stroke {
+            slide.subtitle_stroke = stroke;
+        }
+        if let Some(align) = align {
+            slide.subtitle_align = align;
+        }
+        Ok(())
+    }
+
+    /// Encore's "Include" of a slide's subtitle: the name, the description.
+    pub fn set_slide_subtitle_parts(
+        &mut self,
+        id: u64,
+        index: usize,
+        name: bool,
+        description: bool,
+    ) -> Result<(), ProjectError> {
+        let slide = self
+            .slideshows
+            .get_mut(&id)
+            .ok_or_else(|| ProjectError::Invalid("slideshow does not exist".to_string()))?
+            .slides
+            .get_mut(index)
+            .ok_or_else(|| ProjectError::Invalid("slide index out of range".to_string()))?;
+        slide.subtitle_without_name = !name;
+        slide.subtitle_description = description;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod slide_text_tests {
+    use crate::model::Project;
+    use filmcraft_time::Tick;
+
+    /// Encore: a slide takes the picture's name; "Include" chooses the name and the description.
+    #[test]
+    fn a_slides_subtitle_is_its_name_and_description() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::default();
+        let dir = std::env::temp_dir();
+        let image = project.add_asset(&dir.join("disccraft-slide-text.png"))?;
+        let show = project.add_slideshow(None)?;
+        let index = project.add_slide(show, image, Tick(filmcraft_time::TICKS_PER_SECOND))?;
+        let text = |project: &Project| {
+            project
+                .slideshow(show)
+                .and_then(|show| show.slides.get(index))
+                .map(|slide| project.slide_subtitle_text(slide))
+                .unwrap_or_default()
+        };
+        assert_eq!(text(&project), "");
+        project.set_slide_subtitle(show, index, true)?;
+        assert_eq!(text(&project), "disccraft-slide-text");
+        project.set_slide_text(show, index, None, Some("By the sea".to_owned()))?;
+        assert_eq!(text(&project), "disccraft-slide-text");
+        project.set_slide_subtitle_parts(show, index, true, true)?;
+        assert_eq!(text(&project), "disccraft-slide-text\nBy the sea");
+        project.set_slide_text(show, index, Some("Beach".to_owned()), None)?;
+        project.set_slide_subtitle_parts(show, index, false, true)?;
+        assert_eq!(text(&project), "By the sea");
+        project.set_slide_subtitle_parts(show, index, false, false)?;
+        assert_eq!(text(&project), "");
+        // The look: a stroke and a place from the top; more than 100 % is refused.
+        project.set_slide_subtitle_look(show, index, Some(crate::SlideStroke::Thick), Some(0))?;
+        assert!(
+            project
+                .set_slide_subtitle_look(show, index, None, Some(101))
+                .is_err()
+        );
+        let slide = project
+            .slideshow(show)
+            .and_then(|show| show.slides.get(index))
+            .ok_or("no slide")?;
+        assert_eq!(slide.subtitle_stroke.pixels(), 3);
+        assert_eq!(slide.subtitle_align, 0);
+        // The show's own colour set: kept when it differs from the default, refused past 100 % opacity.
+        let mut colors = crate::SubtitleColorSet::default();
+        project.set_slideshow_subtitle_colors(show, Some(colors))?;
+        assert!(
+            project
+                .slideshow(show)
+                .ok_or("no show")?
+                .subtitle_colors
+                .is_none()
+        );
+        if let Some(group) = colors.groups.first_mut() {
+            group.fill.rgb = [255, 0, 0];
+        }
+        project.set_slideshow_subtitle_colors(show, Some(colors))?;
+        assert_eq!(
+            project.slideshow(show).ok_or("no show")?.subtitle_colors,
+            Some(colors)
+        );
+        if let Some(group) = colors.groups.first_mut() {
+            group.fill.opacity = 101;
+        }
+        assert!(
+            project
+                .set_slideshow_subtitle_colors(show, Some(colors))
+                .is_err()
+        );
+        Ok(())
     }
 }

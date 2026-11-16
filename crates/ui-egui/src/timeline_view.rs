@@ -151,14 +151,18 @@ fn marker_time(drag: Option<MarkerDrag>, index: usize, chapter_time: f64) -> f64
 }
 
 /// Cached result of probing a timeline's video asset.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct DurationProbe {
-    /// Asset id that was probed.
-    asset: u64,
+    /// The video clips that were probed (the first clip and the ones after it).
+    videos: Vec<u64>,
     /// Whether the probe has already been attempted.
     done: bool,
     /// Probed duration in seconds, or zero when unknown.
     seconds: f64,
+    /// Where each clip after the first starts, in seconds.
+    joins: Vec<f64>,
+    /// Where every clip plays, as (start, end) in seconds (empty: one clip over the whole duration).
+    spans: Vec<(f64, f64)>,
 }
 
 /// Drag state for a chapter marker.
@@ -208,6 +212,16 @@ struct TimelineSnapshot {
     video: u64,
     /// Video asset display name.
     asset_name: String,
+    /// The video clips after the first (Encore: more videos butted on to the end): asset id and name.
+    more_video: Vec<(u64, String)>,
+    /// Where each of those clips starts, in seconds (filled in with the duration).
+    joins: Vec<f64>,
+    /// Where every clip plays, as (start, end) in seconds (filled in with the duration).
+    spans: Vec<(f64, f64)>,
+    /// The empty stretches in front of the clips, in frames (so a moved clip is measured again).
+    gaps: Vec<u64>,
+    /// The clips' trims as numbers (start, end + 1 or 0), so a changed trim is measured again.
+    trims: Vec<u64>,
     /// Chapter snapshots.
     chapters: Vec<ChapterSnapshot>,
     /// Audio and subtitle tracks, in that order.
@@ -253,6 +267,8 @@ struct TimelineFrame<'a> {
     last: Option<egui::TextureHandle>,
     /// Whether chapter names are drawn next to the chapter points (View ▸ Show Chapter Names).
     show_names: bool,
+    /// A video clip being dragged along the track: the clip and how far, in seconds.
+    clip_move: Option<(usize, f64)>,
 }
 
 /// Timeline view methods for the desktop application.
@@ -260,7 +276,34 @@ impl DiscCraftApp {
     /// Draws the timeline viewer for one title timeline: a header column (the big current time, the toolbar, the track
     /// names and languages) beside the ruler and the tracks, and under them the timeline switcher and the Craft
     /// apps' zoom scroll bar (ROADMAP M9.8).
+    /// A Project panel row dragged over the timeline viewer: outlines the viewer, and on release adds the item as a
+    /// track ([`DiscCraftApp::drop_on_timeline`]).
+    fn accept_timeline_drop(&mut self, ui: &Ui, id: TimelineId, area: Rect) {
+        let Some(payload) = egui::DragAndDrop::payload::<crate::project_panel::DragRow>(ui.ctx())
+        else {
+            return;
+        };
+        if !ui
+            .input(|i| i.pointer.interact_pos())
+            .is_some_and(|at| area.contains(at))
+        {
+            return;
+        }
+        let _ = ui.painter().rect_stroke(
+            area.shrink(2.0),
+            4.0,
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(0x4a, 0x90, 0xff)),
+            egui::StrokeKind::Inside,
+        );
+        if !ui.input(|i| i.pointer.any_released()) {
+            return;
+        }
+        let _ = egui::DragAndDrop::take_payload::<crate::project_panel::DragRow>(ui.ctx());
+        self.drop_on_timeline(id, payload.0);
+    }
+
     pub(crate) fn timeline_view(&mut self, ui: &mut Ui, id: TimelineId) {
+        let area = ui.max_rect();
         // 字幕トラックの字幕を読んでおく（スナップショットに入れて、トラックの上に並べる）。
         self.load_timeline_cues(id);
         let Some(mut snapshot) = self.timeline_snapshot(id) else {
@@ -274,13 +317,13 @@ impl DiscCraftApp {
                 .project
                 .assets
                 .get(&track.asset)
-                .map(|asset| std::path::PathBuf::from(&asset.path))
+                .map(|asset| asset.media_file().into_owned())
             {
                 track.peaks = self.waveforms.get(track.asset.0, path, ui.ctx());
             }
         }
 
-        let duration = self.timeline_duration(ui, &snapshot);
+        let duration = self.timeline_duration(ui, &mut snapshot);
         let view_key = timeline_key("timeline_view", id.0);
         let mut view = ui
             .data(|data| data.get_temp::<craft_timeline::View>(view_key))
@@ -343,6 +386,7 @@ impl DiscCraftApp {
             });
         ui.data_mut(|data| data.insert_temp(view_key, view));
         timeline_store_state(ui, id, &interaction);
+        self.accept_timeline_drop(ui, id, area);
     }
 
     /// The canvas with the ruler, the video and track bars, the chapter points and the playhead: the visible part of
@@ -399,6 +443,16 @@ impl DiscCraftApp {
             first,
             last,
             show_names: self.show_chapter_names,
+            clip_move: ui
+                .data(|data| {
+                    data.get_temp::<(usize, f32, f32)>(timeline_key("clip_move_drag", id.0))
+                })
+                .map(|(clip, pressed_x, now_x)| {
+                    (
+                        clip,
+                        f64::from(now_x - pressed_x) / (f64::from(BASE_SCALE) * f64::from(zoom)),
+                    )
+                }),
         };
 
         timeline_draw(&ui.painter().with_clip_rect(canvas), &frame);
@@ -406,6 +460,23 @@ impl DiscCraftApp {
         self.timeline_handle_input(ui, &frame, &response, interaction);
         if interaction.selected != before {
             self.focus_chapter(id, interaction.selected);
+        }
+        // A click on a subtitle clip selects it: the Properties panel shows the subtitle clip (as in Encore). A
+        // click anywhere else in the viewer lets go of it.
+        if response.clicked()
+            && let Some(point) = response.interact_pointer_pos()
+        {
+            match cue_at_point(&frame, point) {
+                Some((track, cue)) => {
+                    self.select(crate::app::Selection::Timeline(id));
+                    self.cue_focus = Some((id, track, cue));
+                }
+                None => {
+                    if self.cue_focus.is_some_and(|(focused, _, _)| focused == id) {
+                        self.cue_focus = None;
+                    }
+                }
+            }
         }
         self.timeline_context_menu(ui, &frame, &response, id, interaction);
     }
@@ -461,10 +532,42 @@ impl DiscCraftApp {
 
         let tracks = self.track_rows(timeline);
 
+        let more_video = timeline
+            .more_video
+            .iter()
+            .map(|asset| {
+                let name = self
+                    .session
+                    .project
+                    .assets
+                    .get(asset)
+                    .map_or_else(String::new, |found| found.name.clone());
+                (asset.0, name)
+            })
+            .collect();
+
         Some(TimelineSnapshot {
             id: id.0,
             video: timeline.video.0,
             asset_name,
+            more_video,
+            joins: Vec::new(),
+            spans: Vec::new(),
+            gaps: timeline
+                .video_gaps
+                .iter()
+                .map(|gap| u64::from(*gap))
+                .collect(),
+            trims: timeline
+                .video_trims
+                .iter()
+                .flat_map(|trim| {
+                    [
+                        u64::from(trim.start),
+                        trim.end.map_or(0, |end| u64::from(end).saturating_add(1)),
+                    ]
+                })
+                .collect(),
             chapters,
             tracks,
             fps_num,
@@ -514,28 +617,72 @@ impl DiscCraftApp {
     }
 
     /// Returns the timeline duration, probing the video asset once per timeline.
-    fn timeline_duration(&mut self, ui: &mut Ui, snapshot: &TimelineSnapshot) -> f64 {
+    fn timeline_duration(&mut self, ui: &mut Ui, snapshot: &mut TimelineSnapshot) -> f64 {
         let key = timeline_key("timeline_duration", snapshot.id);
+        let videos: Vec<u64> = std::iter::once(snapshot.video)
+            .chain(snapshot.more_video.iter().map(|(asset, _)| *asset))
+            // A marker no asset id takes, then the trims: a different trim is a different measurement.
+            .chain(std::iter::once(u64::MAX))
+            .chain(snapshot.trims.iter().copied())
+            // And the gaps: a moved clip is another measurement too.
+            .chain(std::iter::once(u64::MAX))
+            .chain(snapshot.gaps.iter().copied())
+            .collect();
         let mut probe = match ui.data(|data| data.get_temp::<DurationProbe>(key)) {
-            Some(probe) if probe.asset == snapshot.video => probe,
+            Some(probe) if probe.videos == videos => probe,
             _ => DurationProbe {
-                asset: snapshot.video,
+                videos,
                 done: false,
                 seconds: 0.0,
+                joins: Vec::new(),
+                spans: Vec::new(),
             },
         };
 
         if !probe.done {
             probe.done = true;
-            if let Some(value) = self.run_query("asset.probe", json!({"asset": snapshot.video}))
-                && let Some(seconds) = value.get("seconds").and_then(Value::as_f64)
-                && seconds.is_finite()
-                && seconds > 0.0
+            if snapshot.more_video.is_empty()
+                && snapshot.trims.is_empty()
+                && snapshot.gaps.iter().all(|gap| *gap == 0)
             {
-                probe.seconds = seconds;
+                if let Some(value) = self.run_query("asset.probe", json!({"asset": snapshot.video}))
+                    && let Some(seconds) = value.get("seconds").and_then(Value::as_f64)
+                    && seconds.is_finite()
+                    && seconds > 0.0
+                {
+                    probe.seconds = seconds;
+                }
+            } else if let Some(value) =
+                self.run_query("timeline.clips", json!({"timeline": snapshot.id}))
+            {
+                // Several clips: the engine adds their lengths up (frame-exact for MPEG-2 streams).
+                let seconds =
+                    |field: Option<&Value>| field.and_then(Value::as_i64).map(ticks_to_seconds);
+                probe.seconds = seconds(value.get("duration")).unwrap_or(0.0);
+                probe.spans = value
+                    .get("clips")
+                    .and_then(Value::as_array)
+                    .map(|clips| {
+                        clips
+                            .iter()
+                            .filter_map(|clip| {
+                                let start = seconds(clip.get("start"))?;
+                                Some((start, start + seconds(clip.get("duration"))?))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                probe.joins = probe
+                    .spans
+                    .iter()
+                    .skip(1)
+                    .map(|(start, _)| *start)
+                    .collect();
             }
-            ui.data_mut(|data| data.insert_temp(key, probe));
+            ui.data_mut(|data| data.insert_temp(key, probe.clone()));
         }
+        snapshot.joins.clone_from(&probe.joins);
+        snapshot.spans.clone_from(&probe.spans);
 
         if probe.seconds > 0.0 {
             probe.seconds
@@ -729,8 +876,40 @@ impl DiscCraftApp {
                     craft_timeline::style::TRACK_TARGET,
                 )
             };
-            let name_x = if track.subtitle { 64.0 } else { 44.0 };
+            let name_x = 64.0;
             header_row(&painter, row, &badge, color, &track.label, name_x);
+            if !track.subtitle {
+                // The speaker marks the audio track heard in the monitor (Encore: the box at the left of an audio
+                // track's header; a new track takes it).
+                let speaker = Rect::from_center_size(
+                    egui::pos2(row.min.x + 49.0, row.center().y),
+                    egui::vec2(18.0, 18.0),
+                );
+                let response = ui
+                    .interact(
+                        speaker,
+                        Id::unique("audio_heard").with((id.0, track.index)),
+                        egui::Sense::click(),
+                    )
+                    .on_hover_text(tl!("Hear This Track in Monitor"));
+                let heard = self.heard_audio(id) == Some(track.index);
+                if response.hovered() {
+                    painter.rect_filled(speaker.expand(2.0), 3.0, craft_timeline::style::HOVER);
+                }
+                paint_speaker(
+                    &painter,
+                    speaker.shrink(3.0),
+                    if heard {
+                        craft_timeline::style::ICON_ACTIVE
+                    } else {
+                        craft_timeline::style::TEXT_DIM
+                    },
+                    heard,
+                );
+                if response.clicked() {
+                    self.set_heard_audio(id, track.index);
+                }
+            }
             if track.subtitle {
                 // The eye shows the track's subtitles in the monitor (Encore: one track or none).
                 let eye = Rect::from_center_size(
@@ -820,7 +999,25 @@ impl DiscCraftApp {
             return;
         };
         let duration = frame.duration;
+        // The clip under the pointer (Encore: Clear on a clip); a timeline's only clip stays.
+        let clips = frame.snapshot.joins.len().saturating_add(1);
+        let clip = frame
+            .snapshot
+            .joins
+            .iter()
+            .filter(|join| **join <= time)
+            .count();
         let _ = response.context_menu(|ui| {
+            if clips > 1 {
+                if ui.button(tl!("Clear Video Clip")).clicked() {
+                    let _ = self.run_command(
+                        "timeline.removeVideo",
+                        json!({"timeline": id.0, "clip": clip}),
+                    );
+                    ui.close();
+                }
+                let _ = ui.separator();
+            }
             if ui.button(tl!("Add Chapter Point Here")).clicked() {
                 let _ = self.run_command(
                     "timeline.addChapter",
@@ -905,6 +1102,94 @@ impl DiscCraftApp {
         interaction: &mut TimelineInteraction,
     ) {
         let pointer = ui.input(|input| input.pointer.interact_pos());
+
+        // A video clip's edge being dragged (Encore: trimming a clip by its edge). On release the engine moves
+        // the in or out point to the nearest GOP start.
+        let edge_key = timeline_key("clip_edge_drag", frame.snapshot.id);
+        if let Some((clip, out_edge)) = ui.data(|data| data.get_temp::<(usize, bool)>(edge_key)) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            if ui.input(|input| input.pointer.any_released()) {
+                ui.data_mut(|data| data.remove::<(usize, bool)>(edge_key));
+                if let Some(point) = pointer {
+                    let time = x_to_time(point.x, frame.origin_x, frame.zoom).max(0.0);
+                    let _ = self.run_command(
+                        "timeline.trimVideo",
+                        json!({
+                            "timeline": frame.snapshot.id,
+                            "clip": clip,
+                            "edge": if out_edge { "out" } else { "in" },
+                            "time": seconds_to_ticks(time),
+                        }),
+                    );
+                }
+            }
+            return;
+        }
+        // A video clip's body being dragged (Encore: moving a clip along the track). On release the engine puts
+        // the clip there, by frames, between its neighbours.
+        let move_key = timeline_key("clip_move_drag", frame.snapshot.id);
+        if let Some((clip, pressed_x, _)) =
+            ui.data(|data| data.get_temp::<(usize, f32, f32)>(move_key))
+        {
+            let now_x = pointer.map_or(pressed_x, |point| point.x);
+            if ui.input(|input| input.pointer.any_released()) {
+                ui.data_mut(|data| data.remove::<(usize, f32, f32)>(move_key));
+                // A press and release without moving is a click, not a move.
+                if (now_x - pressed_x).abs() >= 3.0
+                    && let Some((start, _)) = clip_spans_of(frame).get(clip).copied()
+                {
+                    let shift = f64::from(now_x - pressed_x)
+                        / (f64::from(BASE_SCALE) * f64::from(frame.zoom));
+                    let _ = self.run_command(
+                        "timeline.moveVideo",
+                        json!({
+                            "timeline": frame.snapshot.id,
+                            "clip": clip,
+                            "time": seconds_to_ticks((start + shift).max(0.0)),
+                        }),
+                    );
+                }
+            } else {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                ui.data_mut(|data| data.insert_temp(move_key, (clip, pressed_x, now_x)));
+                ui.ctx().request_repaint();
+            }
+            return;
+        }
+        if let Some(point) = pointer
+            && frame.canvas.contains(point)
+            && response.contains_pointer()
+            && interaction.drag.is_none()
+            && let Some(clip) = clip_body_at(frame, point)
+            && ui.input(|input| input.pointer.button_pressed(egui::PointerButton::Primary))
+            && !ui.input(|input| input.pointer.any_released())
+            // A chapter point's line runs through the clip: a press on it drags the chapter, as before.
+            && hit_marker(
+                &frame
+                    .snapshot
+                    .chapters
+                    .iter()
+                    .map(|chapter| time_to_x(chapter.time, frame.origin_x, frame.zoom))
+                    .collect::<Vec<f32>>(),
+                point.x,
+                HIT_TOLERANCE,
+            )
+            .is_none()
+        {
+            ui.data_mut(|data| data.insert_temp(move_key, (clip, point.x, point.x)));
+            return;
+        }
+        if let Some(point) = pointer
+            && frame.canvas.contains(point)
+            && response.contains_pointer()
+            && let Some(edge) = clip_edge_at(frame, point)
+        {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            if ui.input(|input| input.pointer.button_pressed(egui::PointerButton::Primary)) {
+                ui.data_mut(|data| data.insert_temp(edge_key, edge));
+                return;
+            }
+        }
 
         if let Some(drag) = interaction.drag {
             if ui.input(|input| input.pointer.any_released()) {
@@ -1175,43 +1460,149 @@ fn draw_ruler(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
     }
 }
 
+/// A small speaker (DiscCraft's own drawing): the box and cone, and two sound waves when `on`.
+fn paint_speaker(painter: &egui::Painter, rect: Rect, color: egui::Color32, on: bool) {
+    let (w, h) = (rect.width(), rect.height());
+    let at = |x: f32, y: f32| egui::pos2(rect.min.x + w * x, rect.min.y + h * y);
+    let _ = painter.add(egui::Shape::convex_polygon(
+        vec![
+            at(0.0, 0.35),
+            at(0.25, 0.35),
+            at(0.55, 0.1),
+            at(0.55, 0.9),
+            at(0.25, 0.65),
+            at(0.0, 0.65),
+        ],
+        color,
+        egui::Stroke::NONE,
+    ));
+    if on {
+        let stroke = egui::Stroke::new(1.2, color);
+        let _ = painter.line_segment([at(0.7, 0.35), at(0.7, 0.65)], stroke);
+        let _ = painter.line_segment([at(0.9, 0.2), at(0.9, 0.8)], stroke);
+    }
+}
+
+/// Where every video clip plays, as (start, end) in seconds: the measured spans, or one clip over the whole
+/// duration.
+fn clip_spans_of(frame: &TimelineFrame<'_>) -> Vec<(f64, f64)> {
+    if frame.snapshot.spans.is_empty() {
+        vec![(0.0, frame.duration)]
+    } else {
+        frame.snapshot.spans.clone()
+    }
+}
+
+/// The video clip whose body is under `point` (not its edges, which trim it).
+fn clip_body_at(frame: &TimelineFrame<'_>, point: egui::Pos2) -> Option<usize> {
+    let top = frame.canvas.min.y + VIDEO_TOP;
+    if point.y < top || point.y > top + VIDEO_HEIGHT || clip_edge_at(frame, point).is_some() {
+        return None;
+    }
+    let seconds = x_to_time(point.x, frame.origin_x, frame.zoom);
+    if point.x < frame.origin_x {
+        return None;
+    }
+    clip_spans_of(frame)
+        .iter()
+        .position(|(start, end)| seconds >= *start && seconds < *end)
+}
+
+/// The video clip edge under `point`, as (clip, whether it is the clip's out edge): within a few points of a
+/// clip's end from inside it, or of its start from inside it, on the video bar.
+fn clip_edge_at(frame: &TimelineFrame<'_>, point: egui::Pos2) -> Option<(usize, bool)> {
+    const REACH: f32 = 5.0;
+    let top = frame.canvas.min.y + VIDEO_TOP;
+    if point.y < top || point.y > top + VIDEO_HEIGHT {
+        return None;
+    }
+    for (clip, (start, end)) in clip_spans_of(frame).iter().enumerate() {
+        let (left, right) = (
+            time_to_x(*start, frame.origin_x, frame.zoom),
+            time_to_x(*end, frame.origin_x, frame.zoom),
+        );
+        if point.x <= right && right - point.x <= REACH {
+            return Some((clip, true));
+        }
+        if point.x >= left && point.x - left <= REACH {
+            return Some((clip, false));
+        }
+    }
+    None
+}
+
 /// Draws the video clip as the Craft apps draw a clip: the label colour (Iris), a lighter top edge, the name band,
 /// the head and tail frames below it, and the corner marks where the clip reaches the media's first and last frame
 /// (a title's clip is the whole file).
 fn draw_video_bar(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
     let origin_x = frame.origin_x;
-    let left = origin_x;
-    let right = time_to_x(frame.duration, origin_x, frame.zoom);
-    if right <= left {
-        return;
-    }
+    let spans = clip_spans_of(frame);
     let top = frame.canvas.min.y + VIDEO_TOP + 1.0;
-    let body = Rect::from_min_max(
-        egui::pos2(left, top),
-        egui::pos2(right, frame.canvas.min.y + VIDEO_TOP + VIDEO_HEIGHT - 1.0),
+    let bottom = frame.canvas.min.y + VIDEO_TOP + VIDEO_HEIGHT - 1.0;
+    let names = std::iter::once(frame.snapshot.asset_name.as_str()).chain(
+        frame
+            .snapshot
+            .more_video
+            .iter()
+            .map(|(_, name)| name.as_str()),
     );
-    craft_timeline::clip_body(painter, body, craft_timeline::style::CLIP_VIDEO);
-
-    // The clip's first frame at its start and its last frame at its end, below the name band.
-    let strip = Rect::from_min_max(
-        egui::pos2(body.min.x + 1.0, body.min.y + craft_timeline::NAME_BAND),
-        egui::pos2(body.max.x - 1.0, body.max.y - 1.0),
-    );
-    let thumb_width = strip.height() * 4.0 / 3.0;
-    if strip.width() > thumb_width * 2.0 + 4.0 {
-        if let Some(texture) = &frame.first {
-            let at = Rect::from_min_size(strip.min, egui::vec2(thumb_width, strip.height()));
-            crate::project_panel::draw_fitted(painter, at, texture);
+    let last = spans.len().saturating_sub(1);
+    // One body per clip (Encore: the clips on the video track, with the gaps between them left empty).
+    for (index, ((start, end), name)) in spans.iter().zip(names).enumerate() {
+        let left = time_to_x(*start, origin_x, frame.zoom);
+        let right = time_to_x(*end, origin_x, frame.zoom);
+        if right <= left {
+            continue;
         }
-        if let Some(texture) = &frame.last {
-            let at = Rect::from_min_size(
-                egui::pos2(strip.max.x - thumb_width, strip.min.y),
-                egui::vec2(thumb_width, strip.height()),
-            );
-            crate::project_panel::draw_fitted(painter, at, texture);
+        let body = Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom));
+        craft_timeline::clip_body(painter, body, craft_timeline::style::CLIP_VIDEO);
+        // The first clip's first frame at its start and the last clip's last frame at its end, below the name
+        // band.
+        let strip = Rect::from_min_max(
+            egui::pos2(body.min.x + 1.0, body.min.y + craft_timeline::NAME_BAND),
+            egui::pos2(body.max.x - 1.0, body.max.y - 1.0),
+        );
+        let thumb_width = strip.height() * 4.0 / 3.0;
+        if strip.width() > thumb_width * 2.0 + 4.0 {
+            if index == 0
+                && let Some(texture) = &frame.first
+            {
+                let at = Rect::from_min_size(strip.min, egui::vec2(thumb_width, strip.height()));
+                crate::project_panel::draw_fitted(painter, at, texture);
+            }
+            if index == last
+                && let Some(texture) = &frame.last
+            {
+                let at = Rect::from_min_size(
+                    egui::pos2(strip.max.x - thumb_width, strip.min.y),
+                    egui::vec2(thumb_width, strip.height()),
+                );
+                crate::project_panel::draw_fitted(painter, at, texture);
+            }
         }
+        craft_timeline::clip_name_and_edges(painter, body, name, true, true);
     }
-    craft_timeline::clip_name_and_edges(painter, body, &frame.snapshot.asset_name, true, true);
+    // A clip being dragged along the track (Encore: moving a clip): an outline where it would start.
+    if let Some((clip, shift)) = frame.clip_move
+        && let Some((start, end)) = spans.get(clip)
+    {
+        let ghost = Rect::from_min_max(
+            egui::pos2(
+                time_to_x((start + shift).max(0.0), origin_x, frame.zoom),
+                top,
+            ),
+            egui::pos2(
+                time_to_x((end + shift).max(0.0), origin_x, frame.zoom),
+                bottom,
+            ),
+        );
+        let _ = painter.rect_stroke(
+            ghost,
+            2.0,
+            egui::Stroke::new(1.5, craft_timeline::style::RULER_TEXT),
+            egui::StrokeKind::Inside,
+        );
+    }
 }
 
 /// Height of the ruler band at the top of the canvas (the Craft ruler: markers row, timecodes, ticks), as tall as
@@ -1370,6 +1761,27 @@ fn draw_track_bars(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
         }
         craft_timeline::clip_name_and_edges(painter, lane, &track.clip, true, true);
     }
+}
+
+/// The subtitle clip under `point`: its subtitle track (counted among the subtitle tracks) and its number.
+fn cue_at_point(frame: &TimelineFrame<'_>, point: egui::Pos2) -> Option<(usize, usize)> {
+    let seconds = x_to_time(point.x, frame.origin_x, frame.zoom);
+    if point.x < frame.origin_x {
+        return None;
+    }
+    frame
+        .snapshot
+        .tracks
+        .iter()
+        .zip(track_rows_geometry(&frame.snapshot.tracks))
+        .find_map(|(track, (top, height))| {
+            let rows = (frame.canvas.min.y + top)..=(frame.canvas.min.y + top + height);
+            let cues = track.cues.as_ref().filter(|_| rows.contains(&point.y))?;
+            let cue = cues
+                .iter()
+                .position(|cue| cue.start <= seconds && seconds < cue.end)?;
+            Some((track.index, cue))
+        })
 }
 
 /// Draws a subtitle track's cues as the Craft apps draw captions: a rounded block in the caption colour per cue, with

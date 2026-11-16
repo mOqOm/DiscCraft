@@ -19,6 +19,7 @@ mod chapter_playlist;
 mod check;
 mod check_lists;
 mod check_menu;
+pub use check_menu::{has_overlapping_buttons, overlapping_buttons};
 mod folder;
 mod graphic;
 mod hd_frame;
@@ -63,19 +64,20 @@ pub use library::{
 pub use link::Link;
 pub use lists::{
     DEFAULT_SLIDE_DURATION, DEFAULT_SLIDE_SECONDS, DEFAULT_TRANSITION_DURATION, Playlist,
-    PlaylistItem, Slide, SlideScale, SlideTransition, Slideshow, TransitionKind,
+    PlaylistItem, Slide, SlideScale, SlideStroke, SlideTransition, Slideshow, TransitionKind,
 };
 pub use menu::{
     Button, DEFAULT_TEXT_SIZE, MAX_BUTTONS, MAX_FONT_NAME_CHARS, MAX_LEADING,
     MAX_MENU_AUDIO_SECONDS, MAX_MENU_SECONDS, MAX_MENU_TEXTS, MAX_TEXT_CHARS, MAX_TEXT_SIZE,
     MAX_TRACKING, MIN_LEADING, MIN_TEXT_SIZE, MIN_TRACKING, MenuBackground, MenuText, Rect,
-    TextAlign, TextCaps, TextFormat, auto_button_rect, frame_size,
+    TextAlign, TextCaps, TextFormat, auto_button_rect, frame_size, safe_area_guides,
 };
 pub use menu::{ButtonDefaults, ButtonKind, PopupBackground, RouteOptions, WrapMode};
 pub use menu::{
     ColorSet, DEFAULT_ACTIVATED_COLOR, Guide, GuideOrientation, HighlightGroup, MAX_BUTTON_OFFSET,
     MAX_MENU_GUIDES,
 };
+pub use menu::{ContentBox, normalized_angle, rotated_bounds, rotated_bounds_about};
 pub use menu::{
     DEFAULT_NORMAL_MORE, GroupColor, NormalColor, opacity_to_alpha, opacity_to_contrast, tint,
 };
@@ -87,7 +89,12 @@ pub use menu::{MAX_TEXT_SCALE, MIN_TEXT_SCALE, TextAntialias, TextScript};
 pub use model::BdVideo;
 pub use model::{
     Asset, AssetKind, AudioTrack, Capacity, Chapter, DiscKind, DiscSettings, Menu, Project,
-    SubtitleDefault, SubtitleTrack, Timeline, VideoStandard,
+    SubtitleColor, SubtitleColorSet, SubtitleDefault, SubtitleGroup, SubtitleTrack, Timeline,
+    VideoStandard,
+};
+pub use model::{
+    ClipTrim, CueLook, MAX_COLOR_SET_NAME, MAX_COLOR_SETS, MAX_SUBTITLE_CUES, MAX_TIMELINE_CLIPS,
+    SubtitleCue, SubtitleJustify,
 };
 pub use model::{FLOWCHART_DISC, FLOWCHART_LIMIT, FlowPoint, LayerBreakPoint};
 pub use replace::{DesignButton, MenuDesign};

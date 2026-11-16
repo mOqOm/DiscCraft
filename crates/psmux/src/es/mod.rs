@@ -27,10 +27,14 @@ pub mod mpeg2v;
 /// AC-3 elementary stream parser.
 pub mod ac3;
 
+/// DTS elementary stream parser.
+pub mod dts;
+
 /// WAV to DVD LPCM parser.
 pub mod wav;
 
 pub use ac3::{Ac3Frame, Ac3Stream, parse_ac3};
+pub use dts::{DtsStream, parse_dts};
 pub use mpeg2v::{
     Picture, PictureType, SequenceInfo, VideoStream, parse_video, parse_video_reader,
 };

@@ -192,11 +192,11 @@ pub fn bounds(rects: &[Rect]) -> Option<Rect> {
     })
 }
 
-/// The safe area buttons are aligned to when "relative to safe area" is on: 5% in from each edge of the frame,
-/// the inner guide the menu viewer draws.
+/// The safe area buttons are aligned to when "relative to safe area" is on: the title-safe area, 10% in from each
+/// edge of the frame (measured in Encore CS6: 192 / 1728 / 108 / 972 on a 1920x1080 menu).
 pub fn safe_area(frame: (u16, u16)) -> Rect {
-    let inset_x = frame.0 / 20;
-    let inset_y = frame.1 / 20;
+    let inset_x = frame.0 / 10;
+    let inset_y = frame.1 / 10;
     Rect {
         x: inset_x,
         y: inset_y,
@@ -541,7 +541,7 @@ impl Project {
         checked_indexes(&indexes, target.buttons.len())?;
         for (index, rect) in rects {
             if let Some(button) = target.buttons.get_mut(*index) {
-                button.rect = *rect;
+                button.set_rect(*rect);
             }
         }
         Ok(())
@@ -599,7 +599,7 @@ impl Project {
         let area = to_safe_area.then(|| safe_area(frame));
         for (index, rect) in sorted.iter().zip(layout(&rects, area)) {
             if let Some(button) = target.buttons.get_mut(*index) {
-                button.rect = keep_in_frame(rect, frame);
+                button.set_rect(keep_in_frame(rect, frame));
             }
         }
         Ok(())
@@ -652,11 +652,12 @@ mod tests {
     #[test]
     fn align_to_the_safe_area() {
         let area = safe_area((720, 480));
-        assert_eq!(area, rect(36, 24, 648, 432));
+        assert_eq!(area, rect(72, 48, 576, 384));
+        assert_eq!(safe_area((1920, 1080)), rect(192, 108, 1536, 864));
         let one = align_rects(&[rect(300, 300, 100, 40)], Align::Top, Some(area));
-        assert_eq!(one, vec![rect(300, 24, 100, 40)]);
+        assert_eq!(one, vec![rect(300, 48, 100, 40)]);
         let one = align_rects(&[rect(300, 300, 100, 40)], Align::Right, Some(area));
-        assert_eq!(one, vec![rect(584, 300, 100, 40)]);
+        assert_eq!(one, vec![rect(548, 300, 100, 40)]);
     }
 
     #[test]
@@ -821,6 +822,11 @@ mod tests {
             orientation: Default::default(),
             thumbnail: None,
             subpicture: None,
+            label_offset: [0, 0],
+            thumbnail_offset: [0, 0],
+            body: None,
+            hidden: false,
+            locked: false,
             name: "Button 1".to_string(),
             label: "Copy".to_string(),
             rect: rect(700, 470, 100, 40),
@@ -879,8 +885,8 @@ mod tests {
         let edited = project.menu(menu).ok_or("missing menu")?;
         let first = edited.buttons.first().ok_or("missing button")?.rect;
         let last = edited.buttons.get(2).ok_or("missing button")?.rect;
-        assert_eq!(first.y, 24);
-        assert_eq!(last.y + last.h, 456);
+        assert_eq!(first.y, 48);
+        assert_eq!(last.y + last.h, 432);
         assert!(project.set_button_rects(menu, &[(3, first)]).is_err());
         Ok(())
     }

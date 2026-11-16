@@ -28,12 +28,15 @@ const AUDIO_LATE: f64 = 0.08;
 const AUDIO_RATES: std::ops::RangeInclusive<u32> = 8_000..=384_000;
 
 /// The sound of a playback: the file to take it from, and the output's rate.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PlayerAudio {
     /// An audio file, or a video file with sound.
     pub path: PathBuf,
     /// The output device's sample rate (Hz).
     pub rate: u32,
+    /// Where in the audio file to start (seconds), when that is not the picture's start position: a timeline's
+    /// audio track runs along the whole timeline while the picture is one of its clips.
+    pub from: Option<f64>,
 }
 
 #[derive(Debug, Default)]
@@ -294,7 +297,13 @@ impl Player {
 
         let audio = audio
             .filter(|audio| AUDIO_RATES.contains(&audio.rate))
-            .map(|audio| start_audio(audio, from, clock, &stop));
+            .map(|audio| {
+                let audio_from = audio
+                    .from
+                    .filter(|at| at.is_finite())
+                    .map_or(from, |at| at.max(0.0));
+                start_audio(audio, audio_from, clock, &stop)
+            });
 
         Self {
             shared,
@@ -602,6 +611,7 @@ mod tests {
             Some(PlayerAudio {
                 path: audio,
                 rate: 44_100,
+                from: None,
             }),
             0.5,
             29.97,
@@ -641,6 +651,7 @@ mod tests {
             Some(PlayerAudio {
                 path: fixture,
                 rate: 48_000,
+                from: None,
             }),
             0.0,
             29.97,
@@ -664,6 +675,7 @@ mod tests {
             Some(PlayerAudio {
                 path: PathBuf::from("no-such-audio.wav"),
                 rate: 0,
+                from: None,
             }),
             0.0,
             29.97,

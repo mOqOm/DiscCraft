@@ -12,14 +12,21 @@ pub(crate) const TICKS_PER_MS: u64 = 254_016_000;
 const FONT_DIVISOR: f32 = 18.0;
 const MIN_FONT_SIZE: f32 = 16.0;
 const BOTTOM_MARGIN: f32 = 0.08;
+/// The title-safe inset on each side, as a part of the frame's width.
+const SIDE_MARGIN: f32 = 0.10;
 
 const FILL_THRESHOLD: f32 = 0.5;
 const DILATE_THRESHOLD: f32 = 0.5;
-const OUTLINE_RADIUS: i64 = 2;
+/// The widest outline around a cue's letters, in pixels.
+const MAX_OUTLINE: u8 = 4;
 
 const TRANSPARENT: u8 = 0;
 const FILL: u8 = 1;
 const OUTLINE: u8 = 2;
+/// A pixel the letters cover only in part: drawn in the anti-alias colour, which softens their edges.
+pub const ANTIALIAS: u8 = 3;
+/// The least coverage that makes an anti-alias pixel.
+const ANTIALIAS_THRESHOLD: f32 = 0.2;
 
 const FONT_FAMILIES: [&str; 7] = [
     "Yu Gothic UI",
@@ -40,6 +47,8 @@ pub struct Cue {
     pub end: Tick,
     /// Cue text, with lines joined by `\n`.
     pub text: String,
+    /// The cue's own colour group, stroke and place (the default for cues read from a file).
+    pub look: disccraft_project::CueLook,
 }
 
 /// A rendered 2-bit subpicture bitmap.
@@ -109,6 +118,73 @@ pub fn parse_srt(text: &str) -> Result<Vec<Cue>, MenuError> {
 /// Returns [`MenuError::Invalid`] when the frame size is zero, the text is
 /// empty, or the rendered cue has no visible pixels inside the frame.
 pub fn render_cue(text: &str, frame_width: u16, frame_height: u16) -> Result<CueBitmap, MenuError> {
+    render_cue_styled(text, frame_width, frame_height, CueStyle::default())
+}
+
+/// How a cue is drawn (Encore's subtitle Stroke and Alignment).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CueStyle {
+    /// The outline around the letters, in pixels (0: none).
+    pub outline: u8,
+    /// Where the text sits between the top (0) and the bottom (100) of the subtitle area, in percent.
+    pub vertical: u8,
+    /// Which side the lines are set to: centred in the frame, or from an edge of the title-safe area.
+    pub horizontal: disccraft_project::SubtitleJustify,
+}
+
+impl Default for CueStyle {
+    /// A medium outline at the bottom.
+    fn default() -> Self {
+        Self {
+            outline: 2,
+            vertical: 100,
+            horizontal: disccraft_project::SubtitleJustify::Center,
+        }
+    }
+}
+
+/// Whether a subtitle's text does not fit the subtitle area of a frame: wider than the title-safe width (a line
+/// that cannot be broken) or, with its line breaks, taller than the title-safe height. Such
+/// text reaches into the edges a television may hide, or off the frame. Text that cannot be laid out fits.
+#[must_use]
+pub fn cue_overflows(text: &str, frame_width: u16, frame_height: u16) -> bool {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let text = strip_tags_text(text);
+    if text.trim().is_empty() || frame_width == 0 || frame_height == 0 {
+        return false;
+    }
+    let family = choose_family();
+    let style = text_style(&family, font_size(frame_height));
+    let safe_width = f32::from(frame_width) * (1.0 - 2.0 * SIDE_MARGIN);
+    // Laid out in the title-safe width, as the text frame of Encore's subtitles.
+    let para = ParagraphStyle {
+        align: Align::Center,
+        width: Some(safe_width),
+        ..ParagraphStyle::default()
+    };
+    let [x0, y0, x1, y1] = layout(&text, &style, &para).bounds;
+    let (width, height) = (x1 - x0, y1 - y0);
+    if !width.is_finite() || !height.is_finite() {
+        return false;
+    }
+    // The title-safe height as well: Encore's subtitle text frame is the title-safe box (80 % of the frame each
+    // way; ten lines of the default size fit an NTSC frame), and its check reports text that runs out of it.
+    let room = f32::from(frame_height) * (1.0 - 2.0 * SIDE_MARGIN);
+    width > safe_width + 1.0 || height > room
+}
+
+/// [`render_cue`] with a chosen outline and vertical place.
+///
+/// # Errors
+///
+/// As [`render_cue`].
+pub fn render_cue_styled(
+    text: &str,
+    frame_width: u16,
+    frame_height: u16,
+    cue_style: CueStyle,
+) -> Result<CueBitmap, MenuError> {
+    let radius = i64::from(cue_style.outline.min(MAX_OUTLINE));
     if frame_width == 0 || frame_height == 0 {
         return Err(MenuError::Invalid(
             "frame dimensions must be non-zero".to_string(),
@@ -125,7 +201,11 @@ pub fn render_cue(text: &str, frame_width: u16, frame_height: u16) -> Result<Cue
     let family = choose_family();
     let style = text_style(&family, font_size(frame_height));
     let para = ParagraphStyle {
-        align: Align::Center,
+        align: match cue_style.horizontal {
+            disccraft_project::SubtitleJustify::Left => Align::Left,
+            disccraft_project::SubtitleJustify::Center => Align::Center,
+            disccraft_project::SubtitleJustify::Right => Align::Right,
+        },
         width: Some(f32::from(frame_width)),
         ..ParagraphStyle::default()
     };
@@ -137,7 +217,7 @@ pub fn render_cue(text: &str, frame_width: u16, frame_height: u16) -> Result<Cue
         ));
     }
 
-    let [x0, _y0, x1, y1] = layout.bounds;
+    let [x0, y0, x1, y1] = layout.bounds;
     let frame_w_f = f32::from(frame_width);
     let frame_h_f = f32::from(frame_height);
     let text_w = x1 - x0;
@@ -146,9 +226,18 @@ pub fn render_cue(text: &str, frame_width: u16, frame_height: u16) -> Result<Cue
         return Err(MenuError::Invalid("cue bounds are not finite".to_string()));
     }
 
-    let x = (frame_w_f - text_w) * 0.5 - x0;
+    // Left and right stand on the title-safe edges (a tenth of the frame in from each side, as Encore's subtitle
+    // text frame).
+    let x = match cue_style.horizontal {
+        disccraft_project::SubtitleJustify::Left => frame_w_f * SIDE_MARGIN - x0,
+        disccraft_project::SubtitleJustify::Center => (frame_w_f - text_w) * 0.5 - x0,
+        disccraft_project::SubtitleJustify::Right => frame_w_f * (1.0 - SIDE_MARGIN) - x1,
+    };
+    // The subtitle area leaves the same margin at the top and the bottom; at 100 % the text stands on its bottom.
+    let top = frame_h_f * BOTTOM_MARGIN;
     let bottom = frame_h_f * (1.0 - BOTTOM_MARGIN);
-    let y = bottom - y1;
+    let room = bottom - top - (y1 - y0);
+    let y = top + room * f32::from(cue_style.vertical.min(100)) / 100.0 - y0;
 
     if !x.is_finite() || !y.is_finite() {
         return Err(MenuError::Invalid(
@@ -161,8 +250,8 @@ pub fn render_cue(text: &str, frame_width: u16, frame_height: u16) -> Result<Cue
         return Err(MenuError::Invalid("cue produced no pixels".to_string()));
     }
 
-    let bbox = bounding_box(&mask, mask_x, mask_y, frame_width, frame_height)?;
-    let pixels = rasterize_pixels(&mask, mask_x, mask_y, &bbox)?;
+    let bbox = bounding_box(&mask, mask_x, mask_y, (frame_width, frame_height), radius)?;
+    let pixels = rasterize_pixels(&mask, mask_x, mask_y, &bbox, radius)?;
 
     Ok(CueBitmap {
         x: bbox.x,
@@ -203,7 +292,12 @@ pub(crate) fn process_block(
         return Ok(());
     }
 
-    cues.push(Cue { start, end, text });
+    cues.push(Cue {
+        start,
+        end,
+        text,
+        look: disccraft_project::CueLook::default(),
+    });
 
     if cues.len() > MAX_CUES {
         return Err(MenuError::Invalid("too many srt cues".to_string()));
@@ -536,8 +630,8 @@ fn bounding_box(
     mask: &Mask,
     mask_x: i32,
     mask_y: i32,
-    frame_width: u16,
-    frame_height: u16,
+    (frame_width, frame_height): (u16, u16),
+    radius: i64,
 ) -> Result<BBox, MenuError> {
     if frame_width == 0 || frame_height == 0 {
         return Err(MenuError::Invalid(
@@ -585,16 +679,16 @@ fn bounding_box(
             }
 
             if strong {
-                let Some(x0) = dx.checked_sub(OUTLINE_RADIUS) else {
+                let Some(x0) = dx.checked_sub(radius) else {
                     continue;
                 };
-                let Some(x1) = dx.checked_add(OUTLINE_RADIUS) else {
+                let Some(x1) = dx.checked_add(radius) else {
                     continue;
                 };
-                let Some(y0) = dy.checked_sub(OUTLINE_RADIUS) else {
+                let Some(y0) = dy.checked_sub(radius) else {
                     continue;
                 };
-                let Some(y1) = dy.checked_add(OUTLINE_RADIUS) else {
+                let Some(y1) = dy.checked_add(radius) else {
                     continue;
                 };
 
@@ -611,6 +705,7 @@ fn rasterize_pixels(
     mask_x: i32,
     mask_y: i32,
     bbox: &BBox,
+    radius: i64,
 ) -> Result<Vec<u8>, MenuError> {
     let width = usize::from(bbox.width);
     let height = usize::from(bbox.height);
@@ -643,7 +738,9 @@ fn rasterize_pixels(
 
             let value = if fill_at_device(mask, mask_x, mask_y, dx, dy) {
                 FILL
-            } else if dilated_at_device(mask, mask_x, mask_y, dx, dy) {
+            } else if partly_covered(mask, (mask_x, mask_y), dx, dy) {
+                ANTIALIAS
+            } else if radius > 0 && dilated_at_device(mask, (mask_x, mask_y), dx, dy, radius) {
                 OUTLINE
             } else {
                 TRANSPARENT
@@ -658,6 +755,19 @@ fn rasterize_pixels(
     }
 
     Ok(pixels)
+}
+
+/// Whether the letters cover the device pixel in part: less than a fill pixel, enough to show.
+fn partly_covered(mask: &Mask, (mask_x, mask_y): (i32, i32), dx: i64, dy: i64) -> bool {
+    let at = |device: i64, origin: i32| {
+        device
+            .checked_sub(i64::from(origin))
+            .and_then(|value| usize::try_from(value).ok())
+    };
+    let (Some(mx), Some(my)) = (at(dx, mask_x), at(dy, mask_y)) else {
+        return false;
+    };
+    alpha_at(mask, mx, my).is_some_and(|a| (ANTIALIAS_THRESHOLD..FILL_THRESHOLD).contains(&a))
 }
 
 fn fill_at_device(mask: &Mask, mask_x: i32, mask_y: i32, dx: i64, dy: i64) -> bool {
@@ -682,11 +792,17 @@ fn fill_at_device(mask: &Mask, mask_x: i32, mask_y: i32, dx: i64, dy: i64) -> bo
     alpha_at(mask, mx, my).is_some_and(|a| a >= FILL_THRESHOLD)
 }
 
-fn dilated_at_device(mask: &Mask, mask_x: i32, mask_y: i32, dx: i64, dy: i64) -> bool {
+fn dilated_at_device(
+    mask: &Mask,
+    (mask_x, mask_y): (i32, i32),
+    dx: i64,
+    dy: i64,
+    radius: i64,
+) -> bool {
     let mask_x_i = i64::from(mask_x);
     let mask_y_i = i64::from(mask_y);
 
-    for off_y in -OUTLINE_RADIUS..=OUTLINE_RADIUS {
+    for off_y in -radius..=radius {
         let Some(oy) = dy.checked_add(off_y) else {
             continue;
         };
@@ -706,7 +822,7 @@ fn dilated_at_device(mask: &Mask, mask_x: i32, mask_y: i32, dx: i64, dy: i64) ->
             continue;
         }
 
-        for off_x in -OUTLINE_RADIUS..=OUTLINE_RADIUS {
+        for off_x in -radius..=radius {
             let Some(ox) = dx.checked_add(off_x) else {
                 continue;
             };
@@ -804,6 +920,111 @@ mod tests {
     #[test]
     fn render_cue_rejects_empty_text() -> Result<(), Box<dyn Error>> {
         assert!(render_cue("", 720, 480).is_err());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod style_tests {
+    use super::{ANTIALIAS, CueStyle, OUTLINE, cue_overflows, render_cue, render_cue_styled};
+
+    /// Encore's Stroke and Alignment: the outline's width, and the place from the top (100 % is the bottom).
+    /// A line or two fits; a text of many lines is taller than the subtitle area.
+    #[test]
+    fn many_lines_overflow_the_subtitle_area() {
+        assert!(!cue_overflows("Hello", 720, 480));
+        assert!(!cue_overflows("Hello\nworld", 720, 480));
+        assert!(!cue_overflows("", 720, 480));
+        let tall = vec!["line"; 30].join("\n");
+        assert!(cue_overflows(&tall, 720, 480));
+        // The same words on one line wrap in the title-safe width, and are then too tall as well.
+        let long = vec!["word"; 400].join(" ");
+        assert!(cue_overflows(&long, 720, 480));
+    }
+
+    #[test]
+    fn a_cue_takes_its_stroke_and_its_place() -> Result<(), Box<dyn std::error::Error>> {
+        let usual = render_cue("Hello", 720, 480)?;
+        let same = render_cue_styled("Hello", 720, 480, CueStyle::default())?;
+        assert_eq!(usual, same);
+        assert!(usual.pixels.contains(&OUTLINE));
+        // The letters' half-covered edge pixels are anti-alias pixels: some, far fewer than the fill.
+        let count = |value: u8| usual.pixels.iter().filter(|pixel| **pixel == value).count();
+        assert!(
+            count(ANTIALIAS) > 0 && count(ANTIALIAS) < count(1),
+            "{}",
+            count(ANTIALIAS)
+        );
+
+        let bare = render_cue_styled(
+            "Hello",
+            720,
+            480,
+            CueStyle {
+                outline: 0,
+                vertical: 100,
+                horizontal: disccraft_project::SubtitleJustify::Center,
+            },
+        )?;
+        assert!(!bare.pixels.contains(&OUTLINE));
+        assert_eq!(bare.width + 4, usual.width);
+
+        let thick = render_cue_styled(
+            "Hello",
+            720,
+            480,
+            CueStyle {
+                outline: 3,
+                vertical: 100,
+                horizontal: disccraft_project::SubtitleJustify::Center,
+            },
+        )?;
+        assert_eq!(thick.width, usual.width + 2);
+
+        let top = render_cue_styled(
+            "Hello",
+            720,
+            480,
+            CueStyle {
+                outline: 2,
+                vertical: 0,
+                horizontal: disccraft_project::SubtitleJustify::Center,
+            },
+        )?;
+        // The area leaves 8 % at the top and the bottom: the line starts 38 lines down, its ink a little lower.
+        assert!((34..=60).contains(&top.y), "{}", top.y);
+        assert!(usual.y > 380, "{}", usual.y);
+        let middle = render_cue_styled(
+            "Hello",
+            720,
+            480,
+            CueStyle {
+                outline: 2,
+                vertical: 50,
+                horizontal: disccraft_project::SubtitleJustify::Center,
+            },
+        )?;
+        assert!(top.y < middle.y && middle.y < usual.y);
+
+        // Left and right: on the title-safe edges (72 and 648 of 720), give or take the outline.
+        let side = |horizontal| {
+            render_cue_styled(
+                "Hello",
+                720,
+                480,
+                CueStyle {
+                    outline: 2,
+                    vertical: 100,
+                    horizontal,
+                },
+            )
+        };
+        let left = side(disccraft_project::SubtitleJustify::Left)?;
+        let right = side(disccraft_project::SubtitleJustify::Right)?;
+        assert!((66..=76).contains(&left.x), "{}", left.x);
+        let right_edge = right.x + right.width;
+        assert!((644..=654).contains(&right_edge), "{right_edge}");
+        assert!(left.x < usual.x && usual.x < right.x);
         Ok(())
     }
 }

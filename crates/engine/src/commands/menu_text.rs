@@ -19,7 +19,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "テキストを追加",
         menu: &["メニュー"],
         shortcut: None,
-        params: r##"{"menu": id, "text": string, "x": n, "y": n, "size"?: 8..200, "color"?: "#RRGGBB"}"##,
+        params: r##"{"menu": id, "text": string, "x": n, "y": n, "size"?: 8..200, "color"?: "#RRGGBB", "vertical"?: bool (縦書き)}"##,
         enabled: always_enabled,
         run: run_add_text,
         journal: true,
@@ -29,7 +29,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "テキストを変更",
         menu: &["メニュー"],
         shortcut: None,
-        params: r##"{"menu": id, "index": n, "text"?: string, "x"?: n, "y"?: n, "size"?: 8..200, "color"?: "#RRGGBB" | null, "font"?: string | null, "fontStyle"?: string | null, "bold"?: bool, "italic"?: bool, "underline"?: bool, "strikethrough"?: bool, "caps"?: "normal" | "all" | "small", "align"?: "left" | "center" | "right", "tracking"?: -1000..1000, "leading"?: -100..200, "kerning"?: bool, "baseline"?: -100..100, "verticalScale"?: 1..1000, "horizontalScale"?: 1..1000, "script"?: "normal" | "superscript" | "subscript", "antialias"?: "none" | "crisp" | "strong" | "smooth" | "sharp"}"##,
+        params: r##"{"menu": id, "index": n, "text"?: string, "x"?: n, "y"?: n, "size"?: 8..200, "color"?: "#RRGGBB" | null, "font"?: string | null, "fontStyle"?: string | null, "bold"?: bool, "italic"?: bool, "underline"?: bool, "strikethrough"?: bool, "caps"?: "normal" | "all" | "small", "align"?: "left" | "center" | "right", "tracking"?: -1000..1000, "leading"?: -100..200, "kerning"?: bool, "baseline"?: -100..100, "verticalScale"?: 1..1000, "horizontalScale"?: 1..1000, "script"?: "normal" | "superscript" | "subscript", "antialias"?: "none" | "crisp" | "strong" | "smooth" | "sharp", "vertical"?: bool}"##,
         enabled: always_enabled,
         run: run_set_text,
         journal: true,
@@ -135,6 +135,7 @@ fn run_add_text(session: &mut Session, params: &Value) -> CommandResult {
     let color = opt_str(params, "color")?
         .map(|color| parse_color(&color))
         .transpose()?;
+    let vertical = opt_flag(params, "vertical")?.unwrap_or(false);
     let Some(menu) = session.project.menu_mut(menu_id) else {
         return Err(format!("menu {} does not exist", menu_id.0));
     };
@@ -152,6 +153,9 @@ fn run_add_text(session: &mut Session, params: &Value) -> CommandResult {
         format: TextFormat::default(),
         shadow: None,
         orientation: Default::default(),
+        hidden: false,
+        locked: false,
+        vertical,
     });
     let index = u64::try_from(menu.texts.len().saturating_sub(1))
         .map_err(|_| "text index is too large".to_string())?;
@@ -180,6 +184,7 @@ fn run_set_text(session: &mut Session, params: &Value) -> CommandResult {
     let font = font_param(params)?;
     let font_style = name_param(params, "fontStyle")?;
     let patch = FormatPatch::parse(params)?;
+    let vertical = opt_flag(params, "vertical")?;
     let Some(menu) = session.project.menu_mut(menu_id) else {
         return Err(format!("menu {} does not exist", menu_id.0));
     };
@@ -188,6 +193,9 @@ fn run_set_text(session: &mut Session, params: &Value) -> CommandResult {
     };
     if let Some(text) = text {
         target.text = text;
+    }
+    if let Some(vertical) = vertical {
+        target.vertical = vertical;
     }
     patch.apply(&mut target.format);
     if let Some(x) = x {

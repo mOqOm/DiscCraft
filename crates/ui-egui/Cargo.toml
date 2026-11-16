@@ -16,6 +16,7 @@ disccraft-vm.workspace = true
 egui.workspace = true
 craft-ui.workspace = true
 rfd.workspace = true
+sys-locale.workspace = true
 cpal.workspace = true
 chrono.workspace = true
 png.workspace = true

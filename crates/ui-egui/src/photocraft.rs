@@ -166,11 +166,16 @@ pub(crate) fn file_name_for(name: &str) -> String {
     }
 }
 
-/// Whether `path` names a PSD / PSB file.
+/// Whether `path` names a layered document PhotoCraft edits and DiscCraft reads back as a menu: a PSD / PSB file
+/// or a PhotoCraft document (`.pcraft`).
 fn is_psd_path(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("psd") || ext.eq_ignore_ascii_case("psb"))
+        .is_some_and(|ext| {
+            ["psd", "psb", "pcraft"]
+                .iter()
+                .any(|known| ext.eq_ignore_ascii_case(known))
+        })
 }
 
 /// The time and size of a file, if it exists.
@@ -180,7 +185,19 @@ fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
 }
 
 /// `<folder>/<base>.<ext>`, or `<base> 2.<ext>`, `<base> 3.<ext>`, … when that is taken.
-fn unique_path(folder: &Path, base: &str, ext: &str) -> PathBuf {
+/// What a Craft app is started with to edit the file at `path`. FilmCraft given only a media file starts as its
+/// "At Startup" setting says (by default its Home with the demo project) and imports the file there, so it is
+/// told to start with an empty project that holds just the file.
+fn edit_args(app: CraftApp, path: &Path) -> Vec<std::ffi::OsString> {
+    let mut args = Vec::new();
+    if app == CraftApp::Film {
+        args.push(std::ffi::OsString::from("--empty"));
+    }
+    args.push(path.as_os_str().to_owned());
+    args
+}
+
+pub(crate) fn unique_path(folder: &Path, base: &str, ext: &str) -> PathBuf {
     let mut path = folder.join(format!("{base}.{ext}"));
     let mut number = 2_u32;
     while path.exists() && number < 1000 {
@@ -347,7 +364,7 @@ impl DiscCraftApp {
     }
 
     /// Forgets everything drawn or measured from an asset's file and from the menus, so they are read again.
-    fn forget_pictures(&mut self, asset: Option<AssetId>) {
+    pub(crate) fn forget_pictures(&mut self, asset: Option<AssetId>) {
         self.menu_texture = None;
         self.menu_thumbnails.clear();
         if let Some(asset) = asset {
@@ -373,13 +390,16 @@ impl DiscCraftApp {
             .copied()
             .find_map(|app| find_app(app).map(|exe| (app, exe)));
         let launched = match &app {
-            Some((app, exe)) => std::process::Command::new(exe).arg(&path).spawn().map(|_| {
-                tlf!(
-                    "Opened {name} in {app}. Save there to update it here.",
-                    name = asset.name,
-                    app = app.name()
-                )
-            }),
+            Some((app, exe)) => std::process::Command::new(exe)
+                .args(edit_args(*app, &path))
+                .spawn()
+                .map(|_| {
+                    tlf!(
+                        "Opened {name} in {app}. Save there to update it here.",
+                        name = asset.name,
+                        app = app.name()
+                    )
+                }),
             None => open_with_default_app(&path).map(|()| {
                 tlf!(
                     "Opened {name} in its default app. Save there to update it here.",
@@ -551,6 +571,7 @@ mod tests {
     fn psd_paths_are_recognised() {
         assert!(is_psd_path(Path::new("menu.PSD")));
         assert!(is_psd_path(Path::new("menu.psb")));
+        assert!(is_psd_path(Path::new("menu.PCraft")));
         assert!(!is_psd_path(Path::new("menu.png")));
     }
 
@@ -583,6 +604,19 @@ mod tests {
         assert!(steps.get(5).is_some_and(|step| step.contains("m.mp4")));
     }
 
+    #[test]
+    fn filmcraft_opens_the_file_in_an_empty_project() {
+        let path = std::path::Path::new("C:/media/movie.mp4");
+        let film: Vec<String> = super::edit_args(super::CraftApp::Film, path)
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(film, ["--empty", "C:/media/movie.mp4"]);
+        let sound = super::edit_args(super::CraftApp::Sound, path);
+        assert_eq!(sound, [path.as_os_str().to_owned()]);
+    }
+
+    /// Files written for another app never replace an existing one.
     #[test]
     fn unique_paths_do_not_overwrite() -> Result<(), Box<dyn std::error::Error>> {
         let dir = std::env::temp_dir().join(format!("disccraft-unique-{}", std::process::id()));

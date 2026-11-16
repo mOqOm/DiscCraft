@@ -45,7 +45,9 @@ fn main() -> ExitCode {
             .with_title("DiscCraft")
             // Like Encore, start maximized; the panels take their share of the screen.
             .with_inner_size([1280.0, 800.0])
-            .with_maximized(true),
+            .with_maximized(true)
+            // Files dragged in from Explorer are imported into the project (as in Encore).
+            .with_drag_and_drop(true),
         ..Default::default()
     };
 

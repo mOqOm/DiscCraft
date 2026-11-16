@@ -695,6 +695,8 @@ fn compile_titles(project: &Project, ctx: &mut Context) -> Result<Vec<TitleNav>,
 fn compile_menu_remote(ctx: &mut Context, link: &Link, title: u8) -> Result<Vec<Cmd>, NavError> {
     let pgcn = match link {
         Link::NotSet => return Ok(Vec::new()),
+        // "Return to Last Menu" (a new timeline's default) on a disc without menus: the key does nothing.
+        Link::LastMenu if ctx.menu_count == 0 => return Ok(Vec::new()),
         Link::Menu { id, .. } => resolve_menu(ctx, *id)?,
         Link::LastMenu => ensure_last_menu(ctx)?,
         other => {
@@ -1700,6 +1702,14 @@ mod tests {
         let t1 = project.add_timeline(asset1, None)?;
         let t2 = project.add_timeline(asset2, None)?;
         let t3 = project.add_timeline(asset3, None)?;
+        // Without a menu remote (a new timeline's is "return to last menu"), so only the playlist's hidden PGCs
+        // are counted below.
+        for timeline in [t1, t2, t3] {
+            project
+                .timeline_mut(timeline)
+                .ok_or("missing timeline")?
+                .menu_remote = Link::NotSet;
+        }
 
         let menu = project.add_menu(Some("Main".to_string()))?;
         let playlist = project.add_playlist(None)?;
@@ -1988,7 +1998,10 @@ mod tests {
             id: first,
             chapter: 0,
         };
-        let _ = third;
+        project
+            .timeline_mut(third)
+            .ok_or("missing timeline")?
+            .menu_remote = Link::NotSet;
 
         let nav = compile(&project)?;
         let remote = |index: usize| nav.titles.get(index).map(|title| title.menu_remote.clone());
@@ -2005,6 +2018,33 @@ mod tests {
         assert_eq!(pre, Some(vec![cmd::jump_tt(1)]));
         // No menu remote: the MENU key does nothing, so there is no root menu.
         assert_eq!(remote(2), Some(Vec::new()));
+
+        // A new timeline's default, "return to last menu": the hidden PGC that goes back to the menu last shown;
+        // on a disc without menus the key does nothing.
+        project
+            .timeline_mut(third)
+            .ok_or("missing timeline")?
+            .menu_remote = Link::LastMenu;
+        let nav = compile(&project)?;
+        let last_menu = find_hidden(&nav, |kind| matches!(kind, HiddenKind::LastMenu))?;
+        assert_eq!(
+            nav.titles.get(2).map(|title| title.menu_remote.clone()),
+            Some(vec![cmd::jump_ss_vmgm_pgcn(last_menu)])
+        );
+        let mut plain = Project::default();
+        let asset = plain.add_asset(std::path::Path::new("movie.mp4"))?;
+        let only = plain.add_timeline(asset, None)?;
+        assert_eq!(
+            plain
+                .timeline(only)
+                .map(|timeline| timeline.menu_remote.clone()),
+            Some(Link::LastMenu)
+        );
+        let nav = compile(&plain)?;
+        assert_eq!(
+            nav.titles.first().map(|title| title.menu_remote.clone()),
+            Some(Vec::new())
+        );
         Ok(())
     }
 

@@ -28,7 +28,7 @@ fn pixel(image: &Image8, x: u32, y: u32) -> [u8; 4] {
     ]
 }
 
-fn write_psd() -> std::path::PathBuf {
+fn write_psd(tag: &str) -> std::path::PathBuf {
     let mut b = PsdBuilder::new(W, H);
     b.push_layer(LayerSpec::new(
         "Background",
@@ -67,14 +67,15 @@ fn write_psd() -> std::path::PathBuf {
     ));
     b.end_group().unwrap();
     b.composite(solid(W, H, [0, 0, 80, 255]));
-    let path = std::env::temp_dir().join(format!("disccraft-photo-{}.psd", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("disccraft-photo-{tag}-{}.psd", std::process::id()));
     std::fs::write(&path, b.to_bytes().unwrap()).unwrap();
     path
 }
 
 #[test]
 fn reads_buttons_highlights_and_background() {
-    let path = write_psd();
+    let path = write_psd("menu");
     let menu = load_psd_menu(&path).unwrap();
     let image = load_image(&path).unwrap();
     let _ = std::fs::remove_file(&path);
@@ -100,4 +101,43 @@ fn reads_buttons_highlights_and_background() {
     assert_eq!(pixel(&menu.background, 7, 7), [0, 0, 80, 255]);
     assert_eq!(pixel(&image, 10, 10), [255, 255, 0, 255]);
     assert_eq!(pixel(&image, 40, 32), [0, 255, 0, 255]);
+}
+
+/// A PhotoCraft document (`.pcraft`, PhotoCraft's own format) reads like the PSD it was made from: the same
+/// buttons, highlight and background. The document is written by PhotoCraft's own writer.
+#[test]
+fn a_photocraft_document_reads_like_its_psd() {
+    let psd = write_psd("pcraft");
+    let from_psd = load_psd_menu(&psd).unwrap();
+    let bytes = std::fs::read(&psd).unwrap();
+    let _ = std::fs::remove_file(&psd);
+
+    let document = photocraft_io::import("menu.psd", &bytes).unwrap().document;
+    let saved = photocraft_io::export(
+        &document,
+        "menu.pcraft",
+        &photocraft_io::ExportOptions::default(),
+    )
+    .unwrap();
+    let path = std::env::temp_dir().join(format!("disccraft-photo-{}.pcraft", std::process::id()));
+    std::fs::write(&path, saved.bytes).unwrap();
+    assert!(disccraft_photo::is_pcraft(&path));
+    assert!(disccraft_photo::is_document(&path));
+    let menu = load_psd_menu(&path).unwrap();
+    let image = load_image(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!((menu.width, menu.height), (W, H));
+    let names: Vec<&str> = menu.buttons.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["Play", "Back"]);
+    for (read, expected) in menu.buttons.iter().zip(&from_psd.buttons) {
+        assert_eq!(
+            (read.x, read.y, read.width, read.height),
+            (expected.x, expected.y, expected.width, expected.height)
+        );
+        assert_eq!(read.highlight.is_some(), expected.highlight.is_some());
+    }
+    assert_eq!(pixel(&menu.background, 10, 10), [255, 0, 0, 255]);
+    assert_eq!(pixel(&menu.background, 7, 7), [0, 0, 80, 255]);
+    assert_eq!(pixel(&image, 10, 10), [255, 255, 0, 255]);
 }

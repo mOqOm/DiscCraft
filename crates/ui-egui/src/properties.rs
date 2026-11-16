@@ -32,9 +32,10 @@ impl DiscCraftApp {
             }
             Selection::None => self.disc_sheet(ui),
             Selection::Asset(id) => self.asset_sheet(ui, id),
-            Selection::Timeline(id) => match self.focused_chapter(id) {
-                Some(index) => self.chapter_sheet(ui, id, index),
-                None => self.timeline_sheet(ui, id),
+            Selection::Timeline(id) => match (self.focused_chapter(id), self.focused_cue(id)) {
+                (Some(index), _) => self.chapter_sheet(ui, id, index),
+                (None, Some((track, cue))) => self.cue_sheet(ui, id, track, cue),
+                (None, None) => self.timeline_sheet(ui, id),
             },
             Selection::Menu(id) => match (self.selected_menu_text(id), self.focused_button(id)) {
                 (Some(index), _) => self.text_sheet(ui, id, index),
@@ -275,6 +276,7 @@ impl DiscCraftApp {
         };
         self.description_row(ui, "asset", id.0, &asset.description);
         ui.separator();
+        self.composition_row(ui, id, &asset);
 
         if let Some(state) = self.transcode_state(id) {
             let (dvd, bluray) = state.by_kind(self.session.project.settings.kind);
@@ -398,7 +400,8 @@ impl DiscCraftApp {
         ui.separator();
 
         let video = self.asset_display_name(timeline.video);
-        let seconds = self.asset_seconds(timeline.video);
+        // The whole timeline: its clips added up.
+        let seconds = Some(self.timeline_seconds(timeline.id)).filter(|seconds| *seconds > 0.0);
         let source_fps = self.asset_probe(timeline.video).fps;
         let standard = self.session.project.settings.standard;
         let (width, height) = frame_size(standard);
@@ -445,6 +448,51 @@ impl DiscCraftApp {
             &timeline.subtitles.len().to_string(),
         );
         text_row(ui, tl!("Chapters:"), &timeline.chapters.len().to_string());
+        self.subtitle_color_rows(ui, id, &timeline);
+    }
+
+    /// タイムラインカラーセット（Encore の「タイムラインカラーセットを編集」）: 3 つのグループの文字とストロークの色と
+    /// 不透明度、字幕トラックごとのグループ。色を選んでいる間は手元に持ち、選び終えたら 1 回のコマンドにする。
+    fn subtitle_color_rows(
+        &mut self,
+        ui: &mut Ui,
+        id: TimelineId,
+        timeline: &disccraft_project::Timeline,
+    ) {
+        self.color_set_rows(
+            ui,
+            ("timeline.setSubtitleColors", "timeline"),
+            id.0,
+            timeline.subtitle_colors,
+        );
+        // 字幕トラックごとのグループ。
+        for (track, subtitle) in timeline.subtitles.iter().enumerate() {
+            let mut chosen = None;
+            ui.horizontal(|ui| {
+                prop_label(ui, &tlf!("Subtitle {n}:", n = track.saturating_add(1)));
+                egui::ComboBox::from_id_salt(("subtitle_track_group", id.0, track))
+                    .selected_text(tlf!("Group {n}", n = subtitle.group.saturating_add(1)))
+                    .show_ui(ui, |ui| {
+                        for group in 0..disccraft_project::SubtitleColorSet::GROUPS {
+                            if ui
+                                .selectable_label(
+                                    subtitle.group == group,
+                                    tlf!("Group {n}", n = group.saturating_add(1)),
+                                )
+                                .clicked()
+                            {
+                                chosen = Some(group);
+                            }
+                        }
+                    });
+            });
+            if let Some(group) = chosen.filter(|group| *group != subtitle.group) {
+                let _ = self.run_command(
+                    "timeline.setSubtitleGroup",
+                    json!({"timeline": id.0, "track": track, "group": group.saturating_add(1)}),
+                );
+            }
+        }
     }
 
     /// タイムラインビューアで選ばれている、`id` のチャプターポイントの番号。
@@ -1729,6 +1777,13 @@ impl DiscCraftApp {
             return;
         };
         self.description_row(ui, "slideshow", id, &slideshow.description);
+        // スライドの字幕（字幕を作成）のカラーセット。
+        self.color_set_rows(
+            ui,
+            ("slideshow.setSubtitleColors", "slideshow"),
+            id,
+            slideshow.subtitle_colors,
+        );
         ui.separator();
         let targets = link_targets(&self.session.project, false);
         let port = Port::EndAction(NodeId::Slideshow(id));
@@ -1885,10 +1940,35 @@ impl DiscCraftApp {
         };
         let settings = self.session.project.settings.clone();
         let asset = self.session.project.assets.get(&slide.asset).cloned();
-        let name = asset
-            .as_ref()
-            .map_or_else(|| tl!("Unknown").to_owned(), |asset| asset.name.clone());
-        text_row(ui, tl!("Name:"), &name);
+        let name = self.session.project.slide_name(&slide);
+        let mut changed_name = None;
+        ui.horizontal(|ui| {
+            prop_label(ui, tl!("Name:"));
+            changed_name = committed_text(ui, &format!("slide_name_{id}_{index}"), &name, false).1;
+        });
+        if let Some(name) = changed_name {
+            let _ = self.run_command(
+                "slideshow.setSlideText",
+                json!({"slideshow": id, "slide": index, "name": name}),
+            );
+        }
+        let mut changed_description = None;
+        ui.horizontal_top(|ui| {
+            prop_label(ui, tl!("Description:"));
+            changed_description = committed_text(
+                ui,
+                &format!("slide_description_{id}_{index}"),
+                &slide.description,
+                true,
+            )
+            .1;
+        });
+        if let Some(description) = changed_description {
+            let _ = self.run_command(
+                "slideshow.setSlideText",
+                json!({"slideshow": id, "slide": index, "description": description}),
+            );
+        }
         ui.separator();
         if let Some(asset) = &asset {
             text_row(ui, tl!("Location:"), &asset.path);
@@ -1954,6 +2034,121 @@ impl DiscCraftApp {
             let _ = self.run_command(
                 "slideshow.setSlideScale",
                 json!({"slideshow": id, "slide": index, "scale": scale.as_str()}),
+            );
+        }
+        ui.separator();
+        // 字幕を作成（Encore: スライドの名前や説明を、そのスライドの間だけ字幕として出す）。
+        let mut subtitle = slide.subtitle;
+        ui.horizontal(|ui| {
+            prop_label(ui, "");
+            let _ = ui
+                .checkbox(&mut subtitle, tl!("Create Subtitle"))
+                .on_hover_text(tl!("Create a subtitle that matches the slide"));
+        });
+        if subtitle != slide.subtitle {
+            let _ = self.run_command(
+                "slideshow.setSlideSubtitle",
+                json!({"slideshow": id, "slide": index, "on": subtitle}),
+            );
+        }
+        // 次を含む: 名前 / 説明（「字幕を作成」がオンのときだけ選べる）。
+        let mut with_name = !slide.subtitle_without_name;
+        let mut with_description = slide.subtitle_description;
+        ui.horizontal(|ui| {
+            prop_label(ui, tl!("Include:"));
+            ui.add_enabled_ui(slide.subtitle, |ui| {
+                let _ = ui.checkbox(&mut with_name, tl!("Name"));
+                let _ = ui.checkbox(&mut with_description, tl!("Description"));
+            });
+        });
+        if with_name == slide.subtitle_without_name
+            || with_description != slide.subtitle_description
+        {
+            let _ = self.run_command(
+                "slideshow.setSlideSubtitle",
+                json!({"slideshow": id, "slide": index, "name": with_name, "description": with_description}),
+            );
+        }
+        // ハイライト（Encore: 字幕のカラーグループ）。
+        let mut chosen_group = None;
+        ui.horizontal(|ui| {
+            prop_label(ui, tl!("Highlight:"));
+            ui.add_enabled_ui(slide.subtitle, |ui| {
+                egui::ComboBox::from_id_salt(("slide_subtitle_group", id, index))
+                    .selected_text(tlf!(
+                        "Group {n}",
+                        n = slide.subtitle_group.saturating_add(1)
+                    ))
+                    .show_ui(ui, |ui| {
+                        for group in 0..disccraft_project::SubtitleColorSet::GROUPS {
+                            if ui
+                                .selectable_label(
+                                    slide.subtitle_group == group,
+                                    tlf!("Group {n}", n = group.saturating_add(1)),
+                                )
+                                .clicked()
+                            {
+                                chosen_group = Some(group);
+                            }
+                        }
+                    });
+            });
+        });
+        if let Some(group) = chosen_group.filter(|group| *group != slide.subtitle_group) {
+            let _ = self.run_command(
+                "slideshow.setSlideSubtitle",
+                json!({"slideshow": id, "slide": index, "group": group.saturating_add(1)}),
+            );
+        }
+        // ストロークと整列（Encore: 字幕の縁取りと、上からの位置。100 % が下）。
+        let mut chosen_stroke = None;
+        let mut align = slide.subtitle_align;
+        ui.horizontal(|ui| {
+            prop_label(ui, tl!("Stroke:"));
+            ui.add_enabled_ui(slide.subtitle, |ui| {
+                egui::ComboBox::from_id_salt(("slide_stroke", id, index))
+                    .selected_text(slide_stroke_label(slide.subtitle_stroke))
+                    .show_ui(ui, |ui| {
+                        for stroke in disccraft_project::SlideStroke::ALL {
+                            if ui
+                                .selectable_label(
+                                    slide.subtitle_stroke == stroke,
+                                    slide_stroke_label(stroke),
+                                )
+                                .clicked()
+                            {
+                                chosen_stroke = Some(stroke);
+                            }
+                        }
+                    });
+            });
+        });
+        let mut align_done = false;
+        ui.horizontal(|ui| {
+            prop_label(ui, tl!("Vertical Alignment:"));
+            ui.add_enabled_ui(slide.subtitle, |ui| {
+                let response = ui.add(egui::DragValue::new(&mut align).range(0..=100).suffix(" %"));
+                align_done = response.drag_stopped() || response.lost_focus();
+                // The value while it is being dragged or typed.
+                let editing = egui::Id::unique(("slide_align_edit", id, index));
+                if response.dragged() || response.has_focus() {
+                    ui.data_mut(|data| data.insert_temp(editing, align));
+                } else if let Some(pending) = ui.data_mut(|data| data.remove_temp::<u8>(editing)) {
+                    align = pending;
+                    align_done = true;
+                }
+            });
+        });
+        if let Some(stroke) = chosen_stroke.filter(|stroke| *stroke != slide.subtitle_stroke) {
+            let _ = self.run_command(
+                "slideshow.setSlideSubtitle",
+                json!({"slideshow": id, "slide": index, "stroke": stroke.as_str()}),
+            );
+        }
+        if align_done && align != slide.subtitle_align {
+            let _ = self.run_command(
+                "slideshow.setSlideSubtitle",
+                json!({"slideshow": id, "slide": index, "align": align}),
             );
         }
         ui.separator();
@@ -2217,6 +2412,448 @@ impl DiscCraftApp {
         }
     }
 
+    /// EffectCraft のプロジェクトのアセット: どのコンポジションを使うか（プロジェクトでアクティブなものか、名前で選ぶ）。
+    /// コンポジションの一覧はアセットごとに 1 回だけ読む。
+    fn composition_row(&mut self, ui: &mut Ui, id: AssetId, asset: &disccraft_project::Asset) {
+        if !std::path::Path::new(&asset.path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("ecproj"))
+        {
+            return;
+        }
+        let list_id = egui::Id::unique(("asset_compositions", id.0));
+        let listed = ui.data(|data| data.get_temp::<(Vec<String>, Option<String>)>(list_id));
+        let (names, active) = match listed {
+            Some(listed) => listed,
+            None => {
+                let value = self.run_query("asset.compositions", json!({ "asset": id.0 }));
+                let names: Vec<String> = value
+                    .as_ref()
+                    .and_then(|value| value.get("compositions"))
+                    .and_then(serde_json::Value::as_array)
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|name| name.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let active = value
+                    .as_ref()
+                    .and_then(|value| value.get("active"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                let listed = (names, active);
+                ui.data_mut(|data| data.insert_temp(list_id, listed.clone()));
+                listed
+            }
+        };
+        let active_label = match &active {
+            Some(name) => tlf!("Active in the Project ({name})", name = name),
+            None => tl!("Active in the Project").to_owned(),
+        };
+        let mut chosen: Option<Option<String>> = None;
+        ui.horizontal(|ui| {
+            prop_label(ui, tl!("Composition:"));
+            egui::ComboBox::from_id_salt(("asset_composition", id.0))
+                .selected_text(
+                    asset
+                        .composition
+                        .clone()
+                        .unwrap_or_else(|| active_label.clone()),
+                )
+                .width(220.0)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(asset.composition.is_none(), active_label.as_str())
+                        .clicked()
+                    {
+                        chosen = Some(None);
+                    }
+                    for name in &names {
+                        if ui
+                            .selectable_label(
+                                asset.composition.as_ref() == Some(name),
+                                name.as_str(),
+                            )
+                            .clicked()
+                        {
+                            chosen = Some(Some(name.clone()));
+                        }
+                    }
+                });
+        });
+        if let Some(composition) = chosen.filter(|chosen| *chosen != asset.composition) {
+            let done = self.run_command(
+                "asset.setComposition",
+                json!({ "asset": id.0, "composition": composition }),
+            );
+            if done.is_some() {
+                // Another composition: its pictures and length are read again.
+                self.forget_pictures(Some(id));
+            }
+        }
+        ui.separator();
+    }
+
+    /// カラーセットの欄（タイムラインとスライドショーで共通）: 3 つのグループの文字とストロークの色と不透明度。色を
+    /// 選んでいる間は手元に持ち、選び終えたら 1 回のコマンド（`command` に `{owner: id, groups}`）にする。
+    fn color_set_rows(
+        &mut self,
+        ui: &mut Ui,
+        (command, owner): (&'static str, &'static str),
+        id: u64,
+        own: Option<disccraft_project::SubtitleColorSet>,
+    ) {
+        ui.separator();
+        // カラーセット: 初期設定、プロジェクトの名前付きのセット（Encore のダイアログの一覧）、またはその場の色。
+        let current = own.unwrap_or_default();
+        let named: Vec<(String, disccraft_project::SubtitleColorSet)> = self
+            .session
+            .project
+            .subtitle_color_sets
+            .iter()
+            .map(|(name, set)| (name.clone(), *set))
+            .collect();
+        let matching = own.and_then(|set| {
+            named
+                .iter()
+                .find(|(_, candidate)| *candidate == set)
+                .map(|(name, _)| name.clone())
+        });
+        let shown = match (&matching, own) {
+            (Some(name), _) => name.clone(),
+            (None, Some(_)) => tl!("Custom").to_owned(),
+            (None, None) => tl!("Timeline Default").to_owned(),
+        };
+        let mut pick: Option<Option<String>> = None;
+        ui.horizontal(|ui| {
+            prop_label(ui, tl!("Color Set:"));
+            egui::ComboBox::from_id_salt(("color_set_choice", command, id))
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(own.is_none(), tl!("Timeline Default"))
+                        .clicked()
+                    {
+                        pick = Some(None);
+                    }
+                    for (name, _) in &named {
+                        if ui
+                            .selectable_label(matching.as_ref() == Some(name), name.as_str())
+                            .clicked()
+                        {
+                            pick = Some(Some(name.clone()));
+                        }
+                    }
+                });
+        });
+        match pick {
+            Some(None) if own.is_some() => {
+                let _ = self.run_command(command, json!({ owner: id, "groups": null }));
+            }
+            Some(Some(name)) if matching.as_ref() != Some(&name) => {
+                let _ = self.run_command("colorset.apply", json!({ owner: id, "name": name }));
+            }
+            _ => {}
+        }
+        // 新規（今の色に名前を付けてプロジェクトに持つ）と 削除。
+        let name_id = egui::Id::unique(("color_set_name", command, id));
+        let mut new_name = ui
+            .data(|data| data.get_temp::<String>(name_id))
+            .unwrap_or_default();
+        let (mut save, mut delete) = (false, false);
+        ui.horizontal(|ui| {
+            prop_label(ui, tl!("Name:"));
+            let _ = ui.add(egui::TextEdit::singleline(&mut new_name).desired_width(120.0));
+            save = ui
+                .add_enabled(!new_name.trim().is_empty(), egui::Button::new(tl!("New")))
+                .clicked();
+            delete = ui
+                .add_enabled(matching.is_some(), egui::Button::new(tl!("Delete")))
+                .clicked();
+        });
+        if save {
+            if self
+                .run_command("colorset.save", json!({ owner: id, "name": new_name }))
+                .is_some()
+            {
+                new_name.clear();
+            }
+        } else if delete && let Some(name) = &matching {
+            let _ = self.run_command("colorset.delete", json!({ "name": name }));
+        }
+        ui.data_mut(|data| data.insert_temp(name_id, new_name));
+        let pending_id = egui::Id::unique(("subtitle_colors_edit", command, id));
+        let mut edit = ui
+            .data(|data| data.get_temp::<disccraft_project::SubtitleColorSet>(pending_id))
+            .unwrap_or(current);
+        for (index, group) in edit.groups.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                prop_label(ui, &tlf!("Group {n}", n = index.saturating_add(1)));
+                for color in [&mut group.fill, &mut group.stroke] {
+                    let _ = ui.color_edit_button_srgb(&mut color.rgb);
+                    let _ = ui.add(
+                        egui::DragValue::new(&mut color.opacity)
+                            .range(0..=100)
+                            .suffix(" %"),
+                    );
+                }
+                // アンチエイリアスの色: 自分の色を持つときだけ変えられる（持たないときは塗りとストロークの中間）。
+                let mut antialias = group.antialias_color();
+                ui.add_enabled_ui(group.antialias.is_some(), |ui| {
+                    let _ = ui.color_edit_button_srgb(&mut antialias.rgb);
+                    let _ = ui.add(
+                        egui::DragValue::new(&mut antialias.opacity)
+                            .range(0..=100)
+                            .suffix(" %"),
+                    );
+                });
+                if group.antialias.is_some() {
+                    group.antialias = Some(antialias);
+                }
+            })
+            .response
+            .on_hover_text(tl!("Fill, stroke and anti-alias colors with their opacity"));
+        }
+        // Encore の「塗りおよびストロークからアンチエイリアスカラーを作成」。外すと今の中間の色から変えられる。
+        ui.horizontal(|ui| {
+            prop_label(ui, "");
+            let mut derived = edit.groups.iter().all(|group| group.antialias.is_none());
+            if ui
+                .checkbox(
+                    &mut derived,
+                    tl!("Create anti-alias color from fill and stroke"),
+                )
+                .changed()
+            {
+                for group in &mut edit.groups {
+                    group.antialias = (!derived).then(|| group.antialias_color());
+                }
+            }
+        });
+        let busy = egui::Popup::is_any_open(ui.ctx())
+            || ui.input(|input| input.pointer.any_down())
+            || ui.memory(|memory| memory.focused().is_some());
+        if edit == current {
+            ui.data_mut(|data| data.remove::<disccraft_project::SubtitleColorSet>(pending_id));
+        } else if busy {
+            ui.data_mut(|data| data.insert_temp(pending_id, edit));
+        } else {
+            ui.data_mut(|data| data.remove::<disccraft_project::SubtitleColorSet>(pending_id));
+            let groups: Vec<serde_json::Value> = edit
+                .groups
+                .iter()
+                .map(|group| {
+                    let mut entry = json!({
+                        "fill": group.fill.rgb,
+                        "fillOpacity": group.fill.opacity,
+                        "stroke": group.stroke.rgb,
+                        "strokeOpacity": group.stroke.opacity,
+                    });
+                    // A set with its own anti-alias colour (from a file or a command) keeps it.
+                    if let (Some(color), Some(map)) = (group.antialias, entry.as_object_mut()) {
+                        let _ = map.insert("antialias".to_owned(), json!(color.rgb));
+                        let _ = map.insert("antialiasOpacity".to_owned(), json!(color.opacity));
+                    }
+                    entry
+                })
+                .collect();
+            let _ = self.run_command(command, json!({ owner: id, "groups": groups }));
+        }
+        // 書き出し / 読み込み（Encore のカラーセットのダイアログのボタン）と、初期設定に戻す。
+        ui.horizontal(|ui| {
+            prop_label(ui, "");
+            if ui.button(tl!("Export…")).clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter(tl!("Subtitle Color Set"), &["dccolors"])
+                    .set_file_name("colors.dccolors")
+                    .save_file()
+            {
+                let _ = self.run_query(
+                    "colorset.export",
+                    json!({ owner: id, "path": path.to_string_lossy() }),
+                );
+            }
+            if ui.button(tl!("Import…")).clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter(tl!("Subtitle Color Set"), &["dccolors"])
+                    .pick_file()
+            {
+                let _ = self.run_command(
+                    "colorset.import",
+                    json!({ owner: id, "path": path.to_string_lossy() }),
+                );
+            }
+            if own.is_some() && ui.button(tl!("Reset to Default")).clicked() {
+                let _ = self.run_command(command, json!({ owner: id, "groups": null }));
+            }
+        });
+    }
+
+    /// タイムラインビューアで選んだ字幕（`id` のタイムラインの、字幕トラックと字幕の番号）。
+    fn focused_cue(&self, id: TimelineId) -> Option<(usize, usize)> {
+        let (timeline, track, cue) = self.cue_focus?;
+        (timeline == id).then_some((track, cue))
+    }
+
+    /// 字幕クリップのプロパティ（Encore: テキスト / デュレーション / インポイント / アウトポイント / ハイライト /
+    /// ストローク / 整列）。ハイライト・ストローク・整列は、その字幕だけの値か、トラックの値（初期設定）。
+    fn cue_sheet(&mut self, ui: &mut Ui, id: TimelineId, track: usize, index: usize) {
+        sheet_title(ui, tl!("Subtitle Clip"));
+        let Some(subtitle) = self
+            .session
+            .project
+            .timeline(id)
+            .and_then(|timeline| timeline.subtitles.get(track))
+            .cloned()
+        else {
+            self.cue_focus = None;
+            return;
+        };
+        let asset = subtitle.asset;
+        let cues = self.subtitle_cues(asset);
+        let Some(cue) = cues.get(index).cloned() else {
+            self.cue_focus = None;
+            return;
+        };
+        let set = |app: &mut Self, extra: serde_json::Value| {
+            let mut params = json!({ "asset": asset.0, "cue": index });
+            if let (Some(map), Some(extra)) = (params.as_object_mut(), extra.as_object()) {
+                map.extend(extra.clone());
+            }
+            let _ = app.run_command("subtitle.setCue", params);
+        };
+
+        let mut changed_text = None;
+        ui.horizontal_top(|ui| {
+            prop_label(ui, tl!("Text:"));
+            changed_text = committed_text(
+                ui,
+                &format!("cue_text_{}_{track}_{index}", id.0),
+                &cue.text,
+                true,
+            )
+            .1;
+        });
+        if let Some(text) = changed_text {
+            set(self, json!({ "text": text }));
+        }
+        ui.separator();
+        text_row(
+            ui,
+            tl!("Duration:"),
+            &self.duration_text((cue.end - cue.start).max(0.0)),
+        );
+        text_row(ui, tl!("In point:"), &self.duration_text(cue.start));
+        text_row(ui, tl!("Out point:"), &self.duration_text(cue.end));
+        ui.separator();
+
+        // ハイライト（カラーグループ）: トラックのグループか、この字幕だけのグループ。
+        let track_group = tlf!(
+            "Track Setting (Group {n})",
+            n = subtitle.group.saturating_add(1)
+        );
+        let mut group_choice: Option<Option<u8>> = None;
+        ui.horizontal(|ui| {
+            prop_label(ui, tl!("Highlight:"));
+            egui::ComboBox::from_id_salt(("cue_group", id.0, track, index))
+                .selected_text(match cue.look.group {
+                    Some(group) => tlf!("Group {n}", n = group.saturating_add(1)),
+                    None => track_group.clone(),
+                })
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(cue.look.group.is_none(), track_group.as_str())
+                        .clicked()
+                    {
+                        group_choice = Some(None);
+                    }
+                    for group in 0..disccraft_project::SubtitleColorSet::GROUPS {
+                        if ui
+                            .selectable_label(
+                                cue.look.group == Some(group),
+                                tlf!("Group {n}", n = group.saturating_add(1)),
+                            )
+                            .clicked()
+                        {
+                            group_choice = Some(Some(group));
+                        }
+                    }
+                });
+        });
+        if let Some(choice) = group_choice.filter(|choice| *choice != cue.look.group) {
+            set(
+                self,
+                json!({ "group": choice.map(|group| u64::from(group) + 1) }),
+            );
+        }
+
+        // ストローク。
+        let current_stroke = cue.look.stroke.unwrap_or_default();
+        let mut stroke_choice = None;
+        ui.horizontal(|ui| {
+            prop_label(ui, tl!("Stroke:"));
+            egui::ComboBox::from_id_salt(("cue_stroke", id.0, track, index))
+                .selected_text(slide_stroke_label(current_stroke))
+                .show_ui(ui, |ui| {
+                    for stroke in disccraft_project::SlideStroke::ALL {
+                        if ui
+                            .selectable_label(current_stroke == stroke, slide_stroke_label(stroke))
+                            .clicked()
+                        {
+                            stroke_choice = Some(stroke);
+                        }
+                    }
+                });
+        });
+        if let Some(stroke) = stroke_choice.filter(|stroke| *stroke != current_stroke) {
+            set(self, json!({ "stroke": stroke.as_str() }));
+        }
+
+        // 揃え（左 / 中央 / 右。Encore の文字パネルの段落の揃え）。
+        let current_justify = cue.look.justify.unwrap_or_default();
+        let mut justify_choice = None;
+        ui.horizontal(|ui| {
+            prop_label(ui, tl!("Justify:"));
+            egui::ComboBox::from_id_salt(("cue_justify", id.0, track, index))
+                .selected_text(justify_label(current_justify))
+                .show_ui(ui, |ui| {
+                    for side in disccraft_project::SubtitleJustify::ALL {
+                        if ui
+                            .selectable_label(current_justify == side, justify_label(side))
+                            .clicked()
+                        {
+                            justify_choice = Some(side);
+                        }
+                    }
+                });
+        });
+        if let Some(side) = justify_choice.filter(|side| *side != current_justify) {
+            set(self, json!({ "justify": side.as_str() }));
+        }
+
+        // 整列（上からの位置。100 % が下）。
+        let current_align = cue.look.align.unwrap_or(100);
+        let mut align = current_align;
+        let mut align_done = false;
+        ui.horizontal(|ui| {
+            prop_label(ui, tl!("Vertical Alignment:"));
+            let response = ui.add(egui::DragValue::new(&mut align).range(0..=100).suffix(" %"));
+            align_done = response.drag_stopped() || response.lost_focus();
+            let editing = egui::Id::unique(("cue_align_edit", id.0, track, index));
+            if response.dragged() || response.has_focus() {
+                ui.data_mut(|data| data.insert_temp(editing, align));
+            } else if let Some(pending) = ui.data_mut(|data| data.remove_temp::<u8>(editing)) {
+                align = pending;
+                align_done = true;
+            }
+        });
+        if align_done && align != current_align {
+            set(self, json!({ "align": align }));
+        }
+    }
+
     /// 説明の行（Encore のプロパティの「説明」。フォーカスが外れたときに確定）。
     fn description_row(&mut self, ui: &mut Ui, kind: &str, id: u64, current: &str) {
         let mut changed = None;
@@ -2250,7 +2887,11 @@ impl DiscCraftApp {
         targets: &[(String, Link)],
     ) -> Option<Link> {
         let mut selected = None;
-        let current_label = link_label(&self.session.project, current);
+        let mut current_label = link_label(&self.session.project, current);
+        // Encore: the First Play field also names the disc's Set Audio / Set Subtitle (「ntsc:チャプター 1; A2, S1」).
+        if matches!(port, Port::FirstPlay) && *current != Link::NotSet {
+            current_label.push_str(&first_play_streams(&self.session.project.settings));
+        }
         ui.horizontal(|ui| {
             prop_label(ui, label);
             self.pick_whip(ui, port);
@@ -2458,6 +3099,26 @@ fn link_sub_label(project: &disccraft_project::Project, link: &Link) -> String {
     match label.split_once(':') {
         Some((_, rest)) => rest.trim().to_owned(),
         None => label,
+    }
+}
+
+/// 字幕の揃えの名前。
+fn justify_label(side: disccraft_project::SubtitleJustify) -> &'static str {
+    match side {
+        disccraft_project::SubtitleJustify::Left => tl!("Left"),
+        disccraft_project::SubtitleJustify::Center => tl!("Center"),
+        disccraft_project::SubtitleJustify::Right => tl!("Right"),
+    }
+}
+
+/// スライドの字幕のストロークの名前。
+fn slide_stroke_label(stroke: disccraft_project::SlideStroke) -> &'static str {
+    match stroke {
+        disccraft_project::SlideStroke::None => tl!("None"),
+        disccraft_project::SlideStroke::Thin => tl!("Thin"),
+        disccraft_project::SlideStroke::Medium => tl!("Medium"),
+        disccraft_project::SlideStroke::Thick => tl!("Thick"),
+        disccraft_project::SlideStroke::ExtraThick => tl!("Extra Thick"),
     }
 }
 
@@ -2806,5 +3467,43 @@ mod tests {
         assert_eq!(frame_rate_text(VideoStandard::Ntsc), "29.97 fps");
         assert_eq!(frame_rate_text(VideoStandard::Pal), "25 fps");
         assert_eq!(frame_size(VideoStandard::Pal), (720, 576));
+    }
+}
+
+/// What Encore CS6 appends to the First Play field for the disc's Set Audio / Set Subtitle: 「; A2, S1」 for audio
+/// track 2 and subtitle track 1, only the parts that are set (nothing when both are "no change").
+pub(crate) fn first_play_streams(settings: &disccraft_project::DiscSettings) -> String {
+    use disccraft_project::SubtitleDefault;
+    let mut parts = Vec::new();
+    if let Some(track) = settings.audio_default {
+        parts.push(format!("A{track}"));
+    }
+    match settings.subtitle_default {
+        SubtitleDefault::NoChange => {}
+        SubtitleDefault::Off => parts.push("S-".to_owned()),
+        SubtitleDefault::Stream(track) => parts.push(format!("S{track}")),
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("; {}", parts.join(", "))
+    }
+}
+
+#[cfg(test)]
+mod first_play_tests {
+    use super::first_play_streams;
+    use disccraft_project::{DiscSettings, SubtitleDefault};
+
+    #[test]
+    fn the_first_play_field_names_the_set_streams() {
+        let mut settings = DiscSettings::default();
+        assert_eq!(first_play_streams(&settings), "");
+        settings.audio_default = Some(2);
+        settings.subtitle_default = SubtitleDefault::Stream(1);
+        // As read in Encore CS6: 「ntsc:チャプター 1; A2, S1」.
+        assert_eq!(first_play_streams(&settings), "; A2, S1");
+        settings.audio_default = None;
+        assert_eq!(first_play_streams(&settings), "; S1");
     }
 }

@@ -35,6 +35,14 @@ const BITRATES: [u32; 19] = [
     32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 576, 640,
 ];
 
+/// The bit rate (kbit/s) the first frame of an AC-3 stream states, from the stream's first bytes alone.
+#[must_use]
+pub fn first_frame_bit_rate_kbps(data: &[u8]) -> Option<u32> {
+    parse_ac3_header(data, 0)
+        .ok()
+        .map(|header| header.bit_rate_kbps)
+}
+
 /// Parse an AC-3 elementary stream.
 pub fn parse_ac3(data: &[u8], start_pts: i64) -> Result<Ac3Stream, EsError> {
     let mut frames = Vec::new();

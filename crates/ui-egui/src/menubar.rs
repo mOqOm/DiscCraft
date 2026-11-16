@@ -426,6 +426,9 @@ impl DiscCraftApp {
         ui.separator();
         push(clicked, ui, Action::AddChapterPoint, timeline);
         push(clicked, ui, Action::AddChapterPointsAtInterval, timeline);
+        // FilmCraft のプロジェクトのマーカーをチャプターに（Encore は Premiere Pro のチャプターマーカーを読む）。
+        push(clicked, ui, Action::ImportFilmCraftMarkers, timeline);
+        push(clicked, ui, Action::NewTimelineFromFilmCraft, true);
         ui.separator();
         // Encore と同じく最後に再生。再生中にもう一度選ぶと止まる。
         push(clicked, ui, Action::Play, self.viewer_timeline().is_some());
@@ -574,8 +577,18 @@ impl DiscCraftApp {
         self.panel_front(Panel::TimelineViewer)
     }
 
-    /// 消去できるもの（メニューの選択中のボタン、タイムラインの選択中のチャプターポイント）があるか。
+    /// 消去できるもの（最後に押したプロジェクト / メニュー / タイムラインのパネルで選んでいる項目、メニューの選択中の
+    /// ボタン、タイムラインの選択中のチャプターポイント）があるか。
     fn can_clear(&self) -> bool {
+        let in_list = match self.active_panel {
+            Some(Panel::Project) => self.selection != Selection::None,
+            Some(Panel::Menus) => matches!(self.selection, Selection::Menu(_)),
+            Some(Panel::Timelines) => matches!(self.selection, Selection::Timeline(_)),
+            _ => false,
+        };
+        if in_list {
+            return true;
+        }
         match self.selection {
             Selection::Menu(_) => {
                 self.panel_front(Panel::MenuViewer) && !self.selected_buttons.is_empty()
@@ -620,6 +633,8 @@ impl DiscCraftApp {
             Action::RemoveAudioTrack => self.remove_last_track(TrackKind::Audio),
             Action::RemoveSubtitleTrack => self.remove_last_track(TrackKind::Subtitle),
             Action::ImportSubtitles => self.import_subtitles(),
+            Action::ImportFilmCraftMarkers => self.import_filmcraft_markers(),
+            Action::NewTimelineFromFilmCraft => self.new_timeline_from_filmcraft(),
             Action::About => self.about_open = true,
             Action::Undo => self.undo(),
             Action::Redo => self.redo(),
@@ -891,7 +906,38 @@ impl DiscCraftApp {
         }
     }
 
+    /// Edit ▸ Clear (Delete): removes what is selected in the panel last pressed, as in Encore — the item in the
+    /// Project panel, the menu (or its selected buttons) in the Menus panel, the timeline in the Timelines panel;
+    /// in the viewers the buttons, texts and graphics of the menu, or the timeline's selection.
     fn clear_selection(&mut self) {
+        let item = matches!(
+            self.selection,
+            Selection::Asset(_)
+                | Selection::Timeline(_)
+                | Selection::Menu(_)
+                | Selection::Slideshow(_)
+                | Selection::Playlist(_)
+                | Selection::ChapterPlaylist(_)
+        );
+        match self.active_panel {
+            Some(Panel::Project) if item => {
+                self.remove_object(self.selection);
+                return;
+            }
+            Some(Panel::Menus) if matches!(self.selection, Selection::Menu(_)) => {
+                if self.selected_buttons.is_empty() {
+                    self.remove_object(self.selection);
+                } else {
+                    self.remove_selected_buttons();
+                }
+                return;
+            }
+            Some(Panel::Timelines) if matches!(self.selection, Selection::Timeline(_)) => {
+                self.remove_object(self.selection);
+                return;
+            }
+            _ => {}
+        }
         match self.selection {
             Selection::Menu(_) if self.panel_front(Panel::MenuViewer) => {
                 if !self.remove_selected_text() && !self.remove_selected_graphic() {

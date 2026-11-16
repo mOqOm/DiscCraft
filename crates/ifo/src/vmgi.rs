@@ -1282,6 +1282,7 @@ mod tests {
             video: VideoAttr {
                 standard: Standard::Ntsc,
                 wide: false,
+                resolution: crate::Resolution::Full,
             },
             first_play: Pgc {
                 prohibited_ops: 0,

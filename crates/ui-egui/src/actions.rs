@@ -168,6 +168,10 @@ pub(crate) enum Action {
     RemoveSubtitleTrack,
     /// Read a subtitle file (SRT, WebVTT, text script) and add it as a subtitle track.
     ImportSubtitles,
+    /// Read a FilmCraft project and turn a sequence's markers into chapter points.
+    ImportFilmCraftMarkers,
+    /// Export a FilmCraft sequence with FilmCraft and make a timeline of it, its markers as chapters.
+    NewTimelineFromFilmCraft,
     /// Show the About DiscCraft dialog.
     About,
     /// Zoom in.
@@ -241,7 +245,7 @@ pub(crate) enum Trigger {
 
 impl Action {
     /// Every action, in menu order.
-    pub(crate) const ALL: [Action; 109] = [
+    pub(crate) const ALL: [Action; 111] = [
         Action::NewProject,
         Action::NewMenu,
         Action::NewTimeline,
@@ -321,6 +325,8 @@ impl Action {
         Action::RemoveAudioTrack,
         Action::RemoveSubtitleTrack,
         Action::ImportSubtitles,
+        Action::ImportFilmCraftMarkers,
+        Action::NewTimelineFromFilmCraft,
         Action::About,
         Action::ZoomIn,
         Action::ZoomOut,
@@ -436,6 +442,8 @@ impl Action {
             Self::RemoveAudioTrack => tl!("Delete Audio Track"),
             Self::RemoveSubtitleTrack => tl!("Delete Subtitle Track"),
             Self::ImportSubtitles => tl!("Import Subtitles…"),
+            Self::ImportFilmCraftMarkers => tl!("Import FilmCraft Markers…"),
+            Self::NewTimelineFromFilmCraft => tl!("New Timeline from FilmCraft Sequence…"),
             Self::About => tl!("About DiscCraft…"),
             Self::ZoomIn => tl!("Zoom In"),
             Self::ZoomOut => tl!("Zoom Out"),
@@ -491,6 +499,8 @@ impl Action {
             | Self::RemoveAudioTrack
             | Self::RemoveSubtitleTrack
             | Self::ImportSubtitles
+            | Self::ImportFilmCraftMarkers
+            | Self::NewTimelineFromFilmCraft
             | Self::About
             | Self::AlignLeft
             | Self::AlignHorizontalCenter

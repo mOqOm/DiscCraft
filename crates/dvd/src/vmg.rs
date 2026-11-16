@@ -33,6 +33,7 @@ pub(crate) fn vmg_set_sectors(
         video: VideoAttr {
             standard: Standard::Ntsc,
             wide: false,
+            resolution: disccraft_ifo::Resolution::Full,
         },
         first_play: Pgc::default(),
         vts_attrs: vec![vec![0; 0x300]; vts_count],
@@ -76,6 +77,7 @@ pub(crate) fn write_vmg(
         video: VideoAttr {
             standard,
             wide: menus_wide,
+            resolution: disccraft_ifo::Resolution::Full,
         },
         first_play: Pgc {
             prohibited_ops: first_play.1 | crate::UOP_TIME_PLAY,

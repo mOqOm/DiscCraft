@@ -5,7 +5,7 @@ use super::{
     AudioSource, GopInfo, MuxError, MuxInput, SUBPICTURE_COUNT, SubpictureUnit, VobuInfo,
     VobuRecord, invalid, u32_from_i64,
 };
-use crate::es::{Ac3Stream, LpcmStream, VideoStream, to_90k};
+use crate::es::{LpcmStream, VideoStream, to_90k};
 use crate::sink::{SECTOR, SectorSink};
 
 /// MPEG-2 pack header length in bytes.
@@ -106,12 +106,15 @@ struct GopState {
 /// Borrowed audio source kind.
 #[derive(Clone, Copy, Debug)]
 enum AudioKind<'a> {
-    /// AC-3 stream and its elementary-stream bytes.
-    Ac3 {
-        /// Parsed AC-3 stream.
-        stream: &'a Ac3Stream,
-        /// AC-3 elementary stream bytes.
+    /// Whole frames in private stream 1 behind the frame count and the pointer to the first one: AC-3
+    /// (substreams from 0x80) and DTS (from 0x88).
+    Framed {
+        /// The frames of the stream.
+        frames: &'a [crate::es::Ac3Frame],
+        /// The elementary stream bytes.
         data: &'a [u8],
+        /// The substream number of the first audio stream.
+        base: u8,
     },
     /// DVD LPCM stream.
     Lpcm(&'a LpcmStream),
@@ -185,7 +188,23 @@ pub(crate) fn init_audio_states<'a>(input: &MuxInput<'a>) -> Result<Vec<AudioSta
         match source {
             AudioSource::Ac3 { stream, data } => {
                 states.push(AudioState {
-                    kind: AudioKind::Ac3 { stream, data },
+                    kind: AudioKind::Framed {
+                        frames: &stream.frames,
+                        data,
+                        base: 0x80,
+                    },
+                    next_frame: 0,
+                    next_byte: 0,
+                    start_pts: input.audio_start_pts,
+                });
+            }
+            AudioSource::Dts { stream, data } => {
+                states.push(AudioState {
+                    kind: AudioKind::Framed {
+                        frames: &stream.frames,
+                        data,
+                        base: 0x88,
+                    },
                     next_frame: 0,
                     next_byte: 0,
                     start_pts: input.audio_start_pts,
@@ -931,8 +950,7 @@ impl<'a> AudioState<'a> {
     /// Number of remaining frames in this audio stream.
     fn remaining_frames(&self) -> Result<usize, MuxError> {
         match &self.kind {
-            AudioKind::Ac3 { stream, .. } => stream
-                .frames
+            AudioKind::Framed { frames, .. } => frames
                 .len()
                 .checked_sub(self.next_frame)
                 .ok_or_else(|| invalid("AC-3 frame index overflow")),
@@ -949,8 +967,7 @@ impl<'a> AudioState<'a> {
     /// Presentation timestamp of the next frame, in 27 MHz units.
     fn next_pts(&self) -> Result<i64, MuxError> {
         match &self.kind {
-            AudioKind::Ac3 { stream, .. } => stream
-                .frames
+            AudioKind::Framed { frames, .. } => frames
                 .get(self.next_frame)
                 .map(|frame| frame.pts)
                 .ok_or_else(|| invalid("missing AC-3 frame")),
@@ -962,8 +979,8 @@ impl<'a> AudioState<'a> {
     fn build_payload(&mut self, stream_index: usize) -> Result<(Vec<u8>, i64, usize), MuxError> {
         let kind = self.kind;
         let (payload, pts, count) = match kind {
-            AudioKind::Ac3 { stream, data } => {
-                self.build_ac3_payload(stream, data, stream_index)?
+            AudioKind::Framed { frames, data, base } => {
+                self.build_ac3_payload(frames, data, base, stream_index)?
             }
             AudioKind::Lpcm(lpcm) => self.build_lpcm_payload(lpcm, stream_index)?,
         };
@@ -973,22 +990,29 @@ impl<'a> AudioState<'a> {
     /// Build one AC-3 PES payload, filled: frames run on from one pack into the next, as DVD authoring packs them
     /// (a pack of whole frames only leaves up to a frame's length unused: 11 % of the mux rate of 448 kbit/s 5.1).
     /// The header counts the frames that start in the pack and points at the first of them, whose PTS the pack carries.
+    /// DTS frames are packed the same way, but whole (see `whole_frames`).
     fn build_ac3_payload(
         &mut self,
-        stream: &Ac3Stream,
+        frames: &[crate::es::Ac3Frame],
         data: &[u8],
+        base: u8,
         stream_index: usize,
     ) -> Result<(Vec<u8>, i64, usize), MuxError> {
-        let sub_id = sub_stream_id(0x80, stream_index)?;
+        let sub_id = sub_stream_id(base, stream_index)?;
+        // DTS frames (substreams from 0x88) do not run on into the next pack: a pack holds whole frames.
+        let whole_frames = base != 0x80;
         let mut audio = Vec::with_capacity(AC3_DATA_CAPACITY);
         let mut starts = 0usize;
         let mut first_start: Option<(usize, i64)> = None;
         let (mut index, mut byte) = (self.next_frame, self.next_byte);
 
         while audio.len() < AC3_DATA_CAPACITY {
-            let Some(frame) = stream.frames.get(index) else {
+            let Some(frame) = frames.get(index) else {
                 break;
             };
+            if whole_frames && byte == 0 && frame.len > AC3_DATA_CAPACITY - audio.len() {
+                break;
+            }
             if byte == 0 {
                 if starts == usize::from(u8::MAX) {
                     break;
@@ -1026,8 +1050,7 @@ impl<'a> AudioState<'a> {
             Some((offset, pts)) => (offset + 1, pts),
             None => (
                 0,
-                stream
-                    .frames
+                frames
                     .get(self.next_frame)
                     .map(|frame| frame.pts)
                     .ok_or_else(|| invalid("missing AC-3 frame"))?,

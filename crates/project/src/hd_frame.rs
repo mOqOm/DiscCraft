@@ -101,7 +101,7 @@ fn retarget_menu(menu: &mut Menu, from: (u16, u16), to: (u16, u16)) {
         )
     };
     for button in &mut menu.buttons {
-        button.rect = move_rect(button.rect);
+        button.set_rect(move_rect(button.rect));
         scale_shadow(&mut button.shadow, sy);
     }
     for text in &mut menu.texts {

@@ -91,6 +91,12 @@ pub struct MenuGraphic {
     /// Mirrored or turned (Encore's Object ▸ Flip / Rotate); a turned image is drawn on its side.
     #[serde(default, skip_serializing_if = "Orientation::is_identity")]
     pub orientation: Orientation,
+    /// Hidden (Encore's eye in the Layers panel): not drawn in the menu viewer nor on the disc.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+    /// Locked (Encore's lock in the Layers panel): cannot be picked or moved in the menu viewer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
 }
 
 impl MenuGraphic {
@@ -156,6 +162,8 @@ impl Project {
             opacity,
             shadow: graphic.shadow.filter(DropShadow::is_valid),
             orientation: graphic.orientation.rotated(0),
+            hidden: false,
+            locked: false,
         });
         Ok(target.graphics.len().saturating_sub(1))
     }
@@ -284,6 +292,8 @@ mod tests {
             opacity: FULL_OPACITY,
             shadow: None,
             orientation: Default::default(),
+            hidden: false,
+            locked: false,
         }
     }
 
@@ -309,6 +319,8 @@ mod tests {
                     opacity: 150,
                     shadow: None,
                     orientation: Default::default(),
+                    hidden: false,
+                    locked: false,
                 }
             )?,
             1

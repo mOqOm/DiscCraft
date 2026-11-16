@@ -410,16 +410,13 @@ impl Preview {
             "menu" => vm.menu_key(),
             "title" => vm.title_key(),
             // The player's chapter keys (|◀◀ ▶▶|): the chapter before or after, within the title.
-            "next" | "previous" => {
+            // Next on the last chapter ends the title (its end action runs), as in Encore's preview.
+            "next" => vm.next_chapter(),
+            "previous" => {
                 let Location::Title { chapter, .. } = *vm.location() else {
                     return Err("not in a title".to_string());
                 };
-                let wanted = if key == "next" {
-                    chapter.saturating_add(1)
-                } else {
-                    chapter.saturating_sub(1)
-                };
-                vm.jump_chapter(wanted)
+                vm.jump_chapter(chapter.saturating_sub(1))
             }
             other => return Err(format!("unknown key \"{other}\"")),
         }
@@ -962,8 +959,9 @@ mod tests {
                 chapter: 1
             }
         );
-        // The chapter keys and number stay within the title's one chapter; the stream keys set SPRM1 / SPRM2.
-        session.execute("preview.key", &json!({ "key": "next" }))?;
+        // The previous key and the chapter number stay within the title's one chapter (next on the last chapter
+        // ends the title, as in Encore's preview); the stream keys set SPRM1 / SPRM2.
+        session.execute("preview.key", &json!({ "key": "previous" }))?;
         session.execute("preview.chapter", &json!({ "chapter": 9 }))?;
         assert_eq!(
             session.preview.location(),

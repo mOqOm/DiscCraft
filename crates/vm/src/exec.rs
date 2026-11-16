@@ -126,6 +126,9 @@ pub struct Vm<'a> {
     highlight: Option<u8>,
     context: Context,
     ip: usize,
+    /// The title and chapter the MENU or TITLE key was pressed in, for the MENU key to go back to from a menu
+    /// (the player's resume).
+    resume: Option<(u8, u16)>,
 }
 
 impl<'a> Vm<'a> {
@@ -141,6 +144,7 @@ impl<'a> Vm<'a> {
             highlight: None,
             context: Context::FirstPlay,
             ip: 0,
+            resume: None,
         };
         vm.run()?;
         Ok(vm)
@@ -166,6 +170,7 @@ impl<'a> Vm<'a> {
             highlight: None,
             context: Context::FirstPlay,
             ip: 0,
+            resume: None,
         };
 
         vm.validate_location()?;
@@ -231,6 +236,18 @@ impl<'a> Vm<'a> {
             chapter: chapter.clamp(1, chapters),
         };
         Ok(&self.location)
+    }
+
+    /// The player's next-chapter key: the chapter after this one, or — on the last chapter — the end of the title
+    /// (its end action runs), as in Encore CS6's preview.
+    pub fn next_chapter(&mut self) -> Result<&Location, VmError> {
+        let Location::Title { title, chapter } = self.location else {
+            return Err(invalid("not in a title"));
+        };
+        if chapter >= self.title_model(title)?.chapters {
+            return self.finish_title();
+        }
+        self.jump_chapter(chapter.saturating_add(1))
     }
 
     /// The player's audio key: play audio track `track` (1 to 8; SPRM1).
@@ -364,13 +381,22 @@ impl<'a> Vm<'a> {
     /// Press the remote's MENU key. During a title this runs the title set's root menu, which jumps to the
     /// timeline's menu remote; when the title has none, or no title is playing, nothing happens.
     pub fn menu_key(&mut self) -> Result<&Location, VmError> {
-        let Location::Title { title, .. } = self.location else {
+        let Location::Title { title, chapter } = self.location else {
+            // In a menu the key goes back to the title it was pressed in (Encore CS6's preview and players:
+            // resume). Nothing to go back to: nothing happens.
+            if let (Location::Menu { .. }, Some((title, chapter))) =
+                (self.location, self.resume.take())
+            {
+                self.highlight = None;
+                self.location = Location::Title { title, chapter };
+            }
             return Ok(&self.location);
         };
         let model = self.title_model(title)?;
         if model.menu_remote.is_empty() || model.prohibited_ops & UOP_ROOT_MENU != 0 {
             return Ok(&self.location);
         }
+        self.resume = Some((title, chapter));
 
         self.steps = 0;
         self.highlight = None;
@@ -395,6 +421,9 @@ impl<'a> Vm<'a> {
         };
         if prohibited & UOP_TITLE_MENU != 0 {
             return Ok(&self.location);
+        }
+        if let Location::Title { title, chapter } = self.location {
+            self.resume = Some((title, chapter));
         }
         self.steps = 0;
         self.highlight = None;
@@ -429,6 +458,8 @@ impl<'a> Vm<'a> {
         let Location::Title { title, .. } = self.location else {
             return Err(invalid("not in a title"));
         };
+        // A title that has played to its end is not resumed.
+        self.resume = None;
 
         self.title_model(title)?;
         self.steps = 0;
@@ -1286,9 +1317,19 @@ mod tests {
         )?;
         assert!(matches!(*vm.menu_key()?, Location::Menu { pgcn: 1, .. }));
 
-        // In a menu the key does nothing.
-        let at_menu = *vm.location();
-        assert_eq!(*vm.menu_key()?, at_menu);
+        // In the menu the key goes back to where it was pressed (resume), once.
+        assert_eq!(
+            *vm.menu_key()?,
+            Location::Title {
+                title: 1,
+                chapter: 2
+            }
+        );
+
+        // A menu reached without leaving a title has nothing to go back to: the key does nothing.
+        let shown = Location::Menu { pgcn: 1, button: 1 };
+        let mut fresh = Vm::restore(&model, shown)?;
+        assert_eq!(*fresh.menu_key()?, shown);
 
         // A title without a menu remote keeps playing.
         let mut silent = model.clone();

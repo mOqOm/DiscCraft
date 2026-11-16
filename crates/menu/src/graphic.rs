@@ -4,7 +4,9 @@
 //! transparent RGBA layer of a PSD export.
 
 use crate::draw::{SourceImage, load_image};
-use disccraft_project::{GraphicKind, Menu, MenuGraphic, Orientation, Project, Rect, ShapeKind};
+use disccraft_project::{
+    GraphicKind, Menu, MenuGraphic, Orientation, Project, Rect, ShapeKind, rotated_bounds,
+};
 use filmcraft_text::Mask;
 
 /// A pixel the painter wants drawn: frame position, colour and coverage (0 to 1, the graphic's opacity included).
@@ -19,7 +21,7 @@ pub(crate) fn paint_graphics(
     height: u16,
     sink: &mut Sink<'_>,
 ) {
-    for graphic in &menu.graphics {
+    for graphic in menu.graphics.iter().filter(|graphic| !graphic.hidden) {
         paint_graphic(project, graphic, width, height, sink);
     }
 }
@@ -48,7 +50,7 @@ fn graphic_mask(
     width: u16,
     height: u16,
 ) -> Option<(Mask, i32, i32)> {
-    let (x0, y0, x1, y1) = frame_area(graphic.rect, width, height)?;
+    let (x0, y0, x1, y1) = frame_area(drawn_rect(graphic), width, height)?;
     let w = x1.checked_sub(x0)?;
     let h = y1.checked_sub(y0)?;
     if w == 0 || h == 0 {
@@ -80,9 +82,10 @@ fn paint_body(
     sink: &mut Sink<'_>,
 ) {
     let opacity = f32::from(graphic.opacity.clamp(1, 100)) / 100.0;
-    let Some(area) = frame_area(graphic.rect, width, height) else {
+    let Some(area) = frame_area(drawn_rect(graphic), width, height) else {
         return;
     };
+    let place = Placement::new(graphic.rect, graphic.orientation);
     match graphic.kind {
         GraphicKind::Image { asset } => {
             // A turned image is read at its upright size, then drawn on its side.
@@ -92,19 +95,59 @@ fn paint_body(
                 (graphic.rect.w, graphic.rect.h)
             };
             if let Ok(source) = load_image(project, asset, w, h) {
-                paint_image(
-                    &source,
-                    graphic.rect,
-                    graphic.orientation,
-                    area,
-                    opacity,
-                    sink,
-                );
+                paint_image(&source, &place, graphic.orientation, area, opacity, sink);
             }
         }
         GraphicKind::Shape { shape, color } => {
-            paint_shape(shape, color, graphic.rect, area, opacity, sink);
+            paint_shape(shape, color, &place, area, opacity, sink);
         }
+    }
+}
+
+/// The frame rectangle a graphic covers: its box, turned by its free angle about its centre.
+pub(crate) fn drawn_rect(graphic: &MenuGraphic) -> Rect {
+    rotated_bounds(graphic.rect, graphic.orientation.angle)
+}
+
+/// Where a frame pixel falls in a graphic's box, which may be turned by a free angle about its centre.
+struct Placement {
+    rect: Rect,
+    /// The free turn's sine and cosine; `None` when it is not turned.
+    turn: Option<(f32, f32)>,
+}
+
+impl Placement {
+    fn new(rect: Rect, orientation: Orientation) -> Self {
+        let turn = (disccraft_project::normalized_angle(i32::from(orientation.angle)) != 0)
+            .then(|| orientation.angle_radians().sin_cos());
+        Self { rect, turn }
+    }
+
+    /// The centre of frame pixel (`x`, `y`) in the box's own coordinates (0 to its width and height), and how much
+    /// of the pixel the box covers at a turned edge (1 inside); `None` outside.
+    fn local(&self, x: usize, y: usize) -> Option<(f32, f32, f32)> {
+        let (w, h) = (f32::from(self.rect.w), f32::from(self.rect.h));
+        // `as` is exact for frame coordinates.
+        let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+        let Some((sin, cos)) = self.turn else {
+            return Some((
+                px - f32::from(self.rect.x),
+                py - f32::from(self.rect.y),
+                1.0,
+            ));
+        };
+        // Turn the pixel back about the box's centre.
+        let (cx, cy) = (
+            f32::from(self.rect.x) + w * 0.5,
+            f32::from(self.rect.y) + h * 0.5,
+        );
+        let (qx, qy) = (px - cx, py - cy);
+        let (lx, ly) = (
+            qx * cos + qy * sin + w * 0.5,
+            -qx * sin + qy * cos + h * 0.5,
+        );
+        let edge = (lx.min(w - lx).min(ly).min(h - ly) + 0.5).clamp(0.0, 1.0);
+        (edge > 0.0).then_some((lx, ly, edge))
     }
 }
 
@@ -117,22 +160,26 @@ fn frame_area(rect: Rect, width: u16, height: u16) -> Option<(usize, usize, usiz
     (x1 > x0 && y1 > y0 && rect.w > 0 && rect.h > 0).then_some((x0, y0, x1, y1))
 }
 
-/// Scales `source` into `rect` (bilinear, alpha aware) and paints the part inside `area`.
+/// Scales `source` into the graphic's box (bilinear, alpha aware) and paints the part inside `area`.
 fn paint_image(
     source: &SourceImage,
-    rect: Rect,
+    place: &Placement,
     orientation: Orientation,
     area: (usize, usize, usize, usize),
     opacity: f32,
     sink: &mut Sink<'_>,
 ) {
     let (x0, y0, x1, y1) = area;
-    let dst_w = usize::from(rect.w);
-    let dst_h = usize::from(rect.h);
+    let dst_w = usize::from(place.rect.w);
+    let dst_h = usize::from(place.rect.h);
     for y in y0..y1 {
         for x in x0..x1 {
-            let dx = x.saturating_sub(usize::from(rect.x));
-            let dy = y.saturating_sub(usize::from(rect.y));
+            let Some((lx, ly, edge)) = place.local(x, y) else {
+                continue;
+            };
+            // The box's pixel (`as` saturates; clamped into the box).
+            let dx = (lx.max(0.0) as usize).min(dst_w.saturating_sub(1));
+            let dy = (ly.max(0.0) as usize).min(dst_h.saturating_sub(1));
             let (ux, uy) = orientation.upright_pixel(dx, dy, dst_w, dst_h);
             let (up_w, up_h) = if orientation.swaps_sides() {
                 (dst_h, dst_w)
@@ -140,7 +187,7 @@ fn paint_image(
                 (dst_w, dst_h)
             };
             let (color, alpha) = bilinear_rgba(source, ux, uy, up_w, up_h);
-            let coverage = alpha * opacity;
+            let coverage = alpha * opacity * edge;
             if coverage > 0.0 {
                 sink(x, y, color, coverage);
             }
@@ -148,26 +195,25 @@ fn paint_image(
     }
 }
 
-/// Paints `shape` filling `rect` with `color`, anti-aliased at its edge.
+/// Paints `shape` filling the graphic's box with `color`, anti-aliased at its edge.
 fn paint_shape(
     shape: ShapeKind,
     color: [u8; 3],
-    rect: Rect,
+    place: &Placement,
     area: (usize, usize, usize, usize),
     opacity: f32,
     sink: &mut Sink<'_>,
 ) {
     let (x0, y0, x1, y1) = area;
-    let w = f32::from(rect.w);
-    let h = f32::from(rect.h);
-    let left = f32::from(rect.x);
-    let top = f32::from(rect.y);
+    let w = f32::from(place.rect.w);
+    let h = f32::from(place.rect.h);
     for y in y0..y1 {
         for x in x0..x1 {
-            // The pixel centre, relative to the rectangle.
-            let px = (x as f32) + 0.5 - left;
-            let py = (y as f32) + 0.5 - top;
-            let coverage = shape_coverage(shape, px, py, w, h) * opacity;
+            // The pixel centre, in the box.
+            let Some((px, py, edge)) = place.local(x, y) else {
+                continue;
+            };
+            let coverage = shape_coverage(shape, px, py, w, h) * opacity * edge;
             if coverage > 0.0 {
                 sink(x, y, color, coverage);
             }

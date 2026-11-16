@@ -394,6 +394,63 @@ impl DiscCraftApp {
         ))
     }
 
+    /// The Build button, as in Encore CS6: the project is checked first, and when the check finds something a
+    /// dialog offers to show it, to go on anyway, or to cancel. A project without problems builds at once.
+    pub(crate) fn request_build(&mut self) {
+        self.refresh_check();
+        if self.problems.is_empty() {
+            self.start_build();
+        } else {
+            self.build_prompt = true;
+        }
+    }
+
+    /// The dialog of [`Self::request_build`]: Show opens the Check Project window (and does not build), Ignore and
+    /// Continue builds, Cancel does nothing.
+    pub(crate) fn show_build_prompt(&mut self, ctx: &egui::Context) {
+        if !self.build_prompt {
+            return;
+        }
+        let mut choice = None;
+        let response = egui::Modal::new(egui::Id::unique("build_check_prompt")).show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.strong(tl!("Check Project"));
+            ui.add_space(6.0);
+            ui.label(tl!(
+                "The project has problems, so the disc may not play correctly. Do you want to look at them?"
+            ));
+            ui.add_space(10.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Right to left, so Cancel ends up on the right as in Encore.
+                if ui.button(tl!("Cancel")).clicked() {
+                    choice = Some(0);
+                }
+                if ui.button(tl!("Ignore and Continue")).clicked() {
+                    choice = Some(1);
+                }
+                if ui.button(tl!("Show")).clicked() {
+                    choice = Some(2);
+                }
+            });
+        });
+        if response.should_close() {
+            self.build_prompt = false;
+            return;
+        }
+        match choice {
+            Some(1) => {
+                self.build_prompt = false;
+                self.start_build();
+            }
+            Some(2) => {
+                self.build_prompt = false;
+                self.check_window.open = true;
+            }
+            Some(_) => self.build_prompt = false,
+            None => {}
+        }
+    }
+
     pub(crate) fn start_build(&mut self) {
         // An empty Location builds next to the project (Encore always has a location; a build never silently
         // does nothing).
@@ -401,11 +458,24 @@ impl DiscCraftApp {
             self.build_path = self.default_build_path().to_string_lossy().into_owned();
         }
         let path = self.build_path.trim().to_owned();
+        let Some(target) = build_target(
+            self.build_output,
+            Path::new(&path),
+            &self.session.project.settings.name,
+        ) else {
+            // Encore: an image needs a file to write, not a folder.
+            self.status = tl!("The destination path is not valid.").to_string();
+            return;
+        };
+        // Encore saves the project when a build starts.
+        if self.session.path.is_some() && self.session.dirty {
+            self.save_project(false);
+        }
 
         let project = self.session.project.clone();
         let options = BuildOptions {
             output: self.build_output,
-            path: PathBuf::from(path),
+            path: target,
             cache: None,
             // Audio without a language of its own is in DiscCraft's display language (unless the disc says).
             audio_language: Some(crate::i18n::current().code().to_owned()),
@@ -435,6 +505,25 @@ impl DiscCraftApp {
                 self.status = tl!("Simulation finished").to_string();
             }
             Err(error) => self.status = error,
+        }
+    }
+}
+
+/// Where a build to `location` goes, as in Encore CS6: an image is the file itself (`None` when the location is
+/// a folder: there is nothing to name the image); a folder build goes into a folder named after the disc inside
+/// an existing location, unless the location already is a disc folder (a rebuild goes to the same place) or the
+/// disc has no name.
+fn build_target(output: OutputKind, location: &Path, disc_name: &str) -> Option<PathBuf> {
+    match output {
+        OutputKind::Iso => (!location.is_dir()).then(|| location.to_path_buf()),
+        OutputKind::Folder => {
+            let name = file_safe(disc_name.trim());
+            let built = location.join("VIDEO_TS").is_dir() || location.join("BDMV").is_dir();
+            if location.is_dir() && !built && !name.trim().is_empty() {
+                Some(location.join(name))
+            } else {
+                Some(location.to_path_buf())
+            }
         }
     }
 }
@@ -472,5 +561,47 @@ mod progress_tests {
         assert_eq!(elapsed_text(3_725), "1:02:05");
         assert_eq!(file_safe(" a/b:c? "), "a_b_c_");
         assert_eq!(file_safe("映画"), "映画");
+    }
+}
+
+#[cfg(test)]
+mod build_target_tests {
+    use super::build_target;
+    use disccraft_build::OutputKind;
+
+    /// As in Encore CS6: a folder build goes into `<location>/<disc name>`, an image needs a file name.
+    #[test]
+    fn a_build_goes_where_encore_puts_it() -> Result<(), Box<dyn std::error::Error>> {
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-build-target-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        assert_eq!(
+            build_target(OutputKind::Folder, &dir, "Untitled Project"),
+            Some(dir.join("Untitled Project"))
+        );
+        assert_eq!(
+            build_target(OutputKind::Folder, &dir, " "),
+            Some(dir.clone())
+        );
+        // A folder that does not exist yet is the disc folder itself.
+        let fresh = dir.join("movie_DVD");
+        assert_eq!(
+            build_target(OutputKind::Folder, &fresh, "Movie"),
+            Some(fresh.clone())
+        );
+        // A rebuild into a disc folder stays there.
+        std::fs::create_dir_all(fresh.join("VIDEO_TS"))?;
+        assert_eq!(
+            build_target(OutputKind::Folder, &fresh, "Movie"),
+            Some(fresh)
+        );
+        // An image: a folder is refused, a file is taken.
+        assert_eq!(build_target(OutputKind::Iso, &dir, "Movie"), None);
+        assert_eq!(
+            build_target(OutputKind::Iso, &dir.join("movie.iso"), "Movie"),
+            Some(dir.join("movie.iso"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
     }
 }
