@@ -114,10 +114,16 @@ impl DiscCraftApp {
         self.first_play_items(ui, selection);
 
         ui.separator();
-        // プロジェクトの項目の切り取り / コピー / 貼り付けはまだない。
-        for label in [tl!("Cut"), tl!("Copy"), tl!("Paste")] {
-            let _ = ui.add_enabled(false, egui::Button::new(label));
+        // 切り取りは Encore でも灰色。コピーは項目を覚え、貼り付けはその複製を作る（アセットは複製しない）。
+        let _ = ui.add_enabled(false, egui::Button::new(tl!("Cut")));
+        if ui
+            .add_enabled(asset.is_none(), egui::Button::new(tl!("Copy")))
+            .clicked()
+        {
+            self.project_clipboard = selection;
+            ui.close();
         }
+        self.paste_item(ui);
         if ui.button(tl!("Clear")).clicked() {
             self.remove_object(selection);
             ui.close();
@@ -169,8 +175,23 @@ impl DiscCraftApp {
             self.start_transcode_now(asset);
             ui.close();
         }
-        // Not there yet: Revert to Original, and pointing at a file transcoded elsewhere.
-        let _ = ui.add_enabled(false, egui::Button::new(tl!("Revert to Original")));
+        // Revert to Original: the asset's transcodes are taken out of the build's cache.
+        let transcoded = asset
+            .and_then(|id| self.transcode_state(id))
+            .is_some_and(|state| state == TranscodeState::Transcoded);
+        if ui
+            .add_enabled(
+                transcoded && idle,
+                egui::Button::new(tl!("Revert to Original")),
+            )
+            .clicked()
+        {
+            if let Some(id) = asset {
+                self.revert_to_original(id);
+            }
+            ui.close();
+        }
+        // Not there yet: pointing at a file transcoded elsewhere.
         let _ = ui.menu_button(tl!("Locate Transcoded File"), |ui| {
             let _ = ui.add_enabled(false, egui::Button::new(tl!("DVD…")));
             let _ = ui.add_enabled(false, egui::Button::new(tl!("Blu-ray…")));
@@ -433,8 +454,58 @@ impl DiscCraftApp {
         ui.menu_button(tl!("New"), |ui| self.new_items(ui, None, None));
         // Encore: 切り取り / コピー / 貼り付け / 消去 follow, all grey where nothing is chosen.
         ui.separator();
-        for label in [tl!("Cut"), tl!("Copy"), tl!("Paste"), tl!("Clear")] {
+        for label in [tl!("Cut"), tl!("Copy")] {
             let _ = ui.add_enabled(false, egui::Button::new(label));
+        }
+        self.paste_item(ui);
+        let _ = ui.add_enabled(false, egui::Button::new(tl!("Clear")));
+    }
+
+    /// 貼り付け: コピーしてある項目（メニュー、タイムライン、スライドショー、再生リスト、チャプター再生リスト）の
+    /// 複製を作って選ぶ。コピーした項目がもうなければ灰色。
+    fn paste_item(&mut self, ui: &mut Ui) {
+        let project = &self.session.project;
+        let copied = match self.project_clipboard {
+            Selection::Timeline(id) => project.timeline(id).is_some().then_some(("timeline", id.0)),
+            Selection::Menu(id) => project.menu(id).is_some().then_some(("menu", id.0)),
+            Selection::Slideshow(id) => project
+                .slideshows
+                .contains_key(&id)
+                .then_some(("slideshow", id)),
+            Selection::Playlist(id) => project
+                .playlists
+                .contains_key(&id)
+                .then_some(("playlist", id)),
+            Selection::ChapterPlaylist(id) => project
+                .chapter_playlists
+                .contains_key(&id)
+                .then_some(("chapterPlaylist", id)),
+            Selection::None | Selection::Asset(_) => None,
+        };
+        if !ui
+            .add_enabled(copied.is_some(), egui::Button::new(tl!("Paste")))
+            .clicked()
+        {
+            return;
+        }
+        ui.close();
+        let Some((kind, id)) = copied else {
+            return;
+        };
+        let made = self
+            .run_command(
+                "project.duplicate",
+                serde_json::json!({ "kind": kind, "id": id }),
+            )
+            .and_then(|value| value.get("id").and_then(serde_json::Value::as_u64));
+        if let Some(copy) = made {
+            self.select(match kind {
+                "timeline" => Selection::Timeline(TimelineId(copy)),
+                "menu" => Selection::Menu(disccraft_project::MenuId(copy)),
+                "slideshow" => Selection::Slideshow(copy),
+                "playlist" => Selection::Playlist(copy),
+                _ => Selection::ChapterPlaylist(copy),
+            });
         }
     }
 

@@ -150,6 +150,27 @@ pub fn transcode_now(
     }
 }
 
+/// Encore's Revert to Original: removes `asset`'s transcodes from the cache a build with `options` uses, so that
+/// its status is "Untranscoded" again and the next build (or Transcode Now) converts it anew. Returns how many
+/// files went.
+///
+/// # Errors
+///
+/// When the asset does not exist or the cache folder cannot be read.
+pub fn revert_to_original(
+    project: &Project,
+    options: &BuildOptions,
+    asset: disccraft_project::AssetId,
+) -> Result<usize, String> {
+    let cache = cache_dir(options);
+    match project.settings.kind {
+        DiscKind::Dvd => disccraft_dvd::revert_transcodes(project, &cache, asset)
+            .map_err(|error| error.to_string()),
+        DiscKind::BluRay => disccraft_bd::revert_transcodes(project, &cache, asset)
+            .map_err(|error| error.to_string()),
+    }
+}
+
 /// The step [`build_with_progress`] names while it writes the disc image (after the folder).
 pub const STEP_IMAGE: &str = "disc image";
 

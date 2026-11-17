@@ -94,6 +94,7 @@ fn the_videos_own_sound_as_audio_1_builds_like_the_implicit_soundtrack() {
             project.timeline_mut(t).unwrap().audio.push(AudioTrack {
                 asset: v,
                 language: String::new(),
+                start: 0,
             });
         }
         project.settings.first_play = Link::Timeline { id: t, chapter: 0 };

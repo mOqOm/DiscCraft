@@ -244,6 +244,8 @@ pub fn transcode_now(
     prepare::prepare_all_of(project, cache_dir, &budget, progress, true, only)
 }
 
+pub use prepare::revert_transcodes;
+
 /// Whether `timeline` plays `asset` (a video clip or an audio track).
 #[must_use]
 pub fn timeline_uses(

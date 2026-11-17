@@ -562,6 +562,45 @@ pub(crate) fn hd_transcoded(
     clips > 0
 }
 
+/// Removes from `cache_dir` the HD video of every timeline clip that plays `asset` (see [`hd_transcoded`]);
+/// returns how many files went.
+pub(crate) fn revert_hd(
+    project: &Project,
+    cache_dir: &Path,
+    asset: disccraft_project::AssetId,
+) -> usize {
+    let Ok(Some(budget)) = disccraft_dvd::hd_budget(project) else {
+        return 0;
+    };
+    let rates = (budget.target_kbps, budget.max_kbps);
+    let Some(media) = project.assets.get(&asset).map(|asset| asset.media_file()) else {
+        return 0;
+    };
+    let source: &Path = &media;
+    let mut removed = 0usize;
+    for timeline in project.timelines.values() {
+        for (clip, video) in timeline.videos().into_iter().enumerate() {
+            if video != asset {
+                continue;
+            }
+            let Ok((es, index)) = cached_paths(
+                cache_dir,
+                source,
+                (project.settings.bd_video.id(), rates),
+                timeline.video_trim(clip),
+            ) else {
+                continue;
+            };
+            for file in [es, index] {
+                if file.is_file() && std::fs::remove_file(&file).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+    }
+    removed
+}
+
 /// Where the HD encode of `source` in `format` is kept (of its trimmed part when `trim` is not the whole clip).
 fn cached_paths(
     cache_dir: &Path,

@@ -559,6 +559,32 @@ impl DiscCraftApp {
         self.status = tl!("Transcode started").to_string();
     }
 
+    /// Encore's Revert to Original: takes `asset`'s transcodes out of the build's cache (the one Transcode Now
+    /// and the build fill), so that it is "Untranscoded" again.
+    pub(crate) fn revert_to_original(&mut self, asset: disccraft_project::AssetId) {
+        let path = self.build_path.trim().to_owned();
+        let Some(target) = build_target(
+            self.build_output,
+            Path::new(&path),
+            &self.session.project.settings.name,
+        ) else {
+            self.status = tl!("The destination path is not valid.").to_string();
+            return;
+        };
+        let options = BuildOptions {
+            output: self.build_output,
+            path: target,
+            cache: None,
+            audio_language: None,
+        };
+        self.status =
+            match disccraft_build::revert_to_original(&self.session.project, &options, asset) {
+                Ok(_) => tl!("Reverted to the original").to_string(),
+                Err(error) => error,
+            };
+        self.transcode_dirty = true;
+    }
+
     /// Called as the window is drawn: says in the status bar how far Transcode Now is, and what came of it.
     pub(crate) fn poll_transcode_now(&mut self, ctx: &egui::Context) {
         if let Some(result) = self.transcode_job.poll() {

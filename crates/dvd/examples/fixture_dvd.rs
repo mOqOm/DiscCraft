@@ -17,6 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tl.audio.push(AudioTrack {
             asset: audio,
             language: "ja".to_string(),
+            start: 0,
         });
     }
     let report = build_video_ts(&project, &fixtures.join("dvd_out"))?;

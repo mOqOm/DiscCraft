@@ -79,6 +79,12 @@ DiscCraft は映像・音声・静止画から DVD-Video / Blu-ray（BDMV）を�
 Rust stable 1.95 以上（rustup）。Windows を最優先、macOS / Linux も対象。Linux では再生の音（cpal）のために
 ALSA の開発用パッケージ（Debian / Ubuntu の `libasound2-dev`、Fedora の `alsa-lib-devel`）が要る。
 
+リリースには Windows（x64）のほかに、Linux（x86_64、aarch64 の `tar.gz`）と macOS（Apple シリコンと Intel を 1 つにした
+`zip`）のビルドも置いている。**Linux と macOS のビルドは動作を確認していない**: GitHub のランナーで自動でビルドしただけで、
+画面を出して使ったことも、作ったディスクを確かめたこともない。動作を確認しているのは Windows だけ。macOS のビルドは
+署名も公証もしていないので、初回は Gatekeeper に止められる（右クリックの「開く」か、`xattr -d com.apple.quarantine` で外す）。
+Linux のビルドの実行には ALSA（`libasound2`）と、X11 か Wayland のライブラリが要る。動いた / 動かなかったの報告を歓迎する。
+
 ## ビルドと使い方
 
 ```

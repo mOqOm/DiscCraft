@@ -17,6 +17,16 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "project.duplicate",
+        label: "項目を複製",
+        menu: &["プロジェクト"],
+        shortcut: None,
+        params: r#"{"kind": "timeline"|"menu"|"slideshow"|"playlist"|"chapterPlaylist", "id": id} → {"kind", "id"} (the copy)"#,
+        enabled: always_enabled,
+        run: run_duplicate,
+        journal: true,
+    },
+    CommandSpec {
         id: "project.rename",
         label: "名前を変更",
         menu: &["プロジェクト"],
@@ -126,6 +136,30 @@ fn run_remove(session: &mut Session, params: &Value) -> CommandResult {
     result.map_err(|error| error.to_string())?;
 
     Ok(empty_object())
+}
+
+/// Copies a menu (with its pages), a timeline, a slideshow, a playlist or a chapter playlist (Encore: Copy and
+/// Paste in the Project panel): the copy has a name of its own and sits in the same folder.
+fn run_duplicate(session: &mut Session, params: &Value) -> CommandResult {
+    use disccraft_project::Duplicate;
+    let kind = req_str(params, "kind")?;
+    let id = req_u64(params, "id")?;
+    let original = match kind.as_str() {
+        "timeline" => Duplicate::Timeline(TimelineId(id)),
+        "menu" => Duplicate::Menu(MenuId(id)),
+        "slideshow" => Duplicate::Slideshow(id),
+        "playlist" => Duplicate::Playlist(id),
+        "chapterPlaylist" => Duplicate::ChapterPlaylist(id),
+        other => return Err(format!("parameter \"kind\" cannot be duplicated: {other}")),
+    };
+    let copy = session
+        .project
+        .duplicate(original)
+        .map_err(|error| error.to_string())?;
+    Ok(object(&[
+        ("kind", Value::String(kind)),
+        ("id", Value::from(copy.id())),
+    ]))
 }
 
 fn run_rename(session: &mut Session, params: &Value) -> CommandResult {
@@ -326,6 +360,44 @@ mod tests {
     use std::error::Error;
     use std::fs;
     use std::path::PathBuf;
+
+    /// Encore's Copy and Paste of a project item: the copy has a name of its own, and one undo takes it away.
+    #[test]
+    fn an_item_is_duplicated_and_undone() -> Result<(), Box<dyn Error>> {
+        let mut session = Session::new();
+        let menu = session
+            .execute("menu.create", &json!({"name": "Top"}))?
+            .get("menu")
+            .and_then(Value::as_u64)
+            .ok_or("no menu")?;
+        let made = session.execute("project.duplicate", &json!({"kind": "menu", "id": menu}))?;
+        let copy = made.get("id").and_then(Value::as_u64).ok_or("no id")?;
+        assert_ne!(copy, menu);
+        assert_eq!(made.get("kind"), Some(&json!("menu")));
+        assert_eq!(
+            session
+                .project
+                .menu(MenuId(copy))
+                .map(|menu| menu.name.clone()),
+            Some("Top 2".to_owned())
+        );
+        assert_eq!(session.project.menus.len(), 2);
+        // Assets are not copied, nor what is not there.
+        assert!(
+            session
+                .execute("project.duplicate", &json!({"kind": "asset", "id": 1}))
+                .is_err()
+        );
+        assert!(
+            session
+                .execute("project.duplicate", &json!({"kind": "timeline", "id": 999}))
+                .is_err()
+        );
+        session.execute("edit.undo", &Value::Null)?;
+        assert_eq!(session.project.menus.len(), 1);
+        assert!(session.project.menu(MenuId(copy)).is_none());
+        Ok(())
+    }
 
     #[test]
     fn folders_are_created_filled_and_undone() -> Result<(), Box<dyn Error>> {

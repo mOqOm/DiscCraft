@@ -312,6 +312,16 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "timeline.moveAudio",
+        label: "オーディオクリップを移動",
+        menu: &["タイムライン"],
+        shortcut: None,
+        params: r#"{"timeline": id, "track": index, "timecode"?: "HH:MM:SS;FF", "time"?: ticks}"#,
+        enabled: always_enabled,
+        run: run_move_audio,
+        journal: true,
+    },
+    CommandSpec {
         id: "timeline.setTrackLanguage",
         label: "トラックの言語を設定",
         menu: &["タイムライン"],
@@ -431,6 +441,7 @@ fn take_source_streams(session: &mut Session, timeline: TimelineId) {
             timeline.audio.push(disccraft_project::AudioTrack {
                 asset: video,
                 language: String::new(),
+                start: 0,
             });
         }
     }
@@ -1349,6 +1360,7 @@ fn run_add_audio_track(session: &mut Session, params: &Value) -> CommandResult {
     timeline.audio.push(AudioTrack {
         asset: asset_id,
         language,
+        start: 0,
     });
 
     let index = u64::try_from(timeline.audio.len().saturating_sub(1))
@@ -1404,6 +1416,33 @@ fn run_set_user_ops(session: &mut Session, params: &Value) -> CommandResult {
 }
 
 /// Change the language of an audio or subtitle track (Encore's language list in the track header).
+/// Moves an audio track's clip along the track (Encore: dragging an audio clip): its sound starts at the frame
+/// nearest the time given, and the track is silent before it.
+fn run_move_audio(session: &mut Session, params: &Value) -> CommandResult {
+    let timeline = TimelineId(req_u64(params, "timeline")?);
+    let track = req_usize(params, "track")?;
+    let time = time_param(params, &session.project.settings)?;
+    let rate = session.project.settings.frame_rate();
+    let frame = rate.frame_at(rate.snap_nearest(Tick(time.0.max(0))));
+    let start = u32::try_from(frame.max(0)).map_err(|_| "the clip is too far along".to_string())?;
+    let at = rate.tick_of(i64::from(start));
+    let Some(found) = session.project.timeline_mut(timeline) else {
+        return Err(format!("timeline {} does not exist", timeline.0));
+    };
+    let Some(slot) = found.audio.get_mut(track) else {
+        return Err(format!("audio track {track} does not exist"));
+    };
+    slot.start = start;
+    Ok(object(&[
+        ("start", Value::from(at.0)),
+        (
+            "timecode",
+            Value::String(format_time(at, &session.project.settings)),
+        ),
+        ("frame", Value::from(start)),
+    ]))
+}
+
 fn run_set_track_language(session: &mut Session, params: &Value) -> CommandResult {
     let timeline = TimelineId(req_u64(params, "timeline")?);
     let kind = req_str(params, "kind")?;
@@ -2348,6 +2387,73 @@ mod tests {
         );
         session.undo()?;
         assert!(ops(&session).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn an_audio_clip_moves_along_its_track() -> Result<(), Box<dyn Error>> {
+        let dir = temp_dir("move_audio")?;
+        let video = dir.join("movie.mp4");
+        let audio = dir.join("audio.wav");
+        fs::write(&video, b"fake")?;
+        fs::write(&audio, b"fake")?;
+        let mut session = Session::new();
+        let video_id = value_u64(
+            &session.execute("asset.import", &obj(&[("path", string_value(&video))]))?,
+            "asset",
+        )?;
+        let audio_id = value_u64(
+            &session.execute("asset.import", &obj(&[("path", string_value(&audio))]))?,
+            "asset",
+        )?;
+        let timeline_id = value_u64(
+            &session.execute("timeline.create", &obj(&[("asset", Value::from(video_id))]))?,
+            "timeline",
+        )?;
+        session.execute(
+            "timeline.addAudioTrack",
+            &obj(&[
+                ("timeline", Value::from(timeline_id)),
+                ("asset", Value::from(audio_id)),
+            ]),
+        )?;
+        let start = |session: &Session| {
+            session
+                .project
+                .timeline(disccraft_project::TimelineId(timeline_id))
+                .and_then(|timeline| timeline.audio.first().map(|track| track.start))
+        };
+        assert_eq!(start(&session), Some(0));
+        // Ten seconds in (NTSC drop-frame: frame 300), given as a timecode.
+        let moved = session.execute(
+            "timeline.moveAudio",
+            &serde_json::json!({"timeline": timeline_id, "track": 0, "timecode": "00;00;10;00"}),
+        )?;
+        assert_eq!(start(&session), Some(300));
+        assert_eq!(moved.get("frame"), Some(&Value::from(300)));
+        // Before the start is the start; a track that is not there is an error and changes nothing.
+        session.execute(
+            "timeline.moveAudio",
+            &serde_json::json!({"timeline": timeline_id, "track": 0, "time": -5}),
+        )?;
+        assert_eq!(start(&session), Some(0));
+        assert!(
+            session
+                .execute(
+                    "timeline.moveAudio",
+                    &serde_json::json!({"timeline": timeline_id, "track": 3, "time": 0}),
+                )
+                .is_err()
+        );
+        // One step back: where it was moved to.
+        session.execute("edit.undo", &Value::Null)?;
+        assert_eq!(start(&session), Some(300));
+        // The file keeps the start, and leaves it out when it is 0.
+        let text = serde_json::to_string(&session.project)?;
+        assert!(text.contains("\"start\":300"), "{text}");
+        session.execute("edit.undo", &Value::Null)?;
+        assert!(!serde_json::to_string(&session.project)?.contains("\"start\""));
+        let _ = fs::remove_dir_all(&dir);
         Ok(())
     }
 

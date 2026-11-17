@@ -971,6 +971,7 @@
 	Interpret Footage…	フッテージを変換…
 	A build or a transcode is already running	ビルドかトランスコードが実行中です
 	Transcode started	トランスコードを開始しました
+	Reverted to the original	オリジナルに戻しました
 	Transcode finished ({time})	トランスコードが終わりました（{time}）
 	Cannot transcode: {message}	トランスコードできません: {message}
 	Transcoding {step}: {percent}% ({time})	トランスコード中 {step}: {percent}%（{time}）

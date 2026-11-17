@@ -22,6 +22,7 @@ pub use media_cache::{
 };
 mod picture;
 mod pulldown;
+mod raw_ac3;
 mod session;
 pub use session::{document_metadata, document_of, set_compositions};
 pub mod slideshow;
@@ -484,9 +485,14 @@ pub fn probe_audio_seconds(input: &Path) -> Result<f64, TranscodeError> {
     {
         return Ok(seconds);
     }
+    // A raw AC-3 file tells its length from its first frame and its size: it is not decoded for that.
+    let raw_ac3 = raw_ac3::is_raw_ac3(input)
+        .then(|| raw_ac3::seconds(input))
+        .flatten();
     let seconds = match mkv_probe::quick(input).filter(|probe| probe.has_audio) {
         // A Matroska video's sound is as long as the file.
         Some(probe) => probe.seconds,
+        None if raw_ac3.is_some() => raw_ac3.unwrap_or_default(),
         None => match source::Source::open_audio(input) {
             Ok(source) => source.info().duration.0 as f64 / 254_016_000_000.0,
             Err(error) => ac3_seconds(input).ok_or(error)?,

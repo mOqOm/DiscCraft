@@ -215,6 +215,7 @@ fn build_project(video: &Path, audio: &Path) -> Result<Project, Box<dyn Error>> 
     tl.audio.push(AudioTrack {
         asset: a,
         language: "ja".to_string(),
+        start: 0,
     });
     tl.end_action = Link::LastMenu;
     let menu = project.add_menu(Some("Main menu".to_string()))?;

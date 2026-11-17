@@ -286,8 +286,12 @@ It cannot go on a Blu-ray yet, and it is silent in the Monitor and the preview.
   status bar shows how far it is), and you can go on editing meanwhile. When it is done the transcode status becomes
   "Transcoded", and the build uses that conversion. The conversion is kept inside the Build panel's destination. It
   cannot be chosen for media that needs no conversion, nor for media whose picture cannot be decoded (what cannot
-  be decoded cannot be converted either)
+  be decoded cannot be converted either). **Revert to Original** throws a finished conversion away, so the status is
+  "Untranscoded" again (the next build, or Transcode Now, makes it anew)
 - Media in use cannot be deleted. Taking an item out of use sets the links to it back to Not Set
+- **Copy** and **Paste** in the Project panel's right-click menu make a copy of a menu (with its pages), a timeline, a
+  slideshow, a playlist or a chapter playlist. The copy is named with a number ("Name 2") and goes in the same folder.
+  Its links to other items are kept, and a link it had to itself points at the copy
 
 ## 5. Making a timeline
 
@@ -335,6 +339,11 @@ A DVD takes up to 99 chapters in a title. For a menu of scene buttons that show 
 **Remove Audio Track / Remove Subtitle Track** remove the bottom one. The **Disc** panel (the same as the properties
 with nothing selected) sets the audio track heard and the subtitle shown by default. In the Monitor, the speaker
 button in a track's header chooses the track you hear.
+
+An audio track's clip can be dragged left and right to move where it starts (by frames). The track is silent up to
+there. A Dolby Digital (AC-3) file only gets silence of its own form in front and is not re-encoded; other sound gets
+the silence and is converted to Dolby Digital. A DTS track cannot be moved (the build reports an error; move it back to
+the start).
 
 The limits are 8 audio tracks and 32 subtitle tracks.
 

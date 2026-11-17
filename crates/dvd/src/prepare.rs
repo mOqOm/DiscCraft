@@ -1381,6 +1381,28 @@ fn prepare_audio_tracks(
             }
             kind => kind,
         };
+        // A clip moved along its track starts with silence: its sound is decoded, the silence put in front, and
+        // the whole made Dolby Digital (whatever it was: a stream used as it is cannot start late by minutes).
+        if track.start > 0 {
+            let key = audio_cache_key(path)?;
+            let samples = delay_samples(track.start, project.settings.standard);
+            let delayed = match kind {
+                // Dolby Digital stays as it is: silent frames of its own form go in front.
+                AudioKind::Ac3 => delayed_ac3(path, cache_dir, &key, samples)?,
+                AudioKind::Dts => {
+                    return Err(DvdError::Unsupported(format!(
+                        "{}: a DTS track cannot start later than its timeline (move it back to the start)",
+                        path.display()
+                    )));
+                }
+                AudioKind::Wav | AudioKind::Transcode => {
+                    let wav = transcode_audio_to_cache(path, cache_dir, &key)?;
+                    ac3_soundtrack(&delayed_wav(&wav, cache_dir, &key, samples)?)?
+                }
+            };
+            out.push(PreparedAudio::Ac3(delayed));
+            continue;
+        }
         let prepared = match kind {
             AudioKind::Ac3 => PreparedAudio::Ac3(path.to_path_buf()),
             AudioKind::Dts => PreparedAudio::Dts(path.to_path_buf()),
@@ -1408,6 +1430,172 @@ fn prepare_audio_tracks(
         out.push(prepared);
     }
 
+    Ok(out)
+}
+
+/// The 48 kHz samples of `frames` frames of the disc's standard rate, to the nearest sample.
+pub(crate) fn delay_samples(frames: u32, standard: VideoStandard) -> u64 {
+    let frames = u64::from(frames);
+    match standard {
+        // 48000 * 1001 / 30000 samples a frame.
+        VideoStandard::Ntsc => (frames * 48_000 * 1001 + 15_000) / 30_000,
+        VideoStandard::Pal => frames * 1920,
+    }
+}
+
+/// The AC-3 stream `path` with silence in front for `samples` samples (to the nearest frame of 1536), kept in
+/// `cache_dir` as `{key}.delay{frames}f.ac3`. The silent frames are in the stream's own form (coding mode, LFE,
+/// bit rate), so the stream is not decoded.
+///
+/// # Errors
+///
+/// [`DvdError::Unsupported`] when the file is not 48 kHz AC-3 or its form cannot be made, and I/O errors.
+pub(crate) fn delayed_ac3(
+    path: &Path,
+    cache_dir: &Path,
+    key: &str,
+    samples: u64,
+) -> Result<PathBuf, DvdError> {
+    use std::io::Write;
+    let frames = (samples + 768) / 1536;
+    fs::create_dir_all(cache_dir).map_err(|err| crate::io_error(cache_dir, err))?;
+    let out = cache_dir.join(format!("{key}.delay{frames}f.ac3"));
+    if out.is_file() {
+        return Ok(out);
+    }
+    let unsupported = |what: String| DvdError::Unsupported(format!("{}: {what}", path.display()));
+    let head = read_head(path).ok_or_else(|| unsupported("cannot be read".to_string()))?;
+    let (rate, kbps, acmod, lfe) = disccraft_psmux::es::ac3::first_frame_format(&head)
+        .ok_or_else(|| unsupported("not an AC-3 stream".to_string()))?;
+    if rate != 48_000 {
+        return Err(unsupported(format!("AC-3 at {rate} Hz cannot start later")));
+    }
+    let silent = disccraft_ac3enc::silent_frame(acmod, lfe, kbps)
+        .map_err(|err| unsupported(err.to_string()))?;
+    let part = cache_dir.join(format!("{key}.delay{frames}f.{}.ac3.part", part_number()));
+    let write = || -> std::io::Result<()> {
+        let mut writer = std::io::BufWriter::with_capacity(1 << 20, fs::File::create(&part)?);
+        for _ in 0..frames {
+            writer.write_all(&silent)?;
+        }
+        let _ = std::io::copy(&mut fs::File::open(path)?, &mut writer)?;
+        writer.flush()
+    };
+    if let Err(err) = write() {
+        fs::remove_file(&part).unwrap_or(());
+        return Err(crate::io_error(&part, err));
+    }
+    fs::rename(&part, &out).map_err(|err| crate::io_error(&part, err))?;
+    Ok(out)
+}
+
+/// `wav` (a cached transcode: 16-bit PCM) with `samples` sample frames of silence in front, kept next to it in
+/// `cache_dir` as `{key}.delay{samples}.wav`.
+///
+/// # Errors
+///
+/// [`DvdError::Unsupported`] when the file is not a PCM WAV or would pass a WAV's 4 GiB, and I/O errors.
+pub(crate) fn delayed_wav(
+    wav: &Path,
+    cache_dir: &Path,
+    key: &str,
+    samples: u64,
+) -> Result<PathBuf, DvdError> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let out = cache_dir.join(format!("{key}.delay{samples}.wav"));
+    if out.is_file() {
+        return Ok(out);
+    }
+    let unsupported = |what: &str| DvdError::Unsupported(format!("{}: {what}", wav.display()));
+    let io = |err: std::io::Error| crate::io_error(wav, err);
+    let mut input = fs::File::open(wav).map_err(io)?;
+    let mut head = vec![0u8; 64 * 1024];
+    let mut filled = 0usize;
+    while filled < head.len() {
+        let got = input
+            .read(head.get_mut(filled..).unwrap_or_default())
+            .map_err(io)?;
+        if got == 0 {
+            break;
+        }
+        filled += got;
+    }
+    head.truncate(filled);
+    // The chunks of the RIFF file: "fmt " (how the samples are stored) and "data" (where they start).
+    if head.get(0..4) != Some(b"RIFF") || head.get(8..12) != Some(b"WAVE") {
+        return Err(unsupported("not a WAV file"));
+    }
+    let mut at = 12usize;
+    let mut format: Option<[u8; 16]> = None;
+    let (data_start, data_len) = loop {
+        let name = head
+            .get(at..at + 4)
+            .ok_or_else(|| unsupported("no sound data"))?;
+        let len = head
+            .get(at + 4..at + 8)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_le_bytes)
+            .ok_or_else(|| unsupported("no sound data"))?;
+        let body = at + 8;
+        if name == b"data" {
+            break (body as u64, u64::from(len));
+        }
+        if name == b"fmt " {
+            format = head
+                .get(body..body + 16)
+                .and_then(|bytes| bytes.try_into().ok());
+        }
+        at = body
+            .checked_add(len as usize)
+            .and_then(|end| end.checked_add(len as usize & 1))
+            .ok_or_else(|| unsupported("no sound data"))?;
+    };
+    let format = format.ok_or_else(|| unsupported("no format"))?;
+    let block = u64::from(u16::from_le_bytes([format[12], format[13]]));
+    if u16::from_le_bytes([format[0], format[1]]) != 1 || block == 0 {
+        return Err(unsupported("not PCM"));
+    }
+    // What is really there (a file cut short has less than its header says).
+    let size = input.metadata().map_err(io)?.len();
+    let data_len = data_len.min(size.saturating_sub(data_start));
+    let data_len = data_len - data_len % block;
+    let silence = samples
+        .checked_mul(block)
+        .ok_or_else(|| unsupported("the clip is too far along"))?;
+    let total = silence
+        .checked_add(data_len)
+        .filter(|total| *total <= u64::from(u32::MAX) - 36)
+        .ok_or_else(|| unsupported("the sound with its silence is longer than a WAV file holds"))?;
+
+    let part = cache_dir.join(format!("{key}.delay{samples}.{}.wav.part", part_number()));
+    let mut write = || -> std::io::Result<()> {
+        let mut writer = std::io::BufWriter::with_capacity(1 << 20, fs::File::create(&part)?);
+        writer.write_all(b"RIFF")?;
+        writer.write_all(&(36 + total as u32).to_le_bytes())?;
+        writer.write_all(b"WAVEfmt ")?;
+        writer.write_all(&16u32.to_le_bytes())?;
+        writer.write_all(&format)?;
+        writer.write_all(b"data")?;
+        writer.write_all(&(total as u32).to_le_bytes())?;
+        let zeros = vec![0u8; 1 << 16];
+        let mut left = silence;
+        while left > 0 {
+            let now = left.min(zeros.len() as u64) as usize;
+            writer.write_all(zeros.get(..now).unwrap_or_default())?;
+            left -= now as u64;
+        }
+        input.seek(SeekFrom::Start(data_start))?;
+        let copied = std::io::copy(&mut (&mut input).take(data_len), &mut writer)?;
+        if copied != data_len {
+            return Err(std::io::Error::other("the sound ended early"));
+        }
+        writer.flush()
+    };
+    if let Err(err) = write() {
+        fs::remove_file(&part).unwrap_or(());
+        return Err(crate::io_error(&part, err));
+    }
+    fs::rename(&part, &out).map_err(|err| crate::io_error(&part, err))?;
     Ok(out)
 }
 
@@ -2348,6 +2536,60 @@ fn fnv1a64(bytes: &[u8], seed: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// A clip moved along its track: its WAV gets that much silence in front, sample for sample.
+    #[test]
+    fn a_moved_audio_clip_starts_with_silence() {
+        assert_eq!(super::delay_samples(0, VideoStandard::Ntsc), 0);
+        // 30 NTSC frames are 1.001 s; 25 PAL frames one second.
+        assert_eq!(super::delay_samples(30, VideoStandard::Ntsc), 48_048);
+        assert_eq!(super::delay_samples(1, VideoStandard::Ntsc), 1602);
+        assert_eq!(super::delay_samples(25, VideoStandard::Pal), 48_000);
+
+        let dir = std::env::temp_dir().join(format!("disccraft-delay-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A stereo WAV with a "LIST" chunk before its data, and a data length that says more than is there.
+        let sound: Vec<u8> = (1..=40u8).collect();
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF\0\0\0\0WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&[1, 0, 2, 0, 0x80, 0xBB, 0, 0, 0, 0xEE, 2, 0, 4, 0, 16, 0]);
+        wav.extend_from_slice(b"LIST");
+        wav.extend_from_slice(&3u32.to_le_bytes());
+        wav.extend_from_slice(b"abc\0");
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&1000u32.to_le_bytes());
+        wav.extend_from_slice(&sound);
+        // A torn last frame is left out.
+        wav.extend_from_slice(&[9, 9]);
+        let input = dir.join("in.wav");
+        std::fs::write(&input, &wav).unwrap();
+        let out = super::delayed_wav(&input, &dir, "key", 3).unwrap();
+        assert_eq!(out.file_name().unwrap(), "key.delay3.wav");
+        let made = std::fs::read(&out).unwrap();
+        assert_eq!(&made[0..4], b"RIFF");
+        assert_eq!(
+            u32::from_le_bytes(made[4..8].try_into().unwrap()),
+            36 + 12 + 40
+        );
+        assert_eq!(&made[20..36], &wav[20..36]);
+        assert_eq!(&made[36..40], b"data");
+        assert_eq!(
+            u32::from_le_bytes(made[40..44].try_into().unwrap()),
+            12 + 40
+        );
+        assert_eq!(&made[44..56], &[0u8; 12]);
+        assert_eq!(&made[56..], &sound[..]);
+        // Asked again, it is there already.
+        std::fs::remove_file(&input).unwrap();
+        assert_eq!(super::delayed_wav(&input, &dir, "key", 3).unwrap(), out);
+        // Not a WAV: refused, nothing left behind.
+        let junk = dir.join("junk.wav");
+        std::fs::write(&junk, b"not a wave file at all").unwrap();
+        assert!(super::delayed_wav(&junk, &dir, "junk", 3).is_err());
+        assert!(!dir.join("junk.delay3.wav").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::{
         AC3_STEREO_BITRATE, AudioKind, Budget, LPCM_STEREO_BITRATE, MAX_MUX_VIDEO_BITRATE,
         TICKS_PER_SECOND, TranscodeStatus, VideoStandard, audio_cache_key, audio_kind,
@@ -2804,6 +3046,59 @@ fn video_status(
     } else {
         TranscodeStatus::Untranscoded
     }
+}
+
+/// Encore's Revert to Original: removes what the cache in `cache_dir` holds of `asset`'s transcodes for a DVD (its
+/// MPEG-2 video for the project's bitrates, its converted sound and what was made from them), so the next build
+/// (or Transcode Now) makes them again. Returns how many files went.
+///
+/// # Errors
+///
+/// When the cache folder cannot be read.
+pub fn revert_transcodes(
+    project: &Project,
+    cache_dir: &Path,
+    asset: AssetId,
+) -> Result<usize, DvdError> {
+    let Some(found) = project.assets.get(&asset) else {
+        return Err(DvdError::Invalid("asset does not exist".to_string()));
+    };
+    let media = found.media_file();
+    let path: &Path = &media;
+    if !cache_dir.is_dir() {
+        return Ok(0);
+    }
+    // The names of its cache files start with its keys: the sound's, and the video's for the project's budget.
+    let mut keys = Vec::new();
+    if let Ok(key) = audio_cache_key(path) {
+        keys.push(key);
+    }
+    if found.kind == AssetKind::Video
+        && let Ok(budget) = budget(project)
+    {
+        let gop_starts = asset_gop_starts(project, path);
+        if let Ok(key) = cache_key(
+            project,
+            path,
+            &budget,
+            (asset_wide(project, path), &gop_starts),
+        ) {
+            keys.push(key);
+        }
+    }
+    let mut removed = 0usize;
+    let entries = fs::read_dir(cache_dir).map_err(|err| crate::io_error(cache_dir, err))?;
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let ours = keys.iter().any(|key| {
+            name.strip_prefix(key.as_str())
+                .is_some_and(|rest| rest.starts_with('.'))
+        });
+        if ours && entry.path().is_file() && fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 /// Status of an audio asset: AC-3 and WAV are used as is, anything else is converted to LPCM.

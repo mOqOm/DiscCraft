@@ -527,6 +527,16 @@ pub struct AudioTrack {
     /// Language code.
     #[serde(default)]
     pub language: String,
+    /// Where the sound starts on the timeline, in frames of the disc's standard rate (Encore: an audio clip moved
+    /// along its track). The track is silent before it.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub start: u32,
+}
+
+/// For `skip_serializing_if`: a field left out of the file at its default of 0.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }
 
 /// Subtitle track reference.

@@ -229,6 +229,7 @@ fn a_dvd_compliant_program_stream_is_repackaged() -> Result<(), Box<dyn Error>> 
                 .push(disccraft_project::AudioTrack {
                     asset: video,
                     language: "en".to_string(),
+                    start: 0,
                 });
         }
         let dir = temp_dir(name);
@@ -620,6 +621,7 @@ fn build_project(video: &Path, audio: &Path) -> Result<Project, Box<dyn Error>> 
     timeline.audio.push(AudioTrack {
         asset: audio_asset,
         language: "ja".to_string(),
+        start: 0,
     });
 
     Ok(project)

@@ -104,6 +104,16 @@ pub(crate) fn audio_source(
         .map(|asset| asset.media_file().into_owned())
 }
 
+/// Where the sound of [`audio_source`] starts on the timeline, in frames of the disc's standard rate (an audio
+/// clip moved along its track; 0 for the video file's own sound).
+pub(crate) fn audio_start(timeline: &Timeline, stream: Option<u8>) -> u32 {
+    stream
+        .and_then(|stream| usize::from(stream).checked_sub(1))
+        .and_then(|index| timeline.audio.get(index))
+        .or_else(|| timeline.audio.first())
+        .map_or(0, |track| track.start)
+}
+
 /// VM が表示にしている字幕ストリーム（1 から）のタイムラインの字幕トラック（0 から）。
 pub(crate) fn subtitle_track(timeline: &Timeline, stream: Option<u8>) -> Option<usize> {
     let index = usize::from(stream?).checked_sub(1)?;
@@ -215,6 +225,11 @@ impl DiscCraftApp {
         };
         let from = resume.unwrap_or_else(|| chapter_start(timeline, chapter));
         let audio_path = audio_source(project, timeline, self.preview.audio);
+        // An audio clip moved along its track starts later: the sound is that far behind the picture.
+        let (rate_num, rate_den) = crate::timeline_view::frame_rate(project.settings.standard);
+        let audio_start = f64::from(audio_start(timeline, self.preview.audio))
+            * f64::from(rate_den)
+            / f64::from(rate_num.max(1));
         playback.timeline = Some(id);
         playback.wide = timeline.wide(&project.settings);
         // A Blu-ray HD title shows at the disc's HD size and rate (always 16:9), not as the 720 x 480 SD frame.
@@ -239,7 +254,7 @@ impl DiscCraftApp {
             (Some(device), Some(path)) => Some(PlayerAudio {
                 path,
                 rate: device.rate(),
-                from: None,
+                from: (audio_start > 0.0).then_some(from - audio_start),
             }),
             _ => None,
         };
@@ -422,16 +437,25 @@ mod tests {
             AudioTrack {
                 asset: AssetId(2),
                 language: "ja".to_owned(),
+                start: 0,
             },
             AudioTrack {
                 asset: AssetId(3),
                 language: "en".to_owned(),
+                start: 0,
             },
         ];
         assert_eq!(
             audio_source(&project, &movie, Some(2)),
             Some(PathBuf::from("en.ac3"))
         );
+        // A moved clip's start goes with the track that is heard.
+        if let Some(track) = movie.audio.get_mut(1) {
+            track.start = 45;
+        }
+        assert_eq!(super::audio_start(&movie, Some(2)), 45);
+        assert_eq!(super::audio_start(&movie, Some(1)), 0);
+        assert_eq!(super::audio_start(&movie, None), 0);
         // None chosen, or one the timeline does not have: the first track.
         assert_eq!(
             audio_source(&project, &movie, None),

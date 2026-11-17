@@ -20,6 +20,8 @@ mod check;
 mod check_lists;
 mod check_menu;
 pub use check_menu::{has_overlapping_buttons, overlapping_buttons};
+mod duplicate;
+pub use duplicate::Duplicate;
 mod folder;
 mod graphic;
 mod hd_frame;

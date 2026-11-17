@@ -75,11 +75,16 @@ impl DiscCraftApp {
         let clip_end = clip.start + clip.duration;
         // 聞くのは、見出しのスピーカーで選んだオーディオトラック（Encore と同じく、初めは最後に足したトラック）。
         let heard = self.heard_audio(id).unwrap_or(0);
-        let track = self
+        let heard_track = self
             .session
             .project
             .timeline(id)
-            .and_then(|timeline| timeline.audio.get(heard).map(|track| track.asset));
+            .and_then(|timeline| timeline.audio.get(heard).cloned());
+        // Where the track's sound starts on the timeline (an audio clip moved along its track), seconds.
+        let track_start = heard_track
+            .as_ref()
+            .map_or(0.0, |track| f64::from(track.start) / fps);
+        let track = heard_track.map(|track| track.asset);
         let Some(path) = self
             .session
             .project
@@ -119,7 +124,7 @@ impl DiscCraftApp {
                 path: audio,
                 rate: device.rate(),
                 // オーディオトラックはタイムライン全体に沿って流れる。映像のファイルの音はクリップと同じ位置。
-                from: track.is_some().then_some(from),
+                from: track.is_some().then_some(from - track_start),
             }),
             _ => None,
         };
