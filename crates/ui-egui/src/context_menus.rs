@@ -24,69 +24,11 @@ pub(crate) struct ChapterInterval {
 }
 
 impl DiscCraftApp {
-    /// 項目（アセット、タイムライン、メニュー、スライドショー、再生リスト）の右クリックメニューの中身。
+    /// 項目（アセット、タイムライン、メニュー、スライドショー、再生リスト）の右クリックメニューの中身。Encore CS6 の
+    /// プロジェクトパネルと同じ並びで、どの項目でも同じ行が出て、その項目で使えない行は灰色になる（2026-11-17 に
+    /// メニュー / タイムライン / ビデオ / オーディオ / スライドショーで確認）。「Bridge で表示」の場所には
+    /// 「オリジナルを編集」、ほかに DiscCraft だけの行（フォルダーへ移動、リンクの指定、PhotoCraft で編集）がある。
     pub(crate) fn object_menu_items(&mut self, ui: &mut Ui, selection: Selection) {
-        if ui.button(tl!("Open")).clicked() {
-            self.select(selection);
-            ui.close();
-        }
-        // アセットは作ったアプリで開ける（Encore の「オリジナルを編集」）と、ファイルの場所を開ける
-        // （「エクスプローラーで表示」）。
-        if let Selection::Asset(id) = selection {
-            if crate::actions::menu_item(ui, crate::actions::Action::EditOriginal, true) {
-                self.select(selection);
-                self.edit_original(id);
-                ui.close();
-            }
-            let path = self
-                .session
-                .project
-                .assets
-                .get(&id)
-                .map(|asset| asset.path.clone());
-            if ui
-                .add_enabled(path.is_some(), egui::Button::new(tl!("Show in Explorer")))
-                .clicked()
-            {
-                if let Some(path) = path {
-                    self.reveal_in_file_manager(std::path::Path::new(&path));
-                }
-                ui.close();
-            }
-            // Encore: アセットを置き換え… / アセットを検索…（検索はオフラインのときだけ）。
-            ui.separator();
-            if ui.button(tl!("Replace Asset…")).clicked() {
-                self.relink_asset(id);
-                ui.close();
-            }
-            let offline = self
-                .session
-                .project
-                .assets
-                .get(&id)
-                .is_some_and(|asset| asset.offline);
-            if ui
-                .add_enabled(offline, egui::Button::new(tl!("Locate Asset…")))
-                .clicked()
-            {
-                self.relink_asset(id);
-                ui.close();
-            }
-        }
-        if ui.button(tl!("Rename…")).clicked() {
-            self.select(selection);
-            self.start_rename();
-            ui.close();
-        }
-        if let Selection::Menu(id) = selection {
-            ui.separator();
-            if crate::actions::menu_item(ui, crate::actions::Action::EditMenuInPhotoCraft, true) {
-                self.edit_menu_in_photocraft(id);
-                ui.close();
-            }
-        }
-
-        ui.separator();
         let asset = match selection {
             Selection::Asset(id) => Some(id),
             _ => None,
@@ -95,6 +37,75 @@ impl DiscCraftApp {
             Selection::Timeline(id) => Some(id),
             _ => None,
         };
+        self.transcode_items(ui, asset);
+
+        ui.separator();
+        // 開く: メニュー、タイムライン、スライドショー、再生リスト（アセットは灰色）。
+        if ui
+            .add_enabled(asset.is_none(), egui::Button::new(tl!("Open")))
+            .clicked()
+        {
+            self.select(selection);
+            ui.close();
+        }
+        let path = asset
+            .and_then(|id| self.session.project.assets.get(&id))
+            .map(|asset| asset.path.clone());
+        if ui
+            .add_enabled(path.is_some(), egui::Button::new(tl!("Show in Explorer")))
+            .clicked()
+        {
+            if let Some(path) = path {
+                self.reveal_in_file_manager(std::path::Path::new(&path));
+            }
+            ui.close();
+        }
+        // アセットは作ったアプリで開ける（Encore では編集メニューの「オリジナルを編集」）。
+        if crate::actions::menu_item(ui, crate::actions::Action::EditOriginal, asset.is_some())
+            && let Some(id) = asset
+        {
+            self.select(selection);
+            self.edit_original(id);
+            ui.close();
+        }
+        if ui.button(tl!("Rename…")).clicked() {
+            self.select(selection);
+            self.start_rename();
+            ui.close();
+        }
+        if let Selection::Menu(id) = selection
+            && crate::actions::menu_item(ui, crate::actions::Action::EditMenuInPhotoCraft, true)
+        {
+            self.edit_menu_in_photocraft(id);
+            ui.close();
+        }
+
+        // アセットを置き換え… / アセットを検索…（検索はオフラインのときだけ）/ フッテージを変換…（まだない）。
+        ui.separator();
+        if ui
+            .add_enabled(asset.is_some(), egui::Button::new(tl!("Replace Asset…")))
+            .clicked()
+        {
+            if let Some(id) = asset {
+                self.relink_asset(id);
+            }
+            ui.close();
+        }
+        let offline = asset
+            .and_then(|id| self.session.project.assets.get(&id))
+            .is_some_and(|asset| asset.offline);
+        if ui
+            .add_enabled(offline, egui::Button::new(tl!("Locate Asset…")))
+            .clicked()
+        {
+            if let Some(id) = asset {
+                self.relink_asset(id);
+            }
+            ui.close();
+        }
+        let _ = ui.add_enabled(false, egui::Button::new(tl!("Interpret Footage…")));
+
+        ui.separator();
         ui.menu_button(tl!("New"), |ui| self.new_items(ui, asset, timeline));
         self.move_to_folder_items(ui, selection);
 
@@ -103,40 +114,67 @@ impl DiscCraftApp {
         self.first_play_items(ui, selection);
 
         ui.separator();
+        // プロジェクトの項目の切り取り / コピー / 貼り付けはまだない。
+        for label in [tl!("Cut"), tl!("Copy"), tl!("Paste")] {
+            let _ = ui.add_enabled(false, egui::Button::new(label));
+        }
         if ui.button(tl!("Clear")).clicked() {
             self.remove_object(selection);
             ui.close();
         }
-        // エンドアクションのある項目には「リンクの指定…」（Ctrl+L のダイアログ）。
-        if matches!(
+
+        ui.separator();
+        let linked = matches!(
             selection,
             Selection::Menu(_)
                 | Selection::Timeline(_)
                 | Selection::Slideshow(_)
                 | Selection::Playlist(_)
                 | Selection::ChapterPlaylist(_)
-        ) {
-            ui.separator();
-            if crate::actions::menu_item(ui, crate::actions::Action::SpecifyLink, true) {
-                self.select(selection);
-                self.open_link_dialog();
-                ui.close();
-            }
+        );
+        // エンドアクションのある項目には「リンクの指定…」（Ctrl+L のダイアログ）。
+        if linked && crate::actions::menu_item(ui, crate::actions::Action::SpecifyLink, true) {
+            self.select(selection);
+            self.open_link_dialog();
+            ui.close();
         }
-        // Encore と同じく最後に「ここからプレビューする」（ビルド結果をその項目から）。
-        if matches!(
-            selection,
-            Selection::Menu(_)
-                | Selection::Timeline(_)
-                | Selection::Slideshow(_)
-                | Selection::ChapterPlaylist(_)
-        ) {
-            ui.separator();
-            if ui.button(tl!("Preview from Here")).clicked() {
-                self.preview_from(selection);
-                ui.close();
-            }
+        // Encore と同じく最後に「ここからプレビューする」。
+        let previews = linked && !matches!(selection, Selection::Playlist(_));
+        if ui
+            .add_enabled(previews, egui::Button::new(tl!("Preview from Here")))
+            .clicked()
+        {
+            self.preview_from(selection);
+            ui.close();
         }
+    }
+
+    /// The first rows of an item's menu, as in Encore: Transcode Settings… / Transcode Now / Revert to Original /
+    /// Locate Transcoded File ▸. Transcode Now makes the asset's transcodes ahead of the build, in the background.
+    fn transcode_items(&mut self, ui: &mut Ui, asset: Option<disccraft_project::AssetId>) {
+        use crate::project_panel::TranscodeState;
+        // Not there yet: a transcode setting per asset (the build chooses the bitrate for the whole disc).
+        let _ = ui.add_enabled(false, egui::Button::new(tl!("Transcode Settings…")));
+        let untranscoded = asset
+            .and_then(|id| self.transcode_state(id))
+            .is_some_and(|state| state == TranscodeState::Untranscoded);
+        let idle = !self.build_job.is_running() && !self.transcode_job.is_running();
+        if ui
+            .add_enabled(
+                untranscoded && idle,
+                egui::Button::new(tl!("Transcode Now")),
+            )
+            .clicked()
+        {
+            self.start_transcode_now(asset);
+            ui.close();
+        }
+        // Not there yet: Revert to Original, and pointing at a file transcoded elsewhere.
+        let _ = ui.add_enabled(false, egui::Button::new(tl!("Revert to Original")));
+        let _ = ui.menu_button(tl!("Locate Transcoded File"), |ui| {
+            let _ = ui.add_enabled(false, egui::Button::new(tl!("DVD…")));
+            let _ = ui.add_enabled(false, egui::Button::new(tl!("Blu-ray…")));
+        });
     }
 
     /// The right-click menu of the flowchart's background (Encore: すべてのサムネールを表示 / 新規 ▸ / 読み込み ▸ /
@@ -387,11 +425,17 @@ impl DiscCraftApp {
         }
     }
 
-    /// The right-click menu of an empty part of the Project panel (Encore: 読み込み ▸ / 新規 ▸).
+    /// The right-click menu of an empty part of the Project panel (Encore: 読み込み ▸ / 新規 ▸ / 切り取り / コピー /
+    /// 貼り付け / 消去).
     pub(crate) fn project_background_menu(&mut self, ui: &mut Ui) {
         ui.menu_button(tl!("Import"), |ui| self.import_items(ui));
         ui.separator();
         ui.menu_button(tl!("New"), |ui| self.new_items(ui, None, None));
+        // Encore: 切り取り / コピー / 貼り付け / 消去 follow, all grey where nothing is chosen.
+        ui.separator();
+        for label in [tl!("Cut"), tl!("Copy"), tl!("Paste"), tl!("Clear")] {
+            let _ = ui.add_enabled(false, egui::Button::new(label));
+        }
     }
 
     /// The items of 新規 ▸ (the Project panel's right-click menus and its New button): Menu, Timeline, Slideshow,

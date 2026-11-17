@@ -74,7 +74,7 @@ pub(crate) fn write_menu_clip(
     let streams = menu_streams(project);
 
     let inputs = mux_inputs(
-        project.settings.bd_video.hd().is_some(),
+        project.settings.bd_video,
         (video.data, video.pts_90k, video.dts_90k),
         ig_units,
     );
@@ -113,15 +113,8 @@ fn write_motion_menu_clip(
     cache_dir: &Path,
 ) -> Result<u64, BdError> {
     let menu = menu_clip.menu;
-    if let Some((width, height, fps_num, fps_den)) = project.settings.bd_video.hd() {
-        let options = disccraft_transcode::hd::HdOptions {
-            width,
-            height,
-            fps_num,
-            fps_den,
-            target_kbps: 15_000,
-            max_kbps: 30_000,
-        };
+    let video = project.settings.bd_video;
+    if let Some(options) = crate::hd::options(video, crate::hd::menu_rates(video)) {
         return write_hd_motion_menu_clip(project, menu_clip, (dirs, cache_dir), &options);
     }
     let motion = disccraft_dvd::encode_motion_menu(project, menu, cache_dir)
@@ -274,7 +267,7 @@ fn write_hd_motion_menu_clip(
     let mut streams = menu_streams(project);
     let mut inputs = vec![EsInput {
         pid: VIDEO_PID,
-        kind: StreamKind::H264Video,
+        kind: crate::hd::kind(project.settings.bd_video),
         units,
     }];
     if let Some(audio) = &motion.audio {
@@ -370,8 +363,9 @@ struct ObjectIds {
 }
 
 fn prepare_video(project: &Project, rendered: &RenderedMenu) -> Result<VideoPrepared, BdError> {
-    if let Some((_, _, fps_num, fps_den)) = project.settings.bd_video.hd() {
-        return prepare_hd_video(rendered, (fps_num, fps_den));
+    let video = project.settings.bd_video;
+    if let Some(options) = crate::hd::options(video, crate::hd::menu_rates(video)) {
+        return prepare_hd_video(rendered, &options);
     }
     let frame =
         rgb_to_frame420(rendered.width, rendered.height, &rendered.rgb).map_err(video_error)?;
@@ -399,24 +393,26 @@ fn prepare_video(project: &Project, rendered: &RenderedMenu) -> Result<VideoPrep
     })
 }
 
-/// An HD menu's still: one H.264 IDR picture at the menu clip's start, lasting one frame (the play item holds it).
+/// An HD menu's still: one H.264 IDR picture (for 1080i one MPEG-2 I picture) at the menu clip's start, lasting one
+/// frame (the play item holds it).
 fn prepare_hd_video(
     rendered: &RenderedMenu,
-    (fps_num, fps_den): (u32, u32),
+    options: &disccraft_transcode::hd::HdOptions,
 ) -> Result<VideoPrepared, BdError> {
+    let (fps_num, fps_den) = (options.fps_num, options.fps_den);
     let options = disccraft_transcode::hd::HdOptions {
         width: u32::from(rendered.width),
         height: u32::from(rendered.height),
-        fps_num,
-        fps_den,
-        target_kbps: 20_000,
-        max_kbps: 40_000,
+        ..options.clone()
     };
     let mut data = disccraft_transcode::hd::encode_h264_still(&rendered.rgb, &options)
         .map_err(|error| BdError::Unsupported(format!("HD menu: {error}")))?;
-    // End of sequence (NAL unit type 10): the still is shown at once instead of waiting for more pictures, as an
-    // MPEG-2 still ends with a sequence end code.
-    data.extend_from_slice(&H264_END_OF_SEQUENCE);
+    match options.codec {
+        // End of sequence (NAL unit type 10): the still is shown at once instead of waiting for more pictures, as
+        // an MPEG-2 still ends with a sequence end code.
+        disccraft_transcode::hd::HdCodec::H264 => data.extend_from_slice(&H264_END_OF_SEQUENCE),
+        disccraft_transcode::hd::HdCodec::Mpeg2 => append_sequence_end(&mut data),
+    }
     let start = START_DTS_27MHZ;
     let frame = i64::from(fps_den)
         .saturating_mul(27_000_000)
@@ -471,35 +467,22 @@ fn menu_streams(project: &Project) -> MenuStreams {
     }
 }
 
-/// A menu clip's video coding: SD MPEG-2, or H.264 at the disc's HD format.
+/// A menu clip's video coding: SD MPEG-2, or the disc's HD format's (H.264, or MPEG-2 for 1080i).
 fn menu_video_coding(project: &Project) -> StreamCoding {
-    match project.settings.bd_video.hd() {
-        Some((_, height, fps_num, fps_den)) => StreamCoding::H264Video {
-            video_format: if height >= 1080 { 6 } else { 5 },
-            frame_rate: match (fps_num, fps_den) {
-                (24_000, 1001) => 1,
-                (24, 1) => 2,
-                (25, 1) => 3,
-                (50, 1) => 6,
-                (60_000, 1001) => 7,
-                _ => 4,
-            },
-            aspect: 3,
-        },
-        None => clip::video_coding(&project.settings, project.menus_wide()),
-    }
+    crate::hd::coding(project.settings.bd_video)
+        .unwrap_or_else(|| clip::video_coding(&project.settings, project.menus_wide()))
 }
 
 fn mux_inputs(
-    hd: bool,
+    video: disccraft_project::BdVideo,
     (video_data, pts, dts): (Vec<u8>, u64, u64),
     ig_units: Vec<EsUnit>,
 ) -> Vec<EsInput> {
     vec![
         EsInput {
             pid: VIDEO_PID,
-            kind: if hd {
-                StreamKind::H264Video
+            kind: if video.hd().is_some() {
+                crate::hd::kind(video)
             } else {
                 StreamKind::Mpeg2Video
             },

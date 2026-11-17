@@ -89,6 +89,8 @@ pub struct DiscCraftApp {
     pub(crate) allow_close: bool,
     /// 環境設定ダイアログ。
     pub(crate) prefs: crate::prefs::PrefsWindow,
+    /// 環境設定 ▸ タイムライン（起動時に読み、変えたら保存する）。
+    pub(crate) timeline_prefs: crate::workspace::TimelinePrefs,
     /// ライブラリパネルの状態。
     pub(crate) library: crate::library_panel::LibraryState,
     /// ユーザーがライブラリに足した項目（`library.json`）。
@@ -97,8 +99,12 @@ pub struct DiscCraftApp {
     pub(crate) chapter_interval: Option<crate::context_menus::ChapterInterval>,
     /// モニターに映しているタイムラインのフレーム（アセット ID、フレーム番号、テクスチャ）。
     pub(crate) monitor_frame: Option<(u64, i64, egui::TextureHandle)>,
-    /// モニターの静止画を読むために開いている映像（スクラブでデコーダーを使い回す）。
-    pub(crate) monitor_source: Option<disccraft_engine::FrameSource>,
+    /// モニターの静止画を裏のスレッドでデコードする（スクラブで画面を止めない。開いた映像は使い回す）。
+    pub(crate) monitor_loader: disccraft_engine::FrameLoader,
+    /// いまデコードを頼んでいるモニターのフレーム（アセット ID とフレーム番号、大きさ）。
+    pub(crate) monitor_wanted: Option<((u64, i64), (u32, u32))>,
+    /// モニターに絵を出せない理由（デコードできない映像。黒い画面の上に出す）。
+    pub(crate) monitor_note: Option<String>,
     /// ツールバーの「メニューを PhotoCraft で編集」に描く PhotoCraft のアイコン（初めて描くときに読む）。
     pub(crate) photocraft_icon: Option<egui::TextureHandle>,
     /// 読んだ字幕ファイルの字幕（アセットの id ごと）。
@@ -250,6 +256,12 @@ pub struct DiscCraftApp {
     pub(crate) track_dialog: Option<crate::track_dialog::TrackDialog>,
     /// ヘルプ ▸ DiscCraft について… のダイアログを開いているか。
     pub(crate) about_open: bool,
+    /// ヘルプ ▸ システム互換性レポート… が開いている。
+    pub(crate) system_report_open: bool,
+    /// ヘルプ ▸ アップデートを確認… が開いている。
+    pub(crate) update_open: bool,
+    /// ログに書いた最後のステータス（同じ文を何度も書かない）。
+    pub(crate) logged_status: String,
     /// タイムラインビューアで選んだチャプターポイント。プロパティパネルはこのときチャプターのシートを出す。
     pub(crate) chapter_focus: Option<(TimelineId, usize)>,
     /// タイムラインビューアで選んだ字幕（タイムライン、字幕トラック、字幕の番号）。プロパティはそのシートになる。
@@ -267,11 +279,16 @@ pub struct DiscCraftApp {
     pub(crate) build_output: OutputKind,
     pub(crate) build_path: String,
     pub(crate) build_job: BuildJob,
+    /// 「今すぐトランスコード」の裏の仕事（ビルドと同じキャッシュに変換だけを作る）。
+    pub(crate) transcode_job: BuildJob,
     pub(crate) last_build: Option<BuildReport>,
     pub(crate) last_output_kind: Option<OutputKind>,
     pub(crate) simulate: Option<SimulateSummary>,
     pub(crate) usage: Option<Usage>,
     pub(crate) problems: Vec<ProblemView>,
+    /// A media file is still being opened on its own thread (a long file takes seconds): the estimate, the check
+    /// and the transcode status wait for it instead of holding up the window.
+    pub(crate) media_pending: bool,
     pub(crate) usage_dirty: bool,
     pub(crate) check_dirty: bool,
     /// アセットごとのトランスコードステータス（`asset.transcodeStatus`）。
@@ -286,6 +303,12 @@ impl DiscCraftApp {
     pub fn new(ctx: &Context) -> Self {
         ctx.request_repaint();
 
+        crate::help::log(&format!(
+            "DiscCraft {} started on {} ({})",
+            crate::help::version_text(),
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ));
         let (workspace, dock, user_workspaces) = load_workspace();
         let language = load_language();
         crate::i18n::set_current(language);
@@ -322,11 +345,14 @@ impl DiscCraftApp {
             film_export: None,
             allow_close: false,
             prefs: crate::prefs::PrefsWindow::default(),
+            timeline_prefs: crate::workspace::load_timeline_prefs(),
             library: crate::library_panel::LibraryState::default(),
             user_library: crate::user_library::UserLibrary::load(),
             chapter_interval: None,
             monitor_frame: None,
-            monitor_source: None,
+            monitor_loader: disccraft_engine::FrameLoader::new(),
+            monitor_wanted: None,
+            monitor_note: None,
             photocraft_icon: None,
             playback: None,
             clip_cache: None,
@@ -411,6 +437,9 @@ impl DiscCraftApp {
             show_chapter_names: false,
             track_dialog: None,
             about_open: false,
+            system_report_open: false,
+            update_open: false,
+            logged_status: String::new(),
             chapter_focus: None,
             cue_focus: None,
             chapter_key: None,
@@ -422,11 +451,13 @@ impl DiscCraftApp {
             build_output: OutputKind::Folder,
             build_path: String::new(),
             build_job: BuildJob::default(),
+            transcode_job: BuildJob::default(),
             last_build: None,
             last_output_kind: None,
             simulate: None,
             usage: None,
             problems: Vec::new(),
+            media_pending: false,
             usage_dirty: true,
             transcode: BTreeMap::new(),
             transcode_for: None,
@@ -459,20 +490,26 @@ impl DiscCraftApp {
         if self.build_job.is_running() {
             ui.ctx().request_repaint();
         }
+        self.poll_transcode_now(ui.ctx());
 
         self.validate_selection();
 
-        if self.usage_dirty {
-            self.refresh_usage();
-        }
-
-        if self.check_dirty {
-            self.refresh_check();
-        }
-
         let target = (self.build_path.trim().to_owned(), self.build_output);
-        if self.transcode_dirty || self.transcode_for.as_ref() != Some(&target) {
-            self.refresh_transcode();
+        let transcode_due = self.transcode_dirty || self.transcode_for.as_ref() != Some(&target);
+        if (self.usage_dirty || self.check_dirty || transcode_due || self.media_pending)
+            && !self.wait_for_media(ui.ctx())
+        {
+            if self.usage_dirty {
+                self.refresh_usage();
+            }
+
+            if self.check_dirty {
+                self.refresh_check();
+            }
+
+            if transcode_due {
+                self.refresh_transcode();
+            }
         }
 
         self.menu_bar(ui);
@@ -497,12 +534,19 @@ impl DiscCraftApp {
         self.shadow_window(ui.ctx());
         self.color_set_window(ui.ctx());
         self.about_window(ui.ctx());
+        self.system_report_window(ui.ctx());
+        self.update_window(ui.ctx());
         self.show_welcome(ui);
         self.show_confirm(ui.ctx());
         self.show_build_prompt(ui.ctx());
         self.show_film_marker_dialog(ui.ctx());
         self.poll_film_export(ui.ctx());
         self.intercept_close(ui.ctx());
+        // What the status bar said, for the session log (Help ▸ Reveal Log Files…).
+        if self.status != self.logged_status {
+            crate::help::log(&format!("status: {}", self.status));
+            self.logged_status.clone_from(&self.status);
+        }
     }
 
     /// ようこそ画面と新規プロジェクトダイアログを描き、選ばれたことを実行する。
@@ -1031,6 +1075,7 @@ impl DiscCraftApp {
     pub(crate) fn run_command(&mut self, id: &str, params: Value) -> Option<Value> {
         match self.session.execute(id, &params) {
             Ok(value) => {
+                crate::help::log(id);
                 // 字幕の編集と取り消し / やり直しのあとは、覚えている字幕を読み直す（編集した字幕はプロジェクトにある）。
                 if id.starts_with("subtitle.") || id.starts_with("edit.") {
                     self.subtitle_cache.clear();
@@ -1040,6 +1085,7 @@ impl DiscCraftApp {
                 Some(value)
             }
             Err(error) => {
+                crate::help::log(&format!("{id} failed: {error}"));
                 self.status = error;
                 None
             }
@@ -1058,15 +1104,48 @@ impl DiscCraftApp {
         }
     }
 
+    /// Whether a media file of the project is still being opened (each is opened on a thread of its own:
+    /// `asset.pending`). While one is, the status bar says so and the window is drawn again shortly; when the
+    /// last is open, what was shown without it (lengths, thumbnails) is asked for again.
+    fn wait_for_media(&mut self, ctx: &egui::Context) -> bool {
+        let answer = self.session.execute("asset.pending", &json!({})).ok();
+        let listed = |name: &str| {
+            answer
+                .as_ref()
+                .and_then(|value| value.get(name))
+                .and_then(Value::as_array)
+                .is_some_and(|ids| !ids.is_empty())
+        };
+        let pending = listed("pending");
+        // A file whose length is known but whose pictures are not open yet holds nothing back; the window is
+        // drawn again now and then until its thumbnail and frames can be had.
+        if !pending && listed("opening") {
+            self.media_pending = true;
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+            return false;
+        }
+        if pending {
+            if !self.media_pending {
+                self.status = tl!("Reading media…").to_string();
+            }
+            self.media_pending = true;
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        } else if self.media_pending {
+            self.media_pending = false;
+            if self.status == tl!("Reading media…") {
+                self.status = tl!("Media read").to_string();
+            }
+            ctx.request_repaint();
+        }
+        pending
+    }
+
     /// 編集のたびに自動で走る容量の見積もり。ステータスバーの表示は変えない（失敗したときはエラーを残す）。
     pub(crate) fn refresh_usage(&mut self) {
-        let status = std::mem::take(&mut self.status);
         self.usage_dirty = false;
-        let value = self.run_command("disc.usage", json!({}));
-        self.usage_dirty = false;
-
-        if let Some(value) = value {
-            self.status = status;
+        // A query: through `run_command` it would mark the project edited and start the check, which started
+        // this again, on every frame.
+        if let Some(value) = self.run_query("disc.usage", json!({})) {
             self.usage = parse_usage(&value);
         }
     }
@@ -1079,14 +1158,9 @@ impl DiscCraftApp {
 
     /// 編集のたびに自動で走るチェック。ステータスバーの表示（保存しました など）は変えない。
     pub(crate) fn refresh_check(&mut self) {
-        let status = std::mem::take(&mut self.status);
         self.check_dirty = false;
-        let value = self.run_command("project.check", json!({}));
-        self.check_dirty = false;
-
-        // 失敗したときは run_command が出したエラーを残す。
-        if let Some(value) = value {
-            self.status = status;
+        // A query, as `refresh_usage`. When it fails, the error stays in the status bar.
+        if let Some(value) = self.run_query("project.check", json!({})) {
             self.problems = parse_problems(&value);
         }
     }
@@ -1382,7 +1456,10 @@ impl DiscCraftApp {
         let id = self
             .run_command(
                 "slideshow.create",
-                crate::gui_params::create_named(tl!("Slideshows")),
+                crate::gui_params::create_slideshow(
+                    tl!("Slideshows"),
+                    self.timeline_prefs.still_seconds,
+                ),
             )
             .and_then(|value| value.get("slideshow").and_then(Value::as_u64));
 
@@ -1898,5 +1975,29 @@ mod preload_tests {
         };
         assert_eq!(preload_timeline(&project), Some(extra));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::DiscCraftApp;
+
+    /// The automatic estimate and check leave nothing to do behind them. They used to run through the editing
+    /// path, which marked the project edited again, so each started the other (and the transcode status) on
+    /// every frame drawn.
+    #[test]
+    fn the_automatic_estimate_and_check_do_not_start_each_other() {
+        let mut app = DiscCraftApp::new(&egui::Context::default());
+        app.usage_dirty = true;
+        app.check_dirty = true;
+        app.transcode_dirty = false;
+        app.refresh_usage();
+        app.refresh_check();
+        assert!(!app.usage_dirty, "the check asked for the estimate again");
+        assert!(!app.check_dirty, "the estimate asked for the check again");
+        assert!(
+            !app.transcode_dirty,
+            "the transcode status was asked for again"
+        );
     }
 }

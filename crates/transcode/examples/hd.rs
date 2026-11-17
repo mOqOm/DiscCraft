@@ -19,6 +19,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         fps_den: 1001,
         target_kbps: 12_000,
         max_kbps: 30_000,
+        codec: disccraft_transcode::hd::HdCodec::H264,
     };
     let started = std::time::Instant::now();
     let frames = transcode_h264(

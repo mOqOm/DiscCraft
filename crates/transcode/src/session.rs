@@ -85,6 +85,12 @@ pub fn document_metadata(path: &Path) -> std::io::Result<std::fs::Metadata> {
     std::fs::metadata(document_of(path).0)
 }
 
+/// Whether `path` names a Craft document (a SoundCraft session or an EffectCraft project, or a composition of
+/// one), which is made into media on demand.
+pub(crate) fn is_document(path: &Path) -> bool {
+    Craft::of(&document_of(path).0).is_some() || Craft::of(path).is_some()
+}
+
 /// Held while a document is being mixed down or rendered.
 static MAKING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Numbers the part files of this process.

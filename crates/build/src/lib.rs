@@ -13,15 +13,44 @@
     clippy::unreachable
 )]
 
-use disccraft_udf::image::{ImageFile, dvd_file_order, write_dvd_iso};
+use disccraft_udf::image::{DVD_ROOT_NAMES, ImageFile, dvd_file_order, write_dvd_iso_with_rom};
 use disccraft_udf::tree::{TreeFile, write_udf250_iso};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use disccraft_bd::{BdBuildReport, build_bdmv_with};
+pub use disccraft_dvd::TranscodeStatus;
 use disccraft_dvd::{DvdBuildReport, DvdError, build_video_ts_with};
-pub use disccraft_dvd::{TranscodeStatus, transcode_status};
+
+/// The transcode status of every asset in `project` (`disccraft_dvd::transcode_status`). On an HD Blu-ray, a
+/// video whose H.264 for the project's format is in `cache_dir` is [`TranscodeStatus::Transcoded`] (the DVD
+/// status knows the MPEG-2 of an SD disc only).
+#[must_use]
+pub fn transcode_status(
+    project: &Project,
+    cache_dir: Option<&Path>,
+) -> std::collections::BTreeMap<disccraft_project::AssetId, TranscodeStatus> {
+    let mut all = disccraft_dvd::transcode_status(project, cache_dir);
+    let hd = project.settings.kind == DiscKind::BluRay && project.settings.bd_video.hd().is_some();
+    if let (true, Some(cache)) = (hd, cache_dir) {
+        for (asset, status) in &mut all {
+            let video = project
+                .assets
+                .get(asset)
+                .is_some_and(|asset| asset.kind == disccraft_project::AssetKind::Video);
+            if video && *status == TranscodeStatus::Untranscoded {
+                if disccraft_bd::hd_transcoded(project, cache, *asset) {
+                    *status = TranscodeStatus::Transcoded;
+                }
+            } else if video && *status == TranscodeStatus::Transcoded {
+                // An SD transcode left in the cache says nothing about the HD title.
+                *status = TranscodeStatus::Untranscoded;
+            }
+        }
+    }
+    all
+}
 use disccraft_project::{DiscKind, Project};
 
 mod layer;
@@ -96,6 +125,31 @@ pub fn build(project: &Project, options: &BuildOptions) -> Result<BuildReport, S
     build_with_progress(project, options, &mut |_, _| {})
 }
 
+/// Encore's Transcode Now: makes the transcodes a build with `options` would make, in that build's cache
+/// ([`cache_dir`]), without writing a disc. With `only`, just those of the timelines that play that asset.
+/// `progress` is called as in [`build_with_progress`].
+///
+/// # Errors
+///
+/// The first transcode that fails, as a build would say it.
+pub fn transcode_now(
+    project: &Project,
+    options: &BuildOptions,
+    only: Option<disccraft_project::AssetId>,
+    progress: &mut dyn FnMut(&str, f32),
+) -> Result<(), String> {
+    let expanded = project
+        .with_transitions_expanded()
+        .map_err(|error| error.to_string())?;
+    let cache = cache_dir(options);
+    match expanded.settings.kind {
+        DiscKind::Dvd => disccraft_dvd::transcode_now(&expanded, &cache, only, progress)
+            .map_err(|error| error.to_string()),
+        DiscKind::BluRay => disccraft_bd::transcode_now(&expanded, &cache, only, progress)
+            .map_err(|error| error.to_string()),
+    }
+}
+
 /// The step [`build_with_progress`] names while it writes the disc image (after the folder).
 pub const STEP_IMAGE: &str = "disc image";
 
@@ -121,16 +175,100 @@ pub fn build_with_progress(
 
     let cache = cache_dir(options);
     let at = (cache.as_path(), started);
+    // The ROM content is read before the long part of the build, so a folder that is gone is said at once.
+    let rom = rom_tree(project)?;
     match (project.settings.kind, options.output) {
         (DiscKind::Dvd, OutputKind::Folder) => {
-            build_dvd_folder(project, &options.path, at, progress)
+            let mut report = build_dvd_folder(project, &options.path, at, progress)?;
+            report.total_bytes =
+                report
+                    .total_bytes
+                    .saturating_add(copy_rom(project, &rom, &options.path)?);
+            Ok(report)
         }
-        (DiscKind::Dvd, OutputKind::Iso) => build_dvd_iso(project, &options.path, at, progress),
+        (DiscKind::Dvd, OutputKind::Iso) => {
+            build_dvd_iso(project, (&options.path, &rom), at, progress)
+        }
         (DiscKind::BluRay, OutputKind::Folder) => {
-            build_bd_folder(project, &options.path, at, progress)
+            let mut report = build_bd_folder(project, &options.path, at, progress)?;
+            report.total_bytes =
+                report
+                    .total_bytes
+                    .saturating_add(copy_rom(project, &rom, &options.path)?);
+            Ok(report)
         }
-        (DiscKind::BluRay, OutputKind::Iso) => build_bd_iso(project, &options.path, at, progress),
+        (DiscKind::BluRay, OutputKind::Iso) => {
+            build_bd_iso(project, (&options.path, &rom), at, progress)
+        }
     }
+}
+
+/// The names in the root of a Blu-ray disc that ROM content may not use.
+const BD_ROOT_NAMES: [&str; 2] = ["BDMV", "CERTIFICATE"];
+
+/// The project's ROM content (Encore's DVD-ROM / BD-ROM content: files a computer sees beside the video) as files
+/// of the disc's root; none when the project has none.
+///
+/// # Errors
+///
+/// When the folder cannot be read, or its top holds a name the disc uses itself (`VIDEO_TS`, `BDMV`).
+fn rom_tree(project: &Project) -> Result<Vec<TreeFile>, String> {
+    let reserved: &[&str] = match project.settings.kind {
+        DiscKind::Dvd => &DVD_ROOT_NAMES,
+        DiscKind::BluRay => &BD_ROOT_NAMES,
+    };
+    let files = project.rom_files()?;
+    for file in &files {
+        let top = file.path.split('/').next().unwrap_or_default();
+        if reserved.iter().any(|name| name.eq_ignore_ascii_case(top)) {
+            return Err(format!(
+                "ROM content: \"{top}\" is the disc's own folder; take it out of the ROM content folder"
+            ));
+        }
+    }
+    Ok(files
+        .into_iter()
+        .map(|file| TreeFile {
+            path: file.path,
+            source: file.source,
+        })
+        .collect())
+}
+
+/// Copies the ROM content into the disc folder `root` (beside `VIDEO_TS` / `BDMV`) and returns its bytes.
+fn copy_rom(project: &Project, rom: &[TreeFile], root: &Path) -> Result<u64, String> {
+    if rom.is_empty() {
+        return Ok(0);
+    }
+    // A disc folder inside the content folder would become part of the content of the next build.
+    let content = project.settings.rom_content.as_deref().unwrap_or_default();
+    if let (Ok(content), Ok(root)) = (Path::new(content).canonicalize(), root.canonicalize())
+        && root.starts_with(&content)
+    {
+        return Err(
+            "the output folder is inside the ROM content folder; choose another place".to_string(),
+        );
+    }
+    let mut bytes = 0_u64;
+    for file in rom {
+        let mut target = root.to_path_buf();
+        target.extend(file.path.split('/'));
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        let same = matches!(
+            (file.source.canonicalize(), target.canonicalize()),
+            (Ok(source), Ok(target)) if source == target
+        );
+        let copied = if same {
+            std::fs::metadata(&target).map(|metadata| metadata.len())
+        } else {
+            std::fs::copy(&file.source, &target)
+        }
+        .map_err(|e| format!("ROM content: {}: {e}", file.source.display()))?;
+        bytes = bytes.saturating_add(copied);
+    }
+    Ok(bytes)
 }
 
 fn build_bd_folder(
@@ -151,7 +289,7 @@ fn build_bd_folder(
 /// Build the `BDMV` folder next to the image (`<name>.files`), then write a UDF 2.50 image of it.
 fn build_bd_iso(
     project: &Project,
-    iso: &Path,
+    (iso, rom): (&Path, &[TreeFile]),
     (cache, started): (&Path, Instant),
     progress: &mut dyn FnMut(&str, f32),
 ) -> Result<BuildReport, String> {
@@ -161,6 +299,7 @@ fn build_bd_iso(
     progress(STEP_IMAGE, 0.0);
     let mut files = Vec::new();
     collect_tree(&folder, &folder.join("BDMV"), &mut files)?;
+    files.extend(rom.iter().cloned());
     files.sort_by(|a, b| a.path.cmp(&b.path));
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -272,7 +411,7 @@ fn build_video_ts_checked(
 
 fn build_dvd_iso(
     project: &Project,
-    iso: &Path,
+    (iso, rom): (&Path, &[TreeFile]),
     (cache, started): (&Path, Instant),
     progress: &mut dyn FnMut(&str, f32),
 ) -> Result<BuildReport, String> {
@@ -298,9 +437,11 @@ fn build_dvd_iso(
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
-    let iso_report = catch_unwind(AssertUnwindSafe(|| write_dvd_iso(&files, &label, iso, now)))
-        .map_err(|_| "internal error while writing the ISO image".to_string())?
-        .map_err(|e| format!("ISO: {e}"))?;
+    let iso_report = catch_unwind(AssertUnwindSafe(|| {
+        write_dvd_iso_with_rom(&files, rom, &label, iso, now)
+    }))
+    .map_err(|_| "internal error while writing the ISO image".to_string())?
+    .map_err(|e| format!("ISO: {e}"))?;
     progress(STEP_IMAGE, 1.0);
     report.output = iso.to_path_buf();
     report.total_bytes = u64::from(iso_report.sectors) * 2048;

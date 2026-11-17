@@ -32,7 +32,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "スライドショーを作成",
         menu: &["スライドショー"],
         shortcut: None,
-        params: r#"{"name"?: string}"#,
+        params: r#"{"name"?: string, "slideSeconds"?: number}"#,
         enabled: always_enabled,
         run: run_create_slideshow,
         journal: true,
@@ -115,6 +115,26 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         params: r#"{"slideshow": id, "groups": [{"fill": [r, g, b], "fillOpacity"?: 0-100, "stroke": [r, g, b], "strokeOpacity"?: 0-100, "antialias"?: [r, g, b], "antialiasOpacity"?: 0-100} x 3] | null}"#,
         enabled: always_enabled,
         run: run_set_slideshow_colors,
+        journal: true,
+    },
+    CommandSpec {
+        id: "slideshow.setSlideEffect",
+        label: "スライドのパンとズームを設定",
+        menu: &["スライドショー"],
+        shortcut: None,
+        params: r#"{"slideshow": id, "slide": index, "on"?: bool, "pan"?: "none" | "left" | "right" | "up" | "down", "zoom"?: "in" | "out" | "none"}"#,
+        enabled: always_enabled,
+        run: run_set_slide_effect,
+        journal: true,
+    },
+    CommandSpec {
+        id: "slideshow.setRandomPanZoom",
+        label: "スライドショーのランダムにパンとズームを設定",
+        menu: &["スライドショー"],
+        shortcut: None,
+        params: r#"{"slideshow": id, "on": bool}"#,
+        enabled: always_enabled,
+        run: run_set_random_pan_zoom,
         journal: true,
     },
     CommandSpec {
@@ -319,10 +339,37 @@ fn run_import_slideshow(session: &mut Session, params: &Value) -> CommandResult 
 
 fn run_create_slideshow(session: &mut Session, params: &Value) -> CommandResult {
     let name = opt_str(params, "name")?;
+    // The show's slide duration when it is not the usual six seconds (Encore's preference "Still Duration").
+    // Counted in timecode as Encore does: n seconds are n x 30 frames of an NTSC disc (n x 25 of a PAL one).
+    let slide_duration = match opt_value(params, "slideSeconds") {
+        Some(value) => {
+            let seconds = value
+                .as_f64()
+                .filter(|seconds| (1.0..=3600.0).contains(seconds))
+                .ok_or_else(|| "parameter \"slideSeconds\" must be 1 to 3600".to_string())?;
+            let settings = &session.project.settings;
+            let nominal = if settings.standard == disccraft_project::VideoStandard::Ntsc {
+                30.0
+            } else {
+                25.0
+            };
+            // In range, so the cast is exact.
+            let frames = (seconds * nominal).round() as i64;
+            Some(settings.frame_rate().tick_of(frames))
+        }
+        None => None,
+    };
     let id = session
         .project
         .add_slideshow(name)
         .map_err(|error| error.to_string())?;
+    if let Some(duration) = slide_duration
+        && let Err(error) = session.project.set_slideshow_slide_duration(id, duration)
+    {
+        // Nothing is left behind of a show that cannot have the duration asked for.
+        let _ = session.project.slideshows.remove(&id);
+        return Err(error.to_string());
+    }
 
     Ok(object(&[("slideshow", Value::from(id))]))
 }
@@ -584,6 +631,80 @@ fn run_set_slideshow_colors(session: &mut Session, params: &Value) -> CommandRes
     session
         .project
         .set_slideshow_subtitle_colors(id, colors)
+        .map_err(|error| error.to_string())?;
+    Ok(empty_object())
+}
+
+/// Encore's "Pan & Zoom" of a slide: `on` false turns it off; `pan` / `zoom` set the effect (and turn it on).
+fn run_set_slide_effect(session: &mut Session, params: &Value) -> CommandResult {
+    let id = req_u64(params, "slideshow")?;
+    let index = req_usize(params, "slide")?;
+    let on = match params.get("on") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_bool()
+                .ok_or_else(|| "parameter \"on\" must be true or false".to_string())?,
+        ),
+    };
+    let pan = match params.get("pan") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .and_then(disccraft_project::SlidePan::parse)
+                .ok_or_else(|| {
+                    "parameter \"pan\" must be none, left, right, up or down".to_string()
+                })?,
+        ),
+    };
+    let zoom = match params.get("zoom") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .and_then(disccraft_project::SlideZoom::parse)
+                .ok_or_else(|| "parameter \"zoom\" must be in, out or none".to_string())?,
+        ),
+    };
+    if on.is_none() && pan.is_none() && zoom.is_none() {
+        return Err("give \"on\", \"pan\" or \"zoom\"".to_string());
+    }
+    let current = session
+        .project
+        .slideshow(id)
+        .and_then(|show| show.slides.get(index))
+        .ok_or_else(|| "slide index out of range".to_string())?
+        .effect;
+    let effect = if on == Some(false) {
+        None
+    } else {
+        let mut effect = current.unwrap_or_default();
+        if let Some(pan) = pan {
+            effect.pan = pan;
+        }
+        if let Some(zoom) = zoom {
+            effect.zoom = zoom;
+        }
+        Some(effect)
+    };
+    session
+        .project
+        .set_slide_effect(id, index, effect)
+        .map_err(|error| error.to_string())?;
+    Ok(empty_object())
+}
+
+/// Encore's "Random Pan & Zoom" of a slideshow.
+fn run_set_random_pan_zoom(session: &mut Session, params: &Value) -> CommandResult {
+    let id = req_u64(params, "slideshow")?;
+    let on = params
+        .get("on")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "parameter \"on\" must be a boolean".to_string())?;
+    session
+        .project
+        .set_slideshow_random_pan_zoom(id, on)
         .map_err(|error| error.to_string())?;
     Ok(empty_object())
 }

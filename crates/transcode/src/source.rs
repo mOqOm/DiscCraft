@@ -11,12 +11,14 @@ use filmcraft_time::Tick;
 use crate::pulldown::{self, Timeline};
 use crate::{TICKS_PER_SECOND, TranscodeError, io_error};
 
-/// Opened FilmCraft media source with DVD-oriented validation.
+/// Opened FilmCraft media source with DVD-oriented validation. Cheap to clone: one opened file is shared by
+/// everything that asks for it (`crate::media_cache`).
+#[derive(Clone)]
 pub(crate) struct Source {
     media: Arc<dyn MediaSource>,
     /// The real display times of MPEG-2 video whose frames FilmCraft spaces evenly but the stream does not (soft
     /// pulldown), with the media info corrected to its real length; `None` for everything else.
-    timing: Option<(Timeline, MediaInfo)>,
+    timing: Option<Arc<(Timeline, MediaInfo)>>,
 }
 
 impl Source {
@@ -49,7 +51,7 @@ impl Source {
     /// Borrow source metadata.
     pub(crate) fn info(&self) -> &MediaInfo {
         match &self.timing {
-            Some((_, info)) => info,
+            Some(timing) => &timing.1,
             None => self.media.info(),
         }
     }
@@ -63,8 +65,8 @@ impl Source {
     pub(crate) fn video_frame(&self, time: Tick) -> Result<Arc<VideoFrame>, TranscodeError> {
         // With a timeline: the frame showing at `time`, asked for where FilmCraft's even spacing puts it.
         let time = match (&self.timing, self.media.info().video.as_ref()) {
-            (Some((timeline, _)), Some(video)) => {
-                let frame = i64::try_from(timeline.frame_at(time)).unwrap_or(i64::MAX);
+            (Some(timing), Some(video)) => {
+                let frame = i64::try_from(timing.0.frame_at(time)).unwrap_or(i64::MAX);
                 video.frame_rate.tick_of(frame)
             }
             _ => time,
@@ -86,10 +88,36 @@ impl Source {
             .map_err(|error| TranscodeError::Decode(error.to_string()))
     }
 
+    /// Opens `path`, or gives the source it was opened as before (the same file: path, size and time). A long
+    /// file's index is read once, however many times the file is asked about.
     fn open_media(path: &Path) -> Result<Self, TranscodeError> {
         // A SoundCraft session is opened as its mixdown.
         let resolved = crate::session::resolved(path)?;
         let path = resolved.as_ref();
+        let Some(key) = crate::media_cache::FileKey::of(path) else {
+            return Self::open_file(path);
+        };
+        // Found unreadable when it was opened ahead: not read through again each time it is asked for.
+        if crate::media_cache::refused_file(&key) {
+            return Err(TranscodeError::Decode(format!(
+                "{}: cannot be read as media",
+                path.display()
+            )));
+        }
+        let slot = crate::media_cache::slot(&key);
+        // Held while the file is opened: a second caller waits for this one's source.
+        let mut held = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(source) = held.as_ref() {
+            return Ok(source.clone());
+        }
+        let source = Self::open_file(path)?;
+        *held = Some(source.clone());
+        Ok(source)
+    }
+
+    fn open_file(path: &Path) -> Result<Self, TranscodeError> {
         let reader = FileReader::open(path).map_err(|error| io_error(path, error))?;
         let name = path
             .file_name()
@@ -115,7 +143,10 @@ impl Source {
             (media, None)
         };
 
-        let source = Self { media, timing };
+        let source = Self {
+            media,
+            timing: timing.map(Arc::new),
+        };
         validate_duration(source.info().duration)?;
         Ok(source)
     }

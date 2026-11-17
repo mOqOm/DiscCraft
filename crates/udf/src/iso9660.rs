@@ -55,6 +55,9 @@ pub struct PvdParams<'a> {
     pub volume_space_size: u32,
     /// Size in bytes of one path table.
     pub path_table_size: u32,
+    /// Sectors of the little-endian and the big-endian path table ([`PATH_TABLE_L_SECTOR`] and
+    /// [`PATH_TABLE_M_SECTOR`] unless the tables are too long for their sector).
+    pub path_tables: (u32, u32),
     /// Absolute sector of the root directory extent.
     pub root_extent: u32,
     /// Size in bytes of the root directory extent.
@@ -190,8 +193,8 @@ pub fn pvd(params: &PvdParams<'_>) -> [u8; SECTOR_SIZE] {
         params.path_table_size,
     );
 
-    put_u32_le(&mut out, PVD_L_PATH_OFFSET, PATH_TABLE_L_SECTOR);
-    put_u32_be(&mut out, PVD_M_PATH_OFFSET, PATH_TABLE_M_SECTOR);
+    put_u32_le(&mut out, PVD_L_PATH_OFFSET, params.path_tables.0);
+    put_u32_be(&mut out, PVD_M_PATH_OFFSET, params.path_tables.1);
 
     let date = ecma_date(params.creation_time);
     let root = root_directory_record(params.root_extent, params.root_size, date);
@@ -552,6 +555,7 @@ mod tests {
             volume_id: "DISCCRAFT",
             volume_space_size: 1000,
             path_table_size: 16,
+            path_tables: (super::PATH_TABLE_L_SECTOR, super::PATH_TABLE_M_SECTOR),
             root_extent: 259,
             root_size: 34,
             creation_time: 0,

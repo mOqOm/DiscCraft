@@ -97,7 +97,7 @@ impl DiscCraftApp {
             return;
         };
         let asset = self.track_assets(kind).first().map(|(id, _)| *id);
-        let language = self.default_track_language();
+        let language = self.default_track_language(kind);
         self.track_dialog = Some(TrackDialog {
             timeline,
             kind,
@@ -106,8 +106,16 @@ impl DiscCraftApp {
         });
     }
 
-    /// 新しいトラックの言語の初め: ディスクのオーディオの言語、なければ DiscCraft の表示言語（M13.8 と同じ）。
-    pub(crate) fn default_track_language(&self) -> String {
+    /// 新しいトラックの言語の初め: 環境設定 ▸ タイムライン の言語、なければディスクのオーディオの言語、なければ
+    /// DiscCraft の表示言語（M13.8 と同じ）。
+    pub(crate) fn default_track_language(&self, kind: TrackKind) -> String {
+        let preferred = match kind {
+            TrackKind::Audio => &self.timeline_prefs.audio_language,
+            TrackKind::Subtitle => &self.timeline_prefs.subtitle_language,
+        };
+        if !preferred.is_empty() {
+            return preferred.clone();
+        }
         self.session
             .project
             .settings
@@ -158,7 +166,7 @@ impl DiscCraftApp {
                 tl!("Drop audio, a video with sound or subtitles onto a timeline").to_string();
             return;
         };
-        let language = self.default_track_language();
+        let language = self.default_track_language(track);
         let (command, params) = track.add_command(timeline.0, item, &language);
         if self.run_command(command, params).is_some() {
             self.status = match track {

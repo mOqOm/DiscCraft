@@ -81,18 +81,11 @@ pub(crate) fn sample_frames_from_ticks(ticks: i64) -> Option<u64> {
         return Some(0);
     }
 
-    let ticks = u64::try_from(ticks).ok()?;
-    let rate = u64::from(SAMPLE_RATE);
-    let denominator = u64::try_from(crate::TICKS_PER_SECOND).ok()?;
-    let numerator = ticks.checked_mul(rate)?;
-
-    let whole = numerator / denominator;
-    let remainder = numerator % denominator;
-    let samples = if remainder == 0 {
-        whole
-    } else {
-        whole.checked_add(1)?
-    };
+    // In 128 bits: ticks times the sample rate passes 64 bits after 25 minutes.
+    let ticks = u128::try_from(ticks).ok()?;
+    let denominator = u128::try_from(crate::TICKS_PER_SECOND).ok()?;
+    let numerator = ticks.checked_mul(u128::from(SAMPLE_RATE))?;
+    let samples = u64::try_from(numerator.div_ceil(denominator)).ok()?;
 
     let max_samples = MAX_DATA_BYTES / 4;
     if samples > max_samples {
@@ -337,8 +330,25 @@ fn sample_to_i16(value: f32) -> i16 {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
-    use super::{sample_to_i16, stereo_at};
+    use super::{sample_frames_from_ticks, sample_to_i16, stereo_at};
     use filmcraft_frame::AudioBuffer;
+
+    /// Sound longer than 25 minutes was refused ("audio duration out of range"): ticks times the sample rate
+    /// overflowed 64 bits.
+    #[test]
+    fn hours_of_sound_have_a_length() {
+        let second = crate::TICKS_PER_SECOND;
+        assert_eq!(sample_frames_from_ticks(second), Some(48_000));
+        assert_eq!(sample_frames_from_ticks(second + 1), Some(48_001));
+        assert_eq!(
+            sample_frames_from_ticks(second * 3600 * 3),
+            Some(48_000 * 3600 * 3)
+        );
+        // More than a WAV file holds (4 GiB of 16-bit stereo: about 6.2 hours).
+        assert_eq!(sample_frames_from_ticks(second * 3600 * 7), None);
+        assert_eq!(sample_frames_from_ticks(i64::MAX), None);
+        assert_eq!(sample_frames_from_ticks(-5), Some(0));
+    }
 
     #[test]
     fn mono_duplicates() -> Result<(), String> {

@@ -303,10 +303,145 @@ fn predict_chroma(
     out
 }
 
+/// The 16 x 16 luma prediction of the macroblock at (`mbx`, `mby`) for a vector in half pixels (13818-2 7.6.4):
+/// the whole part of the vector moves the block, and an odd component averages each sample with its right or
+/// lower neighbour (all four when both are odd), rounding up.
+pub(crate) fn predict_luma(
+    reference: &Frame420,
+    mbx: usize,
+    mby: usize,
+    mv_x_half: i32,
+    mv_y_half: i32,
+) -> [u8; 256] {
+    let mut luma = [0u8; 256];
+    let (width, height) = (usize::from(reference.width), usize::from(reference.height));
+    // Floor division: -3 half pixels is 2 whole pixels back and a half forward.
+    let ref_x = i32::try_from(mbx)
+        .unwrap_or(0)
+        .saturating_add(mv_x_half >> 1);
+    let ref_y = i32::try_from(mby)
+        .unwrap_or(0)
+        .saturating_add(mv_y_half >> 1);
+    let (half_x, half_y) = (mv_x_half & 1 != 0, mv_y_half & 1 != 0);
+
+    // The usual case, all samples inside the picture: rows are read as slices.
+    let inside = usize::try_from(ref_x)
+        .ok()
+        .zip(usize::try_from(ref_y).ok())
+        .filter(|(x, y)| {
+            x + 16 + usize::from(half_x) <= width && y + 16 + usize::from(half_y) <= height
+        });
+    if let Some((x, y)) = inside {
+        let step = usize::from(half_x);
+        for row in 0..16 {
+            let top = (y + row) * width + x;
+            let bottom = top + if half_y { width } else { 0 };
+            let (Some(a), Some(b), Some(out)) = (
+                reference.y.get(top..top + 16 + step),
+                reference.y.get(bottom..bottom + 16 + step),
+                luma.get_mut(row * 16..row * 16 + 16),
+            ) else {
+                continue;
+            };
+            for (col, slot) in out.iter_mut().enumerate() {
+                let sum = match (half_x, half_y) {
+                    (false, false) => u16::from(a[col]),
+                    (true, false) => (u16::from(a[col]) + u16::from(a[col + 1]) + 1) >> 1,
+                    (false, true) => (u16::from(a[col]) + u16::from(b[col]) + 1) >> 1,
+                    (true, true) => {
+                        (u16::from(a[col])
+                            + u16::from(a[col + 1])
+                            + u16::from(b[col])
+                            + u16::from(b[col + 1])
+                            + 2)
+                            >> 2
+                    }
+                };
+                *slot = u8::try_from(sum).unwrap_or(255);
+            }
+        }
+        return luma;
+    }
+
+    let (step_x, step_y) = (i32::from(half_x), i32::from(half_y));
+    for row in 0..16 {
+        for col in 0..16 {
+            let x = ref_x.saturating_add(i32::try_from(col).unwrap_or(0));
+            let y = ref_y.saturating_add(i32::try_from(row).unwrap_or(0));
+            let a = u16::from(sample_y(reference, x, y));
+            let b = u16::from(sample_y(reference, x + step_x, y));
+            let c = u16::from(sample_y(reference, x, y + step_y));
+            let d = u16::from(sample_y(reference, x + step_x, y + step_y));
+            if let Some(slot) = luma.get_mut(row * 16 + col) {
+                *slot = u8::try_from((a + b + c + d + 2) >> 2).unwrap_or(255);
+            }
+        }
+    }
+    luma
+}
+
+/// The sum of absolute differences between the macroblock of `cur` at (`mbx`, `mby`) and a prediction of it.
+fn sad_prediction(cur: &Frame420, mbx: usize, mby: usize, prediction: &[u8; 256]) -> u32 {
+    let width = usize::from(cur.width);
+    let mut sum = 0u32;
+    for row in 0..16 {
+        let start = (mby + row) * width + mbx;
+        let (Some(line), Some(predicted)) = (
+            cur.y.get(start..start + 16),
+            prediction.get(row * 16..row * 16 + 16),
+        ) else {
+            return u32::MAX;
+        };
+        for (a, b) in line.iter().zip(predicted) {
+            sum += u32::from(a.abs_diff(*b));
+        }
+    }
+    sum
+}
+
+/// Refines a whole-pixel vector (`best`: dx, dy and its SAD, from [`search_fast`]) to half a pixel: the eight
+/// half-pixel places around it that stay inside the picture and inside +/- `range` pixels. Returns the vector in
+/// half pixels and its SAD.
+pub(crate) fn refine_half(
+    cur: &Frame420,
+    reference: &Frame420,
+    (mbx, mby): (usize, usize),
+    best: (i32, i32, u32),
+    range: i32,
+) -> (i32, i32, u32) {
+    let centre = (best.0.saturating_mul(2), best.1.saturating_mul(2));
+    let mut found = (centre.0, centre.1, best.2);
+    let Some(win) = Window::new(reference, mbx, mby, range.max(0)) else {
+        return found;
+    };
+    // A half-pixel component reads one sample further right or down.
+    let fits = |half: i32, min: i32, max: i32| {
+        let whole = half >> 1;
+        whole >= min && whole + (half & 1) <= max
+    };
+    for oy in -1..=1 {
+        for ox in -1..=1 {
+            let (vx, vy) = (centre.0 + ox, centre.1 + oy);
+            if (ox, oy) == (0, 0)
+                || !fits(vx, win.dx_min, win.dx_max)
+                || !fits(vy, win.dy_min, win.dy_max)
+            {
+                continue;
+            }
+            let prediction = predict_luma(reference, mbx, mby, vx, vy);
+            let sad = sad_prediction(cur, mbx, mby, &prediction);
+            if sad < found.2 {
+                found = (vx, vy, sad);
+            }
+        }
+    }
+    found
+}
+
 /// Predict a macroblock from `reference` using a motion vector in luma half-pel units.
 ///
-/// Luma prediction is full-pel in this encoder. Chroma vectors are luma vectors divided by
-/// two, in chroma half-pel units, with half-pel chroma averaging as required by MPEG-2.
+/// Chroma vectors are luma vectors divided by two, in chroma half-pel units, with half-pel chroma averaging as
+/// required by MPEG-2.
 pub(crate) fn predict(
     reference: &Frame420,
     mbx: usize,
@@ -314,23 +449,7 @@ pub(crate) fn predict(
     mv_x_half: i32,
     mv_y_half: i32,
 ) -> ([u8; 256], [u8; 64], [u8; 64]) {
-    let mut luma = [0u8; 256];
-
-    let luma_x = mv_x_half / 2;
-    let luma_y = mv_y_half / 2;
-    let ref_x = i32::try_from(mbx).unwrap_or(0).saturating_add(luma_x);
-    let ref_y = i32::try_from(mby).unwrap_or(0).saturating_add(luma_y);
-
-    for row in 0..16 {
-        for col in 0..16 {
-            let x = ref_x.saturating_add(i32::try_from(col).unwrap_or(0));
-            let y = ref_y.saturating_add(i32::try_from(row).unwrap_or(0));
-
-            if let Some(slot) = luma.get_mut(row * 16 + col) {
-                *slot = sample_y(reference, x, y);
-            }
-        }
-    }
+    let luma = predict_luma(reference, mbx, mby, mv_x_half, mv_y_half);
 
     let chroma_width = usize::from(reference.width) / 2;
     let chroma_height = usize::from(reference.height) / 2;
@@ -454,5 +573,69 @@ mod tests {
 
         let (_, cb_pred, _) = predict(&reference, 0, 0, 2, 0);
         assert_eq!(cb_pred.first().copied(), Some(15));
+    }
+
+    /// A frame whose luma is `f(x, y)`.
+    fn frame_of(width: u16, height: u16, f: impl Fn(usize, usize) -> u8) -> Frame420 {
+        let mut frame = blank_frame(width, height);
+        for y in 0..usize::from(height) {
+            for x in 0..usize::from(width) {
+                frame.y[y * usize::from(width) + x] = f(x, y);
+            }
+        }
+        frame
+    }
+
+    /// M12.12: an odd vector component averages a sample with its right (lower) neighbour, rounding up; the whole
+    /// part is the floor, so -3 half pixels is two pixels back and half a pixel forward.
+    #[test]
+    fn predict_luma_averages_at_half_pixels() {
+        let reference = frame_of(64, 64, |x, y| (x * 3 + y * 5) as u8);
+        let at = |x: usize, y: usize| u16::from(reference.y[y * 64 + x]);
+        let whole = super::predict_luma(&reference, 16, 16, 4, -2);
+        assert_eq!(u16::from(whole[0]), at(18, 15));
+        let right = super::predict_luma(&reference, 16, 16, 1, 0);
+        assert_eq!(u16::from(right[0]), (at(16, 16) + at(17, 16) + 1) >> 1);
+        let back = super::predict_luma(&reference, 16, 16, -3, 0);
+        assert_eq!(u16::from(back[0]), (at(14, 16) + at(15, 16) + 1) >> 1);
+        let both = super::predict_luma(&reference, 16, 16, 1, -1);
+        assert_eq!(
+            u16::from(both[17]),
+            (at(17, 16) + at(18, 16) + at(17, 17) + at(18, 17) + 2) >> 2
+        );
+        // At the picture's edge the samples outside repeat the edge (never read by a vector the search gives).
+        let edge = super::predict_luma(&reference, 48, 48, 1, 1);
+        assert_eq!(u16::from(edge[255]), at(63, 63));
+    }
+
+    /// The refinement finds a picture moved by half a pixel, and stays inside the picture and the range.
+    #[test]
+    fn refine_half_finds_half_pixel_motion() {
+        let texture = |x: usize, y: usize| ((x * 37 + y * 11 + (x * y) % 13) % 200) as u8 + 20;
+        let reference = frame_of(64, 64, texture);
+        // The current picture is the reference half a pixel to the right and down.
+        let current = frame_of(64, 64, |x, y| {
+            let sum = u16::from(texture(x, y))
+                + u16::from(texture(x + 1, y))
+                + u16::from(texture(x, y + 1))
+                + u16::from(texture(x + 1, y + 1));
+            ((sum + 2) >> 2) as u8
+        });
+        let whole = (0, 0, super::sad_block(&current, &reference, 16, 16, 0, 0));
+        assert!(whole.2 > 0);
+        assert_eq!(
+            super::refine_half(&current, &reference, (16, 16), whole, 15),
+            (1, 1, 0)
+        );
+
+        // In the last macroblock there is nothing to the right or below to average with: only vectors back.
+        let corner = (0, 0, u32::MAX);
+        let (vx, vy, _) = super::refine_half(&current, &reference, (48, 48), corner, 15);
+        assert!(vx <= 0 && vy <= 0, "({vx}, {vy})");
+        // With no range the vector stays.
+        assert_eq!(
+            super::refine_half(&current, &reference, (16, 16), (0, 0, 7), 0),
+            (0, 0, 7)
+        );
     }
 }

@@ -15,6 +15,8 @@ pub(crate) enum PrefsCategory {
     /// 一般（テレビ方式の初期設定）。
     #[default]
     General,
+    /// タイムライン（静止画と字幕の長さ、トラックの言語）。
+    Timelines,
     /// メニュー（ボタンのルートとボタン同期の初期設定。プロジェクトに保存）。
     Menus,
     /// 表示方法（表示言語）。
@@ -23,8 +25,9 @@ pub(crate) enum PrefsCategory {
 
 impl PrefsCategory {
     /// 左の一覧に並べる順。
-    pub(crate) const ALL: [PrefsCategory; 3] = [
+    pub(crate) const ALL: [PrefsCategory; 4] = [
         PrefsCategory::General,
+        PrefsCategory::Timelines,
         PrefsCategory::Menus,
         PrefsCategory::Interface,
     ];
@@ -33,6 +36,7 @@ impl PrefsCategory {
     pub(crate) fn label(self) -> &'static str {
         match self {
             PrefsCategory::General => tl!("General"),
+            PrefsCategory::Timelines => tl!("Timelines"),
             PrefsCategory::Menus => tl!("Menus"),
             PrefsCategory::Interface => tl!("Interface"),
         }
@@ -84,6 +88,7 @@ impl DiscCraftApp {
                 ui.set_min_height(170.0);
                 match self.prefs.category {
                     PrefsCategory::General => self.prefs_general(ui),
+                    PrefsCategory::Timelines => self.prefs_timelines(ui),
                     PrefsCategory::Menus => self.prefs_menus(ui),
                     PrefsCategory::Interface => self.prefs_interface(ui),
                 }
@@ -118,6 +123,57 @@ impl DiscCraftApp {
             }
         });
         ui.small(tl!("Used as the TV standard of new projects."));
+    }
+
+    /// 「タイムライン」（Encore: 静止画デュレーション / 字幕デュレーション / オーディオの言語 / 字幕の言語）。
+    fn prefs_timelines(&mut self, ui: &mut Ui) {
+        ui.strong(tl!("Timelines"));
+        ui.add_space(6.0);
+        let mut prefs = self.timeline_prefs.clone();
+        ui.horizontal(|ui| {
+            ui.label(tl!("Still duration:"));
+            let _ = ui.add(
+                egui::DragValue::new(&mut prefs.still_seconds)
+                    .range(1..=3600)
+                    .suffix(tl!(" s")),
+            );
+        });
+        ui.small(tl!("The slide duration of new slideshows."));
+        ui.horizontal(|ui| {
+            ui.label(tl!("Subtitle duration:"));
+            let _ = ui.add(
+                egui::DragValue::new(&mut prefs.subtitle_seconds)
+                    .range(1..=60)
+                    .suffix(tl!(" s")),
+            );
+        });
+        ui.small(tl!("The length of a subtitle added in the Monitor."));
+        ui.horizontal(|ui| {
+            ui.label(tl!("Audio language:"));
+            let _ = ui.add(
+                egui::TextEdit::singleline(&mut prefs.audio_language)
+                    .char_limit(3)
+                    .desired_width(40.0),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label(tl!("Subtitle language:"));
+            let _ = ui.add(
+                egui::TextEdit::singleline(&mut prefs.subtitle_language)
+                    .char_limit(3)
+                    .desired_width(40.0),
+            );
+        });
+        ui.small(tl!(
+            "The language of new tracks (a code such as ja or en). Empty uses the disc's audio language."
+        ));
+        if prefs != self.timeline_prefs {
+            // What is typed is kept as typed; the saved copy is tidied (a single letter is no language yet).
+            if let Err(error) = crate::workspace::save_timeline_prefs(&prefs) {
+                self.status = error;
+            }
+            self.timeline_prefs = prefs;
+        }
     }
 
     /// 「メニュー」（Encore と同じ並び）: ボタンのルートと、ボタン同期の初期設定。DiscCraft はプロジェクトに保存する

@@ -8,9 +8,84 @@ use crate::vlc;
 use crate::{EncodeError, Frame420, Standard};
 use std::sync::OnceLock;
 
-const MAX_BITRATE_LIMIT: u32 = 9_800_000;
-const VBV_BUFFER_BITS: u64 = 1_835_008;
-const P_F_CODE: u8 = 2;
+/// What depends on the picture format: MP@ML at a DVD's size, or MP@HL at 1920 x 1080.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Params {
+    /// The coded size (whole macroblocks): the size of the frames the encoder is given.
+    coded: (u16, u16),
+    /// The size in the sequence header (what is shown).
+    display: (u16, u16),
+    /// The largest maximum bitrate, bits per second.
+    max_bitrate: u32,
+    /// The VBV buffer, bits (a multiple of 16,384).
+    vbv_bits: u64,
+    /// profile_and_level_indication.
+    profile_level: u32,
+    /// f_code of a P picture's forward vectors, both ways.
+    f_code: u8,
+    /// The motion search range in pixels (inside the f_code's range).
+    search: i32,
+}
+
+impl Params {
+    fn of(format: Format, standard: Standard) -> Self {
+        match format {
+            Format::Sd => Self {
+                coded: (720, sd_height(standard)),
+                display: (720, sd_height(standard)),
+                max_bitrate: 9_800_000,
+                vbv_bits: 1_835_008,
+                profile_level: 0x48,
+                f_code: 2,
+                search: 15,
+            },
+            // MP@HL: a 9,781,248-bit VBV buffer; a Blu-ray's video is at most 40 Mbps. Vectors of +/- 63 pixels
+            // (f_code 4 holds -128 to 127 half pixels).
+            Format::Hd1080 => Self {
+                coded: (1920, 1088),
+                display: (1920, 1080),
+                max_bitrate: 40_000_000,
+                vbv_bits: 9_781_248,
+                profile_level: 0x44,
+                f_code: 4,
+                search: 63,
+            },
+        }
+    }
+}
+
+fn sd_height(standard: Standard) -> u16 {
+    match standard {
+        Standard::Ntsc => 480,
+        Standard::Pal => 576,
+    }
+}
+
+/// The picture format of a sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Format {
+    /// 720 x 480 (NTSC) or 720 x 576 (PAL), MP@ML: a DVD's video.
+    #[default]
+    Sd,
+    /// 1920 x 1080 at the standard's frame rate (29.97 or 25 frames a second: 59.94i / 50i), MP@HL, BT.709,
+    /// always 16:9: a Blu-ray's interlaced HD video. The frames given are 1920 x 1088 (the coded size: the last
+    /// eight lines are not shown); each is coded as one frame picture of two fields from the same moment.
+    Hd1080,
+}
+
+impl Format {
+    /// The size of the frames the encoder takes (whole macroblocks).
+    #[must_use]
+    pub fn coded_size(self, standard: Standard) -> (u16, u16) {
+        Params::of(self, standard).coded
+    }
+
+    /// The VBV buffer in bits: the most one picture may take.
+    #[must_use]
+    pub fn vbv_bits(self) -> u64 {
+        Params::of(self, Standard::Ntsc).vbv_bits
+    }
+}
 
 const INV_SQRT2: f64 = 1.0 / std::f64::consts::SQRT_2;
 
@@ -33,10 +108,12 @@ pub struct EncoderConfig {
     pub gop_size: u16,
     /// Average bitrate in bits per second.
     pub bitrate: u32,
-    /// Maximum bitrate in bits per second, at most 9,800,000.
+    /// Maximum bitrate in bits per second, at most 9,800,000 (SD) or 40,000,000 (HD).
     pub max_bitrate: u32,
-    /// 16:9 display (aspect_ratio_information 3) instead of 4:3 (2).
+    /// 16:9 display (aspect_ratio_information 3) instead of 4:3 (2). HD is always 16:9.
     pub wide: bool,
+    /// The picture format.
+    pub format: Format,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +141,7 @@ impl Predictors {
 /// MPEG-2 I/P sequence encoder.
 pub struct Encoder {
     config: EncoderConfig,
+    params: Params,
     frames_encoded: u64,
     /// Frames encoded since the current GOP started.
     frames_in_gop: u64,
@@ -131,7 +209,7 @@ impl RateControl {
         let nominal = budget.frame_bits * budget.gop_frames * share;
         let target = (nominal - self.debt * share / 2.0).max(nominal * MIN_TARGET_SHARE);
         let available = available as f64;
-        let room = (available - VBV_MARGIN * VBV_BUFFER_BITS as f64).max(available / 2.0);
+        let room = (available - VBV_MARGIN * budget.vbv_bits).max(available / 2.0);
         let target = target.min(room).max(1.0);
         let code = (complexity / target).round().clamp(2.0, 31.0) as u8;
         code.max(last.saturating_sub(MAX_CODE_FALL)).max(floor)
@@ -156,6 +234,8 @@ impl RateControl {
 struct Budget {
     frame_bits: f64,
     gop_frames: f64,
+    /// The VBV buffer, bits.
+    vbv_bits: f64,
 }
 
 impl Encoder {
@@ -173,21 +253,24 @@ impl Encoder {
             return Err(EncodeError("max_bitrate must be non-zero".to_string()));
         }
 
-        if config.max_bitrate > MAX_BITRATE_LIMIT {
+        let params = Params::of(config.format, config.standard);
+        if config.max_bitrate > params.max_bitrate {
             return Err(EncodeError(format!(
-                "max_bitrate must be <= {MAX_BITRATE_LIMIT}"
+                "max_bitrate must be <= {}",
+                params.max_bitrate
             )));
         }
 
         Ok(Self {
             config,
+            params,
             frames_encoded: 0,
             frames_in_gop: 0,
             reference: None,
             reconstruction: None,
             quant_i: FIRST_CODE,
             quant_p: FIRST_CODE,
-            vbv_fullness: VBV_BUFFER_BITS,
+            vbv_fullness: params.vbv_bits,
             rate: RateControl::default(),
         })
     }
@@ -207,7 +290,7 @@ impl Encoder {
         frame: &Frame420,
         start_gop: bool,
     ) -> Result<Vec<u8>, EncodeError> {
-        validate_frame(frame, self.config.standard)?;
+        validate_frame(frame, self.params.coded)?;
 
         let is_gop_start = start_gop
             || self.frames_encoded == 0
@@ -224,7 +307,10 @@ impl Encoder {
         let temporal_reference = u32::try_from(self.frames_in_gop).unwrap_or(0);
 
         let fill = self.fill_bits();
-        let fullness = self.vbv_fullness.saturating_add(fill).min(VBV_BUFFER_BITS);
+        let fullness = self
+            .vbv_fullness
+            .saturating_add(fill)
+            .min(self.params.vbv_bits);
         let budget = self.budget();
         let codes = (self.quant_i, self.quant_p);
         let mut code = self.rate.code(picture_type, budget, fullness, codes);
@@ -311,6 +397,7 @@ impl Encoder {
         Budget {
             frame_bits: f64::from(self.config.bitrate) * self.frame_seconds(),
             gop_frames: f64::from(self.config.gop_size.max(1)),
+            vbv_bits: self.params.vbv_bits as f64,
         }
     }
 
@@ -331,19 +418,12 @@ impl Encoder {
         let mut recon = empty_frame(frame.width, frame.height);
 
         if is_gop_start {
-            write_sequence_header(
-                &mut writer,
-                frame,
-                self.config.standard,
-                bit_rate_value(self.config.max_bitrate),
-                if self.config.wide { 3 } else { 2 },
-            );
-            write_sequence_extension(&mut writer);
+            self.write_sequence_headers(&mut writer);
             write_gop_header(&mut writer, self.frames_encoded, self.fps());
         }
 
         write_picture_header(&mut writer, picture_type, temporal_reference);
-        write_picture_coding_extension(&mut writer, picture_type);
+        write_picture_coding_extension(&mut writer, picture_type, self.params.f_code);
 
         let qs = u16::from(code).saturating_mul(2);
 
@@ -357,9 +437,72 @@ impl Encoder {
         };
         let mut data = writer.finish();
         let workers = slice_workers(usize::from(frame.height) / 16);
-        encode_slices(frame, reference, &mut recon, (code, qs, workers), &mut data)?;
+        let coding = Coding {
+            code,
+            qs,
+            f_code: self.params.f_code,
+            search: self.params.search,
+        };
+        encode_slices(frame, reference, &mut recon, (coding, workers), &mut data)?;
         Ok((data, recon))
     }
+
+    /// The sequence header and its extensions, as every GOP starts.
+    fn write_sequence_headers(&self, writer: &mut BitWriter) {
+        let hd = self.config.format == Format::Hd1080;
+        write_sequence_header(
+            writer,
+            self.params,
+            self.config.standard,
+            bit_rate_value(self.config.max_bitrate),
+            if self.config.wide || hd { 3 } else { 2 },
+        );
+        write_sequence_extension(writer, self.params.profile_level);
+        if hd {
+            write_sequence_display_extension(writer, self.params.display);
+        }
+    }
+
+    /// Encodes `frame` as a sequence of one I picture at quantiser_scale_code `code` (1 to 31; coarser when the
+    /// picture would not fit the VBV buffer), ended by a sequence end code: a menu's still. The encoder's rate
+    /// control is not used and does not change.
+    ///
+    /// # Errors
+    ///
+    /// When the frame has the wrong size, or does not fit the buffer at the coarsest quantiser.
+    pub fn encode_still(&self, frame: &Frame420, code: u8) -> Result<Vec<u8>, EncodeError> {
+        validate_frame(frame, self.params.coded)?;
+        let mut code = code.clamp(1, 31);
+        loop {
+            let (mut data, _) = self.encode_picture(frame, PictureType::I, true, 0, code)?;
+            let bits = u64::try_from(data.len())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(8);
+            if bits <= self.params.vbv_bits {
+                data.extend_from_slice(&[0, 0, 1, 0xB7]);
+                return Ok(data);
+            }
+            if code >= 31 {
+                return Err(EncodeError(format!(
+                    "the still takes {bits} bits at quantiser 31, more than the buffer"
+                )));
+            }
+            code = code.saturating_add(1);
+        }
+    }
+}
+
+/// How a picture's macroblocks are coded.
+#[derive(Debug, Clone, Copy)]
+struct Coding {
+    /// quantiser_scale_code.
+    code: u8,
+    /// The quantiser scale (twice the code: the linear scale).
+    qs: u16,
+    /// f_code of the forward vectors.
+    f_code: u8,
+    /// Motion search range, pixels.
+    search: i32,
 }
 
 /// Encodes the picture's slices (one per macroblock row) into `out` and `recon`, the rows in bands on several
@@ -370,7 +513,7 @@ fn encode_slices(
     frame: &Frame420,
     reference: Option<&Frame420>,
     recon: &mut Frame420,
-    (code, qs, workers): (u8, u16, usize),
+    (coding, workers): (Coding, usize),
     out: &mut Vec<u8>,
 ) -> Result<(), EncodeError> {
     let mb_rows = usize::from(frame.height) / 16;
@@ -378,7 +521,7 @@ fn encode_slices(
     if workers == 1 {
         let mut writer = BitWriter::new();
         for row in 0..mb_rows {
-            encode_row(&mut writer, frame, reference, recon, row, (code, qs));
+            encode_row(&mut writer, frame, reference, recon, row, coding);
         }
         out.extend_from_slice(&writer.finish());
         return Ok(());
@@ -397,14 +540,7 @@ fn encode_slices(
                     let mut writer = BitWriter::new();
                     let mut band_recon = empty_frame(frame.width, frame.height);
                     for row in rows {
-                        encode_row(
-                            &mut writer,
-                            frame,
-                            reference,
-                            &mut band_recon,
-                            row,
-                            (code, qs),
-                        );
+                        encode_row(&mut writer, frame, reference, &mut band_recon, row, coding);
                     }
                     (writer.finish(), band_recon)
                 })
@@ -469,10 +605,11 @@ fn encode_row(
     reference: Option<&Frame420>,
     recon: &mut Frame420,
     row: usize,
-    (code, qs): (u8, u16),
+    coding: Coding,
 ) {
     let mb_cols = usize::from(frame.width) / 16;
-    write_slice_header(writer, row, code);
+    let qs = coding.qs;
+    write_slice_header(writer, row, coding.code);
     let mut predictors = Predictors::new();
     let y = row * 16;
     match reference {
@@ -494,7 +631,7 @@ fn encode_row(
                     recon,
                     col * 16,
                     y,
-                    qs,
+                    coding,
                     &mut predictors,
                     &mut prev_intra,
                     &mut pmv_x,
@@ -512,17 +649,14 @@ fn bit_rate_value(max_bitrate: u32) -> u32 {
     max_bitrate.saturating_add(399) / 400
 }
 
-fn validate_frame(frame: &Frame420, standard: Standard) -> Result<(), EncodeError> {
+fn validate_frame(frame: &Frame420, coded: (u16, u16)) -> Result<(), EncodeError> {
     let w = usize::from(frame.width);
     let h = usize::from(frame.height);
-    let expected_h = match standard {
-        Standard::Ntsc => 480,
-        Standard::Pal => 576,
-    };
 
-    if w != 720 || h != expected_h {
+    if (frame.width, frame.height) != coded {
         return Err(EncodeError(format!(
-            "expected 720x{expected_h}, got {w}x{h}"
+            "expected {}x{}, got {w}x{h}",
+            coded.0, coded.1
         )));
     }
 
@@ -559,7 +693,7 @@ fn empty_frame(width: u16, height: u16) -> Frame420 {
 
 fn write_sequence_header(
     writer: &mut BitWriter,
-    frame: &Frame420,
+    params: Params,
     standard: Standard,
     bit_rate_value: u32,
     aspect_code: u32,
@@ -570,31 +704,50 @@ fn write_sequence_header(
     };
 
     writer.write_start_code(0xB3);
-    writer.write_bits(u32::from(frame.width), 12);
-    writer.write_bits(u32::from(frame.height), 12);
+    writer.write_bits(u32::from(params.display.0), 12);
+    writer.write_bits(u32::from(params.display.1), 12);
     writer.write_bits(aspect_code, 4);
     writer.write_bits(frame_rate_code, 4);
     writer.write_bits(bit_rate_value, 18);
     writer.write_bits(1, 1);
-    writer.write_bits(112, 10);
+    // vbv_buffer_size_value, units of 16,384 bits: 112 (MP@ML) or 597 (MP@HL).
+    writer.write_bits(u32::try_from(params.vbv_bits / 16_384).unwrap_or(112), 10);
     writer.write_bits(0, 1);
     writer.write_bits(0, 1);
     writer.write_bits(0, 1);
 }
 
-fn write_sequence_extension(writer: &mut BitWriter) {
+/// The sequence extension (13818-2 6.2.2.3), 48 bits after its start code.
+fn write_sequence_extension(writer: &mut BitWriter, profile_level: u32) {
     writer.write_start_code(0xB5);
-    writer.write_bits(1, 4);
-    writer.write_bits(0x48, 8);
-    writer.write_bits(0, 1);
-    writer.write_bits(1, 2);
-    writer.write_bits(0, 12);
-    writer.write_bits(0, 12);
-    writer.write_bits(0, 4);
-    writer.write_bits(0, 8);
-    writer.write_bits(0, 1);
-    writer.write_bits(0, 2);
-    writer.write_bits(0, 5);
+    writer.write_bits(1, 4); // extension_start_code_identifier: sequence extension
+    writer.write_bits(profile_level, 8);
+    writer.write_bits(0, 1); // progressive_sequence: frames may be interlaced
+    writer.write_bits(1, 2); // chroma_format: 4:2:0
+    writer.write_bits(0, 2); // horizontal_size_extension
+    writer.write_bits(0, 2); // vertical_size_extension
+    writer.write_bits(0, 12); // bit_rate_extension
+    writer.write_bits(1, 1); // marker_bit
+    writer.write_bits(0, 8); // vbv_buffer_size_extension
+    writer.write_bits(0, 1); // low_delay
+    writer.write_bits(0, 2); // frame_rate_extension_n
+    writer.write_bits(0, 5); // frame_rate_extension_d
+}
+
+/// The sequence display extension (13818-2 6.2.2.4) of an HD sequence: BT.709 primaries, transfer and matrix, and
+/// the size shown.
+fn write_sequence_display_extension(writer: &mut BitWriter, display: (u16, u16)) {
+    writer.write_start_code(0xB5);
+    writer.write_bits(2, 4); // extension_start_code_identifier: sequence display extension
+    writer.write_bits(0, 3); // video_format: component
+    writer.write_bits(1, 1); // colour_description
+    writer.write_bits(1, 8); // colour_primaries: BT.709
+    writer.write_bits(1, 8); // transfer_characteristics: BT.709
+    writer.write_bits(1, 8); // matrix_coefficients: BT.709
+    writer.write_bits(u32::from(display.0), 14); // display_horizontal_size
+    writer.write_bits(1, 1); // marker_bit
+    writer.write_bits(u32::from(display.1), 14); // display_vertical_size
+    writer.write_bits(0, 3); // to the byte
 }
 
 fn write_gop_header(writer: &mut BitWriter, total_frames: u64, fps: u32) {
@@ -638,10 +791,10 @@ fn write_picture_header(
     }
 }
 
-fn write_picture_coding_extension(writer: &mut BitWriter, picture_type: PictureType) {
+fn write_picture_coding_extension(writer: &mut BitWriter, picture_type: PictureType, f_code: u8) {
     let (f00, f01) = match picture_type {
         PictureType::I => (15, 15),
-        PictureType::P => (2, 2),
+        PictureType::P => (u32::from(f_code), u32::from(f_code)),
     };
 
     writer.write_start_code(0xB5);
@@ -827,7 +980,7 @@ fn encode_p_macroblock(
     recon: &mut Frame420,
     x: usize,
     y: usize,
-    qs: u16,
+    coding: Coding,
     predictors: &mut Predictors,
     prev_intra: &mut bool,
     pmv_x: &mut i32,
@@ -835,7 +988,18 @@ fn encode_p_macroblock(
     skipped: &mut u32,
     can_skip: bool,
 ) {
-    let (dx, dy, sad) = motion::search_fast(cur, reference, x, y, 15, (*pmv_x / 2, *pmv_y / 2));
+    let (qs, f_code) = (coding.qs, coding.f_code);
+    let (dx, dy, sad) = motion::search_fast(
+        cur,
+        reference,
+        x,
+        y,
+        coding.search,
+        (*pmv_x / 2, *pmv_y / 2),
+    );
+    // To half a pixel around the best whole-pixel vector.
+    let (mv_x, mv_y, sad) =
+        motion::refine_half(cur, reference, (x, y), (dx, dy, sad), coding.search);
     let intra = motion::intra_cost(cur, x, y);
 
     if intra.saturating_add(512) < sad {
@@ -855,8 +1019,6 @@ fn encode_p_macroblock(
         return;
     }
 
-    let mv_x = dx.saturating_mul(2);
-    let mv_y = dy.saturating_mul(2);
     let (pred_y, pred_cb, pred_cr) = motion::predict(reference, x, y, mv_x, mv_y);
 
     let w = usize::from(cur.width);
@@ -905,10 +1067,10 @@ fn encode_p_macroblock(
             vlc::write_p_macroblock_type(writer, vlc::PType::McNotCoded);
         }
 
-        let delta_x = vlc::wrap_motion_delta(mv_x - *pmv_x, P_F_CODE);
-        let delta_y = vlc::wrap_motion_delta(mv_y - *pmv_y, P_F_CODE);
-        vlc::write_motion_delta(writer, delta_x, P_F_CODE);
-        vlc::write_motion_delta(writer, delta_y, P_F_CODE);
+        let delta_x = vlc::wrap_motion_delta(mv_x - *pmv_x, f_code);
+        let delta_y = vlc::wrap_motion_delta(mv_y - *pmv_y, f_code);
+        vlc::write_motion_delta(writer, delta_x, f_code);
+        vlc::write_motion_delta(writer, delta_y, f_code);
 
         if cbp != 0 {
             // Internally bit 0 is block 0 (Y0); in the bitstream block 0 is the MSB of the 6-bit pattern.
@@ -1312,7 +1474,13 @@ mod tests {
         let encode = |frame: &Frame420, reference: Option<&Frame420>, workers: usize| {
             let mut recon = empty_frame(frame.width, frame.height);
             let mut out = Vec::new();
-            encode_slices(frame, reference, &mut recon, (8, 16, workers), &mut out)
+            let coding = super::Coding {
+                code: 8,
+                qs: 16,
+                f_code: 2,
+                search: 15,
+            };
+            encode_slices(frame, reference, &mut recon, (coding, workers), &mut out)
                 .map(|()| (out, recon))
         };
         let (intra, intra_recon) = encode(&first, None, 1)?;

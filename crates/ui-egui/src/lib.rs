@@ -30,6 +30,7 @@ mod flowchart;
 mod fonts;
 mod gui_params;
 mod guides;
+mod help;
 mod i18n;
 mod icons;
 mod layer_break_view;
@@ -72,6 +73,7 @@ mod workspace;
 
 pub use app::DiscCraftApp;
 pub use fonts::install_japanese_font;
+pub use help::{enable_media_cache, install_crash_log};
 pub use theme::apply_theme;
 
 #[cfg(test)]

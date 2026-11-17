@@ -59,11 +59,21 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "asset.pending",
+        label: "読み込み中のアセットを調べる",
+        menu: &["アセット"],
+        shortcut: None,
+        params: "{}",
+        enabled: always_enabled,
+        run: run_pending,
+        journal: false,
+    },
+    CommandSpec {
         id: "asset.probe",
         label: "アセットの長さを調べる",
         menu: &["アセット"],
         shortcut: None,
-        params: r#"{"asset": id}"#,
+        params: r#"{"asset": id, "wait": bool (既定 true。false: まだ開いていなければ裏で開き {"pending": true} を返す)}"#,
         enabled: always_enabled,
         run: run_probe,
         journal: false,
@@ -83,7 +93,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "アセットのフレームを取り出す",
         menu: &["アセット"],
         shortcut: None,
-        params: r#"{"asset": id, "seconds": f64, "bright"?: bool, "bars"?: bool}"#,
+        params: r#"{"asset": id, "seconds": f64, "bright"?: bool, "bars"?: bool, "wait"?: bool (既定 true。false: まだ開いていなければ裏で開き {"pending": true} を返す)}"#,
         enabled: always_enabled,
         run: run_frame,
         journal: false,
@@ -112,8 +122,13 @@ fn run_frame(session: &mut Session, params: &Value) -> CommandResult {
     // "bars": false gives the picture without its letterbox bars (a video thumbnail stretches it over its area).
     let bright = matches!(params.get("bright"), Some(Value::Bool(true)));
     let bars = !matches!(params.get("bars"), Some(Value::Bool(false)));
-    let reader = disccraft_transcode::FrameReader::open(&asset.media_file())
-        .map_err(|error| error.to_string())?;
+    let media = asset.media_file();
+    let path: &Path = &media;
+    if !wait(params) && !disccraft_transcode::media_open(path) {
+        disccraft_transcode::warm(path);
+        return Ok(pending(id));
+    }
+    let reader = disccraft_transcode::FrameReader::open(path).map_err(|error| error.to_string())?;
     let seconds = if bright {
         reader
             .first_bright_time(seconds)
@@ -142,6 +157,69 @@ fn run_frame(session: &mut Session, params: &Value) -> CommandResult {
 
 /// サムネールの最大辺（ピクセル）。
 const THUMBNAIL_EDGE: u32 = 128;
+/// The name video thumbnails are remembered under (`disccraft_transcode::cached_blob`).
+const THUMBNAIL_BLOB: &str = "thumb";
+
+/// Whether the caller waits for a file that is not open yet (`"wait": false` does not).
+fn wait(params: &Value) -> bool {
+    !matches!(params.get("wait"), Some(Value::Bool(false)))
+}
+
+/// The answer for an asset whose file is being opened on its own thread: ask again later.
+fn pending(id: u64) -> Value {
+    object(&[("asset", Value::from(id)), ("pending", Value::Bool(true))])
+}
+
+/// A remembered thumbnail (width, height, RGB24); `None` for the mark of a video that gave no picture.
+fn thumbnail_from_blob(id: u64, blob: &[u8]) -> Option<Value> {
+    let width = u32::from_le_bytes(blob.get(0..4)?.try_into().ok()?);
+    let height = u32::from_le_bytes(blob.get(4..8)?.try_into().ok()?);
+    let rgb = blob.get(8..)?;
+    let expected = usize::try_from(
+        u64::from(width)
+            .checked_mul(u64::from(height))?
+            .checked_mul(3)?,
+    )
+    .ok()?;
+    if width == 0 || height == 0 || rgb.len() != expected {
+        return None;
+    }
+    Some(object(&[
+        ("asset", Value::from(id)),
+        ("width", Value::from(width)),
+        ("height", Value::from(height)),
+        (
+            "rgb",
+            Value::Array(rgb.iter().copied().map(Value::from).collect()),
+        ),
+    ]))
+}
+
+/// The video and audio assets whose files are still being opened (each is opened on a thread of its own from
+/// here on): a long file takes seconds to open, and the interface asks about it only once this is empty.
+/// `"opening"` lists those being opened whose length and size are known already (from the file's header, or
+/// remembered): only their pictures are waited for.
+fn run_pending(session: &mut Session, _params: &Value) -> CommandResult {
+    let mut ids = Vec::new();
+    let mut opening = Vec::new();
+    for asset in session.project.assets.values() {
+        if !matches!(asset.kind, AssetKind::Video | AssetKind::Audio) {
+            continue;
+        }
+        let media = asset.media_file();
+        let path: &Path = &media;
+        if !disccraft_transcode::probe_ready(path) {
+            disccraft_transcode::warm(path);
+            ids.push(Value::from(asset.id.0));
+        } else if disccraft_transcode::warming(path) {
+            opening.push(Value::from(asset.id.0));
+        }
+    }
+    Ok(object(&[
+        ("pending", Value::Array(ids)),
+        ("opening", Value::Array(opening)),
+    ]))
+}
 
 fn run_thumbnail(session: &mut Session, params: &Value) -> CommandResult {
     let id = req_u64(params, "asset")?;
@@ -153,10 +231,24 @@ fn run_thumbnail(session: &mut Session, params: &Value) -> CommandResult {
 
     let media = asset.media_file();
     let path: &Path = &media;
+    let video = asset.kind == AssetKind::Video;
+    if video {
+        // Made once and remembered between runs (a long file takes seconds to open), a failure too.
+        if let Some(blob) = disccraft_transcode::cached_blob(THUMBNAIL_BLOB, path) {
+            return thumbnail_from_blob(id, &blob)
+                .ok_or_else(|| "asset.thumbnail: the video has no picture to show".to_string());
+        }
+        if !wait(params) && !disccraft_transcode::media_open(path) {
+            disccraft_transcode::warm(path);
+            return Ok(pending(id));
+        }
+    }
     let (width, height, data, stride) = match asset.kind {
         AssetKind::Video => {
-            let (width, height, rgb) =
-                disccraft_transcode::first_frame(path).map_err(|error| error.to_string())?;
+            let (width, height, rgb) = disccraft_transcode::first_frame(path).map_err(|error| {
+                disccraft_transcode::store_blob(THUMBNAIL_BLOB, path, &[]);
+                error.to_string()
+            })?;
             (width, height, rgb, 3_usize)
         }
         AssetKind::Image => {
@@ -175,6 +267,13 @@ fn run_thumbnail(session: &mut Session, params: &Value) -> CommandResult {
 
     let (width, height, rgb) = downscale_rgb(width, height, &data, stride, THUMBNAIL_EDGE)
         .ok_or_else(|| "asset.thumbnail: cannot downscale the frame".to_string())?;
+    if video {
+        let mut blob = Vec::with_capacity(rgb.len().saturating_add(8));
+        blob.extend_from_slice(&width.to_le_bytes());
+        blob.extend_from_slice(&height.to_le_bytes());
+        blob.extend_from_slice(&rgb);
+        disccraft_transcode::store_blob(THUMBNAIL_BLOB, path, &blob);
+    }
 
     let bytes: Vec<Value> = rgb.into_iter().map(Value::from).collect();
     Ok(object(&[
@@ -369,6 +468,15 @@ fn run_probe(session: &mut Session, params: &Value) -> CommandResult {
         .get(&AssetId(id))
         .ok_or_else(|| format!("asset.probe: unknown asset: {id}"))?;
 
+    if matches!(asset.kind, AssetKind::Video | AssetKind::Audio) && !wait(params) {
+        let media = asset.media_file();
+        let path: &Path = &media;
+        if !disccraft_transcode::probe_ready(path) {
+            disccraft_transcode::warm(path);
+            return Ok(pending(id));
+        }
+    }
+
     let mut fields = serde_json::Map::new();
     let _ = fields.insert("asset".to_string(), Value::from(id));
 
@@ -508,5 +616,78 @@ mod tests {
             Err(_) => Value::Null,
         };
         assert!(matches!(value.get("seconds"), Some(Value::Null)));
+    }
+
+    /// M12.13: asked without waiting, a video that is not open yet is opened on its own thread and answered
+    /// "pending"; once `asset.pending` lists nothing, the same question is answered at once.
+    #[test]
+    fn a_video_is_opened_ahead_and_asked_without_waiting() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/fixtures/ntsc.m2v");
+        if !fixture.is_file() {
+            eprintln!("ntsc.m2v fixture not found; skipping");
+            return Ok(());
+        }
+        // A copy of its own: nothing in this process has opened it.
+        let dir = std::env::temp_dir().join(format!("disccraft-pending-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let video = dir.join("pending.m2v");
+        std::fs::copy(&fixture, &video)?;
+        let mut session = Session::new();
+        let imported =
+            session.execute("asset.import", &json!({"path": video.to_string_lossy()}))?;
+        let id = imported
+            .get("asset")
+            .and_then(Value::as_u64)
+            .ok_or("no asset")?;
+
+        let first = session.execute("asset.probe", &json!({"asset": id, "wait": false}))?;
+        assert_eq!(first.get("pending"), Some(&Value::Bool(true)), "{first}");
+        let thumbnail = session.execute("asset.thumbnail", &json!({"asset": id, "wait": false}))?;
+        assert_eq!(thumbnail.get("pending"), Some(&Value::Bool(true)));
+        // The monitor's frame is not waited for either.
+        let frame = json!({"asset": id, "seconds": 0.0, "wait": false});
+        let waiting = session.execute("asset.frame", &frame)?;
+        assert!(
+            waiting.get("pending") == Some(&Value::Bool(true)) || waiting.get("rgb").is_some(),
+            "{waiting}"
+        );
+
+        let start = std::time::Instant::now();
+        loop {
+            let pending = session.execute("asset.pending", &json!({}))?;
+            if pending
+                .get("pending")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+            {
+                break;
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(60));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let probe = session.execute("asset.probe", &json!({"asset": id, "wait": false}))?;
+        assert_eq!(
+            probe.get("width").and_then(Value::as_u64),
+            Some(720),
+            "{probe}"
+        );
+        assert!(probe.get("pending").is_none());
+        let thumbnail = session.execute("asset.thumbnail", &json!({"asset": id, "wait": false}))?;
+        assert!(thumbnail.get("rgb").is_some());
+        let shown = session.execute("asset.frame", &frame)?;
+        assert!(shown.get("rgb").is_some() && shown.get("pending").is_none());
+
+        // A file that is not there is not waited for: the probe answers as before (no length).
+        std::fs::remove_file(&video)?;
+        let gone = session.execute("asset.probe", &json!({"asset": id, "wait": false}))?;
+        assert!(gone.get("pending").is_none(), "{gone}");
+        assert_eq!(
+            session.execute("asset.pending", &json!({}))?,
+            json!({"pending": [], "opening": []})
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
     }
 }

@@ -165,6 +165,23 @@ impl DiscCraftApp {
                 serde_json::json!({ "slideshow": id, "manual": manual }),
             );
         }
+        // ランダムにパンとズーム（Encore: すべてのスライドにランダムなパンとズームエフェクトを適用）。
+        let random = self
+            .session
+            .project
+            .slideshow(id)
+            .is_some_and(|slideshow| slideshow.random_pan_zoom);
+        let mut wanted = random;
+        if ui
+            .checkbox(&mut wanted, tl!("Random Pan & Zoom"))
+            .on_hover_text(tl!("Apply a random pan and zoom effect to all slides"))
+            .changed()
+        {
+            let _ = self.run_command(
+                "slideshow.setRandomPanZoom",
+                serde_json::json!({ "slideshow": id, "on": wanted }),
+            );
+        }
     }
 
     /// トランジションの種類のコンボ（Encore の「トランジションの初期設定」。`slideshow.setTransition`）。

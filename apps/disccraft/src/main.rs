@@ -8,7 +8,9 @@
     clippy::indexing_slicing
 )]
 
-use disccraft_ui_egui::{DiscCraftApp, apply_theme, install_japanese_font};
+use disccraft_ui_egui::{
+    DiscCraftApp, apply_theme, enable_media_cache, install_crash_log, install_japanese_font,
+};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -21,6 +23,7 @@ impl AppWrapper {
         install_japanese_font(&cc.egui_ctx);
         apply_theme(&cc.egui_ctx);
 
+        enable_media_cache();
         let mut app = DiscCraftApp::new(&cc.egui_ctx);
 
         if let Some(path) = path {
@@ -38,6 +41,8 @@ impl eframe::App for AppWrapper {
 }
 
 fn main() -> ExitCode {
+    // A crash leaves the session log behind (Help ▸ Reveal Log Files… shows the folder).
+    install_crash_log();
     let path = std::env::args().nth(1).map(PathBuf::from);
 
     let options = eframe::NativeOptions {

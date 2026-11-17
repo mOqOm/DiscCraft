@@ -1,7 +1,9 @@
-//! HD H.264 transcode for Blu-ray.
+//! HD transcode for Blu-ray.
 //!
-//! Decodes a supported media file, scales it to an HD frame, and encodes an
-//! Annex B H.264 elementary stream plus an access-unit index.
+//! Decodes a supported media file, scales it to an HD frame, and encodes an elementary stream plus an access-unit
+//! index: Annex B H.264, or for the interlaced 1920 x 1080 formats (59.94i / 50i) MPEG-2 MP@HL
+//! ([`HdCodec::Mpeg2`]: the H.264 encoder codes progressive frames only). The functions and files named `h264`
+//! make either, as the options say.
 
 use std::convert::TryFrom;
 use std::fs::{self, File};
@@ -32,6 +34,167 @@ pub struct HdOptions {
     pub target_kbps: u32,
     /// Maximum bitrate in kilobits per second.
     pub max_kbps: u32,
+    /// The video coding.
+    pub codec: HdCodec,
+}
+
+/// The video coding of an HD stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HdCodec {
+    /// H.264 High Profile, progressive frames.
+    #[default]
+    H264,
+    /// MPEG-2 MP@HL, 1920 x 1080 at 29.97 or 25 frames a second, signalled as interlaced (59.94i / 50i): each
+    /// frame is coded as one frame picture whose two fields are from the same moment.
+    Mpeg2,
+}
+
+/// One coded picture from either encoder, its times counted in frames.
+struct Coded {
+    data: Vec<u8>,
+    pts: i64,
+    dts: i64,
+    keyframe: bool,
+}
+
+impl From<Packet> for Coded {
+    fn from(packet: Packet) -> Self {
+        Self {
+            data: packet.data,
+            pts: packet.pts,
+            dts: packet.dts,
+            keyframe: packet.keyframe,
+        }
+    }
+}
+
+/// The encoder of an HD stream: H.264, or MPEG-2 for the interlaced formats.
+enum HdEncoder {
+    H264(Box<Encoder>),
+    Mpeg2(Box<disccraft_mpeg2venc::encoder::Encoder>),
+}
+
+/// The MPEG-2 encoder's settings for `options`: 1920 x 1080 at 29.97 (NTSC) or 25 (PAL) frames a second.
+fn mpeg2_config(
+    options: &HdOptions,
+) -> Result<disccraft_mpeg2venc::encoder::EncoderConfig, TranscodeError> {
+    let standard = match (
+        options.width,
+        options.height,
+        options.fps_num,
+        options.fps_den,
+    ) {
+        (1920, 1080, 30_000, 1001) => disccraft_mpeg2venc::Standard::Ntsc,
+        (1920, 1080, 25, 1) => disccraft_mpeg2venc::Standard::Pal,
+        _ => {
+            return Err(TranscodeError::Unsupported(
+                "MPEG-2 HD is 1920 x 1080 at 29.97 or 25 frames a second".to_string(),
+            ));
+        }
+    };
+    Ok(disccraft_mpeg2venc::encoder::EncoderConfig {
+        standard,
+        // Half a second, as on a DVD.
+        gop_size: if standard == disccraft_mpeg2venc::Standard::Ntsc {
+            15
+        } else {
+            12
+        },
+        bitrate: options.target_kbps.saturating_mul(1000),
+        max_bitrate: options.max_kbps.saturating_mul(1000),
+        wide: true,
+        format: disccraft_mpeg2venc::encoder::Format::Hd1080,
+    })
+}
+
+/// `planes` (1920 x 1080) as the MPEG-2 encoder's frame of the coded size (1920 x 1088): the last line repeated
+/// below the picture, which codes to almost nothing.
+fn mpeg2_frame(
+    planes: &YuvPlanes,
+    coded: (u16, u16),
+) -> Result<disccraft_mpeg2venc::Frame420, TranscodeError> {
+    let pad = |plane: &[u8], stride: usize, width: usize, height: usize| -> Option<Vec<u8>> {
+        if stride == 0 || width > stride {
+            return None;
+        }
+        let mut out = Vec::with_capacity(width.checked_mul(height)?);
+        let rows = plane.len() / stride;
+        for row in 0..height {
+            let from = row.min(rows.checked_sub(1)?).checked_mul(stride)?;
+            out.extend_from_slice(plane.get(from..from.checked_add(width)?)?);
+        }
+        Some(out)
+    };
+    let (width, height) = (usize::from(coded.0), usize::from(coded.1));
+    let planes = (|| {
+        Some((
+            pad(&planes.y, planes.y_stride, width, height)?,
+            pad(&planes.u, planes.uv_stride, width / 2, height / 2)?,
+            pad(&planes.v, planes.uv_stride, width / 2, height / 2)?,
+        ))
+    })();
+    let (y, cb, cr) =
+        planes.ok_or_else(|| TranscodeError::Unsupported("picture too small".to_string()))?;
+    Ok(disccraft_mpeg2venc::Frame420 {
+        width: coded.0,
+        height: coded.1,
+        y,
+        cb,
+        cr,
+    })
+}
+
+impl HdEncoder {
+    fn new(options: &HdOptions) -> Result<Self, TranscodeError> {
+        match options.codec {
+            HdCodec::H264 => Encoder::new(encoder_config(options))
+                .map(|encoder| Self::H264(Box::new(encoder)))
+                .map_err(|error| TranscodeError::Encode(error.to_string())),
+            HdCodec::Mpeg2 => disccraft_mpeg2venc::encoder::Encoder::new(mpeg2_config(options)?)
+                .map(|encoder| Self::Mpeg2(Box::new(encoder)))
+                .map_err(|error| TranscodeError::Encode(error.to_string())),
+        }
+    }
+
+    /// Encodes picture `index`: the pictures that are ready (H.264 holds some back to reorder them).
+    fn encode(
+        &mut self,
+        planes: &YuvPlanes,
+        index: i64,
+        options: &HdOptions,
+    ) -> Result<Vec<Coded>, TranscodeError> {
+        match self {
+            Self::H264(encoder) => Ok(encoder
+                .encode(&planes.frame(), index)
+                .map_err(|error| TranscodeError::Encode(error.to_string()))?
+                .into_iter()
+                .map(Coded::from)
+                .collect()),
+            Self::Mpeg2(encoder) => {
+                let config = mpeg2_config(options)?;
+                let frame = mpeg2_frame(planes, config.format.coded_size(config.standard))?;
+                let data = encoder
+                    .encode_frame(&frame)
+                    .map_err(|error| TranscodeError::Encode(error.to_string()))?;
+                // I and P pictures only: shown in the order coded. A GOP starts with its sequence header.
+                let keyframe = data.starts_with(&[0, 0, 1, 0xB3]);
+                Ok(vec![Coded {
+                    data,
+                    pts: index,
+                    dts: index,
+                    keyframe,
+                }])
+            }
+        }
+    }
+
+    /// The pictures still held back.
+    fn flush(&mut self) -> Vec<Coded> {
+        match self {
+            Self::H264(encoder) => encoder.flush().into_iter().map(Coded::from).collect(),
+            Self::Mpeg2(_) => Vec::new(),
+        }
+    }
 }
 
 /// One access unit of the elementary stream.
@@ -130,7 +293,7 @@ impl<'a, W: Write> PacketWriter<'a, W> {
     }
 
     /// Write one packet and append its index entry.
-    fn write_packet(&mut self, packet: &Packet, options: &HdOptions) -> Result<(), TranscodeError> {
+    fn write_packet(&mut self, packet: &Coded, options: &HdOptions) -> Result<(), TranscodeError> {
         let len = u32::try_from(packet.data.len())
             .map_err(|_| TranscodeError::Unsupported("packet too large".to_string()))?;
         self.writer
@@ -204,8 +367,7 @@ pub fn transcode_h264_range(
 
     let file = File::create(es_out).map_err(|error| io_error(es_out, error))?;
     let mut writer = BufWriter::new(file);
-    let mut encoder = Encoder::new(encoder_config(options))
-        .map_err(|error| TranscodeError::Encode(error.to_string()))?;
+    let mut encoder = HdEncoder::new(options)?;
     let mut packets = PacketWriter::new(&mut writer, es_out);
 
     // The pictures are decoded, scaled and converted on a thread of their own, a few ahead of the encoder, so the
@@ -276,8 +438,7 @@ pub fn encode_h264_black(
     let planes = rgb_to_yuv(&vec![0_u8; pixels], options)?;
     let file = File::create(es_out).map_err(|error| io_error(es_out, error))?;
     let mut writer = BufWriter::new(file);
-    let mut encoder = Encoder::new(encoder_config(options))
-        .map_err(|error| TranscodeError::Encode(error.to_string()))?;
+    let mut encoder = HdEncoder::new(options)?;
     let mut packets = PacketWriter::new(&mut writer, es_out);
     for frame_index in 0..frames {
         encode_planes(&mut encoder, &planes, frame_index, options, &mut packets)?;
@@ -289,7 +450,8 @@ pub fn encode_h264_black(
 }
 
 /// One RGB24 picture of `options`' size as an H.264 stream of a single IDR picture (an HD menu's still), at a
-/// constant quantiser fine enough for text.
+/// constant quantiser fine enough for text. With [`HdCodec::Mpeg2`], an MPEG-2 sequence of one I picture, ended by
+/// its sequence end code.
 pub fn encode_h264_still(rgb: &[u8], options: &HdOptions) -> Result<Vec<u8>, TranscodeError> {
     validate_options(options)?;
     let expected = usize::try_from(options.width)
@@ -300,6 +462,16 @@ pub fn encode_h264_still(rgb: &[u8], options: &HdOptions) -> Result<Vec<u8>, Tra
         return Err(TranscodeError::Unsupported(
             "still picture size mismatch".to_string(),
         ));
+    }
+    if options.codec == HdCodec::Mpeg2 {
+        let config = mpeg2_config(options)?;
+        let frame = mpeg2_frame(
+            &rgb_to_yuv(rgb, options)?,
+            config.format.coded_size(config.standard),
+        )?;
+        return disccraft_mpeg2venc::encoder::Encoder::new(config)
+            .and_then(|encoder| encoder.encode_still(&frame, MPEG2_STILL_CODE))
+            .map_err(|error| TranscodeError::Encode(error.to_string()));
     }
     let mut config = encoder_config(options);
     config.rate = RateControl::Qp(STILL_QP);
@@ -327,7 +499,7 @@ pub fn encode_h264_still(rgb: &[u8], options: &HdOptions) -> Result<Vec<u8>, Tra
 /// An H.264 encoder fed RGB24 pictures one by one (an HD motion menu): the Annex B stream and its access units
 /// (time stamps in 90 kHz from 0).
 pub struct H264Frames {
-    encoder: Encoder,
+    encoder: HdEncoder,
     options: HdOptions,
     data: Vec<u8>,
     units: Vec<AccessUnit>,
@@ -342,8 +514,7 @@ impl H264Frames {
     /// When the options are out of range or the encoder cannot start.
     pub fn new(options: &HdOptions) -> Result<Self, TranscodeError> {
         validate_options(options)?;
-        let encoder = Encoder::new(encoder_config(options))
-            .map_err(|error| TranscodeError::Encode(error.to_string()))?;
+        let encoder = HdEncoder::new(options)?;
         Ok(Self {
             encoder,
             options: options.clone(),
@@ -369,10 +540,7 @@ impl H264Frames {
             ));
         }
         let planes = rgb_to_yuv(rgb, &self.options)?;
-        let packets = self
-            .encoder
-            .encode(&planes.frame(), self.next)
-            .map_err(|error| TranscodeError::Encode(error.to_string()))?;
+        let packets = self.encoder.encode(&planes, self.next, &self.options)?;
         self.next = self.next.saturating_add(1);
         for packet in &packets {
             self.add(packet)?;
@@ -392,7 +560,7 @@ impl H264Frames {
         Ok((self.data, self.units))
     }
 
-    fn add(&mut self, packet: &Packet) -> Result<(), TranscodeError> {
+    fn add(&mut self, packet: &Coded) -> Result<(), TranscodeError> {
         let offset = u64::try_from(self.data.len())
             .map_err(|_| TranscodeError::Unsupported("stream too large".to_string()))?;
         let len = u32::try_from(packet.data.len())
@@ -434,6 +602,8 @@ pub fn for_each_hd_frame(
 
 /// Quantiser of an HD still (low: menus have text).
 const STILL_QP: u8 = 18;
+/// quantiser_scale_code an MPEG-2 HD still starts at (the finest that fits the VBV buffer is used).
+const MPEG2_STILL_CODE: u8 = 2;
 
 /// Read an index written by `transcode_h264`.
 pub fn read_h264_index(path: &Path) -> Result<Vec<AccessUnit>, TranscodeError> {
@@ -614,7 +784,7 @@ const PIPELINE_DEPTH: usize = 8;
 
 /// Encodes one converted picture.
 fn encode_planes<W: Write>(
-    encoder: &mut Encoder,
+    encoder: &mut HdEncoder,
     planes: &YuvPlanes,
     frame_index: u64,
     options: &HdOptions,
@@ -622,9 +792,7 @@ fn encode_planes<W: Write>(
 ) -> Result<(), TranscodeError> {
     let pts = i64::try_from(frame_index)
         .map_err(|_| TranscodeError::Unsupported("frame index too large".to_string()))?;
-    let encoded = encoder
-        .encode(&planes.frame(), pts)
-        .map_err(|error| TranscodeError::Encode(error.to_string()))?;
+    let encoded = encoder.encode(planes, pts, options)?;
     for packet in &encoded {
         packets.write_packet(packet, options)?;
     }
@@ -633,7 +801,7 @@ fn encode_planes<W: Write>(
 
 /// Flush the encoder and write remaining packets.
 fn finish_encoder<W: Write>(
-    encoder: &mut Encoder,
+    encoder: &mut HdEncoder,
     options: &HdOptions,
     packets: &mut PacketWriter<'_, W>,
 ) -> Result<(), TranscodeError> {
@@ -660,6 +828,7 @@ pub(crate) fn render_fit(
             fps_den: 1,
             target_kbps: 0,
             max_kbps: 0,
+            codec: HdCodec::H264,
         },
     )
 }
@@ -1283,6 +1452,7 @@ mod tests {
             fps_den: 1,
             target_kbps: 1000,
             max_kbps: 2000,
+            codec: super::HdCodec::H264,
         }
     }
 
@@ -1414,6 +1584,7 @@ mod tests {
             fps_den: 1001,
             target_kbps: 1000,
             max_kbps: 2000,
+            codec: super::HdCodec::H264,
         };
         assert_eq!(frame_count(Tick(ticks), &options).unwrap(), 144);
     }
@@ -1462,6 +1633,89 @@ mod tests {
             }
         }
         assert!(keyframes >= 1);
+    }
+
+    fn mpeg2_options(fps_num: u32, fps_den: u32) -> HdOptions {
+        HdOptions {
+            width: 1920,
+            height: 1080,
+            fps_num,
+            fps_den,
+            target_kbps: 25_000,
+            max_kbps: 35_000,
+            codec: super::HdCodec::Mpeg2,
+        }
+    }
+
+    /// M10.14: with the MPEG-2 codec the pictures become an MP@HL sequence, one access unit a picture in display
+    /// order, a key frame where a GOP starts with its sequence header.
+    #[test]
+    fn mpeg2_frames_are_one_unit_a_picture() {
+        let options = mpeg2_options(25, 1);
+        let mut frames = super::H264Frames::new(&options).unwrap();
+        let mut rgb = vec![40_u8; 1920 * 1080 * 3];
+        for index in 0..13_usize {
+            // Something moves, so the P pictures are not empty.
+            for value in rgb.iter_mut().skip(index * 3000).take(3000) {
+                *value = 200;
+            }
+            frames.push_rgb(&rgb).unwrap();
+        }
+        let (data, units) = frames.finish().unwrap();
+        assert_eq!(units.len(), 13);
+        for (index, unit) in units.iter().enumerate() {
+            // 25 frames a second: 3600 ticks of 90 kHz a frame, shown in the order coded.
+            assert_eq!(unit.pts, index as i64 * 3600);
+            assert_eq!(unit.dts, unit.pts);
+            // A GOP of 12 at 25 frames a second.
+            assert_eq!(unit.keyframe, index % 12 == 0, "unit {index}");
+            let start = unit.offset as usize;
+            let bytes = &data[start..start + unit.len as usize];
+            let expected: &[u8] = if unit.keyframe {
+                // Sequence header: 1920 x 1080, 16:9, 25 frames a second.
+                &[0, 0, 1, 0xB3, 0x78, 0x04, 0x38, 0x33]
+            } else {
+                &[0, 0, 1, 0x00]
+            };
+            assert!(bytes.starts_with(expected), "unit {index}");
+        }
+        assert_eq!(
+            units.last().map(|unit| unit.offset + u64::from(unit.len)),
+            Some(data.len() as u64)
+        );
+    }
+
+    #[test]
+    fn mpeg2_still_is_one_sequence_with_its_end() {
+        let options = mpeg2_options(30_000, 1001);
+        let rgb = vec![90_u8; 1920 * 1080 * 3];
+        let data = super::encode_h264_still(&rgb, &options).unwrap();
+        assert!(data.starts_with(&[0, 0, 1, 0xB3, 0x78, 0x04, 0x38, 0x34]));
+        assert!(data.ends_with(&[0, 0, 1, 0xB7]));
+        // One picture.
+        let pictures = data.windows(4).filter(|w| *w == [0, 0, 1, 0]).count();
+        assert_eq!(pictures, 1);
+    }
+
+    #[test]
+    fn mpeg2_is_only_1080_at_29_97_or_25() {
+        for options in [
+            HdOptions {
+                width: 1280,
+                height: 720,
+                ..mpeg2_options(25, 1)
+            },
+            mpeg2_options(24_000, 1001),
+            mpeg2_options(60_000, 1001),
+        ] {
+            assert!(super::H264Frames::new(&options).is_err(), "{options:?}");
+        }
+        // More than a Blu-ray's 40 Mbps of video.
+        let fast = HdOptions {
+            max_kbps: 45_000,
+            ..mpeg2_options(25, 1)
+        };
+        assert!(super::H264Frames::new(&fast).is_err());
     }
 }
 

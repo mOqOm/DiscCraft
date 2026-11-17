@@ -328,6 +328,34 @@ impl DiscCraftApp {
                         }
                     });
                     ui.end_row();
+
+                    // Encore: DVD-ROM コンテンツ / BD-ROM コンテンツ [参照…]. A folder of files for a computer,
+                    // put in the disc's root beside the video.
+                    let dvd = self.session.project.settings.kind == DiscKind::Dvd;
+                    ui.label(if dvd {
+                        tl!("DVD-ROM content:")
+                    } else {
+                        tl!("BD-ROM content:")
+                    });
+                    ui.horizontal(|ui| {
+                        let folder = self.session.project.settings.rom_content.clone();
+                        let width = (ui.available_width() - 150.0).max(120.0);
+                        let mut shown = folder.clone().unwrap_or_default();
+                        ui.add_enabled(
+                            false,
+                            egui::TextEdit::singleline(&mut shown).desired_width(width),
+                        );
+                        if ui.button(tl!("Browse…")).clicked() {
+                            self.pick_rom_content();
+                        }
+                        if ui
+                            .add_enabled(folder.is_some(), egui::Button::new(tl!("Clear")))
+                            .clicked()
+                        {
+                            self.clear_rom_content();
+                        }
+                    });
+                    ui.end_row();
                 });
             if let Some(name) = changed_name {
                 let _ = self.run_command("disc.setName", serde_json::json!({ "name": name }));
@@ -349,6 +377,13 @@ impl DiscCraftApp {
                 ui.painter()
                     .rect_filled(swatch, 1.0, ui.visuals().selection.bg_fill);
                 ui.label(tlf!("{used} used. {free} free.", used = used, free = free));
+            });
+            // Encore's second line, always there: 「0 バイト が DVD-ROM コンテンツに使用されています。」
+            let rom = format_bytes(usage.rom_bytes);
+            ui.label(if self.session.project.settings.kind == DiscKind::Dvd {
+                tlf!("{size} used for DVD-ROM content.", size = rom)
+            } else {
+                tlf!("{size} used for BD-ROM content.", size = rom)
             });
         } else {
             ui.label(tl!("No usage information"));

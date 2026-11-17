@@ -312,6 +312,7 @@ fn encoder_config(options: &crate::TranscodeOptions, max_bitrate: u32) -> Encode
         bitrate: options.video_bitrate,
         max_bitrate,
         wide: options.wide,
+        format: disccraft_mpeg2venc::encoder::Format::Sd,
     }
 }
 

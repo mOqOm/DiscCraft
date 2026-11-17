@@ -98,79 +98,83 @@ pub fn encode_wav(wav: &Path, out: &Path) -> Result<Encoded, Ac3Error> {
         HeaderError::Bad(message) => Ac3Error::Unsupported(message),
     })?;
 
+    let data_start = reader.stream_position().map_err(|e| io(wav, e))?;
+    drop(reader);
+    let threads = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    encode_data(wav, out, &format, data_start, SEGMENT_FRAMES, threads)
+}
+
+/// [`encode_wav`] of the PCM at `data_start`, in segments of `segment_frames` AC-3 frames on up to `threads`
+/// threads.
+///
+/// AC-3 frames are coded one by one; all a frame takes from the sound before it is the tail of the transform's
+/// window. So a long sound is cut into segments that are encoded side by side, each by an encoder of its own that
+/// is first run over the [`LEAD_FRAMES`] frames in front of its segment (their packets are dropped). The stream is
+/// the same, byte for byte, as one encoder makes from the whole sound.
+fn encode_data(
+    wav: &Path,
+    out: &Path,
+    format: &Format,
+    data_start: u64,
+    segment_frames: u64,
+    threads: usize,
+) -> Result<Encoded, Ac3Error> {
+    let io = |path: &Path, error: std::io::Error| Ac3Error::Io {
+        path: path.display().to_string(),
+        message: error.to_string(),
+    };
     let channels = usize::from(format.channels);
     let kbps = kbps_for(format.channels);
-    let mode = if channels == 1 {
-        CodingMode::Mono
-    } else {
-        CodingMode::Stereo
+    let frame_bytes = (channels * 2) as u64;
+    // The priming samples come off the front of the source.
+    let priming = u64::from(new_encoder(format.channels)?.priming_samples());
+    let source = Source {
+        wav,
+        // Where the sound that is encoded starts, and its length in samples.
+        start: data_start.saturating_add(priming.saturating_mul(frame_bytes)),
+        samples: (format.data_bytes / frame_bytes).saturating_sub(priming),
+        channels: format.channels,
     };
-    let mut encoder = Encoder::new(Config {
-        codec: Codec::Ac3,
-        sample_rate: SAMPLE_RATE,
-        bitrate_kbps: kbps,
-        mode,
-        lfe: false,
-    })
-    .map_err(|e| Ac3Error::Encoder(e.to_string()))?;
+    let segment_frames = segment_frames.max(LEAD_FRAMES + 1);
+    // Every segment but the last is `segment_frames` whole frames; the last takes the rest (at least as much).
+    let whole_frames = source.samples / FRAME_SAMPLES as u64;
+    let segments = (whole_frames / segment_frames).max(1);
+    let threads = u64::try_from(threads.max(1)).unwrap_or(1).min(segments);
 
     let mut writer = BufWriter::new(File::create(out).map_err(|e| io(out, e))?);
     let mut frames = 0u64;
-    let mut write = |packets: Vec<craft_audio::ac3::encoder::Packet>,
-                     writer: &mut BufWriter<File>|
-     -> Result<(), Ac3Error> {
-        for packet in packets {
-            writer.write_all(&packet.data).map_err(|e| io(out, e))?;
-            frames = frames.saturating_add(1);
+    let mut next = 0u64;
+    while next < segments {
+        // A batch of segments, one a thread; written in order.
+        let batch: Vec<u64> = (next..segments.min(next.saturating_add(threads))).collect();
+        next = next.saturating_add(batch.len() as u64);
+        let encoded: Vec<Result<Vec<u8>, Ac3Error>> = if let [only] = batch.as_slice() {
+            vec![source.segment(*only, segments, segment_frames)]
+        } else {
+            std::thread::scope(|scope| {
+                let workers: Vec<_> = batch
+                    .iter()
+                    .map(|&segment| {
+                        let source = &source;
+                        scope.spawn(move || source.segment(segment, segments, segment_frames))
+                    })
+                    .collect();
+                workers
+                    .into_iter()
+                    .map(|worker| {
+                        worker.join().unwrap_or_else(|_| {
+                            Err(Ac3Error::Encoder("the encoder thread stopped".to_string()))
+                        })
+                    })
+                    .collect()
+            })
+        };
+        for data in encoded {
+            let data = data?;
+            frames = frames.saturating_add((data.len() / frame_len(kbps).max(1)) as u64);
+            writer.write_all(&data).map_err(|e| io(out, e))?;
         }
-        Ok(())
-    };
-
-    // The priming samples come off the front of the source.
-    let frame_bytes = channels * 2;
-    let priming = u64::from(encoder.priming_samples());
-    let skip = priming
-        .saturating_mul(frame_bytes as u64)
-        .min(format.data_bytes);
-    reader
-        .seek(SeekFrom::Current(i64::try_from(skip).unwrap_or(i64::MAX)))
-        .map_err(|e| io(wav, e))?;
-    let mut remaining = format.data_bytes - skip;
-
-    let mut bytes = vec![0u8; CHUNK_FRAMES * frame_bytes];
-    let mut planes = vec![Vec::with_capacity(CHUNK_FRAMES); channels];
-    while remaining > 0 {
-        let want = usize::try_from(remaining.min(bytes.len() as u64)).unwrap_or(bytes.len());
-        // Whole sample frames only (a torn last frame is dropped).
-        let want = want - want % frame_bytes;
-        if want == 0 {
-            break;
-        }
-        let got = read_up_to(&mut reader, &mut bytes[..want]).map_err(|e| io(wav, e))?;
-        let got = got - got % frame_bytes;
-        if got == 0 {
-            break; // The file is shorter than its header says.
-        }
-        remaining = remaining.saturating_sub(got as u64);
-        for plane in &mut planes {
-            plane.clear();
-        }
-        for frame in bytes[..got].chunks_exact(frame_bytes) {
-            let (samples, _) = frame.as_chunks::<2>();
-            for (plane, sample) in planes.iter_mut().zip(samples) {
-                plane.push(f32::from(i16::from_le_bytes(*sample)) / 32768.0);
-            }
-        }
-        let refs: Vec<&[f32]> = planes.iter().map(Vec::as_slice).collect();
-        let packets = encoder
-            .push(&refs)
-            .map_err(|e| Ac3Error::Encoder(e.to_string()))?;
-        write(packets, &mut writer)?;
     }
-    let finish = encoder
-        .finish()
-        .map_err(|e| Ac3Error::Encoder(e.to_string()))?;
-    write(finish.packets, &mut writer)?;
     writer.flush().map_err(|e| io(out, e))?;
 
     Ok(Encoded {
@@ -178,6 +182,137 @@ pub fn encode_wav(wav: &Path, out: &Path) -> Result<Encoded, Ac3Error> {
         channels: format.channels,
         kbps,
     })
+}
+
+/// AC-3 frames in a segment that is encoded on its own thread: a minute of sound.
+const SEGMENT_FRAMES: u64 = 1875;
+/// Frames an encoder is run over in front of its segment, so its first kept frame has the sound before it.
+const LEAD_FRAMES: u64 = 2;
+
+/// Bytes of one frame (1536 samples) at `kbps` and 48 kHz: 192 kbit/s is 768 bytes.
+fn frame_len(kbps: u32) -> usize {
+    kbps as usize * 4
+}
+
+fn new_encoder(channels: u16) -> Result<Encoder, Ac3Error> {
+    Encoder::new(Config {
+        codec: Codec::Ac3,
+        sample_rate: SAMPLE_RATE,
+        bitrate_kbps: kbps_for(channels),
+        mode: if channels == 1 {
+            CodingMode::Mono
+        } else {
+            CodingMode::Stereo
+        },
+        lfe: false,
+    })
+    .map_err(|e| Ac3Error::Encoder(e.to_string()))
+}
+
+/// The PCM that is encoded.
+struct Source<'a> {
+    wav: &'a Path,
+    /// Byte offset of its first sample.
+    start: u64,
+    /// Its length, samples a channel.
+    samples: u64,
+    channels: u16,
+}
+
+impl Source<'_> {
+    /// The AC-3 frames of segment `segment` of `segments`.
+    fn segment(
+        &self,
+        segment: u64,
+        segments: u64,
+        segment_frames: u64,
+    ) -> Result<Vec<u8>, Ac3Error> {
+        let io = |error: std::io::Error| Ac3Error::Io {
+            path: self.wav.display().to_string(),
+            message: error.to_string(),
+        };
+        let frame_samples = FRAME_SAMPLES as u64;
+        let last = segment.saturating_add(1) >= segments;
+        let lead = if segment == 0 { 0 } else { LEAD_FRAMES };
+        let first_frame = segment.saturating_mul(segment_frames).saturating_sub(lead);
+        let first_sample = first_frame.saturating_mul(frame_samples);
+        // The last segment runs to the end of the sound; the others are fed whole frames.
+        let mut remaining = if last {
+            self.samples.saturating_sub(first_sample)
+        } else {
+            lead.saturating_add(segment_frames)
+                .saturating_mul(frame_samples)
+        };
+        let channels = usize::from(self.channels);
+        let frame_bytes = channels * 2;
+        let mut reader = BufReader::new(File::open(self.wav).map_err(io)?);
+        reader
+            .seek(SeekFrom::Start(self.start.saturating_add(
+                first_sample.saturating_mul(frame_bytes as u64),
+            )))
+            .map_err(io)?;
+
+        let mut encoder = new_encoder(self.channels)?;
+        let mut packets = Vec::new();
+        let mut bytes = vec![0u8; CHUNK_FRAMES * frame_bytes];
+        let mut planes = vec![Vec::with_capacity(CHUNK_FRAMES); channels];
+        while remaining > 0 {
+            let want = usize::try_from(remaining.min(CHUNK_FRAMES as u64)).unwrap_or(CHUNK_FRAMES)
+                * frame_bytes;
+            let Some(buffer) = bytes.get_mut(..want) else {
+                break;
+            };
+            let got = read_up_to(&mut reader, buffer).map_err(io)?;
+            // Whole sample frames only (a torn last frame is dropped).
+            let got = got - got % frame_bytes;
+            if got == 0 {
+                break; // The file is shorter than its header says.
+            }
+            remaining = remaining.saturating_sub((got / frame_bytes) as u64);
+            for plane in &mut planes {
+                plane.clear();
+            }
+            for frame in bytes
+                .get(..got)
+                .unwrap_or_default()
+                .chunks_exact(frame_bytes)
+            {
+                let (samples, _) = frame.as_chunks::<2>();
+                for (plane, sample) in planes.iter_mut().zip(samples) {
+                    plane.push(f32::from(i16::from_le_bytes(*sample)) / 32768.0);
+                }
+            }
+            let refs: Vec<&[f32]> = planes.iter().map(Vec::as_slice).collect();
+            packets.extend(
+                encoder
+                    .push(&refs)
+                    .map_err(|e| Ac3Error::Encoder(e.to_string()))?,
+            );
+        }
+        if last {
+            let finish = encoder
+                .finish()
+                .map_err(|e| Ac3Error::Encoder(e.to_string()))?;
+            packets.extend(finish.packets);
+        }
+        // Without the lead, and (but for the last segment) no more than the segment's own frames.
+        let lead = usize::try_from(lead).unwrap_or(usize::MAX);
+        let keep = if last {
+            usize::MAX
+        } else {
+            usize::try_from(segment_frames).unwrap_or(usize::MAX)
+        };
+        if !last && packets.len() < lead.saturating_add(keep) {
+            return Err(Ac3Error::Encoder(
+                "the encoder made fewer frames than it was given".to_string(),
+            ));
+        }
+        let mut data = Vec::new();
+        for packet in packets.into_iter().skip(lead).take(keep) {
+            data.extend_from_slice(&packet.data);
+        }
+        Ok(data)
+    }
 }
 
 /// Reads until `buf` is full or the file ends; returns the bytes read.
@@ -339,6 +474,52 @@ mod tests {
             let size = bytes.len() as u64;
             assert!(read_header(&mut Cursor::new(&bytes), size).is_err());
         }
+    }
+
+    /// A long sound is encoded in segments on several threads: the stream is the one a single encoder makes.
+    #[test]
+    fn segments_encoded_side_by_side_make_the_same_stream() {
+        let dir = std::env::temp_dir().join(format!("disccraft-ac3enc-par-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Six seconds of a sweep with noise and a click every second, different in the two channels.
+        let mut seed = 0x1234_5678_u32;
+        let samples: Vec<i16> = (0..48_000 * 6 + 700)
+            .flat_map(|n| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let noise = f64::from((seed >> 16) as i16) / 32768.0;
+                let t = f64::from(n) / 48_000.0;
+                let sweep = (2.0 * std::f64::consts::PI * (200.0 + 300.0 * t) * t).sin();
+                let click = if n % 48_000 == 100 { 0.9 } else { 0.0 };
+                let left = (sweep * 0.5 + noise * 0.1 + click) * 20_000.0;
+                let right = (sweep * 0.2 - noise * 0.3) * 20_000.0;
+                [left as i16, right as i16]
+            })
+            .collect();
+        let input = dir.join("long.wav");
+        let bytes = wav(2, &samples);
+        std::fs::write(&input, &bytes).unwrap();
+        let format = read_header(&mut Cursor::new(&bytes), bytes.len() as u64).unwrap();
+        let one = dir.join("one.ac3");
+        let many = dir.join("many.ac3");
+        let whole = encode_data(&input, &one, &format, 44, u64::MAX, 1).unwrap();
+        // Segments of 7 frames, 3 at a time (and a batch of one at the end).
+        let split = encode_data(&input, &many, &format, 44, 7, 3).unwrap();
+        let (one, many) = (std::fs::read(&one).unwrap(), std::fs::read(&many).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(whole, split);
+        assert_eq!(whole.frames, 188);
+        assert_eq!(one.len(), 188 * 768);
+        let different: Vec<usize> = one
+            .chunks(768)
+            .zip(many.chunks(768))
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(frame, _)| frame)
+            .collect();
+        assert!(
+            different.is_empty() && one.len() == many.len(),
+            "{different:?}"
+        );
     }
 
     #[test]

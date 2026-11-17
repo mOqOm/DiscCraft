@@ -24,6 +24,8 @@ pub(crate) struct Playback {
     track_audio: bool,
     /// 音を再生できないことをもう知らせたか。
     audio_error_shown: bool,
+    /// 絵をデコードできず音だけ再生していることをもう知らせたか。
+    no_picture_shown: bool,
     /// デコードしているスレッド。
     player: Player,
     /// 最後に再生ヘッドを置いた位置（秒）。
@@ -140,6 +142,7 @@ impl DiscCraftApp {
             _audio: audio,
             track_audio: track.is_some(),
             audio_error_shown: false,
+            no_picture_shown: false,
             player,
             last: from,
             offset,
@@ -163,6 +166,8 @@ impl DiscCraftApp {
 
         let frame = playback.player.take_frame();
         let status = playback.player.status();
+        let no_picture = playback.player.no_picture();
+        let announce = !playback.no_picture_shown;
         // オーディオトラックの音をデコードできなければ、一度だけ知らせる（映像はそのまま再生する）。
         let audio_error = if playback.track_audio && !playback.audio_error_shown {
             playback.player.audio().and_then(|feed| feed.error())
@@ -175,7 +180,20 @@ impl DiscCraftApp {
                 playback.audio_error_shown = true;
             }
         }
+        // 絵をデコードできない映像は、音だけを再生する（黒いフレームで再生ヘッドは進む）。一度だけ知らせる。
+        if let Some(message) = &no_picture
+            && announce
+        {
+            self.status = tlf!(
+                "Playing the sound only (the picture cannot be decoded): {message}",
+                message = message
+            );
+            if let Some(playback) = self.playback.as_mut() {
+                playback.no_picture_shown = true;
+            }
+        }
         if let Some(frame) = frame {
+            self.monitor_note = no_picture;
             self.show_played_frame(ctx, id, &frame);
         }
         match status {

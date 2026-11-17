@@ -428,6 +428,74 @@ pub(crate) fn save_language(language: Language) -> Result<(), String> {
     save(&settings)
 }
 
+/// 環境設定 ▸ タイムライン（Encore: 静止画デュレーション / 字幕デュレーション / オーディオの言語 / 字幕の言語）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TimelinePrefs {
+    /// 新しいスライドショーのスライドの長さ（秒。Encore の初期値 6）。
+    #[serde(default = "default_still_seconds")]
+    pub(crate) still_seconds: u32,
+    /// 「字幕を追加」で足す字幕の長さ（秒。Encore の初期値 2）。
+    #[serde(default = "default_subtitle_seconds")]
+    pub(crate) subtitle_seconds: u32,
+    /// 新しいオーディオトラックの言語（空はディスクのオーディオの言語か表示言語）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) audio_language: String,
+    /// 新しい字幕トラックの言語（空はディスクのオーディオの言語か表示言語）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) subtitle_language: String,
+}
+
+fn default_still_seconds() -> u32 {
+    6
+}
+
+fn default_subtitle_seconds() -> u32 {
+    2
+}
+
+impl Default for TimelinePrefs {
+    fn default() -> Self {
+        Self {
+            still_seconds: default_still_seconds(),
+            subtitle_seconds: default_subtitle_seconds(),
+            audio_language: String::new(),
+            subtitle_language: String::new(),
+        }
+    }
+}
+
+impl TimelinePrefs {
+    /// 入力できる範囲に収めたもの（静止画 1〜3600 秒、字幕 1〜60 秒、言語は英字 2〜3 文字か空）。
+    pub(crate) fn sane(mut self) -> Self {
+        self.still_seconds = self.still_seconds.clamp(1, 3600);
+        self.subtitle_seconds = self.subtitle_seconds.clamp(1, 60);
+        for language in [&mut self.audio_language, &mut self.subtitle_language] {
+            let code: String = language
+                .chars()
+                .filter(char::is_ascii_alphabetic)
+                .take(3)
+                .collect::<String>()
+                .to_ascii_lowercase();
+            *language = if code.len() >= 2 { code } else { String::new() };
+        }
+        self
+    }
+}
+
+/// 環境設定 ▸ タイムライン を読む（未設定は Encore の初期値）。
+pub(crate) fn load_timeline_prefs() -> TimelinePrefs {
+    load_settings().timeline_prefs.unwrap_or_default().sane()
+}
+
+/// 環境設定 ▸ タイムライン を保存する（ほかの設定は維持）。
+pub(crate) fn save_timeline_prefs(prefs: &TimelinePrefs) -> Result<(), String> {
+    let mut settings = load_settings();
+    let prefs = prefs.clone().sane();
+    settings.timeline_prefs = (prefs != TimelinePrefs::default()).then_some(prefs);
+    save(&settings)
+}
+
 /// 新規プロジェクトの既定のテレビ方式を読む（未設定は NTSC）。
 pub(crate) fn load_default_standard() -> VideoStandard {
     load_settings().default_standard.unwrap_or_default()
@@ -503,6 +571,9 @@ pub(crate) struct Saved {
     /// 新規プロジェクトの既定のテレビ方式（環境設定 ▸ 一般）。`None` は NTSC。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) default_standard: Option<VideoStandard>,
+    /// 環境設定 ▸ タイムライン。`None` は Encore の初期値。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) timeline_prefs: Option<TimelinePrefs>,
 }
 
 #[cfg(test)]
@@ -521,6 +592,27 @@ mod tests {
 
     /// Until the user chooses a language the system's is used at every start; a chosen one stays. A language an
     /// older version wrote without being asked does not count as chosen.
+    /// The timeline preferences start at Encore's values and are kept within what can be typed.
+    #[test]
+    fn timeline_preferences_have_encores_defaults_and_stay_in_range() {
+        let prefs = super::TimelinePrefs::default();
+        assert_eq!((prefs.still_seconds, prefs.subtitle_seconds), (6, 2));
+        assert!(prefs.audio_language.is_empty() && prefs.subtitle_language.is_empty());
+        let odd = super::TimelinePrefs {
+            still_seconds: 0,
+            subtitle_seconds: 500,
+            audio_language: "EN-us!".to_owned(),
+            subtitle_language: "j".to_owned(),
+        }
+        .sane();
+        assert_eq!((odd.still_seconds, odd.subtitle_seconds), (1, 60));
+        assert_eq!(odd.audio_language, "enu");
+        assert_eq!(odd.subtitle_language, "");
+        // A settings file of an older version has none.
+        let old: Saved = serde_json::from_str("{}").unwrap_or_default();
+        assert_eq!(old.timeline_prefs, None);
+    }
+
     #[test]
     fn the_startup_language_follows_the_system_until_one_is_chosen() {
         let system = || Language::En;

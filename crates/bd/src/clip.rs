@@ -108,12 +108,8 @@ pub(crate) fn prepare_clip(
     let video_stream = Stream {
         pid: VIDEO_PID,
         coding: match hd {
-            // HD is 16:9; a 4:3 source is pillarboxed in it.
-            Some(hd) => StreamCoding::H264Video {
-                video_format: hd.video_format(),
-                frame_rate: hd.frame_rate(),
-                aspect: 3,
-            },
+            Some(hd) => crate::hd::coding_of(hd.video, hd.codec)
+                .ok_or_else(|| invalid("an HD title on an SD disc"))?,
             None => video_coding(settings, title.wide),
         },
     };
@@ -169,7 +165,7 @@ fn build_inputs(
     let video = match hd {
         Some(hd) => EsInput {
             pid: VIDEO_PID,
-            kind: StreamKind::H264Video,
+            kind: crate::hd::kind_of(hd.codec),
             units: hd_units(title, hd)?,
         },
         None => EsInput {

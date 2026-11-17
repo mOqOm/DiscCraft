@@ -921,6 +921,13 @@ impl DiscCraftApp {
             OutputKind::Iso => "iso",
         };
         self.transcode_for = Some((path.clone(), self.build_output));
+        // The cache is where the build puts it: in the folder the build writes (inside the Location).
+        let path = crate::build_panel::build_target(
+            self.build_output,
+            std::path::Path::new(&path),
+            &self.session.project.settings.name,
+        )
+        .map_or(path, |target| target.to_string_lossy().into_owned());
         let Some(value) = self.run_query(
             "asset.transcodeStatus",
             json!({ "output": output, "path": path }),
@@ -1289,7 +1296,15 @@ impl DiscCraftApp {
             return cached.clone();
         }
 
-        let value = self.run_query("asset.thumbnail", serde_json::json!({ "asset": id.0 }));
+        // Not waited for: a long file is opened on a thread of its own, and asked about again once it is open.
+        let value = self.run_query(
+            "asset.thumbnail",
+            serde_json::json!({ "asset": id.0, "wait": false }),
+        );
+        if is_pending(value.as_ref()) {
+            self.media_pending = true;
+            return None;
+        }
         let texture = value
             .as_ref()
             .and_then(|value| decode_thumbnail(ctx, id.0, value));
@@ -1303,7 +1318,11 @@ impl DiscCraftApp {
             return *probe;
         }
 
-        let value = self.run_query("asset.probe", serde_json::json!({ "asset": id.0 }));
+        let value = self.run_query(
+            "asset.probe",
+            serde_json::json!({ "asset": id.0, "wait": false }),
+        );
+        let pending = is_pending(value.as_ref());
         let metadata = self
             .session
             .project
@@ -1345,6 +1364,15 @@ impl DiscCraftApp {
                 ..ProbeInfo::default()
             },
         };
+        if pending {
+            // Still being opened: shown without its length for now, and asked again.
+            self.media_pending = true;
+            return ProbeInfo {
+                size,
+                modified,
+                ..ProbeInfo::default()
+            };
+        }
         let _ = self.durations.insert(id.0, probe);
         probe
     }
@@ -1717,6 +1745,14 @@ impl DiscCraftApp {
 }
 
 /// `asset.thumbnail` の結果をテクスチャにする。
+/// Whether an `asset.probe` / `asset.thumbnail` answer says the file is still being opened.
+pub(crate) fn is_pending(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(|value| value.get("pending"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 fn decode_thumbnail(
     ctx: &egui::Context,
     id: u64,

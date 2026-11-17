@@ -1,7 +1,9 @@
 //! DVD-Video ISO image writer (UDF 1.02 + ISO 9660 bridge).
 
 use crate::desc::{self, Extent, Fid};
-use crate::iso9660::{self, DirEntry, PathEntry, PvdParams};
+use crate::iso9660::{self, DirEntry, PvdParams};
+use crate::rom::{RomTree, RootRefs};
+use crate::tree::TreeFile;
 use std::error::Error;
 use std::fmt;
 use std::fs::File;
@@ -98,6 +100,27 @@ struct IsoSizes {
     path_table_size: u32,
 }
 
+impl IsoSizes {
+    /// The sectors the root directory takes after the content when it is too long for its own sector (0: it
+    /// stays there).
+    fn moved_root_sectors(&self) -> u32 {
+        if self.root_size > SECTOR_SIZE {
+            u32::try_from(self.root_size.div_ceil(SECTOR_SIZE)).unwrap_or(u32::MAX)
+        } else {
+            0
+        }
+    }
+
+    /// The sectors one path table takes after the content when it is too long for its own sector (0: both stay).
+    fn moved_path_sectors(&self) -> u32 {
+        if u64::from(self.path_table_size) > SECTOR_SIZE {
+            self.path_table_size.div_ceil(SECTOR_SIZE_U32)
+        } else {
+            0
+        }
+    }
+}
+
 struct UdfSizes {
     root_fids_sectors: u32,
     video_fids_sectors: u32,
@@ -124,7 +147,12 @@ struct Plan {
     total_sectors: u32,
     first_file_sector: u32,
     file_count: u32,
+    /// Directories: the root, VIDEO_TS and the DVD-ROM content's.
+    dir_count: u32,
     next_unique_id: u64,
+    /// The ISO 9660 root directory's sector, and the two path tables'.
+    iso_root: u32,
+    path_tables: (u32, u32),
 }
 
 struct IsoBytes {
@@ -150,17 +178,39 @@ pub fn write_dvd_iso(
     out: &Path,
     unix_time: i64,
 ) -> Result<IsoReport, UdfError> {
+    write_dvd_iso_with_rom(video_ts, &[], label, out, unix_time)
+}
+
+/// The names in the root of a DVD-Video image that DVD-ROM content may not use.
+pub const DVD_ROOT_NAMES: [&str; 2] = ["VIDEO_TS", "AUDIO_TS"];
+
+/// Write a DVD-Video ISO image with DVD-ROM content: `rom` files (paths with `/` between folder names) that a
+/// computer sees in the root beside `VIDEO_TS`. They are placed after the video files, which stay where they
+/// are without the content.
+///
+/// # Errors
+///
+/// As [`write_dvd_iso`], and when the content cannot be written (a name the file systems cannot hold, a folder
+/// named `VIDEO_TS`, a path more than seven folders deep, a file of 4 GB or more).
+pub fn write_dvd_iso_with_rom(
+    video_ts: &[ImageFile],
+    rom: &[TreeFile],
+    label: &str,
+    out: &Path,
+    unix_time: i64,
+) -> Result<IsoReport, UdfError> {
     let out_path = out.to_string_lossy().into_owned();
     let mut metas = prepare_files(video_ts)?;
+    let mut rom = RomTree::build(rom, &DVD_ROOT_NAMES)?;
     let date = iso9660::ecma_date(unix_time);
 
-    let iso_sizes = compute_iso_sizes(&metas, date)?;
-    let fid_sizes = compute_fid_sizes(&metas)?;
-    let plan = allocate_plan(iso_sizes.partition_start, &mut metas, &fid_sizes)?;
+    let iso_sizes = compute_iso_sizes(&metas, &rom, date)?;
+    let fid_sizes = compute_fid_sizes(&metas, &rom)?;
+    let plan = allocate_plan(&iso_sizes, &mut metas, &fid_sizes, &mut rom)?;
     let iso_bytes = build_iso_bytes(
         &iso_volume_label(label, out),
         &plan,
-        &metas,
+        (&metas, &rom),
         &iso_sizes,
         date,
         unix_time,
@@ -185,10 +235,24 @@ pub fn write_dvd_iso(
         &plan,
         label,
         unix_time,
-        &metas,
+        (&metas, &rom),
         &out_path,
     )?;
     write_file_data(&mut writer, &mut cursor, &plan, &metas, &out_path)?;
+    let refs = RootRefs {
+        partition_start: plan.partition_start,
+        root_fe_lbn: plan.lbns.root_fe,
+        root_iso: (plan.iso_root, iso_sizes.root_size),
+        date,
+        unix_time,
+    };
+    write_rom(
+        &mut writer,
+        &mut cursor,
+        (&rom, refs),
+        (&plan, &iso_bytes),
+        &out_path,
+    )?;
     write_final_anchor(&mut writer, &mut cursor, &plan, &out_path)?;
 
     writer.flush().map_err(|e| io_error(&out_path, e))?;
@@ -226,7 +290,11 @@ fn file_size(path: &Path) -> Result<u64, UdfError> {
     Ok(meta.len())
 }
 
-fn compute_iso_sizes(metas: &[FileMeta], date: [u8; 7]) -> Result<IsoSizes, UdfError> {
+fn compute_iso_sizes(
+    metas: &[FileMeta],
+    rom: &RomTree,
+    date: [u8; 7],
+) -> Result<IsoSizes, UdfError> {
     let video_entries: Vec<DirEntry> = metas
         .iter()
         .map(|m| DirEntry {
@@ -247,12 +315,13 @@ fn compute_iso_sizes(metas: &[FileMeta], date: [u8; 7]) -> Result<IsoSizes, UdfE
     )
     .len() as u64;
 
-    let root_entries = vec![DirEntry {
+    let mut root_entries = vec![DirEntry {
         name: String::from("VIDEO_TS"),
         extent: iso9660::VIDEO_DIR_SECTOR,
         size: video_size,
         is_dir: true,
     }];
+    root_entries.extend(rom.root_iso_entries(0));
 
     let root_size = iso9660::directory_records(
         iso9660::ROOT_DIR_SECTOR,
@@ -276,18 +345,11 @@ fn compute_iso_sizes(metas: &[FileMeta], date: [u8; 7]) -> Result<IsoSizes, UdfE
         PARTITION_START_BASE
     };
 
-    let path_entries = vec![
-        PathEntry {
-            name: vec![0u8],
-            extent: iso9660::ROOT_DIR_SECTOR,
-            parent: 1,
-        },
-        PathEntry {
-            name: b"VIDEO_TS".to_vec(),
-            extent: iso9660::VIDEO_DIR_SECTOR,
-            parent: 1,
-        },
-    ];
+    let path_entries = rom.path_entries(
+        iso9660::ROOT_DIR_SECTOR,
+        &[("VIDEO_TS", iso9660::VIDEO_DIR_SECTOR)],
+        0,
+    );
 
     let path_table = iso9660::path_table(&path_entries, false);
     let path_table_size = u32_from_u64(path_table.len() as u64, "path table size")?;
@@ -301,8 +363,8 @@ fn compute_iso_sizes(metas: &[FileMeta], date: [u8; 7]) -> Result<IsoSizes, UdfE
     })
 }
 
-fn compute_fid_sizes(metas: &[FileMeta]) -> Result<UdfSizes, UdfError> {
-    let root_fids = vec![
+fn compute_fid_sizes(metas: &[FileMeta], rom: &RomTree) -> Result<UdfSizes, UdfError> {
+    let mut root_fids = vec![
         Fid {
             name: None,
             is_dir: true,
@@ -314,6 +376,7 @@ fn compute_fid_sizes(metas: &[FileMeta]) -> Result<UdfSizes, UdfError> {
             icb_lbn: 0,
         },
     ];
+    root_fids.extend(rom.root_fids());
 
     let mut video_names: Vec<String> = metas.iter().map(|m| m.iso_name.clone()).collect();
     video_names.sort();
@@ -341,10 +404,12 @@ fn compute_fid_sizes(metas: &[FileMeta]) -> Result<UdfSizes, UdfError> {
 }
 
 fn allocate_plan(
-    partition_start: u32,
+    iso_sizes: &IsoSizes,
     metas: &mut [FileMeta],
     sizes: &UdfSizes,
+    rom: &mut RomTree,
 ) -> Result<Plan, UdfError> {
+    let partition_start = iso_sizes.partition_start;
     let mut lbn = 0u32;
 
     let fsd = lbn;
@@ -383,7 +448,34 @@ fn allocate_plan(
         data_sectors = checked_add_u32(data_sectors, sectors, "file data sectors")?;
     }
 
-    let partition_length = checked_add_u32(file_data, data_sectors, "partition length")?;
+    let video_end = checked_add_u32(file_data, data_sectors, "partition length")?;
+    let video_unique = FIRST_FILE_UNIQUE_ID
+        .checked_add(metas.len() as u64)
+        .ok_or_else(|| invalid("unique id overflow"))?;
+    // The DVD-ROM content after the video, with the ISO 9660 root directory and path tables among it when they
+    // are too long for their own sectors.
+    let (moved_root, moved_path) = (
+        iso_sizes.moved_root_sectors(),
+        iso_sizes.moved_path_sectors(),
+    );
+    let extra = moved_path
+        .checked_mul(2)
+        .and_then(|path| path.checked_add(moved_root))
+        .ok_or_else(|| invalid("ISO 9660 directory overflow"))?;
+    let (extra_lbn, partition_length, next_unique_id) =
+        rom.layout(video_end, extra, video_unique)?;
+    let extra_sector = checked_add_u32(partition_start, extra_lbn, "ISO 9660 sector")?;
+    let iso_root = if moved_root > 0 {
+        extra_sector
+    } else {
+        iso9660::ROOT_DIR_SECTOR
+    };
+    let path_tables = if moved_path > 0 {
+        let l = checked_add_u32(extra_sector, moved_root, "path table sector")?;
+        (l, checked_add_u32(l, moved_path, "path table sector")?)
+    } else {
+        (iso9660::PATH_TABLE_L_SECTOR, iso9660::PATH_TABLE_M_SECTOR)
+    };
     let total = checked_add_u64(
         partition_start as u64,
         partition_length as u64,
@@ -395,10 +487,11 @@ fn allocate_plan(
     let total = u32_from_u64(total, "total sectors")?;
 
     let first_file_sector = checked_add_u32(partition_start, file_data, "first file sector")?;
-    let file_count = u32_from_u64(metas.len() as u64, "file count")?;
-    let next_unique_id = FIRST_FILE_UNIQUE_ID
-        .checked_add(metas.len() as u64)
-        .ok_or_else(|| invalid("unique id overflow"))?;
+    let file_count = u32_from_u64(
+        (metas.len() as u64).saturating_add(rom.files.len() as u64),
+        "file count",
+    )?;
+    let dir_count = u32_from_u64((rom.dirs.len() as u64).saturating_add(2), "directory count")?;
 
     Ok(Plan {
         lbns: UdfLbns {
@@ -417,14 +510,17 @@ fn allocate_plan(
         total_sectors: total,
         first_file_sector,
         file_count,
+        dir_count,
         next_unique_id,
+        iso_root,
+        path_tables,
     })
 }
 
 fn build_iso_bytes(
     label: &str,
     plan: &Plan,
-    metas: &[FileMeta],
+    (metas, rom): (&[FileMeta], &RomTree),
     sizes: &IsoSizes,
     date: [u8; 7],
     unix_time: i64,
@@ -432,17 +528,18 @@ fn build_iso_bytes(
     let video_items = build_video_items(metas);
     let video_entries = final_video_entries(&video_items);
 
-    let root_entries = vec![DirEntry {
+    let mut root_entries = vec![DirEntry {
         name: String::from("VIDEO_TS"),
         extent: iso9660::VIDEO_DIR_SECTOR,
         size: sizes.video_size,
         is_dir: true,
     }];
+    root_entries.extend(rom.root_iso_entries(plan.partition_start));
 
     let root_dir = iso9660::directory_records(
-        iso9660::ROOT_DIR_SECTOR,
+        plan.iso_root,
         sizes.root_size,
-        iso9660::ROOT_DIR_SECTOR,
+        plan.iso_root,
         sizes.root_size,
         &root_entries,
         date,
@@ -451,24 +548,17 @@ fn build_iso_bytes(
     let video_dir = iso9660::directory_records(
         iso9660::VIDEO_DIR_SECTOR,
         sizes.video_size,
-        iso9660::ROOT_DIR_SECTOR,
+        plan.iso_root,
         sizes.root_size,
         &video_entries,
         date,
     );
 
-    let path_entries = vec![
-        PathEntry {
-            name: vec![0u8],
-            extent: iso9660::ROOT_DIR_SECTOR,
-            parent: 1,
-        },
-        PathEntry {
-            name: b"VIDEO_TS".to_vec(),
-            extent: iso9660::VIDEO_DIR_SECTOR,
-            parent: 1,
-        },
-    ];
+    let path_entries = rom.path_entries(
+        plan.iso_root,
+        &[("VIDEO_TS", iso9660::VIDEO_DIR_SECTOR)],
+        plan.partition_start,
+    );
 
     let path_l = iso9660::path_table(&path_entries, false);
     let path_m = iso9660::path_table(&path_entries, true);
@@ -478,7 +568,8 @@ fn build_iso_bytes(
         volume_id: &volume_id,
         volume_space_size: plan.total_sectors,
         path_table_size: sizes.path_table_size,
-        root_extent: iso9660::ROOT_DIR_SECTOR,
+        path_tables: plan.path_tables,
+        root_extent: plan.iso_root,
         root_size: sizes.root_size,
         creation_time: unix_time,
         modification_time: unix_time,
@@ -505,7 +596,7 @@ fn write_iso_sectors<W: Write>(
 ) -> Result<(), UdfError> {
     write_iso_head(w, cursor, bytes, path)?;
     write_vds_regions(w, cursor, plan, label, unix_time, path)?;
-    write_iso_bridge(w, cursor, bytes, path)?;
+    write_iso_bridge(w, cursor, bytes, plan, path)?;
     Ok(())
 }
 
@@ -545,7 +636,7 @@ fn write_vds_regions<W: Write>(
         unix_time,
         plan.next_unique_id,
         plan.file_count,
-        2,
+        plan.dir_count,
         plan.partition_length as u64,
     );
     write_sector(w, cursor, LVID_SECTOR, &lvid, path)?;
@@ -608,12 +699,58 @@ fn write_iso_bridge<W: Write>(
     w: &mut W,
     cursor: &mut u64,
     bytes: &IsoBytes,
+    plan: &Plan,
     path: &str,
 ) -> Result<(), UdfError> {
-    write_bytes_at(w, cursor, iso9660::PATH_TABLE_L_SECTOR, &bytes.path_l, path)?;
-    write_bytes_at(w, cursor, iso9660::PATH_TABLE_M_SECTOR, &bytes.path_m, path)?;
-    write_bytes_at(w, cursor, iso9660::ROOT_DIR_SECTOR, &bytes.root_dir, path)?;
+    // Tables and a root directory too long for their sectors are written after the DVD-ROM content (`write_rom`).
+    if plan.path_tables.0 == iso9660::PATH_TABLE_L_SECTOR {
+        write_bytes_at(w, cursor, iso9660::PATH_TABLE_L_SECTOR, &bytes.path_l, path)?;
+        write_bytes_at(w, cursor, iso9660::PATH_TABLE_M_SECTOR, &bytes.path_m, path)?;
+    }
+    if plan.iso_root == iso9660::ROOT_DIR_SECTOR {
+        write_bytes_at(w, cursor, iso9660::ROOT_DIR_SECTOR, &bytes.root_dir, path)?;
+    }
     write_bytes_at(w, cursor, iso9660::VIDEO_DIR_SECTOR, &bytes.video_dir, path)?;
+    Ok(())
+}
+
+/// Writes the DVD-ROM content after the video files: the folders' entries and directories, a moved ISO 9660 root
+/// directory and path tables, the files' entries, then the files' data.
+fn write_rom<W: Write>(
+    w: &mut W,
+    cursor: &mut u64,
+    (rom, refs): (&RomTree, RootRefs),
+    (plan, bytes): (&Plan, &IsoBytes),
+    path: &str,
+) -> Result<(), UdfError> {
+    let mut pieces: Vec<(u32, &[u8])> = Vec::new();
+    let metadata = rom.metadata(refs)?;
+    for (lbn, data) in &metadata {
+        let sector = checked_add_u32(plan.partition_start, *lbn, "DVD-ROM content sector")?;
+        pieces.push((sector, data.as_slice()));
+    }
+    if plan.iso_root != iso9660::ROOT_DIR_SECTOR {
+        pieces.push((plan.iso_root, bytes.root_dir.as_slice()));
+    }
+    if plan.path_tables.0 != iso9660::PATH_TABLE_L_SECTOR {
+        pieces.push((plan.path_tables.0, bytes.path_l.as_slice()));
+        pieces.push((plan.path_tables.1, bytes.path_m.as_slice()));
+    }
+    pieces.sort_by_key(|(sector, _)| *sector);
+    for (sector, data) in pieces {
+        write_bytes_at(w, cursor, sector, data, path)?;
+    }
+    for file in &rom.files {
+        let target = checked_add_u32(plan.partition_start, file.data_lbn, "file sector")?;
+        write_zeros_to(w, cursor, sector_bytes(target)?, path)?;
+        copy_file(w, &file.source, file.size, path)?;
+        let allocated = checked_mul_u64(u64::from(file.sectors), SECTOR_SIZE, "file allocation")?;
+        let pad = allocated
+            .checked_sub(file.size)
+            .ok_or_else(|| invalid("file padding underflow"))?;
+        write_zero_bytes(w, pad, path)?;
+        *cursor = cursor.saturating_add(allocated);
+    }
     Ok(())
 }
 
@@ -623,12 +760,12 @@ fn write_udf_sectors<W: Write>(
     plan: &Plan,
     label: &str,
     unix_time: i64,
-    metas: &[FileMeta],
+    (metas, rom): (&[FileMeta], &RomTree),
     path: &str,
 ) -> Result<(), UdfError> {
     write_zeros_to(w, cursor, sector_bytes(plan.partition_start)?, path)?;
 
-    let root_fids = build_root_fids_bytes(plan)?;
+    let root_fids = build_root_fids_bytes(plan, rom)?;
     let video_fids = build_video_fids_bytes(plan, metas)?;
 
     // Descriptors inside the partition carry their logical block number in it as their tag location (ECMA-167
@@ -646,7 +783,11 @@ fn write_udf_sectors<W: Write>(
         plan.lbns.root_fe,
         plan.lbns.root_fids,
         root_fids.len(),
-        (0, 2),
+        // Its own parent identifier, VIDEO_TS's and each of the content's root folders'.
+        (
+            0,
+            u16::try_from(rom.root_dir_count().saturating_add(2)).unwrap_or(u16::MAX),
+        ),
         unix_time,
     )?;
     write_sector(w, cursor, root_fe_loc, &root_fe, path)?;
@@ -737,9 +878,9 @@ fn write_final_anchor<W: Write>(
     Ok(())
 }
 
-fn build_root_fids_bytes(plan: &Plan) -> Result<Vec<u8>, UdfError> {
+fn build_root_fids_bytes(plan: &Plan, rom: &RomTree) -> Result<Vec<u8>, UdfError> {
     let first = plan.lbns.root_fids;
-    let fids = vec![
+    let mut fids = vec![
         Fid {
             name: None,
             is_dir: true,
@@ -751,6 +892,7 @@ fn build_root_fids_bytes(plan: &Plan) -> Result<Vec<u8>, UdfError> {
             icb_lbn: plan.lbns.video_fe,
         },
     ];
+    fids.extend(rom.root_fids());
     Ok(desc::file_identifier_descriptors(first, &fids))
 }
 
@@ -1424,5 +1566,182 @@ mod tests {
                 .ok_or_else(|| invalid("short"))?,
         );
         Ok(u16::from_le_bytes(a))
+    }
+
+    /// Four small video files, as `roundtrip_inner` writes them.
+    fn video_files(dir: &Path) -> Result<Vec<ImageFile>, UdfError> {
+        let mut files = Vec::new();
+        for (name, byte, len) in [
+            ("VIDEO_TS.IFO", 0xAA_u8, 4096_usize),
+            ("VIDEO_TS.BUP", 0xBB, 4096),
+            ("VTS_01_0.IFO", 0xCC, 2048),
+            ("VTS_01_1.VOB", 0xDD, 6244),
+        ] {
+            let source = dir.join(name);
+            write_test_file(&source, &vec![byte; len])?;
+            files.push(ImageFile {
+                name: name.to_string(),
+                source,
+            });
+        }
+        Ok(files)
+    }
+
+    /// DVD-ROM content files under `dir/rom`: (path in the image, bytes).
+    fn rom_files(
+        dir: &Path,
+        content: &[(&str, Vec<u8>)],
+    ) -> Result<Vec<crate::tree::TreeFile>, UdfError> {
+        let root = dir.join("rom");
+        fs::create_dir_all(&root).map_err(|e| io_error("rom", e))?;
+        let mut files = Vec::new();
+        for (index, (path, bytes)) in content.iter().enumerate() {
+            let source = root.join(format!("{index}.bin"));
+            write_test_file(&source, bytes)?;
+            files.push(crate::tree::TreeFile {
+                path: (*path).to_string(),
+                source,
+            });
+        }
+        Ok(files)
+    }
+
+    /// M13.11: DVD-ROM content is in both file systems beside VIDEO_TS, with its own names in UDF (Japanese too)
+    /// and 8.3 names in ISO 9660, its data intact, and the video files where they are without it.
+    #[test]
+    fn rom_content_is_beside_the_video() -> Result<(), UdfError> {
+        let dir = temp_dir("rom")?;
+        let result = rom_content_inner(&dir);
+        fs::remove_dir_all(&dir).ok();
+        result
+    }
+
+    fn rom_content_inner(dir: &Path) -> Result<(), UdfError> {
+        let video_ts = video_files(dir)?;
+        let content = [
+            ("README.TXT", b"read me".to_vec()),
+            ("Extras/Manual of the disc.pdf", vec![0x11_u8; 5000]),
+            ("Extras/\u{65e5}\u{672c}\u{8a9e}.txt", vec![0x22_u8; 100]),
+            ("Extras/Pictures/EMPTY.DAT", Vec::new()),
+        ];
+        let rom = rom_files(dir, &content)?;
+        let plain = dir.join("plain.iso");
+        let with_rom = dir.join("rom.iso");
+        let _ = write_dvd_iso(&video_ts, "TEST", &plain, 0)?;
+        let report = super::write_dvd_iso_with_rom(&video_ts, &rom, "TEST", &with_rom, 0)?;
+
+        let udf = list_udf(&with_rom)?;
+        let iso = list_iso9660(&with_rom)?;
+        // The video files are where they are without the content.
+        let video: Vec<&ListedFile> = udf
+            .iter()
+            .filter(|file| file.path.starts_with("VIDEO_TS/"))
+            .collect();
+        let plain_udf = list_udf(&plain)?;
+        assert_eq!(video, plain_udf.iter().collect::<Vec<_>>());
+
+        // UDF has the names as they are; ISO 9660 has them as 8.3 names at the same sectors.
+        for ((path, bytes), iso_path) in content.iter().zip([
+            "README.TXT",
+            "EXTRAS/MANUAL_O.PDF",
+            "EXTRAS/___.TXT",
+            "EXTRAS/PICTURES/EMPTY.DAT",
+        ]) {
+            let in_udf = udf
+                .iter()
+                .find(|file| file.path == *path)
+                .ok_or_else(|| invalid(format!("{path} is not in UDF: {udf:?}")))?;
+            let in_iso = iso
+                .iter()
+                .find(|file| file.path == iso_path)
+                .ok_or_else(|| invalid(format!("{iso_path} is not in ISO 9660: {iso:?}")))?;
+            assert_eq!(in_udf.size, bytes.len() as u64, "{path}");
+            assert_eq!(in_iso.size, bytes.len() as u64, "{path}");
+            if !bytes.is_empty() {
+                assert_eq!(in_udf.sector, in_iso.sector, "{path}");
+                assert_eq!(
+                    &read_test_bytes(&with_rom, in_udf.sector, bytes.len())?,
+                    bytes,
+                    "{path}"
+                );
+                // After the video.
+                assert!(video.iter().all(|file| file.sector < in_udf.sector));
+            }
+        }
+        assert_eq!(udf.len(), 8);
+        assert_eq!(iso.len(), 8);
+
+        // The volume counts its directories (root, VIDEO_TS, Extras, Pictures) and files.
+        let lvid = read_test_sector(&with_rom, super::LVID_SECTOR)?;
+        let u32_at =
+            |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+        assert_eq!(u32_at(&lvid, 120), 8, "files");
+        assert_eq!(u32_at(&lvid, 124), 4, "directories");
+        verify_vds_and_anchors(&with_rom, report.sectors)?;
+
+        // The path table: root, EXTRAS and VIDEO_TS in the root, PICTURES in EXTRAS (number 2).
+        let table = read_test_sector(&with_rom, super::iso9660::PATH_TABLE_L_SECTOR)?;
+        let mut rows = Vec::new();
+        let mut at = 0;
+        while table[at] != 0 {
+            let len = usize::from(table[at]);
+            rows.push((
+                String::from_utf8_lossy(&table[at + 8..at + 8 + len]).into_owned(),
+                u16::from_le_bytes([table[at + 6], table[at + 7]]),
+            ));
+            at += 8 + len + len % 2;
+        }
+        assert_eq!(
+            rows,
+            vec![
+                ("\0".to_string(), 1),
+                ("EXTRAS".to_string(), 1),
+                ("VIDEO_TS".to_string(), 1),
+                ("PICTURES".to_string(), 2),
+            ]
+        );
+        Ok(())
+    }
+
+    /// A root with more entries than its sector holds, and more folders than a path table sector holds: the ISO
+    /// 9660 root directory and the path tables move behind the content, and everything is still found.
+    #[test]
+    fn a_large_rom_root_and_many_folders_still_read() -> Result<(), UdfError> {
+        let dir = temp_dir("romlarge")?;
+        let result = (|| {
+            let video_ts = video_files(&dir)?;
+            let mut content = Vec::new();
+            for index in 0..70 {
+                content.push((format!("FILE{index:04}.TXT"), vec![index as u8; 10]));
+            }
+            for index in 0..200 {
+                content.push((format!("DIR{index:04}/A.TXT"), vec![1_u8; 3]));
+            }
+            let borrowed: Vec<(&str, Vec<u8>)> = content
+                .iter()
+                .map(|(path, bytes)| (path.as_str(), bytes.clone()))
+                .collect();
+            let rom = rom_files(&dir, &borrowed)?;
+            let out = dir.join("large.iso");
+            let report = super::write_dvd_iso_with_rom(&video_ts, &rom, "TEST", &out, 0)?;
+            let udf = list_udf(&out)?;
+            let iso = list_iso9660(&out)?;
+            assert_eq!(udf.len(), 4 + 270);
+            // Every name is an 8.3 name already: the two file systems list the same.
+            assert_eq!(udf, iso);
+            let pvd = read_test_sector(&out, 16)?;
+            let u32_at =
+                |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+            let (root, path_l) = (u32_at(&pvd, 158), u32_at(&pvd, 140));
+            assert!(root > super::iso9660::VIDEO_DIR_SECTOR && root < report.sectors);
+            assert!(path_l > super::iso9660::VIDEO_DIR_SECTOR && path_l < report.sectors);
+            // The moved table starts with the root, which is where the volume descriptor says.
+            let table = read_test_sector(&out, path_l)?;
+            assert_eq!((table[0], u32_at(&table, 2)), (1, root));
+            verify_vds_and_anchors(&out, report.sectors)?;
+            Ok(())
+        })();
+        fs::remove_dir_all(&dir).ok();
+        result
     }
 }

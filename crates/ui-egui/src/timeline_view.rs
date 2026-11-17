@@ -494,18 +494,22 @@ impl DiscCraftApp {
         let (num, den) = frame_rate(self.session.project.settings.standard);
         let step = f64::from(den.max(1)) / f64::from(num.max(1));
         let seconds = (duration - step).max(0.0);
-        let texture = self
-            .run_query(
-                "asset.frame",
-                json!({ "asset": video.0, "seconds": seconds }),
+        // Not waited for: asked again once the file is open.
+        let value = self.run_query(
+            "asset.frame",
+            json!({ "asset": video.0, "seconds": seconds, "wait": false }),
+        );
+        if crate::project_panel::is_pending(value.as_ref()) {
+            self.media_pending = true;
+            return None;
+        }
+        let texture = value.and_then(|value| {
+            crate::project_panel::decode_rgb_texture(
+                ctx,
+                &format!("clip_last_frame_{}", video.0),
+                &value,
             )
-            .and_then(|value| {
-                crate::project_panel::decode_rgb_texture(
-                    ctx,
-                    &format!("clip_last_frame_{}", video.0),
-                    &value,
-                )
-            });
+        });
         let _ = self.last_frames.insert(video.0, texture.clone());
         texture
     }

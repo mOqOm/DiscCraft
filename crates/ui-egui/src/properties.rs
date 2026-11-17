@@ -230,7 +230,7 @@ impl DiscCraftApp {
             self.set_widescreen(wide);
         }
 
-        // Encore's Blu-ray transcode settings: the titles' video (SD MPEG-2, or HD H.264).
+        // Encore's Blu-ray transcode settings: the titles' video (SD MPEG-2, HD H.264, or 1080i MPEG-2).
         if settings.kind == DiscKind::BluRay {
             let videos: Vec<(disccraft_project::BdVideo, &str)> = disccraft_project::BdVideo::ALL
                 .iter()
@@ -2158,6 +2158,53 @@ impl DiscCraftApp {
             self.slide_transition_rows(ui, id, index, &slideshow, &slide);
             ui.separator();
         }
+        // エフェクト（Encore のスライドの「エフェクト」タブ）: パンとズーム / パン / ズーム。
+        let mut effect_on = slide.effect.is_some();
+        let effect = slide.effect.unwrap_or_default();
+        let (mut pan, mut zoom) = (effect.pan, effect.zoom);
+        ui.horizontal(|ui| {
+            prop_label(ui, "");
+            let _ = ui
+                .checkbox(&mut effect_on, tl!("Pan & Zoom"))
+                .on_hover_text(tl!("The picture moves slowly while the slide is up"));
+        });
+        ui.horizontal(|ui| {
+            prop_label(ui, tl!("Pan:"));
+            ui.add_enabled_ui(slide.effect.is_some(), |ui| {
+                egui::ComboBox::from_id_salt(("slide_pan", id, index))
+                    .selected_text(slide_pan_label(pan))
+                    .show_ui(ui, |ui| {
+                        for choice in disccraft_project::SlidePan::ALL {
+                            let _ = ui.selectable_value(&mut pan, choice, slide_pan_label(choice));
+                        }
+                    });
+            });
+        });
+        ui.horizontal(|ui| {
+            prop_label(ui, tl!("Zoom:"));
+            ui.add_enabled_ui(slide.effect.is_some(), |ui| {
+                egui::ComboBox::from_id_salt(("slide_zoom", id, index))
+                    .selected_text(slide_zoom_label(zoom))
+                    .show_ui(ui, |ui| {
+                        for choice in disccraft_project::SlideZoom::ALL {
+                            let _ =
+                                ui.selectable_value(&mut zoom, choice, slide_zoom_label(choice));
+                        }
+                    });
+            });
+        });
+        if effect_on != slide.effect.is_some() {
+            let _ = self.run_command(
+                "slideshow.setSlideEffect",
+                json!({"slideshow": id, "slide": index, "on": effect_on}),
+            );
+        } else if slide.effect.is_some() && (pan != effect.pan || zoom != effect.zoom) {
+            let _ = self.run_command(
+                "slideshow.setSlideEffect",
+                json!({"slideshow": id, "slide": index, "pan": pan.as_str(), "zoom": zoom.as_str()}),
+            );
+        }
+        ui.separator();
         let in_point = slideshow
             .slides
             .iter()
@@ -3241,18 +3288,8 @@ fn bd_video_name(video: disccraft_project::BdVideo) -> &'static str {
         disccraft_project::BdVideo::Sd => tl!("SD (MPEG-2)"),
         disccraft_project::BdVideo::Hd1080p23 => "1920x1080 23.976p (H.264)",
         disccraft_project::BdVideo::Hd1080p24 => "1920x1080 24p (H.264)",
-        disccraft_project::BdVideo::Hd1080p25 => {
-            tl!("1920x1080 25p (H.264, outside the Blu-ray standard)")
-        }
-        disccraft_project::BdVideo::Hd1080p29 => {
-            tl!("1920x1080 29.97p (H.264, outside the Blu-ray standard)")
-        }
-        disccraft_project::BdVideo::Hd1080p50 => {
-            tl!("1920x1080 50p (H.264, outside the Blu-ray standard)")
-        }
-        disccraft_project::BdVideo::Hd1080p59 => {
-            tl!("1920x1080 59.94p (H.264, outside the Blu-ray standard)")
-        }
+        disccraft_project::BdVideo::Hd1080i59 => "1920x1080 59.94i (MPEG-2)",
+        disccraft_project::BdVideo::Hd1080i50 => "1920x1080 50i (MPEG-2)",
         disccraft_project::BdVideo::Hd720p59 => "1280x720 59.94p (H.264)",
         disccraft_project::BdVideo::Hd720p50 => "1280x720 50p (H.264)",
         disccraft_project::BdVideo::Hd720p23 => "1280x720 23.976p (H.264)",
@@ -3505,5 +3542,25 @@ mod first_play_tests {
         assert_eq!(first_play_streams(&settings), "; A2, S1");
         settings.audio_default = None;
         assert_eq!(first_play_streams(&settings), "; S1");
+    }
+}
+
+/// スライドのパン（Encore のエフェクトの「パン」）の表示名。
+fn slide_pan_label(pan: disccraft_project::SlidePan) -> &'static str {
+    match pan {
+        disccraft_project::SlidePan::None => tl!("None"),
+        disccraft_project::SlidePan::Left => tl!("Pan Left"),
+        disccraft_project::SlidePan::Right => tl!("Pan Right"),
+        disccraft_project::SlidePan::Up => tl!("Pan Up"),
+        disccraft_project::SlidePan::Down => tl!("Pan Down"),
+    }
+}
+
+/// スライドのズーム（Encore のエフェクトの「ズーム」）の表示名。
+fn slide_zoom_label(zoom: disccraft_project::SlideZoom) -> &'static str {
+    match zoom {
+        disccraft_project::SlideZoom::In => tl!("Zoom In"),
+        disccraft_project::SlideZoom::Out => tl!("Zoom Out"),
+        disccraft_project::SlideZoom::None => tl!("None"),
     }
 }

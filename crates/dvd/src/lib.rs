@@ -13,15 +13,19 @@ pub use menus::{HdMotionMenu, MotionMenu, encode_hd_motion_menu, encode_motion_m
 mod thumbnails;
 pub use thumbnails::{ThumbnailFrame, still_thumbnails};
 mod demux;
+mod demux_mkv;
+mod demux_mp4;
+mod h264_sps;
 mod output;
 mod prepare;
 mod preview;
 mod sup;
 mod vobsub;
-pub use demux::demux_h264_for_bd;
+pub use demux::{BdVideoFormat, Passthrough, demux_h264_for_bd, h264_fits_bd};
+pub use demux_mkv::H264Samples;
 pub use prepare::{
-    Estimate, TimelineRate, TranscodeStatus, encode_hd_slideshow, estimate, timeline_rates,
-    transcode_status,
+    Estimate, HdBudget, TimelineRate, TranscodeStatus, encode_hd_slideshow, estimate, hd_budget,
+    hd_default_kbps, timeline_rates, transcode_status,
 };
 pub use sup::PgSegment;
 
@@ -221,6 +225,32 @@ pub fn build_video_ts(project: &Project, out_dir: &Path) -> Result<DvdBuildRepor
         &out_dir.join("disccraft-cache"),
         &mut |_, _| {},
     )
+}
+
+/// Encore's Transcode Now: makes the transcodes a build of `project` would make and keeps them in `cache_dir`,
+/// where the build then finds them. With `only`, just those of the timelines that play that asset. For a DVD, or
+/// a Blu-ray with SD video (an HD Blu-ray's titles are made by `disccraft_bd::transcode_now`).
+///
+/// # Errors
+///
+/// As a build's transcodes: media that cannot be read or converted, and I/O errors.
+pub fn transcode_now(
+    project: &Project,
+    cache_dir: &Path,
+    only: Option<disccraft_project::AssetId>,
+    progress: &mut dyn FnMut(&str, f32),
+) -> Result<(), DvdError> {
+    let budget = prepare::budget(project)?;
+    prepare::prepare_all_of(project, cache_dir, &budget, progress, true, only)
+}
+
+/// Whether `timeline` plays `asset` (a video clip or an audio track).
+#[must_use]
+pub fn timeline_uses(
+    timeline: &disccraft_project::Timeline,
+    asset: disccraft_project::AssetId,
+) -> bool {
+    prepare::timeline_uses(timeline, asset)
 }
 
 /// Like [`build_video_ts`], with an explicit transcode cache folder and a progress callback

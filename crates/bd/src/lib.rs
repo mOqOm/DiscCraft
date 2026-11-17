@@ -102,6 +102,55 @@ pub fn build_bdmv(project: &Project, out_dir: &Path) -> Result<BdBuildReport, Bd
     )
 }
 
+/// Whether the HD video a build of `project` makes from `asset` is already in `cache_dir` (see
+/// [`transcode_now`]): every timeline clip that plays it, encoded for the project's format and bitrates.
+#[must_use]
+pub fn hd_transcoded(
+    project: &Project,
+    cache_dir: &Path,
+    asset: disccraft_project::AssetId,
+) -> bool {
+    project.settings.kind == DiscKind::BluRay && hd::hd_transcoded(project, cache_dir, asset)
+}
+
+/// Encore's Transcode Now for a Blu-ray: makes the video and sound a build of `project` would make and keeps them
+/// in `cache_dir`, where the build then finds them. With `only`, just those of the timelines that play that asset.
+///
+/// # Errors
+///
+/// As [`build_bdmv_with`]'s transcodes.
+pub fn transcode_now(
+    project: &Project,
+    cache_dir: &Path,
+    only: Option<disccraft_project::AssetId>,
+    progress: &mut dyn FnMut(&str, f32),
+) -> Result<(), BdError> {
+    if project.settings.kind != DiscKind::BluRay {
+        return Err(invalid("project is not a Blu-ray project"));
+    }
+    if project.settings.bd_video.hd().is_none() {
+        return disccraft_dvd::transcode_now(project, cache_dir, only, progress)
+            .map_err(|error| BdError::Prepare(error.to_string()));
+    }
+    // The rates are the whole project's; the titles made are the ones asked for.
+    let hd_rates = disccraft_dvd::hd_budget(project)
+        .map_err(|error| BdError::Prepare(error.to_string()))?
+        .map_or((0, 0), |budget| (budget.target_kbps, budget.max_kbps));
+    let mut wanted = project.clone();
+    if let Some(asset) = only {
+        wanted
+            .timelines
+            .retain(|_, timeline| disccraft_dvd::timeline_uses(timeline, asset));
+        wanted.slideshows.clear();
+    }
+    let titles = load_title_streams_for_hd(&wanted, cache_dir, progress)
+        .map_err(|error| BdError::Prepare(error.to_string()))?;
+    for title in &titles {
+        let _ = hd::hd_title(&wanted, title, cache_dir, hd_rates, progress)?;
+    }
+    Ok(())
+}
+
 /// Build a BDMV folder with an explicit cache directory and progress callback.
 ///
 /// # Errors
@@ -127,9 +176,13 @@ pub fn build_bdmv_with(
     }
     .map_err(|error| BdError::Prepare(error.to_string()))?;
 
+    // The HD video's bitrate: the format's usual one, or less when the titles would not fit the disc at it.
+    let hd_rates = disccraft_dvd::hd_budget(project)
+        .map_err(|error| BdError::Prepare(error.to_string()))?
+        .map_or((0, 0), |budget| (budget.target_kbps, budget.max_kbps));
     let mut hd_titles = Vec::with_capacity(titles.len());
     for title in &titles {
-        hd_titles.push(hd::hd_title(project, title, cache_dir, progress)?);
+        hd_titles.push(hd::hd_title(project, title, cache_dir, hd_rates, progress)?);
     }
 
     let mut output = BuildOutput::default();

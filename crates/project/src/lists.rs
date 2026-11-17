@@ -129,6 +129,120 @@ impl SlideScale {
     }
 }
 
+/// Which way a slide's picture travels while it is up (Encore's slide effect "Pan").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SlidePan {
+    /// The picture stays where it is.
+    #[default]
+    None,
+    /// The picture moves to the left.
+    Left,
+    /// The picture moves to the right.
+    Right,
+    /// The picture moves up.
+    Up,
+    /// The picture moves down.
+    Down,
+}
+
+impl SlidePan {
+    /// Every choice.
+    pub const ALL: [SlidePan; 5] = [
+        SlidePan::None,
+        SlidePan::Left,
+        SlidePan::Right,
+        SlidePan::Up,
+        SlidePan::Down,
+    ];
+
+    /// The name in command parameters.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SlidePan::None => "none",
+            SlidePan::Left => "left",
+            SlidePan::Right => "right",
+            SlidePan::Up => "up",
+            SlidePan::Down => "down",
+        }
+    }
+
+    /// Parses a command parameter.
+    pub fn parse(text: &str) -> Option<SlidePan> {
+        Self::ALL.into_iter().find(|pan| pan.as_str() == text)
+    }
+}
+
+/// How a slide's picture is scaled while it is up (Encore's slide effect "Zoom").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SlideZoom {
+    /// The picture grows (Encore's default).
+    #[default]
+    In,
+    /// The picture shrinks back to its size.
+    Out,
+    /// The picture keeps its size.
+    None,
+}
+
+impl SlideZoom {
+    /// Every choice.
+    pub const ALL: [SlideZoom; 3] = [SlideZoom::In, SlideZoom::Out, SlideZoom::None];
+
+    /// The name in command parameters.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SlideZoom::In => "in",
+            SlideZoom::Out => "out",
+            SlideZoom::None => "none",
+        }
+    }
+
+    /// Parses a command parameter.
+    pub fn parse(text: &str) -> Option<SlideZoom> {
+        Self::ALL.into_iter().find(|zoom| zoom.as_str() == text)
+    }
+}
+
+/// A slide's pan and zoom (Encore's slide "Effects": Pan & Zoom).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlideEffect {
+    /// Which way the picture travels.
+    #[serde(default)]
+    pub pan: SlidePan,
+    /// How the picture is scaled.
+    #[serde(default)]
+    pub zoom: SlideZoom,
+}
+
+impl SlideEffect {
+    /// The effect Encore's "Random Pan & Zoom" gives the slide at `index`: one of the pans with a zoom in or out,
+    /// the same for the same place in the show (so a build can be repeated).
+    #[must_use]
+    pub fn random(index: usize) -> SlideEffect {
+        // A small integer hash of the place (multiply and fold), enough to spread the choices.
+        let mixed = (index as u64)
+            .wrapping_add(1)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let folded = (mixed >> 32) ^ (mixed & 0xFFFF_FFFF);
+        let pan = match folded % 5 {
+            0 => SlidePan::None,
+            1 => SlidePan::Left,
+            2 => SlidePan::Right,
+            3 => SlidePan::Up,
+            _ => SlidePan::Down,
+        };
+        let zoom = if (folded / 5).is_multiple_of(2) {
+            SlideZoom::In
+        } else {
+            SlideZoom::Out
+        };
+        SlideEffect { pan, zoom }
+    }
+}
+
 /// The outline of a slide's subtitle (Encore's Stroke).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -215,6 +329,15 @@ pub struct SlideTransition {
 }
 
 impl Slideshow {
+    /// The pan and zoom the slide at `index` plays with: its own, else a random one when the show asks for them.
+    #[must_use]
+    pub fn slide_effect(&self, index: usize) -> Option<SlideEffect> {
+        let slide = self.slides.get(index)?;
+        slide
+            .effect
+            .or_else(|| self.random_pan_zoom.then(|| SlideEffect::random(index)))
+    }
+
     /// The audio clips in playing order (the single `audio` of an older file counts as one clip).
     pub fn audio_list(&self) -> Vec<AssetId> {
         if self.audio_clips.is_empty() {
@@ -263,6 +386,9 @@ pub struct Slide {
     /// Encore's Highlight of the subtitle: the colour group (from 0) it uses.
     #[serde(default, skip_serializing_if = "is_first_group")]
     pub subtitle_group: u8,
+    /// Encore's "Pan & Zoom" on the slide: the picture moves while the slide is up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect: Option<SlideEffect>,
 }
 
 /// Slideshow document object.
@@ -313,6 +439,9 @@ pub struct Slideshow {
     /// before it holds.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub manual_advance: bool,
+    /// Encore's "Random Pan & Zoom": every slide without an effect of its own gets one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub random_pan_zoom: bool,
 }
 
 fn is_no_transition(kind: &TransitionKind) -> bool {
@@ -475,6 +604,7 @@ impl Project {
                 transition: TransitionKind::None,
                 transition_duration: timecode_seconds(&self.settings, 2),
                 manual_advance: false,
+                random_pan_zoom: false,
                 audio_clips: Vec::new(),
                 loop_audio: false,
                 fit_to_audio: false,
@@ -531,6 +661,7 @@ impl Project {
             subtitle_stroke: SlideStroke::default(),
             subtitle_align: 100,
             subtitle_group: 0,
+            effect: None,
         });
         Ok(index)
     }
@@ -615,6 +746,33 @@ impl Project {
             .get_mut(index)
             .ok_or_else(|| ProjectError::Invalid("slide index out of range".to_string()))?;
         slide.scale = scale;
+        Ok(())
+    }
+
+    /// Encore's "Pan & Zoom" on a slide: `None` turns it off.
+    pub fn set_slide_effect(
+        &mut self,
+        id: u64,
+        index: usize,
+        effect: Option<SlideEffect>,
+    ) -> Result<(), ProjectError> {
+        let slide = self
+            .slideshows
+            .get_mut(&id)
+            .ok_or_else(|| ProjectError::Invalid("slideshow does not exist".to_string()))?
+            .slides
+            .get_mut(index)
+            .ok_or_else(|| ProjectError::Invalid("slide index out of range".to_string()))?;
+        slide.effect = effect;
+        Ok(())
+    }
+
+    /// Encore's "Random Pan & Zoom" of a slideshow.
+    pub fn set_slideshow_random_pan_zoom(&mut self, id: u64, on: bool) -> Result<(), ProjectError> {
+        self.slideshows
+            .get_mut(&id)
+            .ok_or_else(|| ProjectError::Invalid("slideshow does not exist".to_string()))?
+            .random_pan_zoom = on;
         Ok(())
     }
 

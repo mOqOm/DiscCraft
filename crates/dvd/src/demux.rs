@@ -308,13 +308,130 @@ pub(crate) fn demux_to_cache(
 /// The highest H.264 level a Blu-ray carries (4.1).
 const BD_MAX_H264_LEVEL: u8 = 41;
 /// The fastest video a Blu-ray carries, bit/s.
-const BD_MAX_VIDEO_BITRATE: f64 = 40_000_000.0;
+pub(crate) const BD_MAX_VIDEO_BITRATE: f64 = 40_000_000.0;
 
-/// A Blu-ray's H.264 from a transport stream (`.m2ts`, `.ts`) as it is, for an HD title of `format` (width, height
-/// and frame rate): written once to `cache_dir` as an Annex B stream and its access-unit index, timed from its first
-/// shown picture, as an encode of the title would be. `None` when the file has no such video: not a transport or
-/// program stream, not H.264, another size or rate, a profile other than High or Main or a level above 4.1, faster
-/// than 40 Mbit/s on average, not starting at a key frame, or a picture without a time.
+/// The video of a Blu-ray HD title.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BdVideoFormat {
+    /// Frame width, pixels.
+    pub width: u32,
+    /// Frame height, pixels.
+    pub height: u32,
+    /// Frames a second (numerator, denominator); an interlaced format's frames, not its fields.
+    pub rate: (u32, u32),
+    /// Interlaced (1080i).
+    pub interlaced: bool,
+}
+
+impl BdVideoFormat {
+    /// The HD video of `project`'s titles; `None` when it is not a Blu-ray in an HD format.
+    #[must_use]
+    pub fn of(project: &disccraft_project::Project) -> Option<Self> {
+        if project.settings.kind != DiscKind::BluRay {
+            return None;
+        }
+        let (width, height, num, den) = project.settings.bd_video.hd()?;
+        Some(Self {
+            width,
+            height,
+            rate: (num, den),
+            interlaced: project.settings.bd_video.interlaced(),
+        })
+    }
+
+    /// A name for cache files.
+    pub(crate) fn key(self) -> String {
+        format!(
+            "{}x{}{}-{}-{}",
+            self.width,
+            self.height,
+            if self.interlaced { "i" } else { "" },
+            self.rate.0,
+            self.rate.1
+        )
+    }
+}
+
+/// Whether H.264 with this sequence parameter set is a Blu-ray's video of `format`: Main or High profile up to
+/// level 4.1, 4:2:0 at 8 bits, the format's size (in whole macroblocks), and coded as the format is scanned (an
+/// interlaced format's stream may code fields, a progressive format's codes frames only).
+pub(crate) fn sps_fits(sps: &crate::h264_sps::Sps, format: BdVideoFormat) -> bool {
+    matches!(sps.profile, 77 | 100)
+        && sps.level <= BD_MAX_H264_LEVEL
+        && sps.yuv420_8bit
+        && sps.width == format.width
+        && sps.height == format.height.div_ceil(16).saturating_mul(16)
+        && sps.frame_mbs_only != format.interlaced
+}
+
+/// Whether `path`'s H.264 would go on a Blu-ray title of `format` as it is ([`demux_h264_for_bd`]), told from the
+/// file's headers without reading it through.
+#[must_use]
+pub fn h264_fits_bd(path: &Path, format: BdVideoFormat) -> bool {
+    // Asked again and again as a project's size is estimated: answered once per file (its size and time).
+    type Memo = Mutex<HashMap<(PathBuf, u64, u64, BdVideoFormat), bool>>;
+    static MEMO: OnceLock<Memo> = OnceLock::new();
+
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |since| since.as_nanos() as u64);
+    let key = (path.to_path_buf(), metadata.len(), modified, format);
+    let memo = MEMO.get_or_init(Mutex::default);
+    if let Some(known) = memo.lock().ok().and_then(|memo| memo.get(&key).copied()) {
+        return known;
+    }
+    let fits = h264_fits_bd_now(path, format);
+    if let Ok(mut memo) = memo.lock() {
+        let _ = memo.insert(key, fits);
+    }
+    fits
+}
+
+fn h264_fits_bd_now(path: &Path, format: BdVideoFormat) -> bool {
+    if crate::demux_mkv::is_matroska(path) {
+        return crate::demux_mkv::fits(path, format);
+    }
+    if crate::demux_mp4::is_mp4(path) {
+        return crate::demux_mp4::fits(path, format);
+    }
+    if !is_container(path) {
+        return false;
+    }
+    let Some((source, file)) = open(path) else {
+        return false;
+    };
+    file.find(Kind::Video, |codec| *codec == Codec::H264)
+        .is_some_and(|index| h264_fits(path, &source, &file, index, format))
+        && video_origin(&file).is_some()
+}
+
+/// A file's H.264 that goes on a Blu-ray as it is ([`demux_h264_for_bd`]).
+#[derive(Debug)]
+pub enum Passthrough {
+    /// Taken out of a transport stream into the build cache: an Annex B stream and its access-unit index.
+    Stream {
+        /// The Annex B stream.
+        es: PathBuf,
+        /// Its access-unit index (`disccraft_transcode::hd::read_h264_index`).
+        index: PathBuf,
+    },
+    /// Left in its Matroska or MP4 file, and read from there as the clip is written.
+    Samples(crate::H264Samples),
+}
+
+/// A Blu-ray's H.264 from a transport stream (`.m2ts`, `.ts`), a Matroska file (`.mkv`) or an MP4 / QuickTime file
+/// (`.mp4`, `.m4v`, `.mov`) as it is, for an HD title
+/// of `format`, timed from its first shown picture, as an encode of the title would be. A transport stream's is
+/// written once to `cache_dir` as an Annex B stream and its access-unit index; a Matroska or MP4 file's stays in
+/// the file, and only where its pictures are is kept in `cache_dir`. `None` when the file has no such video: not one of those
+/// containers, not H.264, another size or rate, progressive for an interlaced format (or the reverse), a profile
+/// other than High or Main or a level above 4.1, faster than 40 Mbit/s on average, not starting at a key frame, or
+/// a picture without a time. `progress` is told how far the file has been read (0 to 1).
 ///
 /// # Errors
 ///
@@ -322,8 +439,17 @@ const BD_MAX_VIDEO_BITRATE: f64 = 40_000_000.0;
 pub fn demux_h264_for_bd(
     path: &Path,
     cache_dir: &Path,
-    format: (u32, u32, u32, u32),
-) -> Result<Option<(PathBuf, PathBuf)>, DvdError> {
+    format: BdVideoFormat,
+    progress: &mut dyn FnMut(f32),
+) -> Result<Option<Passthrough>, DvdError> {
+    if crate::demux_mkv::is_matroska(path) {
+        let samples = crate::demux_mkv::demux_h264(path, cache_dir, format, progress)?;
+        return Ok(samples.map(Passthrough::Samples));
+    }
+    if crate::demux_mp4::is_mp4(path) {
+        let samples = crate::demux_mp4::demux_h264(path, cache_dir, format, progress)?;
+        return Ok(samples.map(Passthrough::Samples));
+    }
     if !is_container(path) {
         return Ok(None);
     }
@@ -344,16 +470,15 @@ pub fn demux_h264_for_bd(
     };
 
     fs::create_dir_all(cache_dir).map_err(|err| crate::io_error(cache_dir, err))?;
-    let (width, height, rate_num, rate_den) = format;
-    let key = format!(
-        "{}-{width}x{height}-{rate_num}-{rate_den}",
-        audio_cache_key(path)?
-    );
+    let key = format!("{}-{}", audio_cache_key(path)?, format.key());
     let es = cache_dir.join(format!("{key}.passthrough.h264"));
     let index_path = cache_dir.join(format!("{key}.passthrough.idx"));
     let marker = cache_dir.join(format!("{key}.passthrough.ok"));
     if marker.is_file() && es.is_file() && index_path.is_file() {
-        return Ok(Some((es, index_path)));
+        return Ok(Some(Passthrough::Stream {
+            es,
+            index: index_path,
+        }));
     }
 
     let unsupported =
@@ -401,7 +526,10 @@ pub fn demux_h264_for_bd(
     fs::rename(&es_part, &es).map_err(|err| crate::io_error(&es_part, err))?;
     fs::rename(&index_part, &index_path).map_err(|err| crate::io_error(&index_part, err))?;
     fs::write(&marker, b"ok").map_err(|err| crate::io_error(&marker, err))?;
-    Ok(Some((es, index_path)))
+    Ok(Some(Passthrough::Stream {
+        es,
+        index: index_path,
+    }))
 }
 
 /// Whether stream `index` of `file` is H.264 a Blu-ray HD title of `format` can carry as it is.
@@ -410,7 +538,7 @@ fn h264_fits(
     source: &ReadSeekSource<fs::File>,
     file: &File,
     index: usize,
-    format: (u32, u32, u32, u32),
+    format: BdVideoFormat,
 ) -> bool {
     let Some(stream) = file.streams.get(index) else {
         return false;
@@ -422,35 +550,26 @@ fn h264_fits(
         return false;
     }
     // Profile and level from the sequence parameter set at the start.
-    let Some((profile, level)) = file
+    let Some(sps) = file
         .read_unit(source, index, 0)
         .ok()
-        .and_then(|bytes| sps_profile_level(&bytes))
+        .and_then(|bytes| crate::h264_sps::first_in_annex_b(&bytes))
     else {
         return false;
     };
-    if !matches!(profile, 77 | 100) || level > BD_MAX_H264_LEVEL {
+    if !sps_fits(&sps, format) {
         return false;
     }
     // Size, rate and average bitrate as the media reader sees them.
     let Ok(probe) = disccraft_transcode::probe_video(path) else {
         return false;
     };
-    let (width, height, rate_num, rate_den) = format;
-    let rate = f64::from(rate_num) / f64::from(rate_den.max(1));
+    let BdVideoFormat { width, height, .. } = format;
+    let rate = f64::from(format.rate.0) / f64::from(format.rate.1.max(1));
     let bytes: u64 = stream.units.iter().map(|unit| u64::from(unit.size)).sum();
     probe.width == width
         && probe.height == height
         && (probe.fps - rate).abs() <= rate * 0.005
         && probe.seconds > 0.0
         && bytes as f64 * 8.0 / probe.seconds <= BD_MAX_VIDEO_BITRATE
-}
-
-/// The profile_idc and level_idc of the first sequence parameter set (NAL type 7) in Annex B `data`.
-fn sps_profile_level(data: &[u8]) -> Option<(u8, u8)> {
-    let start = data
-        .array_windows()
-        .position(|&[a, b, c, nal]| [a, b, c] == [0, 0, 1] && nal & 0x1F == 7)?;
-    let sps = data.get(start + 4..start + 7)?;
-    Some((*sps.first()?, *sps.get(2)?))
 }
