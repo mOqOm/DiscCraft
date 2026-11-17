@@ -113,6 +113,36 @@ impl DiscCraftApp {
             push(clicked, ui, Action::ImportSlideshow, true);
         });
         ui.separator();
+        // Encore: トランスコード ▸ トランスコード設定… / 今すぐトランスコード / オリジナルに戻す（選んだアセットに）。
+        ui.menu_button(tl!("Transcode"), |ui| {
+            use crate::project_panel::TranscodeState;
+            let idle = !self.build_job.is_running() && !self.transcode_job.is_running();
+            let state = match self.selection {
+                Selection::Asset(id) => self.transcode_state(id),
+                _ => None,
+            };
+            let any = self
+                .session
+                .project
+                .assets
+                .keys()
+                .any(|id| self.transcode_state(*id) == Some(TranscodeState::Untranscoded));
+            let _ = ui.add_enabled(false, egui::Button::new(tl!("Transcode Settings…")));
+            push(
+                clicked,
+                ui,
+                Action::TranscodeNow,
+                idle && state == Some(TranscodeState::Untranscoded),
+            );
+            push(clicked, ui, Action::TranscodeAll, idle && any);
+            push(
+                clicked,
+                ui,
+                Action::RevertToOriginal,
+                idle && state == Some(TranscodeState::Transcoded),
+            );
+        });
+        ui.separator();
         push(clicked, ui, Action::ProjectSettings, true);
         ui.separator();
         // Encore: ディスクのユーザー操作を設定…
@@ -215,15 +245,14 @@ impl DiscCraftApp {
     pub(crate) fn clipboard_items(&self, ui: &mut Ui, clicked: &mut Vec<Action>) {
         let menu = self.edit_menu_target().is_some();
         let selected = menu && !self.selected_buttons.is_empty();
+        // With no menu buttons chosen, Copy / Paste / Duplicate act on the item chosen in the Project panel.
+        let item = !selected && self.copyable_item(self.selection).is_some();
+        let paste_buttons = menu && !self.button_clipboard.is_empty();
+        let paste_item = self.copyable_item(self.project_clipboard).is_some();
         push(clicked, ui, Action::Cut, selected);
-        push(clicked, ui, Action::Copy, selected);
-        push(
-            clicked,
-            ui,
-            Action::Paste,
-            menu && !self.button_clipboard.is_empty(),
-        );
-        push(clicked, ui, Action::Duplicate, selected);
+        push(clicked, ui, Action::Copy, selected || item);
+        push(clicked, ui, Action::Paste, paste_buttons || paste_item);
+        push(clicked, ui, Action::Duplicate, selected || item);
     }
 
     /// オブジェクト ▸ アレンジ / 整列 / 均等配置（メニューバーとキャンバスの右クリックで共通）。
@@ -429,6 +458,7 @@ impl DiscCraftApp {
         push(clicked, ui, Action::AddChapterPointsAtInterval, timeline);
         // FilmCraft のプロジェクトのマーカーをチャプターに（Encore は Premiere Pro のチャプターマーカーを読む）。
         push(clicked, ui, Action::ImportFilmCraftMarkers, timeline);
+        push(clicked, ui, Action::ImportSourceChapters, timeline);
         push(clicked, ui, Action::NewTimelineFromFilmCraft, true);
         ui.separator();
         // Encore と同じく最後に再生。再生中にもう一度選ぶと止まる。
@@ -635,6 +665,25 @@ impl DiscCraftApp {
             Action::RemoveSubtitleTrack => self.remove_last_track(TrackKind::Subtitle),
             Action::ImportSubtitles => self.import_subtitles(),
             Action::ImportFilmCraftMarkers => self.import_filmcraft_markers(),
+            Action::ImportSourceChapters => {
+                if let Some(timeline) = self.viewer_timeline() {
+                    let result = self.run_command(
+                        "timeline.importSourceChapters",
+                        serde_json::json!({ "timeline": timeline.0 }),
+                    );
+                    if let Some(added) = result
+                        .as_ref()
+                        .and_then(|value| value.get("added"))
+                        .and_then(serde_json::Value::as_u64)
+                    {
+                        self.status = if added == 0 {
+                            tl!("The source has no chapters to add").to_string()
+                        } else {
+                            tlf!("Added {n} chapter points from the source", n = added)
+                        };
+                    }
+                }
+            }
             Action::NewTimelineFromFilmCraft => self.new_timeline_from_filmcraft(),
             Action::About => self.about_open = true,
             Action::JoinDiscord => self.open_link(ui.ctx(), crate::help::DISCORD),
@@ -655,10 +704,38 @@ impl DiscCraftApp {
             Action::Clear => self.clear_selection(),
             Action::Cut => self.cut_buttons(ui.ctx()),
             Action::Copy => {
-                self.copy_buttons(ui.ctx());
+                // Menu buttons when some are chosen; else the item chosen in the Project panel.
+                // What was copied last is what Paste makes.
+                if self.copy_buttons(ui.ctx()) {
+                    self.project_clipboard = Selection::None;
+                } else if self.copyable_item(self.selection).is_some() {
+                    self.copy_item(ui.ctx(), self.selection);
+                }
             }
-            Action::Paste => self.paste_buttons(),
-            Action::Duplicate => self.duplicate_buttons(),
+            Action::Paste => {
+                // Buttons copied here or in another DiscCraft (the system clipboard's text) go into the menu.
+                let from_system = self
+                    .pasted_text
+                    .as_deref()
+                    .is_some_and(|text| crate::button_edit::parse_clipboard(text).is_some());
+                let item = self.copyable_item(self.project_clipboard).is_some();
+                let buttons = self.edit_menu_target().is_some()
+                    && (!self.button_clipboard.is_empty() || (from_system && !item));
+                if buttons {
+                    self.paste_buttons();
+                } else {
+                    self.duplicate_item(self.project_clipboard);
+                }
+            }
+            Action::Duplicate => {
+                let buttons =
+                    self.edit_menu_target().is_some() && !self.selected_buttons.is_empty();
+                if buttons {
+                    self.duplicate_buttons();
+                } else {
+                    self.duplicate_item(self.selection);
+                }
+            }
             Action::SelectAll => self.select_all_buttons(),
             Action::DeselectAll => self.deselect_all_buttons(),
             Action::EditMenuInPhotoCraft => {
@@ -670,6 +747,17 @@ impl DiscCraftApp {
             Action::EditOriginal => {
                 if let Selection::Asset(asset) = self.selection {
                     self.edit_original(asset);
+                }
+            }
+            Action::TranscodeNow => {
+                if let Selection::Asset(asset) = self.selection {
+                    self.start_transcode_now(Some(asset));
+                }
+            }
+            Action::TranscodeAll => self.start_transcode_now(None),
+            Action::RevertToOriginal => {
+                if let Selection::Asset(asset) = self.selection {
+                    self.revert_to_original(asset);
                 }
             }
             Action::CreateEffectCraftComposition => {

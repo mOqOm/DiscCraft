@@ -20,6 +20,26 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: false,
     },
     CommandSpec {
+        id: "build.transcode",
+        label: "今すぐトランスコード",
+        menu: &["ファイル", "トランスコード"],
+        shortcut: None,
+        params: r#"{"output": "folder" | "iso", "path": string, "cache"?: string, "asset"?: id (そのアセットを使うタイムラインだけ。なければプロジェクト全体)}"#,
+        enabled: always_enabled,
+        run: run_transcode,
+        journal: false,
+    },
+    CommandSpec {
+        id: "build.revert",
+        label: "オリジナルに戻す",
+        menu: &["ファイル", "トランスコード"],
+        shortcut: None,
+        params: r#"{"output": "folder" | "iso", "path": string, "cache"?: string, "asset": id} → {"removed": 消したファイルの数}"#,
+        enabled: always_enabled,
+        run: run_revert,
+        journal: false,
+    },
+    CommandSpec {
         id: "asset.transcodeStatus",
         label: "アセットのトランスコードステータス",
         menu: &["アセット"],
@@ -84,6 +104,41 @@ fn status_name(status: TranscodeStatus) -> &'static str {
         TranscodeStatus::Untranscoded => "untranscoded",
         TranscodeStatus::Transcoded => "transcoded",
     }
+}
+
+/// The build a transcode command speaks of: where it writes, and so where its cache is.
+fn transcode_options(params: &Value) -> Result<BuildOptions, String> {
+    let output = parse_output(&req_str(params, "output")?)?;
+    Ok(BuildOptions {
+        output,
+        path: PathBuf::from(req_str(params, "path")?),
+        cache: opt_str(params, "cache")?
+            .filter(|cache| !cache.trim().is_empty())
+            .map(PathBuf::from),
+        audio_language: opt_str(params, "audioLanguage")?
+            .filter(|code| !code.trim().is_empty())
+            .or_else(system_language),
+    })
+}
+
+/// Encore's Transcode Now: makes the build's transcodes (of one asset's timelines, or all) without writing a disc.
+fn run_transcode(session: &mut Session, params: &Value) -> CommandResult {
+    let options = transcode_options(params)?;
+    let asset = crate::params::opt_u64(params, "asset")?.map(disccraft_project::AssetId);
+    let started = std::time::Instant::now();
+    disccraft_build::transcode_now(&session.project, &options, asset, &mut |_, _| {})?;
+    Ok(object(&[(
+        "seconds",
+        Value::from(started.elapsed().as_secs_f64()),
+    )]))
+}
+
+/// Encore's Revert to Original: takes an asset's transcodes out of the build's cache.
+fn run_revert(session: &mut Session, params: &Value) -> CommandResult {
+    let options = transcode_options(params)?;
+    let asset = disccraft_project::AssetId(crate::params::req_u64(params, "asset")?);
+    let removed = disccraft_build::revert_to_original(&session.project, &options, asset)?;
+    Ok(object(&[("removed", Value::from(removed as u64))]))
 }
 
 fn run_build(session: &mut Session, params: &Value) -> CommandResult {

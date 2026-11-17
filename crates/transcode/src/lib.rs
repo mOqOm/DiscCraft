@@ -14,6 +14,8 @@
 )]
 
 mod audio;
+mod file_chapters;
+pub use file_chapters::file_chapters;
 pub mod hd;
 mod media_cache;
 mod mkv_probe;
@@ -288,6 +290,50 @@ fn probe_video_now(input: &Path) -> Result<VideoProbe, TranscodeError> {
         fps,
         wide: is_wide(video.width, video.height, video.par),
         has_audio: source.has_audio(),
+    })
+}
+
+/// Whether the pictures of the video file `input` can be decoded, when that is known without a wait: found out
+/// before (and remembered with the file's other facts), or tried now on a file that is already open. `None`
+/// while the file is not open yet. A file whose picture cannot be decoded cannot be converted either.
+#[must_use]
+pub fn picture_decodes(input: &Path) -> Option<bool> {
+    // That it decodes stays true; that it does not is only this build's verdict (a later build's decoder may
+    // read it), so it is remembered with the build and tried again by another.
+    let not_by_this_build = format!("0:{}", build_tag());
+    match media_cache::fact("picture", input) {
+        Some(known) if known == "1" => return Some(true),
+        Some(known) if known == not_by_this_build => return Some(false),
+        _ => {}
+    }
+    if !media_open(input) {
+        return None;
+    }
+    let decodes = first_frame(input).is_ok();
+    media_cache::remember(
+        "picture",
+        input,
+        if decodes { "1" } else { &not_by_this_build },
+    );
+    Some(decodes)
+}
+
+/// A name for this build of the program: its executable's size and modification time. What a build's decoders
+/// could not read is remembered under it, so that a newer build tries again instead of trusting the old answer.
+#[must_use]
+pub fn build_tag() -> &'static str {
+    static TAG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TAG.get_or_init(|| {
+        let metadata = std::env::current_exe()
+            .ok()
+            .and_then(|exe| std::fs::metadata(exe).ok());
+        let modified = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |since| since.as_secs());
+        let len = metadata.map_or(0, |metadata| metadata.len());
+        format!("{len:x}-{modified:x}")
     })
 }
 

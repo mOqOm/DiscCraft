@@ -120,7 +120,9 @@ impl CheckCategory {
             "timelineBitrateTooHigh" => Self::TimelineBitrate,
             "subtitleTextOverflow" => Self::SubtitleOverflow,
             "subtitleSpacing" => Self::SubtitleSpacing,
-            "assetOffline" | "missingAsset" | "unsupportedMedia" => Self::Media,
+            "assetOffline" | "missingAsset" | "unsupportedMedia" | "undecodableVideo" => {
+                Self::Media
+            }
             "tooManyAudio" | "tooManySubtitles" | "tooManyTitles" => Self::StreamLimits,
             "capacityExceeded" | "lowBitrate" => Self::Capacity,
             _ => Self::Other,
@@ -388,6 +390,10 @@ fn problem_text(problem: &ProblemView) -> String {
         "emptyPlaylist" => tl!("The playlist has no items.").to_owned(),
         "emptyChapterPlaylist" => tl!("The chapter playlist has no entries.").to_owned(),
         "assetOffline" => tl!("The file is offline.").to_owned(),
+        "undecodableVideo" => {
+            tl!("The picture cannot be decoded, so the video cannot be converted for this disc.")
+                .to_owned()
+        }
         "tooManyChapters" => tl!("There are more than 99 chapters.").to_owned(),
         "tooManyAudio" => tl!("There are more than 8 audio tracks.").to_owned(),
         "tooManySubtitles" => tl!("There are more than 32 subtitle tracks.").to_owned(),

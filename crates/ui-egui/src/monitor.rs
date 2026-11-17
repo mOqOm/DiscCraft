@@ -248,8 +248,25 @@ impl DiscCraftApp {
                     );
                     let shown = screen.intersect(area);
                     if let Some(note) = &self.monitor_note {
+                        // Whether the disc takes the video as it is (H.264 a Blu-ray carries) or would have to
+                        // convert it, which it cannot do without the picture.
+                        let asset = self
+                            .monitor_frame
+                            .as_ref()
+                            .map(|(asset, _, _)| disccraft_project::AssetId(*asset));
+                        let fate = match asset.and_then(|asset| self.transcode_state(asset)) {
+                            Some(crate::project_panel::TranscodeState::Unneeded) => {
+                                tl!("This disc carries the video as it is, without converting it.")
+                            }
+                            Some(_) => {
+                                tl!(
+                                    "This disc would have to convert the video, which it cannot do."
+                                )
+                            }
+                            None => "",
+                        };
                         let text = format!(
-                            "{}\n{}",
+                            "{}\n{}\n{fate}",
                             tlf!("The picture cannot be shown: {message}", message = note),
                             tl!("Play to hear the sound.")
                         );

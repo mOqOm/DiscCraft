@@ -3048,6 +3048,32 @@ fn video_status(
     }
 }
 
+/// The video assets the build would convert whose pictures are known not to decode (a codec form the decoder does
+/// not read, such as interlaced H.264): the build would stop at them. Each as its asset id and name. Only what is
+/// known without a wait is told (`disccraft_transcode::picture_decodes`).
+#[must_use]
+pub fn undecodable_videos(project: &Project) -> Vec<(AssetId, String)> {
+    let mut found = Vec::new();
+    for asset in project.assets.values() {
+        if asset.kind != AssetKind::Video
+            || !project
+                .timelines
+                .values()
+                .any(|timeline| timeline.videos().contains(&asset.id))
+        {
+            continue;
+        }
+        let media = asset.media_file();
+        let path: &Path = &media;
+        if video_status(project, path, None, None) == TranscodeStatus::Untranscoded
+            && disccraft_transcode::picture_decodes(path) == Some(false)
+        {
+            found.push((asset.id, asset.name.clone()));
+        }
+    }
+    found
+}
+
 /// Encore's Revert to Original: removes what the cache in `cache_dir` holds of `asset`'s transcodes for a DVD (its
 /// MPEG-2 video for the project's bitrates, its converted sound and what was made from them), so the next build
 /// (or Transcode Now) makes them again. Returns how many files went.

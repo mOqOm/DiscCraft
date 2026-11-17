@@ -120,7 +120,7 @@ impl DiscCraftApp {
             .add_enabled(asset.is_none(), egui::Button::new(tl!("Copy")))
             .clicked()
         {
-            self.project_clipboard = selection;
+            self.copy_item(ui.ctx(), selection);
             ui.close();
         }
         self.paste_item(ui);
@@ -464,8 +464,44 @@ impl DiscCraftApp {
     /// 貼り付け: コピーしてある項目（メニュー、タイムライン、スライドショー、再生リスト、チャプター再生リスト）の
     /// 複製を作って選ぶ。コピーした項目がもうなければ灰色。
     fn paste_item(&mut self, ui: &mut Ui) {
+        let copied = self.copyable_item(self.project_clipboard).is_some();
+        if ui
+            .add_enabled(copied, egui::Button::new(tl!("Paste")))
+            .clicked()
+        {
+            ui.close();
+            self.duplicate_item(self.project_clipboard);
+        }
+    }
+
+    /// Copy of a Project panel item: it is what Paste then makes a copy of. Its name goes to the system clipboard,
+    /// which also makes Ctrl+V reach DiscCraft (the system sends no paste without text to paste).
+    pub(crate) fn copy_item(&mut self, ctx: &Context, selection: Selection) {
+        self.project_clipboard = selection;
+        // What was copied last is what Paste makes.
+        self.button_clipboard.clear();
         let project = &self.session.project;
-        let copied = match self.project_clipboard {
+        let name = match selection {
+            Selection::Timeline(id) => project.timeline(id).map(|item| item.name.clone()),
+            Selection::Menu(id) => project.menu(id).map(|item| item.name.clone()),
+            Selection::Slideshow(id) => project.slideshows.get(&id).map(|item| item.name.clone()),
+            Selection::Playlist(id) => project.playlists.get(&id).map(|item| item.name.clone()),
+            Selection::ChapterPlaylist(id) => project
+                .chapter_playlists
+                .get(&id)
+                .map(|item| item.name.clone()),
+            Selection::None | Selection::Asset(_) => None,
+        };
+        if let Some(name) = name.filter(|name| !name.is_empty()) {
+            ctx.copy_text(name);
+        }
+    }
+
+    /// The kind and id `project.duplicate` takes for `selection`, when it is an item that can be copied and is
+    /// still there (a menu, a timeline, a slideshow, a playlist or a chapter playlist; not an asset).
+    pub(crate) fn copyable_item(&self, selection: Selection) -> Option<(&'static str, u64)> {
+        let project = &self.session.project;
+        match selection {
             Selection::Timeline(id) => project.timeline(id).is_some().then_some(("timeline", id.0)),
             Selection::Menu(id) => project.menu(id).is_some().then_some(("menu", id.0)),
             Selection::Slideshow(id) => project
@@ -481,15 +517,13 @@ impl DiscCraftApp {
                 .contains_key(&id)
                 .then_some(("chapterPlaylist", id)),
             Selection::None | Selection::Asset(_) => None,
-        };
-        if !ui
-            .add_enabled(copied.is_some(), egui::Button::new(tl!("Paste")))
-            .clicked()
-        {
-            return;
         }
-        ui.close();
-        let Some((kind, id)) = copied else {
+    }
+
+    /// Makes a copy of the item `selection` names and selects it (Encore: Paste after Copy, or Duplicate, in the
+    /// Project panel).
+    pub(crate) fn duplicate_item(&mut self, selection: Selection) {
+        let Some((kind, id)) = self.copyable_item(selection) else {
             return;
         };
         let made = self

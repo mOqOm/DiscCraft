@@ -49,11 +49,32 @@ pub(crate) enum ProjectColumn {
     Description,
     Modified,
     Path,
+    /// The file's average bitrate (Encore's ビットレート column).
+    Bitrate,
 }
 
 impl ProjectColumn {
-    /// 全列（表と「列の表示 / 非表示」の並び）。
-    pub(crate) const ALL: [ProjectColumn; 13] = [
+    /// The columns in the order they are shown (the table and Show / Hide Columns): Encore's, with the bitrate
+    /// after the size.
+    pub(crate) const SHOWN: [ProjectColumn; 14] = [
+        ProjectColumn::Name,
+        ProjectColumn::Type,
+        ProjectColumn::Duration,
+        ProjectColumn::Dimensions,
+        ProjectColumn::DvdStatus,
+        ProjectColumn::DvdSettings,
+        ProjectColumn::BlurayStatus,
+        ProjectColumn::BluraySettings,
+        ProjectColumn::Size,
+        ProjectColumn::Bitrate,
+        ProjectColumn::Category,
+        ProjectColumn::Description,
+        ProjectColumn::Modified,
+        ProjectColumn::Path,
+    ];
+
+    /// 全列。並びは列の番号（保存してある列の幅と並べ替えの列）なので変えず、新しい列は後ろに足す。
+    pub(crate) const ALL: [ProjectColumn; 14] = [
         ProjectColumn::Name,
         ProjectColumn::Type,
         ProjectColumn::Duration,
@@ -67,6 +88,7 @@ impl ProjectColumn {
         ProjectColumn::Description,
         ProjectColumn::Modified,
         ProjectColumn::Path,
+        ProjectColumn::Bitrate,
     ];
 
     /// 見出し。
@@ -81,6 +103,7 @@ impl ProjectColumn {
             ProjectColumn::BlurayStatus => tl!("Blu-ray Transcode Status"),
             ProjectColumn::BluraySettings => tl!("Blu-ray Transcode Settings"),
             ProjectColumn::Size => tl!("Size"),
+            ProjectColumn::Bitrate => tl!("Bitrate"),
             ProjectColumn::Category => tl!("Media Category"),
             ProjectColumn::Description => tl!("Description"),
             ProjectColumn::Modified => tl!("Last Modified"),
@@ -96,6 +119,7 @@ impl ProjectColumn {
                 | ProjectColumn::Category
                 | ProjectColumn::Description
                 | ProjectColumn::Path
+                | ProjectColumn::Bitrate
         )
     }
 
@@ -558,7 +582,7 @@ impl DiscCraftApp {
         });
         let fill = crate::theme::TableFill::new(ui, "project_grid");
         let mut sort = self.table_sort("project_grid");
-        let columns: Vec<ProjectColumn> = ProjectColumn::ALL
+        let columns: Vec<ProjectColumn> = ProjectColumn::SHOWN
             .into_iter()
             .filter(|column| self.project_column_shown(*column))
             .collect();
@@ -851,6 +875,7 @@ impl DiscCraftApp {
                 .size
                 .map(crate::build_panel::format_bytes)
                 .unwrap_or_default(),
+            ProjectColumn::Bitrate => row_bitrate(row).map(bitrate_text).unwrap_or_default(),
             ProjectColumn::Category => row.category.to_owned(),
             ProjectColumn::Description => row.description.clone(),
             ProjectColumn::Modified => row.modified.map(modified_text).unwrap_or_default(),
@@ -891,7 +916,7 @@ impl DiscCraftApp {
             ui.close();
         }
         let _ = ui.menu_button(tl!("Show / Hide Columns"), |ui| {
-            for candidate in ProjectColumn::ALL {
+            for candidate in ProjectColumn::SHOWN {
                 let mut shown = self.project_column_shown(candidate);
                 if ui
                     .add_enabled(
@@ -1297,7 +1322,7 @@ impl DiscCraftApp {
         }
 
         // Not waited for: a long file is opened on a thread of its own, and asked about again once it is open.
-        let value = self.run_query(
+        let value = self.run_query_quiet(
             "asset.thumbnail",
             serde_json::json!({ "asset": id.0, "wait": false }),
         );
@@ -1803,6 +1828,22 @@ pub(crate) fn draw_fitted(
     );
 }
 
+/// The average bitrate of a row's file, bits a second: its size over its length (`None` for what has no file or
+/// no length: stills, menus, timelines).
+fn row_bitrate(row: &ProjectRow) -> Option<f64> {
+    let seconds = row.seconds.filter(|seconds| *seconds > 0.0)?;
+    Some(row.size? as f64 * 8.0 / seconds)
+}
+
+/// A bitrate as "8.25 Mbps" or "192 kbps".
+fn bitrate_text(bits_per_second: f64) -> String {
+    if bits_per_second >= 1_000_000.0 {
+        format!("{:.2} Mbps", bits_per_second / 1_000_000.0)
+    } else {
+        format!("{:.0} kbps", bits_per_second / 1000.0)
+    }
+}
+
 /// プロジェクトの表の並べ替えの鍵（列は `ProjectColumn::ALL` の番号）。
 fn project_sort_key(row: &ProjectRow, column: usize, kind: DiscKind) -> crate::theme::SortKey {
     use crate::theme::SortKey;
@@ -1836,6 +1877,7 @@ fn project_sort_key(row: &ProjectRow, column: usize, kind: DiscKind) -> crate::t
             // Sizes fit in f64 well enough for ordering.
             SortKey::Number(size as f64)
         }),
+        Some(ProjectColumn::Bitrate) => row_bitrate(row).map_or(SortKey::None, SortKey::Number),
         Some(ProjectColumn::Category) => text(row.category.to_owned()),
         Some(ProjectColumn::Description) => text(row.description.clone()),
         // Seconds since 1970: exact in f64 for any file date.

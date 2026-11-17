@@ -29,6 +29,20 @@ pub fn check_project(project: &Project) -> Vec<Problem> {
     let base_errors = has_errors(&problems);
 
     reach::check(project, &mut problems);
+    // A video the build would have to convert but whose picture does not decode: the build would stop at it.
+    problems.extend(
+        disccraft_dvd::undecodable_videos(project)
+            .into_iter()
+            .map(|(asset, name)| {
+                error(
+                    "undecodableVideo",
+                    format!(
+                        "asset {} \"{name}\": the picture cannot be decoded, so the video cannot be converted for this disc",
+                        asset.0
+                    ),
+                )
+            }),
+    );
 
     if !base_errors {
         check_navigation(project, &mut problems);

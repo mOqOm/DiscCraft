@@ -1213,7 +1213,7 @@ impl DiscCraftApp {
             return cached.clone();
         }
         // Not waited for: asked again once the file is open.
-        let value = self.run_query(
+        let value = self.run_query_quiet(
             "asset.frame",
             serde_json::json!({
                 "asset": asset.0,
@@ -1250,7 +1250,7 @@ impl DiscCraftApp {
         if let Some(cached) = self.first_frames.get(&asset.0) {
             return cached.clone();
         }
-        let value = self.run_query(
+        let value = self.run_query_quiet(
             "asset.frame",
             serde_json::json!({ "asset": asset.0, "seconds": 0.0, "wait": false }),
         );

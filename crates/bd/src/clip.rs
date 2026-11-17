@@ -174,7 +174,17 @@ fn build_inputs(
             units: video_units(title)?,
         },
     };
-    let (audio_inputs, mut streams) = audio_inputs(title)?;
+    let (mut audio_inputs, mut streams) = audio_inputs(title)?;
+    // The title is as long as its video: sound that goes on past the last HD picture is left off (an SD title's
+    // was cut when it was loaded).
+    if let Some(hd) = hd
+        && let Some(last) = video.units.iter().map(|unit| unit.pts).max()
+    {
+        let end = last.saturating_add(u64::try_from(hd.frame_90k()).unwrap_or(0));
+        for input in &mut audio_inputs {
+            input.units.retain(|unit| unit.pts < end);
+        }
+    }
     let (pg_inputs, pg_streams) = match hd {
         Some(hd) => pg_inputs(&hd.subtitles, (hd.width, hd.height))?,
         None => pg_inputs(
