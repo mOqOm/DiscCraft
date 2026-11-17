@@ -43,6 +43,9 @@ impl PrefsCategory {
     }
 }
 
+/// The height of the dialog's pages.
+const PAGE_HEIGHT: f32 = 190.0;
+
 /// 環境設定ダイアログの状態。
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct PrefsWindow {
@@ -59,19 +62,34 @@ impl DiscCraftApp {
             return;
         }
 
-        let mut open = self.prefs.open;
-        let _ = egui::Window::new(tl!("Preferences"))
-            .id(Id::unique("prefs_window"))
-            .open(&mut open)
-            .resizable(false)
-            .default_size([480.0, 220.0])
-            .show(ctx, |ui| self.prefs_contents(ui));
-        self.prefs.open = open;
+        // As FilmCraft's Preferences: a dialog in the middle of the window, over the dimmed interface, with its
+        // title on top. The settings take effect as they are changed, so the one button closes it (Esc and a click
+        // outside do too).
+        let mut close = false;
+        let response = egui::Modal::new(Id::unique("prefs_window")).show(ctx, |ui| {
+            ui.set_width(480.0);
+            ui.vertical_centered(|ui| ui.strong(tl!("Preferences")));
+            ui.separator();
+            ui.add_space(4.0);
+            self.prefs_contents(ui);
+            ui.add_space(4.0);
+            ui.separator();
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button(tl!("Close")).clicked() {
+                    close = true;
+                }
+            });
+        });
+        if close || response.should_close() {
+            self.prefs.open = false;
+        }
     }
 
     /// 左の分類と右の設定。
     fn prefs_contents(&mut self, ui: &mut Ui) {
         ui.horizontal_top(|ui| {
+            // As tall as its pages: the line between the list and the page would take all the height there is.
+            ui.set_max_height(PAGE_HEIGHT);
             ui.vertical(|ui| {
                 ui.set_width(110.0);
                 for category in PrefsCategory::ALL {
@@ -85,7 +103,7 @@ impl DiscCraftApp {
             });
             ui.separator();
             ui.vertical(|ui| {
-                ui.set_min_height(170.0);
+                ui.set_min_height(PAGE_HEIGHT);
                 match self.prefs.category {
                     PrefsCategory::General => self.prefs_general(ui),
                     PrefsCategory::Timelines => self.prefs_timelines(ui),

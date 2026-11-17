@@ -113,6 +113,27 @@ pub fn hd_transcoded(
     project.settings.kind == DiscKind::BluRay && hd::hd_transcoded(project, cache_dir, asset)
 }
 
+/// Encore's Revert to Original for a Blu-ray: removes `asset`'s transcodes from `cache_dir` (the HD video of the
+/// clips that play it, its converted sound, and its SD video on an SD disc); returns how many files went.
+///
+/// # Errors
+///
+/// When the cache folder cannot be read.
+pub fn revert_transcodes(
+    project: &Project,
+    cache_dir: &Path,
+    asset: disccraft_project::AssetId,
+) -> Result<usize, BdError> {
+    let hd = if project.settings.bd_video.hd().is_some() {
+        hd::revert_hd(project, cache_dir, asset)
+    } else {
+        0
+    };
+    disccraft_dvd::revert_transcodes(project, cache_dir, asset)
+        .map(|removed| removed + hd)
+        .map_err(|error| BdError::Prepare(error.to_string()))
+}
+
 /// Encore's Transcode Now for a Blu-ray: makes the video and sound a build of `project` would make and keeps them
 /// in `cache_dir`, where the build then finds them. With `only`, just those of the timelines that play that asset.
 ///

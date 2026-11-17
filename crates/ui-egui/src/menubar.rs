@@ -43,6 +43,9 @@ impl DiscCraftApp {
         let mut clicked = Vec::new();
 
         egui::containers::menu::MenuBar::new().ui(ui, |ui| {
+            // Room around the menus' names, as Encore's menu bar has (the names were packed together).
+            ui.spacing_mut().button_padding = egui::vec2(9.0, 3.0);
+            ui.spacing_mut().item_spacing.x = 2.0;
             ui.menu_button(tl!("File"), |ui| self.file_menu(ui, &mut clicked));
             ui.menu_button(tl!("Edit"), |ui| self.edit_menu(ui, &mut clicked));
             ui.menu_button(tl!("Object"), |ui| self.object_items(ui, &mut clicked));

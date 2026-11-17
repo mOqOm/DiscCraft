@@ -72,6 +72,7 @@ fn project(video: &Path, audio: &Path) -> Project {
     p.timeline_mut(t).unwrap().audio.push(AudioTrack {
         asset: a,
         language: "ja".to_string(),
+        start: 0,
     });
     let srt = fixtures().join("bd_sub.srt");
     std::fs::write(

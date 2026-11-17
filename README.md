@@ -84,6 +84,13 @@ What works today:
 Rust stable 1.95 or newer (rustup). Windows comes first; macOS and Linux are also targets. On Linux, playback audio (cpal) needs
 the ALSA development packages (`libasound2-dev` on Debian / Ubuntu, `alsa-lib-devel` on Fedora).
 
+Besides Windows (x64), the releases carry builds for Linux (`tar.gz` for x86_64 and aarch64) and macOS (a `zip` with Apple
+silicon and Intel in one). **The Linux and macOS builds have not been verified**: they are built automatically on GitHub's
+runners and nothing more; nobody has opened their window or checked a disc they made. Only Windows is verified. The macOS
+build is neither signed nor notarized, so Gatekeeper stops it the first time (open it from the right-click menu, or remove the
+mark with `xattr -d com.apple.quarantine`). Running the Linux build needs ALSA (`libasound2`) and the X11 or Wayland libraries.
+Reports of what works and what does not are welcome.
+
 ## Building and usage
 
 ```

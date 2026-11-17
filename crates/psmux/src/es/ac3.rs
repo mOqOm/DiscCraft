@@ -43,6 +43,20 @@ pub fn first_frame_bit_rate_kbps(data: &[u8]) -> Option<u32> {
         .map(|header| header.bit_rate_kbps)
 }
 
+/// What the first frame of an AC-3 stream states, from the stream's first bytes alone: sample rate (Hz), bit rate
+/// (kbit/s), coding mode (acmod) and whether there is an LFE channel.
+#[must_use]
+pub fn first_frame_format(data: &[u8]) -> Option<(u32, u32, u8, bool)> {
+    parse_ac3_header(data, 0).ok().map(|header| {
+        (
+            header.sample_rate,
+            header.bit_rate_kbps,
+            header.acmod,
+            header.lfe,
+        )
+    })
+}
+
 /// Parse an AC-3 elementary stream.
 pub fn parse_ac3(data: &[u8], start_pts: i64) -> Result<Ac3Stream, EsError> {
     let mut frames = Vec::new();

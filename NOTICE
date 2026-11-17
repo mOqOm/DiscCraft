@@ -46,7 +46,8 @@ Pinned revision: b47a58653c291f320179d20db3eafb40e70b88a7
 
 This product includes software from craft-libs (https://github.com/storytold/craft-libs), licensed under the MIT License
 or the Apache License 2.0, at your option. FilmCraft, PhotoCraft, EffectCraft and SoundCraft pull in its crates at their own
-revisions. DiscCraft uses directly craft-audio (its AC-3 encoder, which makes the transcoded soundtracks Dolby Digital;
+revisions. DiscCraft uses directly craft-audio (its AC-3 encoder, which makes the transcoded soundtracks Dolby Digital, and its
+AC-3 decoder, with which a raw AC-3 file is heard in the monitor;
 revision 82062077bba679ba5236e2d1a391f02d1533cbab), craft-video (its H.264 encoder, formerly FilmCraft's
 filmcraft-h264enc, which makes the HD Blu-ray video; the same revision; in tests also its MPEG-2 decoder), craft-media
 (its MPEG-2 Systems, Matroska and MP4 readers, which take out video and audio that fit a disc as they are; the same

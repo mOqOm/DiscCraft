@@ -202,6 +202,10 @@ struct TrackRow {
     asset: disccraft_project::AssetId,
     /// An audio track's waveform peaks, once worked out.
     peaks: Option<crate::waveforms::Peaks>,
+    /// Where an audio track's clip starts on the timeline, seconds.
+    start: f64,
+    /// How long an audio track's clip is, seconds (`None` until its file has been read: drawn to the end).
+    length: Option<f64>,
 }
 
 /// Owned snapshot of timeline data used for drawing and interaction.
@@ -269,6 +273,8 @@ struct TimelineFrame<'a> {
     show_names: bool,
     /// A video clip being dragged along the track: the clip and how far, in seconds.
     clip_move: Option<(usize, f64)>,
+    /// An audio track's clip being dragged along its track: the track and how far, in seconds.
+    audio_move: Option<(usize, f64)>,
 }
 
 /// Timeline view methods for the desktop application.
@@ -443,6 +449,16 @@ impl DiscCraftApp {
             first,
             last,
             show_names: self.show_chapter_names,
+            audio_move: ui
+                .data(|data| {
+                    data.get_temp::<(usize, f32, f32)>(timeline_key("audio_move_drag", id.0))
+                })
+                .map(|(track, pressed_x, now_x)| {
+                    (
+                        track,
+                        f64::from(now_x - pressed_x) / (f64::from(BASE_SCALE) * f64::from(zoom)),
+                    )
+                }),
             clip_move: ui
                 .data(|data| {
                     data.get_temp::<(usize, f32, f32)>(timeline_key("clip_move_drag", id.0))
@@ -515,8 +531,8 @@ impl DiscCraftApp {
     }
 
     /// Builds an owned snapshot of the timeline data needed by the view.
-    fn timeline_snapshot(&self, id: TimelineId) -> Option<TimelineSnapshot> {
-        let timeline = self.session.project.timeline(id)?;
+    fn timeline_snapshot(&mut self, id: TimelineId) -> Option<TimelineSnapshot> {
+        let timeline = &self.session.project.timeline(id)?.clone();
         let (fps_num, fps_den) = frame_rate(self.session.project.settings.standard);
 
         let asset_name = match self.session.project.assets.get(&timeline.video) {
@@ -580,7 +596,14 @@ impl DiscCraftApp {
     }
 
     /// Track rows for the audio and subtitle tracks of `timeline`.
-    fn track_rows(&self, timeline: &disccraft_project::Timeline) -> Vec<TrackRow> {
+    fn track_rows(&mut self, timeline: &disccraft_project::Timeline) -> Vec<TrackRow> {
+        let (num, den) = frame_rate(self.session.project.settings.standard);
+        let frame = f64::from(den.max(1)) / f64::from(num.max(1));
+        let lengths: Vec<Option<f64>> = timeline
+            .audio
+            .iter()
+            .map(|track| self.asset_probe(track.asset).seconds)
+            .collect();
         let name = |asset: &disccraft_project::AssetId| {
             self.session
                 .project
@@ -602,6 +625,8 @@ impl DiscCraftApp {
                 cues: None,
                 asset: track.asset,
                 peaks: None,
+                start: f64::from(track.start) * frame,
+                length: lengths.get(index).copied().flatten(),
             });
         let subtitles = timeline
             .subtitles
@@ -616,6 +641,8 @@ impl DiscCraftApp {
                 cues: self.cached_cues(track.asset),
                 asset: track.asset,
                 peaks: None,
+                start: 0.0,
+                length: None,
             });
         audio.chain(subtitles).collect()
     }
@@ -1158,6 +1185,54 @@ impl DiscCraftApp {
                 ui.data_mut(|data| data.insert_temp(move_key, (clip, pressed_x, now_x)));
                 ui.ctx().request_repaint();
             }
+            return;
+        }
+        // An audio track's clip being dragged (Encore: moving an audio clip along its track). On release the engine
+        // starts its sound at the nearest frame.
+        let audio_key = timeline_key("audio_move_drag", frame.snapshot.id);
+        if let Some((track, pressed_x, _)) =
+            ui.data(|data| data.get_temp::<(usize, f32, f32)>(audio_key))
+        {
+            let now_x = pointer.map_or(pressed_x, |point| point.x);
+            if ui.input(|input| input.pointer.any_released()) {
+                ui.data_mut(|data| data.remove::<(usize, f32, f32)>(audio_key));
+                let start = frame
+                    .snapshot
+                    .tracks
+                    .iter()
+                    .find(|row| !row.subtitle && row.index == track)
+                    .map(|row| row.start);
+                // A press and release without moving is a click, not a move.
+                if (now_x - pressed_x).abs() >= 3.0
+                    && let Some(start) = start
+                {
+                    let shift = f64::from(now_x - pressed_x)
+                        / (f64::from(BASE_SCALE) * f64::from(frame.zoom));
+                    let _ = self.run_command(
+                        "timeline.moveAudio",
+                        json!({
+                            "timeline": frame.snapshot.id,
+                            "track": track,
+                            "time": seconds_to_ticks((start + shift).max(0.0)),
+                        }),
+                    );
+                }
+            } else {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                ui.data_mut(|data| data.insert_temp(audio_key, (track, pressed_x, now_x)));
+                ui.ctx().request_repaint();
+            }
+            return;
+        }
+        if let Some(point) = pointer
+            && frame.canvas.contains(point)
+            && response.contains_pointer()
+            && interaction.drag.is_none()
+            && let Some(track) = audio_clip_at(frame, point)
+            && ui.input(|input| input.pointer.button_pressed(egui::PointerButton::Primary))
+            && !ui.input(|input| input.pointer.any_released())
+        {
+            ui.data_mut(|data| data.insert_temp(audio_key, (track, point.x, point.x)));
             return;
         }
         if let Some(point) = pointer
@@ -1730,6 +1805,36 @@ fn language_list(
     chosen
 }
 
+/// Where an audio track's clip is on the timeline, seconds: from its start for its length (to the end of the
+/// timeline while its length is not known).
+fn audio_clip_span(track: &TrackRow, duration: f64) -> (f64, f64) {
+    let end = track
+        .length
+        .map_or(duration.max(track.start), |length| track.start + length);
+    (track.start, end.max(track.start))
+}
+
+/// The audio track whose clip is under `point` (its index among the audio tracks).
+fn audio_clip_at(frame: &TimelineFrame<'_>, point: egui::Pos2) -> Option<usize> {
+    if point.x < frame.origin_x {
+        return None;
+    }
+    let seconds = x_to_time(point.x, frame.origin_x, frame.zoom);
+    frame
+        .snapshot
+        .tracks
+        .iter()
+        .zip(track_rows_geometry(&frame.snapshot.tracks))
+        .find_map(|(track, (top, height))| {
+            let rows = (frame.canvas.min.y + top)..=(frame.canvas.min.y + top + height);
+            if track.subtitle || !rows.contains(&point.y) {
+                return None;
+            }
+            let (start, end) = audio_clip_span(track, frame.duration);
+            (seconds >= start && seconds < end).then_some(track.index)
+        })
+}
+
 /// Draws one clip per audio track (the Craft audio clip colour, its name band) and each subtitle track's cues.
 fn draw_track_bars(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
     let origin_x = frame.origin_x;
@@ -1752,6 +1857,18 @@ fn draw_track_bars(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
             draw_cues(painter, frame, lane, cues);
             continue;
         }
+        if track.subtitle {
+            continue;
+        }
+        // The audio clip: where its sound starts (it may have been moved along the track), for its length.
+        let (start, end) = audio_clip_span(track, frame.duration);
+        let lane = Rect::from_min_max(
+            egui::pos2(time_to_x(start, origin_x, frame.zoom), lane.min.y),
+            egui::pos2(time_to_x(end, origin_x, frame.zoom), lane.max.y),
+        );
+        if lane.width() <= 0.0 {
+            continue;
+        }
         craft_timeline::clip_body(painter, lane, craft_timeline::style::CLIP_AUDIO);
         if let Some(peaks) = &track.peaks {
             let pps = f64::from(BASE_SCALE) * f64::from(frame.zoom);
@@ -1759,11 +1876,23 @@ fn draw_track_bars(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
                 painter,
                 lane,
                 peaks,
-                |x| f64::from(x - origin_x) / pps,
+                |x| f64::from(x - origin_x) / pps - start,
                 craft_timeline::darker(craft_timeline::style::CLIP_AUDIO),
             );
         }
         craft_timeline::clip_name_and_edges(painter, lane, &track.clip, true, true);
+        // Being dragged: an outline where it would start.
+        if let Some((moved, shift)) = frame.audio_move
+            && moved == track.index
+        {
+            let by = time_to_x((start + shift).max(0.0), origin_x, frame.zoom) - lane.min.x;
+            let _ = painter.rect_stroke(
+                lane.translate(egui::vec2(by, 0.0)),
+                2.0,
+                egui::Stroke::new(1.5, craft_timeline::style::RULER_TEXT),
+                egui::StrokeKind::Inside,
+            );
+        }
     }
 }
 

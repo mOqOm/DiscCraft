@@ -35,7 +35,8 @@ pub struct PlayerAudio {
     /// The output device's sample rate (Hz).
     pub rate: u32,
     /// Where in the audio file to start (seconds), when that is not the picture's start position: a timeline's
-    /// audio track runs along the whole timeline while the picture is one of its clips.
+    /// audio track runs along the whole timeline while the picture is one of its clips. Negative when the sound
+    /// starts later than the playback does (an audio clip moved along its track): that long is silent first.
     pub from: Option<f64>,
 }
 
@@ -461,10 +462,7 @@ impl Player {
         let audio = audio
             .filter(|audio| AUDIO_RATES.contains(&audio.rate))
             .map(|audio| {
-                let audio_from = audio
-                    .from
-                    .filter(|at| at.is_finite())
-                    .map_or(from, |at| at.max(0.0));
+                let audio_from = audio.from.filter(|at| at.is_finite()).unwrap_or(from);
                 start_audio(audio, audio_from, clock, &stop)
             });
 
@@ -586,17 +584,32 @@ fn decode_audio(
     let reader = AudioReader::open(&audio.path).map_err(|error| error.to_string())?;
     let rate = f64::from(audio.rate);
     // `as` saturates; `from` is a position in a file of at most hours.
-    let mut position = (from * rate) as u64;
+    let mut position = (from.max(0.0) * rate) as u64;
+    // Frames of silence before the sound starts (a negative `from`).
+    let mut silence = ((-from).max(0.0) * rate) as u64;
     let ahead = (AUDIO_AHEAD * rate) as usize;
     let chunk = ((AUDIO_CHUNK * rate) as usize).max(1);
     while !stop.load(Ordering::Relaxed) {
         let queued = {
             let mut queue = shared.queue.lock().map_err(|error| error.to_string())?;
-            position = position.saturating_add(std::mem::take(&mut queue.skip));
+            // What the output skipped to catch up comes off the silence first, then off the sound.
+            let skip = std::mem::take(&mut queue.skip);
+            let from_silence = skip.min(silence);
+            silence -= from_silence;
+            position = position.saturating_add(skip - from_silence);
             queue.samples.len() / 2
         };
         if queued >= ahead {
             thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+        if silence > 0 {
+            let frames = silence.min(chunk as u64);
+            silence -= frames;
+            let mut queue = shared.queue.lock().map_err(|error| error.to_string())?;
+            queue
+                .samples
+                .extend(std::iter::repeat_n(0.0, frames as usize * 2));
             continue;
         }
         let samples = reader

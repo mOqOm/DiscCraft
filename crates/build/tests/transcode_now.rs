@@ -4,7 +4,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use disccraft_build::{
-    BuildOptions, OutputKind, TranscodeStatus, build, cache_dir, transcode_now, transcode_status,
+    BuildOptions, OutputKind, TranscodeStatus, build, cache_dir, revert_to_original, transcode_now,
+    transcode_status,
 };
 use disccraft_project::{BdVideo, DiscKind, Link, Project};
 use std::path::{Path, PathBuf};
@@ -109,6 +110,16 @@ fn transcode_now_fills_the_builds_cache() {
     assert_eq!(report.titles, 2);
     assert!(again < std::time::Duration::from_secs(5), "{again:?}");
 
+    // Revert to Original: one asset's transcodes go, the other's stay; the build makes them again.
+    assert!(revert_to_original(&project, &options, a).unwrap() >= 2);
+    assert_eq!(
+        status(&project),
+        (TranscodeStatus::Untranscoded, TranscodeStatus::Transcoded)
+    );
+    assert_eq!(revert_to_original(&project, &options, a).unwrap(), 0);
+    transcode_now(&project, &options, Some(a), &mut |_, _| {}).unwrap();
+    assert_eq!(status(&project).0, TranscodeStatus::Transcoded);
+
     // An HD Blu-ray: its titles' H.264 is made ahead in the same way.
     project.settings.kind = DiscKind::BluRay;
     project.settings.bd_video = BdVideo::Hd720p59;
@@ -139,6 +150,13 @@ fn transcode_now_fills_the_builds_cache() {
         hd_status(&project),
         (TranscodeStatus::Transcoded, TranscodeStatus::Transcoded)
     );
+    assert!(revert_to_original(&project, &hd, b).unwrap() >= 2);
+    assert_eq!(
+        hd_status(&project),
+        (TranscodeStatus::Transcoded, TranscodeStatus::Untranscoded)
+    );
+    transcode_now(&project, &hd, Some(b), &mut |_, _| {}).unwrap();
+    assert_eq!(hd_status(&project).1, TranscodeStatus::Transcoded);
     // Trimming a clip asks for another encode.
     let second = *project.timelines.keys().nth(1).unwrap();
     project.timelines.get_mut(&second).unwrap().video_trims = vec![disccraft_project::ClipTrim {

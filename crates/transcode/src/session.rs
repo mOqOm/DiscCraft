@@ -108,6 +108,9 @@ enum Craft {
     Session,
     /// An EffectCraft project: rendered to an MP4.
     Composition,
+    /// A raw Dolby Digital file (not a Craft document, but opened the same way): decoded to a stereo WAV, for the
+    /// monitor's sound and the waveform (`crate::raw_ac3`).
+    Ac3,
 }
 
 impl Craft {
@@ -116,6 +119,8 @@ impl Craft {
             Some(Self::Session)
         } else if disccraft_motion::is_project(path) {
             Some(Self::Composition)
+        } else if crate::raw_ac3::is_raw_ac3(path) {
+            Some(Self::Ac3)
         } else {
             None
         }
@@ -123,7 +128,7 @@ impl Craft {
 
     fn extension(self) -> &'static str {
         match self {
-            Self::Session => "wav",
+            Self::Session | Self::Ac3 => "wav",
             Self::Composition => "mp4",
         }
     }
@@ -193,6 +198,7 @@ pub(crate) fn resolved(media: &Path) -> Result<Cow<'_, Path>, TranscodeError> {
                 .map(|_| ())
                 .map_err(|error| TranscodeError::Decode(error.to_string()))
         }
+        Craft::Ac3 => crate::raw_ac3::decode_to_wav(path, &part),
     };
     if let Err(error) = made {
         let _ = std::fs::remove_file(&part);

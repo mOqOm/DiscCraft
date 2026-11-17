@@ -315,6 +315,48 @@ impl Source<'_> {
     }
 }
 
+/// One AC-3 frame (1536 samples at 48 kHz) of silence in the form of a stream with coding mode `acmod`, an LFE
+/// channel or not, at `kbps`: to put in front of such a stream so that its sound starts later, without decoding it.
+///
+/// # Errors
+///
+/// [`Ac3Error::Encoder`] when the encoder does not make that form.
+pub fn silent_frame(acmod: u8, lfe: bool, kbps: u32) -> Result<Vec<u8>, Ac3Error> {
+    let mode = match acmod {
+        0 => CodingMode::DualMono,
+        1 => CodingMode::Mono,
+        2 => CodingMode::Stereo,
+        3 => CodingMode::ThreeFront,
+        4 => CodingMode::StereoSurround,
+        5 => CodingMode::ThreeFrontSurround,
+        6 => CodingMode::StereoTwoSurround,
+        7 => CodingMode::ThreeFrontTwoSurround,
+        other => return Err(Ac3Error::Encoder(format!("unknown coding mode {other}"))),
+    };
+    let failed = |error: craft_audio::ac3::encoder::Error| Ac3Error::Encoder(error.to_string());
+    let mut encoder = Encoder::new(Config {
+        codec: Codec::Ac3,
+        sample_rate: SAMPLE_RATE,
+        bitrate_kbps: kbps,
+        mode,
+        lfe,
+    })
+    .map_err(failed)?;
+    let channels = mode.channels() + usize::from(lfe);
+    // A few frames of silence; the last is one the encoder makes once it has only silence behind it.
+    let plane = vec![0.0_f32; FRAME_SAMPLES * 4];
+    let planes: Vec<&[f32]> = (0..channels).map(|_| plane.as_slice()).collect();
+    let mut packets = encoder.push(&planes).map_err(failed)?;
+    packets.extend(encoder.finish().map_err(failed)?.packets);
+    let frame = packets
+        .into_iter()
+        .rev()
+        .map(|packet| packet.data)
+        .find(|data| data.len() == frame_len(kbps))
+        .ok_or_else(|| Ac3Error::Encoder("no silent frame was made".to_string()))?;
+    Ok(frame)
+}
+
 /// Reads until `buf` is full or the file ends; returns the bytes read.
 fn read_up_to(reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut total = 0;
@@ -520,6 +562,17 @@ mod tests {
             different.is_empty() && one.len() == many.len(),
             "{different:?}"
         );
+    }
+
+    #[test]
+    fn silent_frames_take_the_form_asked_for() {
+        // Stereo at 192 kbit/s, and 5.1 at 448: frames of 768 and 1792 bytes that start with the sync word.
+        for (acmod, lfe, kbps) in [(2u8, false, 192u32), (7, true, 448), (1, false, 96)] {
+            let frame = silent_frame(acmod, lfe, kbps).unwrap();
+            assert_eq!(frame.len(), kbps as usize * 4, "{acmod} {lfe} {kbps}");
+            assert_eq!(&frame[..2], &[0x0B, 0x77]);
+        }
+        assert!(silent_frame(9, false, 192).is_err());
     }
 
     #[test]

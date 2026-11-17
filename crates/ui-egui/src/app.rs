@@ -37,6 +37,8 @@ pub(crate) enum Selection {
 pub struct DiscCraftApp {
     pub(crate) session: Session,
     pub(crate) selection: Selection,
+    /// The item copied in the Project panel (Copy in its right-click menu), for Paste to make a copy of.
+    pub(crate) project_clipboard: Selection,
     pub(crate) status: String,
     pub(crate) language: Language,
     /// 使っているワークスペース。
@@ -316,6 +318,7 @@ impl DiscCraftApp {
         Self {
             session: Session::new(),
             selection: Selection::None,
+            project_clipboard: Selection::None,
             status: tl!("DiscCraft started").to_string(),
             language,
             workspace,
@@ -911,6 +914,7 @@ impl DiscCraftApp {
 
     fn reset_state(&mut self) {
         self.selection = Selection::None;
+        self.project_clipboard = Selection::None;
         self.last_menu = None;
         self.last_timeline = None;
         self.last_slideshow = None;
