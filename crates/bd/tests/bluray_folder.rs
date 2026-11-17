@@ -877,17 +877,24 @@ fn video_md5(ffmpeg: &Path, file: &Path) -> String {
 /// its decode times are worked out) and times rounded to milliseconds; the clip decodes to the same pictures.
 #[test]
 fn interlaced_h264_in_an_mkv_goes_on_a_1080i_disc_as_it_is() {
-    interlaced_h264_goes_on_a_1080i_disc_as_it_is("mkv");
+    interlaced_h264_goes_on_a_1080i_disc_as_it_is("mkv", 1920);
+}
+
+/// M10.20: the anamorphic 1440 x 1080 of HDV and AVCHD camcorders is a Blu-ray's video too, and goes on the disc
+/// as it is.
+#[test]
+fn anamorphic_1440_wide_h264_goes_on_a_1080i_disc_as_it_is() {
+    interlaced_h264_goes_on_a_1080i_disc_as_it_is("mkv", 1440);
 }
 
 /// M10.17: the same from an MP4 file, whose samples have their own decode times and whose key frames are its sync
 /// samples.
 #[test]
 fn interlaced_h264_in_an_mp4_goes_on_a_1080i_disc_as_it_is() {
-    interlaced_h264_goes_on_a_1080i_disc_as_it_is("mp4");
+    interlaced_h264_goes_on_a_1080i_disc_as_it_is("mp4", 1920);
 }
 
-fn interlaced_h264_goes_on_a_1080i_disc_as_it_is(container: &str) {
+fn interlaced_h264_goes_on_a_1080i_disc_as_it_is(container: &str, width: u32) {
     let (Some(ffmpeg), Some(ffprobe)) = (
         tool("DISCCRAFT_FFMPEG", "ffmpeg"),
         tool("DISCCRAFT_FFPROBE", "ffprobe"),
@@ -895,17 +902,18 @@ fn interlaced_h264_goes_on_a_1080i_disc_as_it_is(container: &str) {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };
-    let video = fixtures().join(format!("h264_1080i.{container}"));
+    let name = if width == 1920 {
+        "h264_1080i".to_owned()
+    } else {
+        format!("h264_{width}x1080i")
+    };
+    let video = fixtures().join(format!("{name}.{container}"));
     if !video.is_file() {
         std::fs::create_dir_all(fixtures()).unwrap();
         let made = Command::new(&ffmpeg)
             .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
-            .args([
-                "testsrc2=size=1920x1080:rate=30000/1001",
-                "-f",
-                "lavfi",
-                "-i",
-            ])
+            .arg(format!("testsrc2=size={width}x1080:rate=30000/1001"))
+            .args(["-f", "lavfi", "-i"])
             .args(["sine=frequency=440:sample_rate=48000", "-t", "3"])
             .args([
                 "-c:v",
@@ -918,6 +926,8 @@ fn interlaced_h264_goes_on_a_1080i_disc_as_it_is(container: &str) {
             .args(["-level", "4.1", "-pix_fmt", "yuv420p", "-b:v", "6M"])
             .args(["-flags", "+ildct+ilme", "-x264-params"])
             .args(["tff=1:bframes=2:keyint=30:aud=0:8x8dct=1:vbv-maxrate=20000:vbv-bufsize=20000"])
+            // Anamorphic: shown 16:9.
+            .args(["-aspect", "16:9"])
             .args(["-c:a", "aac", "-b:a", "128k"])
             .arg(&video)
             .status();
@@ -936,7 +946,7 @@ fn interlaced_h264_goes_on_a_1080i_disc_as_it_is(container: &str) {
 
     // M12.16: its length, size and rate come from the file's header (the file is not opened as media).
     let probe = disccraft_transcode::probe_video(&video).unwrap();
-    assert_eq!((probe.width, probe.height), (1920, 1080));
+    assert_eq!((probe.width, probe.height), (width, 1080));
     assert!((probe.fps - 30_000.0 / 1001.0).abs() < 1e-9, "{probe:?}");
     assert!((probe.seconds - 3.0).abs() < 0.1, "{probe:?}");
     assert!(probe.wide && probe.has_audio, "{probe:?}");
@@ -948,7 +958,7 @@ fn interlaced_h264_goes_on_a_1080i_disc_as_it_is(container: &str) {
     assert!(estimate.passthrough_bytes > 0, "{estimate:?}");
     assert!(estimate.transcode_seconds.abs() < 1e-9, "{estimate:?}");
 
-    let out = fixtures().join(format!("bd_h264_1080i_{container}_out"));
+    let out = fixtures().join(format!("bd_{name}_{container}_out"));
     let _ = std::fs::remove_dir_all(&out);
     let report = build_bdmv(&p, &out).unwrap();
     assert_eq!(report.titles.len(), 1);
@@ -964,7 +974,11 @@ fn interlaced_h264_goes_on_a_1080i_disc_as_it_is(container: &str) {
         .unwrap();
     let text = String::from_utf8_lossy(&probe.stdout);
     let line = text.lines().next().unwrap_or_default().trim();
-    assert_eq!(line, "h264,High,1920,1080,tt,30000/1001,90", "{text}");
+    assert_eq!(
+        line,
+        format!("h264,High,{width},1080,tt,30000/1001,90"),
+        "{text}"
+    );
 
     // Decodes without an error, to the pictures of the source.
     let decode = Command::new(&ffmpeg)

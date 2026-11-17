@@ -113,6 +113,14 @@ pub(crate) fn load_title(
             disc_language,
         )?);
     }
+    // The title is as long as its video: sound that goes on past the last picture (a longer file, a clip moved
+    // along its track) is left off, so no cell ends in sound without pictures.
+    if let Some(last) = video.pictures.iter().map(|picture| picture.pts).max() {
+        let end = last.saturating_add(frame_time_27m(1, standard));
+        for track in &mut audio {
+            end_audio_at(track, first_pts, end);
+        }
+    }
 
     Ok(LoadedTitle {
         video,
@@ -599,6 +607,29 @@ pub(crate) fn audio_language(project: &Project) -> Option<[u8; 2]> {
         .and_then(parse_language)
 }
 
+/// Leaves off what `audio` plays from `end` on (27 MHz; the stream starts at `start`): the frames that start at or
+/// after it, or for LPCM the samples past it (whole 1/600 s frames).
+fn end_audio_at(audio: &mut LoadedAudio, start: i64, end: i64) {
+    match audio {
+        LoadedAudio::Ac3 { stream, .. } => stream.frames.retain(|frame| frame.pts < end),
+        LoadedAudio::Dts { stream, .. } => stream.frames.retain(|frame| frame.pts < end),
+        LoadedAudio::Lpcm { stream, .. } => {
+            let bytes_per_second = u128::from(stream.sample_rate)
+                * u128::from(stream.channels)
+                * u128::from(stream.bits)
+                / 8;
+            let ticks = u128::try_from(end.saturating_sub(start).max(0)).unwrap_or(0);
+            let keep = usize::try_from(ticks * bytes_per_second / 27_000_000).unwrap_or(usize::MAX);
+            let frame = stream.frame_bytes.max(1);
+            // Up to the frame the end falls in.
+            let keep = keep.div_ceil(frame).saturating_mul(frame);
+            if keep < stream.data.len() {
+                stream.data.truncate(keep);
+            }
+        }
+    }
+}
+
 /// The timeline's audio tracks; one without a language of its own takes `disc_language`.
 fn load_audio(
     timeline: &Timeline,
@@ -817,6 +848,63 @@ mod subtitle_tests {
         }
         assert!(load_subtitles(&project, &timeline, 0, VideoStandard::Ntsc).is_err());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod audio_end_tests {
+    use super::{LoadedAudio, end_audio_at};
+    use disccraft_psmux::es::{Ac3Frame, Ac3Stream, LpcmStream};
+
+    /// Sound that goes on past the video is left off: AC-3 by frames, LPCM by its 1/600 s frames.
+    #[test]
+    fn sound_ends_with_the_video() {
+        let frame = |index: i64| Ac3Frame {
+            offset: 0,
+            len: 768,
+            pts: 1000 + index * 864_000,
+        };
+        let mut ac3 = LoadedAudio::Ac3 {
+            stream: Ac3Stream {
+                sample_rate: 48_000,
+                bit_rate_kbps: 192,
+                channels: 2,
+                lfe: false,
+                acmod: 2,
+                frames: (0..10).map(frame).collect(),
+            },
+            data: Vec::new(),
+            language: None,
+        };
+        // The video ends in the middle of the fourth frame: that frame stays, the rest go.
+        end_audio_at(&mut ac3, 1000, 1000 + 3 * 864_000 + 5);
+        let LoadedAudio::Ac3 { stream, .. } = &ac3 else {
+            panic!("not AC-3");
+        };
+        assert_eq!(stream.frames.len(), 4);
+
+        // One second of 48 kHz 16-bit stereo; the video is half a second.
+        let mut lpcm = LoadedAudio::Lpcm {
+            stream: LpcmStream {
+                sample_rate: 48_000,
+                channels: 2,
+                bits: 16,
+                data: vec![0; 192_000],
+                frame_bytes: 320,
+            },
+            language: None,
+        };
+        end_audio_at(&mut lpcm, 0, 13_500_000);
+        let LoadedAudio::Lpcm { stream, .. } = &lpcm else {
+            panic!("not LPCM");
+        };
+        assert_eq!(stream.data.len(), 96_000);
+        // Sound shorter than the video is left as it is.
+        end_audio_at(&mut lpcm, 0, 270_000_000);
+        let LoadedAudio::Lpcm { stream, .. } = &lpcm else {
+            panic!("not LPCM");
+        };
+        assert_eq!(stream.data.len(), 96_000);
     }
 }
 

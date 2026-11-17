@@ -102,6 +102,12 @@ pub(crate) enum Action {
     EditMenuInPhotoCraft,
     /// Edit the selected asset in the app that makes it (Encore: Edit Original).
     EditOriginal,
+    /// Convert the selected asset ahead of the build (Encore: File ▸ Transcode ▸ Transcode Now).
+    TranscodeNow,
+    /// Convert everything the project's build would convert.
+    TranscodeAll,
+    /// Throw the selected asset's conversion away (Encore: File ▸ Transcode ▸ Revert to Original).
+    RevertToOriginal,
     /// Make an EffectCraft composition of the menu (Encore: Create After Effects Composition).
     CreateEffectCraftComposition,
     /// Open the Menu Color Set dialog for the menu being edited (Menu ▸ Edit Menu Color Set…).
@@ -170,6 +176,8 @@ pub(crate) enum Action {
     ImportSubtitles,
     /// Read a FilmCraft project and turn a sequence's markers into chapter points.
     ImportFilmCraftMarkers,
+    /// Take the chapters the timeline's video files carry as chapter points.
+    ImportSourceChapters,
     /// Export a FilmCraft sequence with FilmCraft and make a timeline of it, its markers as chapters.
     NewTimelineFromFilmCraft,
     /// Show the About DiscCraft dialog.
@@ -261,7 +269,7 @@ pub(crate) enum Trigger {
 
 impl Action {
     /// Every action, in menu order.
-    pub(crate) const ALL: [Action; 119] = [
+    pub(crate) const ALL: [Action; 123] = [
         Action::NewProject,
         Action::NewMenu,
         Action::NewTimeline,
@@ -308,6 +316,9 @@ impl Action {
         Action::DeselectAll,
         Action::EditMenuInPhotoCraft,
         Action::EditOriginal,
+        Action::TranscodeNow,
+        Action::TranscodeAll,
+        Action::RevertToOriginal,
         Action::CreateEffectCraftComposition,
         Action::EditMenuColorSet,
         Action::SetMenuUserOps,
@@ -342,6 +353,7 @@ impl Action {
         Action::RemoveSubtitleTrack,
         Action::ImportSubtitles,
         Action::ImportFilmCraftMarkers,
+        Action::ImportSourceChapters,
         Action::NewTimelineFromFilmCraft,
         Action::About,
         Action::JoinDiscord,
@@ -433,6 +445,9 @@ impl Action {
             Self::DeselectAll => tl!("Deselect All"),
             Self::EditMenuInPhotoCraft => tl!("Edit Menu in PhotoCraft"),
             Self::EditOriginal => tl!("Edit Original"),
+            Self::TranscodeNow => tl!("Transcode Now"),
+            Self::TranscodeAll => tl!("Transcode All"),
+            Self::RevertToOriginal => tl!("Revert to Original"),
             Self::CreateEffectCraftComposition => tl!("Create EffectCraft Composition…"),
             Self::EditMenuColorSet => tl!("Edit Menu Color Set…"),
             Self::SetMenuUserOps => tl!("Set Menu User Operations…"),
@@ -467,6 +482,7 @@ impl Action {
             Self::RemoveSubtitleTrack => tl!("Delete Subtitle Track"),
             Self::ImportSubtitles => tl!("Import Subtitles…"),
             Self::ImportFilmCraftMarkers => tl!("Import FilmCraft Markers…"),
+            Self::ImportSourceChapters => tl!("Import Chapters from Source"),
             Self::NewTimelineFromFilmCraft => tl!("New Timeline from FilmCraft Sequence…"),
             Self::About => tl!("About DiscCraft"),
             Self::JoinDiscord => tl!("Join the ArtCraft Discord…"),
@@ -517,6 +533,9 @@ impl Action {
             Self::NewSlideshow => key_shortcut(Modifiers::COMMAND, Key::G),
             Self::Help => key_shortcut(Modifiers::NONE, Key::F1),
             Self::NewPlaylist
+            | Self::TranscodeNow
+            | Self::TranscodeAll
+            | Self::RevertToOriginal
             | Self::NewChapterPlaylist
             | Self::JoinDiscord
             | Self::ArtCraftWebsite
@@ -540,6 +559,7 @@ impl Action {
             | Self::RemoveSubtitleTrack
             | Self::ImportSubtitles
             | Self::ImportFilmCraftMarkers
+            | Self::ImportSourceChapters
             | Self::NewTimelineFromFilmCraft
             | Self::About
             | Self::AlignLeft

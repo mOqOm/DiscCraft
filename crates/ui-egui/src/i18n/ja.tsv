@@ -708,6 +708,7 @@
 	File Path	ファイルパス
 	Dimensions	寸法
 	Size	サイズ
+	Bitrate	ビットレート
 	Slide	スライド
 	Match slideshow setting	スライドショーの設定と一致
 	In point:	インポイント:
@@ -962,8 +963,12 @@
 	Playing the sound only (the picture cannot be decoded): {message}	音だけを再生しています（絵をデコードできません）: {message}
 	The picture cannot be shown: {message}	絵を表示できません: {message}
 	Play to hear the sound.	再生すると音は聞けます。
+	This disc carries the video as it is, without converting it.	このディスクには、変換せずにそのまま収録されます。
+	This disc would have to convert the video, which it cannot do.	このディスクでは変換が必要ですが、変換できません。
 	Transcode Settings…	トランスコード設定…
 	Transcode Now	今すぐトランスコード
+	Transcode All	すべてトランスコード
+	Transcode	トランスコード
 	Revert to Original	オリジナルに戻す
 	Locate Transcoded File	トランスコードされたファイルを検索
 	DVD…	DVD…
@@ -972,6 +977,10 @@
 	A build or a transcode is already running	ビルドかトランスコードが実行中です
 	Transcode started	トランスコードを開始しました
 	Reverted to the original	オリジナルに戻しました
+	Import Chapters from Source	ソースからチャプターを読み込む
+	The source has no chapters to add	ソースに追加できるチャプターはありません
+	Added {n} chapter points from the source	ソースからチャプターポイントを {n} 個追加しました
+	The picture cannot be decoded, so the video cannot be converted for this disc.	絵をデコードできないため、このディスク用に変換できません。
 	Transcode finished ({time})	トランスコードが終わりました（{time}）
 	Cannot transcode: {message}	トランスコードできません: {message}
 	Transcoding {step}: {percent}% ({time})	トランスコード中 {step}: {percent}%（{time}）

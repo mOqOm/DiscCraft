@@ -1098,6 +1098,13 @@ impl DiscCraftApp {
 
     /// 読み取り専用のクエリを実行する。ステータス欄と dirty フラグを変えない
     /// （モニターのように毎フレーム呼び出しうるコマンド用）。
+    /// [`Self::run_query`] for what may fail as a matter of course (a thumbnail or a frame of a video whose
+    /// picture does not decode, of a file that is offline): nothing is said in the status bar; the caller shows
+    /// the lack of a picture where the picture goes.
+    pub(crate) fn run_query_quiet(&mut self, id: &str, params: Value) -> Option<Value> {
+        self.session.execute(id, &params).ok()
+    }
+
     pub(crate) fn run_query(&mut self, id: &str, params: Value) -> Option<Value> {
         match self.session.execute(id, &params) {
             Ok(value) => Some(value),
@@ -1136,6 +1143,8 @@ impl DiscCraftApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         } else if self.media_pending {
             self.media_pending = false;
+            // What the check says of a file can change once it is open (a picture that does not decode).
+            self.check_dirty = true;
             if self.status == tl!("Reading media…") {
                 self.status = tl!("Media read").to_string();
             }

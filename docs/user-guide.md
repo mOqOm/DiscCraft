@@ -232,6 +232,8 @@ in time.
 Interlaced H.264 (1080i from a camcorder or a recorder) cannot be decoded to pictures yet. It imports, and its length and
 size are shown, but the thumbnail and the Monitor stay empty and a build cannot convert it. A Blu-ray can still carry it
 as it is, without conversion ("H.264 that goes on an HD Blu-ray as it is" below). For a DVD, convert it to progressive first.
+On a disc that has to convert it, such as a DVD, Check Project reports the error "The picture cannot be decoded, so the
+video cannot be converted for this disc." (so you know before a build starts).
 A video whose picture cannot be decoded still plays its sound on the timeline. The Monitor shows a black screen with the
 reason, and the time and the playhead move on, so chapter points can be placed by ear.
 
@@ -239,7 +241,8 @@ reason, and the time and the playhead move on, so chapter points can be placed b
 (the picture quality is kept, and the build is fast) when all of these hold.
 
 - Its size, frame rate and scan are those of Blu-ray Video in the disc's properties (interlaced 1920×1080 at
-  29.97 / 25 fps for 1080i 59.94 / 50; progressive for 1080p 23.976 / 24 and 720p)
+  29.97 / 25 fps for 1080i 59.94 / 50; progressive for 1080p 23.976 / 24 and 720p). The 1080-line formats also take
+  the 1440×1080 of camcorders (HDV / AVCHD)
 - High or Main profile, up to level 4.1, 4:2:0 at 8 bits, and no more than 40 Mbps averaged over the whole file
 - It starts with a key frame (IDR)
 - It is not trimmed on the timeline (for 1080i, it is the timeline's only clip)
@@ -282,14 +285,16 @@ It cannot go on a Blu-ray yet, and it is silent in the Monitor and the preview.
   SoundCraft for audio, FilmCraft or EffectCraft for video). It is read again automatically when you save
 - The Project panel's right-click menu has **Replace Asset…** (tell it where offline media is now) and
   **Show in Explorer**
-- **Transcode Now** in the right-click menu converts that media ahead of the build. It runs in the background (the
+- **Transcode Now**, in the right-click menu or under **File ▸ Transcode**, converts that media ahead of the build. It runs in the background (the
   status bar shows how far it is), and you can go on editing meanwhile. When it is done the transcode status becomes
   "Transcoded", and the build uses that conversion. The conversion is kept inside the Build panel's destination. It
   cannot be chosen for media that needs no conversion, nor for media whose picture cannot be decoded (what cannot
   be decoded cannot be converted either). **Revert to Original** throws a finished conversion away, so the status is
-  "Untranscoded" again (the next build, or Transcode Now, makes it anew)
+  "Untranscoded" again (the next build, or Transcode Now, makes it anew). **File ▸ Transcode ▸ Transcode All**
+  converts ahead everything the project's build would convert
 - Media in use cannot be deleted. Taking an item out of use sets the links to it back to Not Set
-- **Copy** and **Paste** in the Project panel's right-click menu make a copy of a menu (with its pages), a timeline, a
+- **Copy** and **Paste** (Ctrl+C / Ctrl+V) and **Duplicate** (Ctrl+D), in the Project panel's right-click menu or the
+  **Edit** menu, make a copy of a menu (with its pages), a timeline, a
   slideshow, a playlist or a chapter playlist. The copy is named with a number ("Name 2") and goes in the same folder.
   Its links to other items are kept, and a link it had to itself points at the copy
 
@@ -325,6 +330,8 @@ Audio and subtitle media dropped on the Timeline Viewer go into A1 / S1.
 - **Timeline ▸ Add Chapter Point** (`*` on the numeric keypad) at the playhead
 - The flags under the ruler of the Timeline Viewer can be dragged
 - **Add Chapter Points at Interval…** (5 minutes by default) sets many at once
+- Chapters inside an mkv or mp4 become the chapter points (with their names) of a timeline made of that file. Later,
+  use **Timeline ▸ Import Chapters from Source**
 - Select a flag and **Edit ▸ Clear** (Delete) removes that chapter
 - Name a chapter in its properties (an empty name shows as "Chapter N"). **View ▸ Show Chapter Names** (Ctrl+8)
   shows the names on the timeline

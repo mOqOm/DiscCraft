@@ -352,14 +352,21 @@ impl BdVideoFormat {
     }
 }
 
+/// Whether pictures `width` wide are a Blu-ray's video of `format`: the format's width, or for the 1080-line
+/// formats also 1440 (the anamorphic 1440 x 1080 of HDV and AVCHD camcorders, shown 16:9 as 1920 x 1080 is).
+pub(crate) fn width_fits(width: u32, format: BdVideoFormat) -> bool {
+    width == format.width || (width == 1440 && (format.width, format.height) == (1920, 1080))
+}
+
 /// Whether H.264 with this sequence parameter set is a Blu-ray's video of `format`: Main or High profile up to
-/// level 4.1, 4:2:0 at 8 bits, the format's size (in whole macroblocks), and coded as the format is scanned (an
-/// interlaced format's stream may code fields, a progressive format's codes frames only).
+/// level 4.1, 4:2:0 at 8 bits, the format's size (in whole macroblocks; 1440 wide too for 1080 lines), and coded
+/// as the format is scanned (an interlaced format's stream may code fields, a progressive format's codes frames
+/// only).
 pub(crate) fn sps_fits(sps: &crate::h264_sps::Sps, format: BdVideoFormat) -> bool {
     matches!(sps.profile, 77 | 100)
         && sps.level <= BD_MAX_H264_LEVEL
         && sps.yuv420_8bit
-        && sps.width == format.width
+        && width_fits(sps.width, format)
         && sps.height == format.height.div_ceil(16).saturating_mul(16)
         && sps.frame_mbs_only != format.interlaced
 }
@@ -564,11 +571,10 @@ fn h264_fits(
     let Ok(probe) = disccraft_transcode::probe_video(path) else {
         return false;
     };
-    let BdVideoFormat { width, height, .. } = format;
     let rate = f64::from(format.rate.0) / f64::from(format.rate.1.max(1));
     let bytes: u64 = stream.units.iter().map(|unit| u64::from(unit.size)).sum();
-    probe.width == width
-        && probe.height == height
+    width_fits(probe.width, format)
+        && probe.height == format.height
         && (probe.fps - rate).abs() <= rate * 0.005
         && probe.seconds > 0.0
         && bytes as f64 * 8.0 / probe.seconds <= BD_MAX_VIDEO_BITRATE

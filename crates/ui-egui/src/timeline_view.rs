@@ -511,7 +511,7 @@ impl DiscCraftApp {
         let step = f64::from(den.max(1)) / f64::from(num.max(1));
         let seconds = (duration - step).max(0.0);
         // Not waited for: asked again once the file is open.
-        let value = self.run_query(
+        let value = self.run_query_quiet(
             "asset.frame",
             json!({ "asset": video.0, "seconds": seconds, "wait": false }),
         );

@@ -182,6 +182,16 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "timeline.importSourceChapters",
+        label: "ソースのチャプターをチャプターポイントに",
+        menu: &["タイムライン"],
+        shortcut: None,
+        params: r#"{"timeline": id} → {"added", "skipped"} (mkv / mp4 に入っているチャプター)"#,
+        enabled: always_enabled,
+        run: run_import_source_chapters,
+        journal: true,
+    },
+    CommandSpec {
         id: "timeline.importFilmCraftMarkers",
         label: "FilmCraft のマーカーをチャプターに",
         menu: &["タイムライン"],
@@ -413,6 +423,8 @@ fn run_create(session: &mut Session, params: &Value) -> CommandResult {
         .add_timeline(asset, name)
         .map_err(|error| error.to_string())?;
     take_source_streams(session, id);
+    // The chapters its file carries become its chapter points (Encore: the chapter markers embedded in a file).
+    let _ = source_chapters(session, id);
     // As in Encore, the first timeline becomes the disc's first play.
     session.project.adopt_first_play(id);
 
@@ -1204,6 +1216,68 @@ const MAX_CHAPTERS: usize = 99;
 /// the chapter markers, or every marker with `"all": true`, each snapped to a GOP start like a chapter added by
 /// hand and named after the marker. A marker at the very start names the first chapter. Markers past the end of
 /// the timeline, on a taken place, or beyond 99 chapters are left out and counted.
+/// Adds the chapters the timeline's video files carry (Matroska chapters, an MP4's chapter track) as chapter
+/// points, each where it falls in its clip; a chapter at a clip's very start names the chapter that is there.
+/// Returns how many were added and how many were left out (outside the clip's used part, on a point that is
+/// there already, past the 99).
+fn source_chapters(session: &mut Session, timeline: TimelineId) -> Result<(u64, u64), String> {
+    const TICKS_PER_SECOND: f64 = 254_016_000_000.0;
+    let spans = clip_spans(session, timeline)?;
+    let rate = session.project.settings.frame_rate();
+    let (mut added, mut skipped) = (0_u64, 0_u64);
+    for (clip, (asset, start, length)) in spans.into_iter().enumerate() {
+        let Some((path, trim)) = session.project.timeline(timeline).and_then(|found| {
+            let asset = session.project.assets.get(&asset)?;
+            Some((asset.media_file().into_owned(), found.video_trim(clip)))
+        }) else {
+            continue;
+        };
+        // Where the clip's used part starts in its file.
+        let source_in = rate.tick_of(i64::from(trim.start));
+        for (seconds, title) in disccraft_transcode::file_chapters(&path) {
+            // `as` saturates; a chapter's time is far inside the range.
+            let in_file = Tick((seconds * TICKS_PER_SECOND) as i64);
+            let offset = in_file.0.saturating_sub(source_in.0);
+            let name = (!title.is_empty()).then_some(title);
+            if offset < 0 || offset >= length.0 {
+                skipped = skipped.saturating_add(1);
+                continue;
+            }
+            let at = Tick(start.0.saturating_add(offset));
+            if at <= Tick::ZERO {
+                // The first chapter is always at the start: the file's chapter gives it its name.
+                if let Some(name) = name {
+                    let _ = session.project.rename_chapter(timeline, 0, &name);
+                }
+                continue;
+            }
+            let count = session
+                .project
+                .timeline(timeline)
+                .map_or(0, |found| found.chapters.len());
+            if count >= MAX_CHAPTERS {
+                skipped = skipped.saturating_add(1);
+                continue;
+            }
+            let time = gop_chapter_time(session, timeline, at, None)?;
+            match session.project.add_chapter(timeline, time, name) {
+                Ok(_) => added = added.saturating_add(1),
+                Err(_) => skipped = skipped.saturating_add(1),
+            }
+        }
+    }
+    Ok((added, skipped))
+}
+
+fn run_import_source_chapters(session: &mut Session, params: &Value) -> CommandResult {
+    let timeline = TimelineId(req_u64(params, "timeline")?);
+    let (added, skipped) = source_chapters(session, timeline)?;
+    Ok(object(&[
+        ("added", Value::from(added)),
+        ("skipped", Value::from(skipped)),
+    ]))
+}
+
 fn run_import_filmcraft_markers(session: &mut Session, params: &Value) -> CommandResult {
     let timeline = TimelineId(req_u64(params, "timeline")?);
     let path = req_str(params, "path")?;

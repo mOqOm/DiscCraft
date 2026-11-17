@@ -160,6 +160,11 @@ const THUMBNAIL_EDGE: u32 = 128;
 /// The name video thumbnails are remembered under (`disccraft_transcode::cached_blob`).
 const THUMBNAIL_BLOB: &str = "thumb";
 
+/// What is remembered in place of a thumbnail for a video this build could not take a picture from.
+fn no_thumbnail_mark() -> Vec<u8> {
+    format!("no:{}", disccraft_transcode::build_tag()).into_bytes()
+}
+
 /// Whether the caller waits for a file that is not open yet (`"wait": false` does not).
 fn wait(params: &Value) -> bool {
     !matches!(params.get("wait"), Some(Value::Bool(false)))
@@ -233,10 +238,15 @@ fn run_thumbnail(session: &mut Session, params: &Value) -> CommandResult {
     let path: &Path = &media;
     let video = asset.kind == AssetKind::Video;
     if video {
-        // Made once and remembered between runs (a long file takes seconds to open), a failure too.
+        // Made once and remembered between runs (a long file takes seconds to open). A failure is remembered
+        // too, but only as this build's: a newer build's decoder may read the file, so it tries again.
         if let Some(blob) = disccraft_transcode::cached_blob(THUMBNAIL_BLOB, path) {
-            return thumbnail_from_blob(id, &blob)
-                .ok_or_else(|| "asset.thumbnail: the video has no picture to show".to_string());
+            if let Some(thumbnail) = thumbnail_from_blob(id, &blob) {
+                return Ok(thumbnail);
+            }
+            if blob == no_thumbnail_mark() {
+                return Err("asset.thumbnail: the video has no picture to show".to_string());
+            }
         }
         if !wait(params) && !disccraft_transcode::media_open(path) {
             disccraft_transcode::warm(path);
@@ -246,7 +256,7 @@ fn run_thumbnail(session: &mut Session, params: &Value) -> CommandResult {
     let (width, height, data, stride) = match asset.kind {
         AssetKind::Video => {
             let (width, height, rgb) = disccraft_transcode::first_frame(path).map_err(|error| {
-                disccraft_transcode::store_blob(THUMBNAIL_BLOB, path, &[]);
+                disccraft_transcode::store_blob(THUMBNAIL_BLOB, path, &no_thumbnail_mark());
                 error.to_string()
             })?;
             (width, height, rgb, 3_usize)
@@ -616,6 +626,62 @@ mod tests {
             Err(_) => Value::Null,
         };
         assert!(matches!(value.get("seconds"), Some(Value::Null)));
+    }
+
+    /// M6.245: a video whose picture does not decode (interlaced H.264) is an error of the project check on a
+    /// disc that would have to convert it, once the file is open; on a 1080i Blu-ray, which carries it as it is,
+    /// it is none.
+    #[test]
+    fn a_video_that_cannot_be_converted_is_a_check_error() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/fixtures/h264_1080i.mkv");
+        if !fixture.is_file() {
+            eprintln!("h264_1080i.mkv fixture not found; skipping");
+            return Ok(());
+        }
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-undecodable-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let video = dir.join("camera.mkv");
+        std::fs::copy(&fixture, &video)?;
+        let mut session = Session::new();
+        let id = session
+            .execute("asset.import", &json!({"path": video.to_string_lossy()}))?
+            .get("asset")
+            .and_then(Value::as_u64)
+            .ok_or("no asset")?;
+        let _ = session.execute("timeline.create", &json!({"asset": id}))?;
+        let undecodable = |session: &mut Session| -> Result<bool, String> {
+            let check = session.execute("project.check", &json!({}))?;
+            Ok(check
+                .get("problems")
+                .and_then(Value::as_array)
+                .is_some_and(|problems| {
+                    problems
+                        .iter()
+                        .any(|problem| problem.get("code") == Some(&json!("undecodableVideo")))
+                }))
+        };
+        // Wait until the file is open (its length is known at once from its header).
+        let start = std::time::Instant::now();
+        loop {
+            let pending = session.execute("asset.pending", &json!({}))?;
+            let _ = session.execute("asset.thumbnail", &json!({"asset": id, "wait": false}));
+            if pending == json!({"pending": [], "opening": []}) && start.elapsed().as_millis() > 200
+            {
+                break;
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(60));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(undecodable(&mut session)?, "a DVD would have to convert it");
+        // A 1080i Blu-ray carries it as it is.
+        session.execute("disc.setKind", &json!({"kind": "bluRay"}))?;
+        session.execute("disc.setBlurayVideo", &json!({"video": "1080i59.94"}))?;
+        assert!(!undecodable(&mut session)?);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
     }
 
     /// M12.13: asked without waiting, a video that is not open yet is opened on its own thread and answered
