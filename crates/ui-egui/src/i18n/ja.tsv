@@ -172,6 +172,8 @@
 	BD50	BD50
 	Custom ({size})	カスタム ({size})
 	Refresh Usage	容量を更新
+	Reading media…	メディアを読み込み中…
+	Media read	メディアを読み込みました
 	Usage updated	容量を更新しました
 	No usage information	容量情報なし
 
@@ -251,6 +253,16 @@
 	Add Chapter Point	チャプターポイントを追加
 	Zoom In	ズームイン
 	Zoom Out	ズームアウト
+	Pan & Zoom	パンとズーム
+	Pan:	パン:
+	Zoom:	ズーム:
+	Pan Left	左へ
+	Pan Right	右へ
+	Pan Up	上へ
+	Pan Down	下へ
+	Random Pan & Zoom	ランダムにパンとズーム
+	The picture moves slowly while the slide is up	スライドの間、絵がゆっくり動く
+	Apply a random pan and zoom effect to all slides	すべてのスライドにランダムなパンとズームエフェクトを適用
 	Fit in Window	ウィンドウに合わせる
 	Show Normal Subpicture	標準サブピクチャを表示
 	Show Selected Subpicture	選択時のサブピクチャを表示
@@ -479,7 +491,43 @@
 	Add Subtitle Track…	字幕トラックを追加…
 	Delete Audio Track	オーディオトラックを削除
 	Delete Subtitle Track	字幕トラックを削除
-	About DiscCraft…	DiscCraft について…
+	About DiscCraft	DiscCraft について
+	Join the ArtCraft Discord…	ArtCraft の Discord に参加…
+	Join the ArtCraft Discord	ArtCraft の Discord に参加
+	ArtCraft Website	ArtCraft の Web サイト
+	DiscCraft on GitHub	GitHub の DiscCraft
+	Report an Issue…	問題を報告…
+	Reveal Log Files…	ログファイルを表示…
+	System Compatibility Report…	システム互換性レポート…
+	System Compatibility Report	システム互換性レポート
+	Check for Updates…	アップデートを確認…
+	Check for Updates	アップデートを確認
+	DiscCraft Help…	DiscCraft ヘルプ…
+	development build	開発版
+	Saves this session's log and shows it in the file manager.	このセッションのログを保存し、ファイルマネージャーで表示します。
+	Shows a report on this computer.	このコンピューターのレポートを表示します。
+	Shows this version and the releases on GitHub.	このバージョンと GitHub のリリースを表示します。
+	Shows the version, community links and license.	バージョン、コミュニティへのリンク、ライセンスを表示します。
+	Opened {url}	{url} を開きました
+	Saved the log: {path}	ログを保存しました: {path}
+	{n} hardware threads	{n} ハードウェアスレッド
+	 — 4 or more are recommended for converting video	（映像の変換には 4 以上をおすすめします）
+	DiscCraft	DiscCraft
+	Operating system	オペレーティングシステム
+	CPU	CPU
+	System language	システムの言語
+	Display language	表示言語
+	Settings folder	設定のフォルダー
+	Log folder	ログのフォルダー
+	Cache of Craft documents	Craft の書類のキャッシュ
+	DVD output	DVD の出力
+	Blu-ray output	Blu-ray の出力
+	VIDEO_TS folder / ISO: MPEG-2, AC-3, LPCM, DTS (as it is), subpictures	VIDEO_TS フォルダー / ISO: MPEG-2、AC-3、LPCM、DTS（そのまま）、サブピクチャ
+	BDMV folder / ISO: MPEG-2 (SD), H.264 1080p / 720p, AC-3, LPCM, PG subtitles, IG menus	BDMV フォルダー / ISO: MPEG-2（SD）、H.264 1080p / 720p、AC-3、LPCM、PG 字幕、IG メニュー
+	Copies the report, to paste into a problem report.	レポートをコピーします（問題の報告に貼り付けられます）。
+	This version: {version}	このバージョン: {version}
+	DiscCraft does not look for updates by itself. New releases are published on GitHub.	DiscCraft は自動では更新を確認しません。新しいリリースは GitHub で公開しています。
+	Open the Releases on GitHub	GitHub のリリースを開く
 	Add Audio Track	オーディオトラックを追加
 	Add Subtitle Track	字幕トラックを追加
 	Asset:	アセット:
@@ -668,6 +716,10 @@
 	Show All Thumbnails	すべてのサムネールを表示
 	Specify Link	リンクの指定
 	{used} used. {free} free.	{used} が使用されています。{free} が空いています。
+	{size} used for DVD-ROM content.	{size} が DVD-ROM コンテンツに使用されています。
+	{size} used for BD-ROM content.	{size} が BD-ROM コンテンツに使用されています。
+	DVD-ROM content:	DVD-ROM コンテンツ:
+	BD-ROM content:	BD-ROM コンテンツ:
 	Default transition:	トランジションの初期設定:
 	Transition:	トランジション:
 	Transition duration:	トランジションのデュレーション:
@@ -905,12 +957,24 @@
 	Could not create the chapter index. Link at least one chapter button of the current menu to a timeline.	チャプターインデックスを作成できませんでした。現在のメニューの最低 1 つのチャプターボタンをタイムラインにリンクする必要があります。
 	Blu-ray video:	Blu-ray の映像：
 	SD (MPEG-2)	SD（MPEG-2）
-	1920x1080 25p (H.264, outside the Blu-ray standard)	1920x1080 25p（H.264、Blu-ray の規格外）
-	1920x1080 29.97p (H.264, outside the Blu-ray standard)	1920x1080 29.97p（H.264、Blu-ray の規格外）
-	1920x1080 50p (H.264, outside the Blu-ray standard)	1920x1080 50p（H.264、Blu-ray の規格外）
-	1920x1080 59.94p (H.264, outside the Blu-ray standard)	1920x1080 59.94p（H.264、Blu-ray の規格外）
 	Playing without sound: {message}	音なしで再生しています: {message}
 	Cannot play the sound: {message}	音を再生できません: {message}
+	Playing the sound only (the picture cannot be decoded): {message}	音だけを再生しています（絵をデコードできません）: {message}
+	The picture cannot be shown: {message}	絵を表示できません: {message}
+	Play to hear the sound.	再生すると音は聞けます。
+	Transcode Settings…	トランスコード設定…
+	Transcode Now	今すぐトランスコード
+	Revert to Original	オリジナルに戻す
+	Locate Transcoded File	トランスコードされたファイルを検索
+	DVD…	DVD…
+	Blu-ray…	Blu-ray…
+	Interpret Footage…	フッテージを変換…
+	A build or a transcode is already running	ビルドかトランスコードが実行中です
+	Transcode started	トランスコードを開始しました
+	Transcode finished ({time})	トランスコードが終わりました（{time}）
+	Cannot transcode: {message}	トランスコードできません: {message}
+	Transcoding {step}: {percent}% ({time})	トランスコード中 {step}: {percent}%（{time}）
+	Transcoding… ({time})	トランスコード中…（{time}）
 	Timeline Display Settings	タイムライン表示設定
 	Undock Panel	パネルのドッキングを解除
 	Close Panel	パネルを閉じる
@@ -935,6 +999,13 @@
 	Reset “{name}”	「{name}」をリセット
 	Display language ({code})	表示言語 ({code})
 	Audio language:	オーディオの言語:
+	Subtitle language:	字幕の言語:
+	Still duration:	静止画デュレーション:
+	Subtitle duration:	字幕デュレーション:
+	 s	 秒
+	The slide duration of new slideshows.	新しいスライドショーのスライドの長さ。
+	The length of a subtitle added in the Monitor.	モニターで足す字幕の長さ。
+	The language of new tracks (a code such as ja or en). Empty uses the disc's audio language.	新しいトラックの言語（ja、en などのコード）。空ならディスクのオーディオの言語。
 	Not found	見つかりません
 	Remove from List	一覧から削除
 	Audio: Dolby Digital (AC-3) 192 kbps stereo (AC-3 and WAV sources are kept)	オーディオ: Dolby Digital (AC-3) 192 kbps ステレオ (AC-3 と WAV の素材はそのまま)

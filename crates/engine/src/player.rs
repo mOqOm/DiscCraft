@@ -172,6 +172,17 @@ impl FrameSource {
         })
     }
 
+    /// Whether `path` opens without a wait: it is open already (or was found not to be a video). When it is not,
+    /// it is opened on a thread of its own from here on, and this is asked again later.
+    #[must_use]
+    pub fn ready(path: &std::path::Path) -> bool {
+        if disccraft_transcode::media_open(path) {
+            return true;
+        }
+        disccraft_transcode::warm(path);
+        false
+    }
+
     /// The file it reads.
     pub fn path(&self) -> &std::path::Path {
         &self.path
@@ -196,6 +207,153 @@ impl FrameSource {
     }
 }
 
+/// One still frame asked of a [`FrameLoader`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct FrameRequest {
+    /// The video file.
+    pub path: PathBuf,
+    /// The frame's time in the file, seconds.
+    pub seconds: f64,
+    /// The size it is wanted at (width, height).
+    pub size: (u32, u32),
+    /// The caller's name for it (an asset and a frame number, say), given back with the frame.
+    pub key: (u64, i64),
+}
+
+#[derive(Default)]
+struct LoaderState {
+    /// The newest frame asked for and not yet started on.
+    request: Option<FrameRequest>,
+    /// The last frame decoded and not yet taken.
+    result: Option<(FrameRequest, Result<PlayerFrame, String>)>,
+    /// A frame is being decoded.
+    working: bool,
+    /// The loader was dropped.
+    closed: bool,
+}
+
+/// Decodes the monitor's still frames on a thread of its own, so the interface never waits for a decoder (or for
+/// a long file to open). Only the newest request is kept: while a frame is being decoded, a later request
+/// replaces the one waiting, as scrubbing asks for frame after frame.
+pub struct FrameLoader {
+    state: Arc<(Mutex<LoaderState>, std::sync::Condvar)>,
+}
+
+impl std::fmt::Debug for FrameLoader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FrameLoader").finish_non_exhaustive()
+    }
+}
+
+impl Default for FrameLoader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FrameLoader {
+    /// Starts the loader's thread (when it cannot be started, requests are answered with an error).
+    #[must_use]
+    pub fn new() -> Self {
+        let state = Arc::new((
+            Mutex::new(LoaderState::default()),
+            std::sync::Condvar::new(),
+        ));
+        let worker = Arc::clone(&state);
+        let spawned = thread::Builder::new()
+            .name("disccraft-frames".to_string())
+            .spawn(move || load_frames(&worker));
+        if spawned.is_err()
+            && let Ok(mut state) = state.0.lock()
+        {
+            state.closed = true;
+        }
+        Self { state }
+    }
+
+    /// Asks for a frame, in place of a request that is still waiting.
+    pub fn request(&self, request: FrameRequest) {
+        let Ok(mut state) = self.state.0.lock() else {
+            return;
+        };
+        if state.closed {
+            let error = Err("the frame loader is not running".to_string());
+            state.result = Some((request, error));
+            return;
+        }
+        state.request = Some(request);
+        self.state.1.notify_one();
+    }
+
+    /// The newest decoded frame (or why it could not be decoded) since the last call, with its request.
+    pub fn take(&self) -> Option<(FrameRequest, Result<PlayerFrame, String>)> {
+        self.state.0.lock().ok()?.result.take()
+    }
+
+    /// Whether a frame is waiting or being decoded.
+    #[must_use]
+    pub fn busy(&self) -> bool {
+        self.state
+            .0
+            .lock()
+            .is_ok_and(|state| state.working || state.request.is_some())
+    }
+}
+
+impl Drop for FrameLoader {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.0.lock() {
+            state.closed = true;
+            state.request = None;
+        }
+        self.state.1.notify_one();
+    }
+}
+
+/// The loader's thread: decode the newest request, keeping the file open for the next.
+fn load_frames(shared: &(Mutex<LoaderState>, std::sync::Condvar)) {
+    let mut source: Option<FrameSource> = None;
+    loop {
+        let request = {
+            let Ok(mut state) = shared.0.lock() else {
+                return;
+            };
+            loop {
+                if state.closed {
+                    return;
+                }
+                if let Some(request) = state.request.take() {
+                    state.working = true;
+                    break request;
+                }
+                state = match shared.1.wait(state) {
+                    Ok(state) => state,
+                    Err(_) => return,
+                };
+            }
+        };
+        let decoded = catch_unwind(AssertUnwindSafe(|| {
+            if source
+                .as_ref()
+                .is_none_or(|open| open.path() != request.path.as_path())
+            {
+                source = None;
+                source = Some(FrameSource::open(&request.path)?);
+            }
+            match &source {
+                Some(open) => open.frame(request.seconds, request.size),
+                None => Err("the video is not open".to_string()),
+            }
+        }))
+        .unwrap_or_else(|_| Err("the frame decoder stopped unexpectedly".to_string()));
+        let Ok(mut state) = shared.0.lock() else {
+            return;
+        };
+        state.working = false;
+        state.result = Some((request, decoded));
+    }
+}
+
 /// Where playback is.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlayerStatus {
@@ -211,6 +369,8 @@ pub enum PlayerStatus {
 struct Shared {
     frame: Option<PlayerFrame>,
     status: PlayerStatus,
+    /// Why only the sound plays, when the picture cannot be decoded.
+    no_picture: Option<String>,
 }
 
 /// Real-time playback of one video file.
@@ -251,6 +411,7 @@ impl Player {
         let shared = Arc::new(Mutex::new(Shared {
             frame: None,
             status: PlayerStatus::Playing,
+            no_picture: None,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let clock = Arc::new(OnceLock::new());
@@ -267,6 +428,8 @@ impl Player {
         } else {
             30.0
         };
+        // With sound to play, a picture that cannot be decoded does not stop the playback.
+        let sound = audio.is_some();
 
         let worker = thread::Builder::new()
             .name("disccraft-player".to_string())
@@ -274,7 +437,7 @@ impl Player {
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     play(
                         &path,
-                        (from, fps, size),
+                        (from, fps, size, sound),
                         &worker_shared,
                         &worker_stop,
                         &worker_clock,
@@ -316,6 +479,14 @@ impl Player {
     /// The sound for the audio output, when the player was started with some.
     pub fn audio(&self) -> Option<AudioFeed> {
         self.audio.as_ref().map(|(feed, _)| feed.clone())
+    }
+
+    /// Why only the sound is playing, when the picture cannot be decoded (the frames are black then).
+    pub fn no_picture(&self) -> Option<String> {
+        self.shared
+            .lock()
+            .ok()
+            .and_then(|shared| shared.no_picture.clone())
     }
 
     /// The newest frame since the last call, if any.
@@ -442,15 +613,91 @@ fn decode_audio(
     Ok(())
 }
 
-/// The worker: decode the frame for the clock until the end or a stop. The clock starts with the first frame.
-fn play(
+/// The size of the black frames of a playback without a picture: small, in the shape of `size`.
+fn black_size(size: Option<(u32, u32)>) -> (u32, u32) {
+    const WIDTH: u32 = 64;
+    let (width, height) = size.filter(|(w, h)| *w > 0 && *h > 0).unwrap_or((720, 480));
+    let rows = u64::from(WIDTH) * u64::from(height) / u64::from(width);
+    (
+        WIDTH,
+        u32::try_from(rows).unwrap_or(WIDTH).clamp(1, 4 * WIDTH),
+    )
+}
+
+/// The worker of a video whose picture cannot be decoded (`message` says why) but whose sound plays: the clock
+/// runs to the end of the file, and a black frame tells the time of each frame.
+fn play_sound_only(
     path: &std::path::Path,
     (from, fps, size): (f64, f64, Option<(u32, u32)>),
+    message: &str,
     shared: &Mutex<Shared>,
     stop: &AtomicBool,
     clock: &OnceLock<Instant>,
 ) -> Result<PlayerStatus, String> {
-    let reader = FrameReader::open(path).map_err(|error| error.to_string())?;
+    // How long it plays: the file's length, as its header or its sound tells it.
+    let end = disccraft_transcode::probe_video(path)
+        .map(|probe| probe.seconds)
+        .or_else(|_| disccraft_transcode::probe_audio_seconds(path))
+        .map_err(|_| message.to_string())?;
+    if !end.is_finite() || from >= end {
+        return Ok(PlayerStatus::Ended);
+    }
+    let (width, height) = black_size(size);
+    let black = || vec![0u8; width as usize * height as usize * 3];
+    if let Ok(mut shared) = shared.lock() {
+        shared.no_picture = Some(message.to_string());
+    }
+    let started = *clock.get_or_init(Instant::now);
+    let mut shown: Option<i64> = None;
+    while !stop.load(Ordering::Relaxed) {
+        let now = from + started.elapsed().as_secs_f64();
+        if now >= end {
+            return Ok(PlayerStatus::Ended);
+        }
+        // `as` saturates; the index only orders the frames.
+        let index = (now * fps).floor() as i64;
+        if shown == Some(index) {
+            let next = (index.saturating_add(1)) as f64 / fps;
+            thread::sleep(Duration::from_secs_f64(
+                (next - now).clamp(0.0, MAX_SLEEP.as_secs_f64()),
+            ));
+            continue;
+        }
+        if let Ok(mut shared) = shared.lock() {
+            shared.frame = Some(PlayerFrame {
+                seconds: index as f64 / fps,
+                width,
+                height,
+                rgb: black(),
+            });
+        }
+        shown = Some(index);
+    }
+    Ok(PlayerStatus::Playing)
+}
+
+/// The worker: decode the frame for the clock until the end or a stop. The clock starts with the first frame.
+fn play(
+    path: &std::path::Path,
+    (from, fps, size, sound): (f64, f64, Option<(u32, u32)>, bool),
+    shared: &Mutex<Shared>,
+    stop: &AtomicBool,
+    clock: &OnceLock<Instant>,
+) -> Result<PlayerStatus, String> {
+    let reader = match FrameReader::open(path) {
+        Ok(reader) => reader,
+        Err(error) if sound => {
+            return play_sound_only(
+                path,
+                (from, fps, size),
+                &error.to_string(),
+                shared,
+                stop,
+                clock,
+            );
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     let frame_at = |seconds: f64| {
         match size {
             Some((width, height)) => reader.frame_sized(seconds, width, height),
@@ -464,7 +711,13 @@ fn play(
     }
     // The first frame is decoded before the clock starts, so the sound waits for the picture.
     let first = (from * fps).floor();
-    let picture = frame_at(first / fps)?;
+    let picture = match frame_at(first / fps) {
+        Ok(picture) => picture,
+        Err(message) if sound => {
+            return play_sound_only(path, (from, fps, size), &message, shared, stop, clock);
+        }
+        Err(message) => return Err(message),
+    };
     let started = *clock.get_or_init(Instant::now);
     let mut shown: Option<i64> = None;
     if let Ok(mut shared) = shared.lock() {
@@ -535,6 +788,113 @@ mod tests {
         feed.shared.queue.lock().map_or((0, 0, 0), |queue| {
             (queue.taken, queue.skip, queue.samples.len() / 2)
         })
+    }
+
+    /// M12.18: a video whose picture the decoder does not read (interlaced H.264) plays its sound, with black
+    /// frames that tell the time; without sound to play, it fails as before.
+    #[test]
+    fn a_video_without_a_readable_picture_plays_its_sound() {
+        let video =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/h264_1080i.mkv");
+        if !video.is_file() {
+            eprintln!("h264_1080i.mkv fixture not found; skipping");
+            return;
+        }
+        let wait = |what: &str, done: &dyn Fn() -> bool| {
+            let start = Instant::now();
+            while !done() {
+                assert!(start.elapsed() < Duration::from_secs(30), "{what}");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let silent = Player::start_sized(video.clone(), None, 0.5, 30.0, Some((1920, 1080)));
+        wait("never failed", &|| silent.status() != PlayerStatus::Playing);
+        assert!(matches!(silent.status(), PlayerStatus::Failed(_)));
+        assert!(silent.no_picture().is_none());
+
+        let audio = PlayerAudio {
+            path: video.clone(),
+            rate: 48_000,
+            from: None,
+        };
+        let player = Player::start_sized(video, Some(audio), 0.5, 30.0, Some((1920, 1080)));
+        let frame = std::cell::RefCell::new(None);
+        wait("no frame", &|| {
+            *frame.borrow_mut() = player.take_frame();
+            frame.borrow().is_some() || player.status() != PlayerStatus::Playing
+        });
+        let frame = frame.into_inner().expect("a frame");
+        assert_eq!((frame.width, frame.height), (64, 36));
+        assert!(frame.seconds >= 0.5 && frame.rgb.iter().all(|byte| *byte == 0));
+        assert!(player.no_picture().is_some_and(|why| why.contains("H.264")));
+        assert_eq!(player.status(), PlayerStatus::Playing);
+        // The sound comes: the fixture's tone.
+        let feed = player.audio().expect("a feed");
+        let heard = std::cell::Cell::new(false);
+        wait("no sound", &|| {
+            let mut out = vec![0.0_f32; 960];
+            feed.fill(&mut out, 2);
+            heard.set(out.iter().any(|sample| sample.abs() > 0.01));
+            heard.get() || feed.error().is_some()
+        });
+        assert!(heard.get(), "{:?}", feed.error());
+        // It ends at the end of the file (3 seconds).
+        wait("never ended", &|| player.status() != PlayerStatus::Playing);
+        assert_eq!(player.status(), PlayerStatus::Ended);
+    }
+
+    /// M12.19: still frames are decoded off the caller's thread; a request replaces the one still waiting.
+    #[test]
+    fn the_loader_decodes_the_newest_request_on_its_own_thread() {
+        use super::{FrameLoader, FrameRequest};
+        let video =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/ntsc.m2v");
+        if !video.is_file() {
+            eprintln!("ntsc.m2v fixture not found; skipping");
+            return;
+        }
+        let loader = FrameLoader::new();
+        assert!(!loader.busy() && loader.take().is_none());
+        let request = |path: &PathBuf, frame: i64| FrameRequest {
+            path: path.clone(),
+            seconds: frame as f64 / 30.0,
+            size: (640, 480),
+            key: (7, frame),
+        };
+        // Asked in a burst: the last is answered, and nothing after it.
+        for frame in 0..5 {
+            loader.request(request(&video, frame));
+        }
+        let mut answered = Vec::new();
+        let start = Instant::now();
+        while loader.busy() || answered.last().is_none_or(|(key, _)| *key != (7, 4)) {
+            assert!(start.elapsed() < Duration::from_secs(60), "{answered:?}");
+            if let Some((asked, frame)) = loader.take() {
+                let frame = frame.expect("a frame");
+                assert_eq!((frame.width, frame.height), (640, 480));
+                answered.push((asked.key, frame.rgb.len()));
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(answered.len() <= 5, "{answered:?}");
+        assert!(answered.iter().all(|(_, len)| *len == 640 * 480 * 3));
+        // A file that is not a video is an error, not a hang; the loader goes on after it.
+        loader.request(request(&PathBuf::from("no such file.mp4"), 0));
+        let start = Instant::now();
+        let failed = loop {
+            assert!(start.elapsed() < Duration::from_secs(60));
+            if let Some((_, result)) = loader.take() {
+                break result;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        assert!(failed.is_err());
+        loader.request(request(&video, 1));
+        let start = Instant::now();
+        while loader.take().is_none_or(|(_, frame)| frame.is_err()) {
+            assert!(start.elapsed() < Duration::from_secs(60));
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     #[test]

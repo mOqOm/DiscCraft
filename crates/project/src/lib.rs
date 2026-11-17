@@ -33,6 +33,7 @@ mod model;
 mod pages;
 mod remove;
 mod replace;
+mod rom;
 mod subpicture;
 mod thumbnail;
 mod timecode;
@@ -64,7 +65,8 @@ pub use library::{
 pub use link::Link;
 pub use lists::{
     DEFAULT_SLIDE_DURATION, DEFAULT_SLIDE_SECONDS, DEFAULT_TRANSITION_DURATION, Playlist,
-    PlaylistItem, Slide, SlideScale, SlideStroke, SlideTransition, Slideshow, TransitionKind,
+    PlaylistItem, Slide, SlideEffect, SlidePan, SlideScale, SlideStroke, SlideTransition,
+    SlideZoom, Slideshow, TransitionKind,
 };
 pub use menu::{
     Button, DEFAULT_TEXT_SIZE, MAX_BUTTONS, MAX_FONT_NAME_CHARS, MAX_LEADING,
@@ -98,6 +100,7 @@ pub use model::{
 };
 pub use model::{FLOWCHART_DISC, FLOWCHART_LIMIT, FlowPoint, LayerBreakPoint};
 pub use replace::{DesignButton, MenuDesign};
+pub use rom::{MAX_ROM_DEPTH, MAX_ROM_ENTRIES, RomFile, rom_disc_bytes, rom_files};
 pub use subpicture::{MAX_SUBPICTURE_SIDE, Subpicture};
 pub use thumbnail::{MenuThumbnail, THUMBNAIL_PARTS, ThumbnailArea, ThumbnailSource};
 pub use timecode::{format_frames, format_time, parse_time};

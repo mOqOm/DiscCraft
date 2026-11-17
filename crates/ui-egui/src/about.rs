@@ -17,7 +17,7 @@ impl DiscCraftApp {
             ui.heading("DiscCraft");
             ui.label(tlf!(
                 "Version {version}",
-                version = env!("CARGO_PKG_VERSION")
+                version = crate::help::version_text()
             ));
             ui.add_space(6.0);
             ui.label(tl!("DVD and Blu-ray authoring."));
@@ -25,6 +25,11 @@ impl DiscCraftApp {
                 "License: {license}",
                 license = env!("CARGO_PKG_LICENSE")
             ));
+            ui.add_space(6.0);
+            // The community and the project, as FilmCraft's About shows them.
+            let _ = ui.hyperlink_to(tl!("Join the ArtCraft Discord"), crate::help::DISCORD);
+            let _ = ui.hyperlink_to("getartcraft.com", crate::help::WEBSITE);
+            let _ = ui.hyperlink_to(tl!("DiscCraft on GitHub"), crate::help::GITHUB);
             ui.add_space(6.0);
             if ui.button(tl!("OK")).clicked() {
                 close = true;

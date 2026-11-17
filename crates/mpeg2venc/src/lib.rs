@@ -1,6 +1,7 @@
-//! Intra-only MPEG-2 still-picture encoder for DVD menu backgrounds.
+//! MPEG-2 video encoder (ISO/IEC 13818-2): I pictures for menu stills, and I/P sequences for titles.
 //!
-//! This milestone encodes one 4:2:0 frame as an MP@ML I picture.
+//! MP@ML at a DVD's size (720 x 480 / 720 x 576), and MP@HL at 1920 x 1080 for a Blu-ray's interlaced HD formats
+//! (59.94i / 50i; [`encoder::Format::Hd1080`]).
 #![deny(
     clippy::unwrap_used,
     clippy::expect_used,

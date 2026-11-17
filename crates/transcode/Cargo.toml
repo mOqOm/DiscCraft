@@ -13,6 +13,7 @@ disccraft-photo.workspace = true
 disccraft-sound.workspace = true
 disccraft-motion.workspace = true
 disccraft-psmux.workspace = true
+craft-media.workspace = true
 filmcraft-media.workspace = true
 filmcraft-codecs.workspace = true
 filmcraft-frame.workspace = true

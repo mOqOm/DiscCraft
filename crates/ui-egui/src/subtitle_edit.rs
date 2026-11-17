@@ -89,9 +89,6 @@ pub(crate) fn min_subtitle_frames(num: u32, den: u32) -> i64 {
     nominal.saturating_mul(2) / 5 + 1
 }
 
-/// The length of an added subtitle in seconds (Encore's Preferences > Timelines > Subtitle Duration default).
-pub(crate) const DEFAULT_SUBTITLE_SECONDS: i64 = 2;
-
 /// What `button` does at `now` (ticks) on a track's subtitles (`(start, end)` in ticks, sorted by start), or `None`
 /// when it has nothing to do, as Encore CS6 decides it (`frame` is one frame, `added` the length of an added
 /// subtitle and `shortest` the shortest subtitle a trim leaves, in ticks):
@@ -206,7 +203,8 @@ impl DiscCraftApp {
         // One frame, and Encore's two seconds on the frame grid (60 frames in NTSC, 50 in PAL).
         let frame = frame_ticks(f64::from(den) / f64::from(num.max(1)), num, den).max(1);
         // `as` is exact for a second's count of frames.
-        let added_frames = (DEFAULT_SUBTITLE_SECONDS as f64 * f64::from(num)
+        // The preference's length (Encore: Subtitle Duration), two seconds unless changed.
+        let added_frames = (f64::from(self.timeline_prefs.subtitle_seconds.max(1)) * f64::from(num)
             / f64::from(den.max(1)))
         .round() as i64;
         let added = frame.saturating_mul(added_frames);

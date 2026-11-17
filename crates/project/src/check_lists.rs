@@ -474,6 +474,7 @@ mod tests {
                 transition: crate::lists::TransitionKind::None,
                 transition_duration: crate::lists::DEFAULT_TRANSITION_DURATION,
                 manual_advance: false,
+                random_pan_zoom: false,
                 audio_clips: Vec::new(),
                 loop_audio: false,
                 fit_to_audio: false,
@@ -503,6 +504,7 @@ mod tests {
                 transition: crate::lists::TransitionKind::None,
                 transition_duration: crate::lists::DEFAULT_TRANSITION_DURATION,
                 manual_advance: false,
+                random_pan_zoom: false,
                 audio_clips: Vec::new(),
                 loop_audio: false,
                 fit_to_audio: false,
@@ -575,6 +577,7 @@ mod tests {
                 subtitle_stroke: crate::SlideStroke::default(),
                 subtitle_align: 100,
                 subtitle_group: 0,
+                effect: None,
             });
 
         let problems = problems_for(&project);
@@ -605,6 +608,7 @@ mod tests {
                 subtitle_stroke: crate::SlideStroke::default(),
                 subtitle_align: 100,
                 subtitle_group: 0,
+                effect: None,
             });
 
         let problems = problems_for(&project);
@@ -635,6 +639,7 @@ mod tests {
                 subtitle_stroke: crate::SlideStroke::default(),
                 subtitle_align: 100,
                 subtitle_group: 0,
+                effect: None,
             });
 
         let problems = problems_for(&project);

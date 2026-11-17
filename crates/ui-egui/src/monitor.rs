@@ -247,6 +247,20 @@ impl DiscCraftApp {
                         egui::Color32::WHITE,
                     );
                     let shown = screen.intersect(area);
+                    if let Some(note) = &self.monitor_note {
+                        let text = format!(
+                            "{}\n{}",
+                            tlf!("The picture cannot be shown: {message}", message = note),
+                            tl!("Play to hear the sound.")
+                        );
+                        let _ = ui.painter().with_clip_rect(shown).text(
+                            shown.center(),
+                            egui::Align2::CENTER_CENTER,
+                            text,
+                            egui::FontId::proportional(13.0),
+                            egui::Color32::GRAY,
+                        );
+                    }
                     if self.subtitle_edit.is_some() {
                         // 字幕を追加したあと / ダブルクリックしたあとは、字幕の場所で入力する（Encore と同じ）。
                         self.subtitle_edit_box(ui, shown);
@@ -416,6 +430,7 @@ impl DiscCraftApp {
                 egui::ColorImage::filled([4, 3], egui::Color32::BLACK),
                 egui::TextureOptions::NEAREST,
             );
+            self.monitor_note = None;
             return Some((black, timecode));
         }
         let (clip, local) = crate::playback::clip_at(&clips, seconds)?;
@@ -430,28 +445,66 @@ impl DiscCraftApp {
             return Some((texture, timecode));
         }
 
-        let dragging = ctx.input(|input| input.pointer.any_down());
-        if dragging && let Some((_, _, texture)) = &self.monitor_frame {
+        // While it plays, the monitor shows the player's frames.
+        if self.is_playing()
+            && let Some((_, _, texture)) = &self.monitor_frame
+        {
             return Some((texture.clone(), timecode));
         }
 
         // The frame as the disc shows it, at the monitor's screen size (`monitor_frame_size`): the same pictures
-        // as playback, so stopping and playing show the same.
+        // as playback, so stopping and playing show the same. It is decoded on the loader's thread (a long file
+        // takes seconds to open, an HD frame a while to decode): the window is never held up, and scrubbing
+        // shows the newest frame that is ready.
         let path = std::path::PathBuf::from(&self.session.project.assets.get(&video)?.path);
-        if self
-            .monitor_source
-            .as_ref()
-            .is_none_or(|source| source.path() != path.as_path())
-        {
-            self.monitor_source = disccraft_engine::FrameSource::open(&path).ok();
-        }
         let size = self.monitor_frame_size(id);
         // The frame of the file: the position in the clip, on the frame grid.
         let at = (local * fps).round().max(0.0) / fps;
-        let picture = self.monitor_source.as_ref()?.frame(at, size).ok()?;
-        let texture = rgb_texture(ctx, "monitor_frame", &picture)?;
-        self.monitor_frame = Some((video.0, frame, texture.clone()));
-        Some((texture, timecode))
+        let key = (video.0, frame);
+        if let Some((asked, picture)) = self.monitor_loader.take() {
+            let texture = match picture.and_then(|picture| {
+                rgb_texture(ctx, "monitor_frame", &picture).ok_or_else(String::new)
+            }) {
+                Ok(texture) => {
+                    self.monitor_note = None;
+                    texture
+                }
+                // A picture that cannot be decoded (a codec the decoder does not read): a black screen in the
+                // monitor's shape with the reason on it. The time is shown and the sound still plays.
+                Err(message) => {
+                    self.monitor_note = Some(message);
+                    let (width, height) = asked.size;
+                    let rows = (48 * u64::from(height) / u64::from(width.max(1))).clamp(1, 192);
+                    ctx.load_texture(
+                        "monitor_no_picture",
+                        egui::ColorImage::filled(
+                            [48, usize::try_from(rows).unwrap_or(27)],
+                            egui::Color32::BLACK,
+                        ),
+                        egui::TextureOptions::NEAREST,
+                    )
+                }
+            };
+            self.monitor_frame = Some((asked.key.0, asked.key.1, texture.clone()));
+            if asked.key == key && asked.size == size {
+                self.monitor_wanted = None;
+                return Some((texture, timecode));
+            }
+        }
+        if self.monitor_wanted != Some((key, size)) {
+            self.monitor_loader.request(disccraft_engine::FrameRequest {
+                path,
+                seconds: at,
+                size,
+                key,
+            });
+            self.monitor_wanted = Some((key, size));
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        // Until it comes, the monitor keeps what it shows.
+        self.monitor_frame
+            .as_ref()
+            .map(|(_, _, texture)| (texture.clone(), timecode))
     }
 
     /// The size the monitor shows timeline `id` at, in square pixels: a Blu-ray HD disc's HD frame, else the SD

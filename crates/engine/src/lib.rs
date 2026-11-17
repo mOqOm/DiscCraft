@@ -23,7 +23,17 @@ mod player;
 mod session;
 pub mod waveform;
 
-pub use player::{AudioFeed, FrameSource, Player, PlayerAudio, PlayerFrame, PlayerStatus};
+/// Keeps what media files were found to be (length, picture size, thumbnails) in `dir` between runs, so a long
+/// video is not read again each time (`disccraft_transcode::enable_probe_cache`). Called by an application once
+/// at start.
+pub fn enable_media_cache(dir: &std::path::Path) {
+    disccraft_transcode::enable_probe_cache(dir);
+}
+
+pub use player::{
+    AudioFeed, FrameLoader, FrameRequest, FrameSource, Player, PlayerAudio, PlayerFrame,
+    PlayerStatus,
+};
 pub use session::{Session, UNDO_LIMIT};
 
 /// Result type returned by engine commands.

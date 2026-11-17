@@ -329,13 +329,11 @@ fn collect_order(tree: &Tree) -> Result<(Vec<usize>, Vec<usize>), UdfError> {
 
 fn fid_len_for_name(name: Option<&str>) -> Result<u32, UdfError> {
     let id_len = match name {
-        Some(text) => {
-            let chars =
-                u32::try_from(text.chars().count()).map_err(|_| invalid("name too long"))?;
-            chars
-                .checked_add(1)
-                .ok_or_else(|| invalid("name too long"))?
-        }
+        // The identifier as it is written: its compression byte and one or two bytes a character.
+        Some(text) => u32::try_from(crate::desc::fid_identifier(text).len())
+            .ok()
+            .filter(|len| *len <= 255)
+            .ok_or_else(|| invalid("name too long"))?,
         // The parent entry has no identifier at all (L_FI = 0).
         None => 0,
     };

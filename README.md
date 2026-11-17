@@ -35,7 +35,10 @@ In development (0.1.0). What works now:
 - The GUI (`cargo run --release -p disccraft`) uses Encore's arrangement and menu bar: the Project / Menu / Timeline / Build tabs,
   the monitor, menu viewer and flowchart, the properties panel, the layers / library panels, and the timeline viewer. Tabs can be
   dragged to reorder, move, split and float, closed with × and reopened from the window menu. Arrangements can be saved and named
-  as workspaces.
+  as workspaces. The Project panel's right-click menu is laid out as Encore's (rows not implemented yet are grey).
+- A video hours long and tens of gigabytes in size can be used right after it is imported: the file is opened in the background,
+  and the length and size of an H.264 mkv are read from its header. The monitor's picture is decoded in the background, so the
+  window does not stop while the playhead is dragged.
 - Menus: button placement (multi-select, align, distribute, arrange, copy and paste), links (pick whip), default buttons,
   auto-activate, backgrounds (colour / image / video) and menu audio, end action and duration, chapter index, library presets,
   image and shape layers (drop shadow, flip, rotate), guides, vertical text, creating a text subpicture.
@@ -43,7 +46,7 @@ In development (0.1.0). What works now:
   join; trimming snaps to GOP starts, and sources that need converting and HD are joined at build time too, though on DVD a clip
   that needs converting cannot be trimmed), chapter points, audio and subtitle tracks (a timeline's colour set picks the subtitle
   colours), end actions, remote menu, playback (Space, with audio; the speaker in the track header picks which audio track the
-  monitor plays).
+  monitor plays. A video whose picture cannot be decoded still plays its sound, and the monitor says why).
 - Navigation: first play, title button, slideshows (a slide's name and description can become a subtitle), playlists, chapter
   playlists. File ▸ Preview lets you try the disc in the project preview window
   without building it (our own VM: remote d-pad, title / menu, audio / subtitle, chapter, pause. Titles play with video and audio
@@ -58,9 +61,11 @@ What works today:
 - DVD: titles (including a timeline built from several video clips), chapters, multiple audio tracks, subtitles, 16:9,
   region codes, playlists and chapter playlists
 - Blu-ray: BDMV folders and ISO images, PG subtitles, IG menus (HDMV; always-on and popup menus, motion menus), user
-  operations (UO masks). Video is SD (720×480 / 720×576) MPEG-2 or HD (1080p 23.976 / 24 / 25 / 29.97 / 50 / 59.94,
-  720p 59.94 / 50 / 23.976 / 24) H.264 (titles, subtitles and menus and popups are at the HD size too; 1080p at 25 / 29.97 /
-  50 / 59.94 is outside the Blu-ray spec and will be removed)
+  operations (UO masks). Video is SD (720×480 / 720×576) MPEG-2 or HD (1080p 23.976 / 24 and
+  720p 59.94 / 50 / 23.976 / 24 as H.264, 1080i 59.94 / 50 as MPEG-2; titles, subtitles and menus and popups are at the HD size too.
+  Sources at 29.97 / 25 fps become HD at their own speed as 1080i 59.94 / 50. H.264 in an `.m2ts` / `.mkv` / `.mp4` / `.mov` that fits a
+  Blu-ray, interlaced 1080i included, goes on the disc as it is, without conversion. An mkv / mp4 / mov is written to the disc
+  straight from the source file, so no working space the size of the video is needed)
 - Menus: still menus, buttons and highlights, motion menus, timeouts (duration and end action), auto-activate, PSD import with
   button detection from layer names, chapter index
 - Sources: video (MP4 / MOV / MKV / m2v and more), audio (WAV / AC-3 / MP3 / FLAC and more), images (PNG / JPEG / PSD / TIFF),
@@ -68,8 +73,9 @@ What works today:
   UTF-8 / UTF-16 / Shift_JIS)
 - Navigation: first play, title button, remote menu, links, flowchart, playlists, slideshows
 - Transcode: automatic transcoding (audio to Dolby Digital (AC-3) at 192 kbps), bitrate allocation to fit the capacity, caching,
-  several sources converted in parallel (the MPEG-2 encoder is multithreaded over macroblock rows)
-- Output: DVD-5 / DVD-9, BD-25 / BD-50, BDXL (100 GB triple layer, 128 GB quad layer), capacity meter
+  several sources converted in parallel (the MPEG-2 encoder is multithreaded over macroblock rows, AC-3 is encoded in segments
+  on every core). Transcode Now in the Project panel's right-click menu converts media in the background ahead of the build
+- Output: DVD-5 / DVD-9, BD-25 / BD-50, BDXL (100 GB triple layer, 128 GB quad layer), capacity meter, DVD-ROM / BD-ROM content (files for a computer beside the video)
 - Verification: project checks (results grouped per item, in Encore's wording), the VM simulator and preview, read-back
   verification
 
@@ -180,7 +186,8 @@ Reused crates are listed in NOTICE.
 FilmCraft's crates build on the craft-libs crates (https://github.com/storytold/craft-libs, MIT OR Apache-2.0) for things such as
 video and audio decoding. DiscCraft uses craft-libs' craft-audio (the AC-3 encoder that turns converted audio into Dolby Digital),
 craft-video (the H.264 encoder for Blu-ray video, which used to be FilmCraft's filmcraft-h264enc; in tests also its MPEG-2 decoder,
-verifying the MPEG-2 encoder's output) and craft-ui (panel and workspace docking), and in tests also craft-psd (writing PSD files
+verifying the MPEG-2 encoder's output), craft-media (reading MPEG-2 program and transport streams, Matroska and MP4, to take out video and audio that fit the format
+without converting them) and craft-ui (panel and workspace docking), and in tests also craft-psd (writing PSD files
 for tests).
 
 ## Trademarks

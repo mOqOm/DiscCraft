@@ -52,9 +52,7 @@ impl DiscCraftApp {
             });
             ui.menu_button(tl!("View"), |ui| self.view_menu(ui, &mut clicked));
             ui.menu_button(tl!("Window"), |ui| self.window_menu(ui, &mut clicked));
-            ui.menu_button(tl!("Help"), |ui| {
-                push(&mut clicked, ui, Action::About, true)
-            });
+            ui.menu_button(tl!("Help"), |ui| self.help_menu(ui, &mut clicked));
         });
 
         for action in pressed.into_iter().chain(clicked) {
@@ -285,7 +283,7 @@ impl DiscCraftApp {
                 Action::AlignHorizontalCenter,
                 Action::AlignRight,
             ] {
-                push(clicked, ui, action, enabled);
+                push_indented(clicked, ui, action, enabled);
             }
             ui.separator();
             for action in [
@@ -293,7 +291,7 @@ impl DiscCraftApp {
                 Action::AlignVerticalCenter,
                 Action::AlignBottom,
             ] {
-                push(clicked, ui, action, enabled);
+                push_indented(clicked, ui, action, enabled);
             }
             ui.separator();
             if menu_check(ui, Action::AlignToSafeArea, self.align_to_safe_area) {
@@ -302,8 +300,8 @@ impl DiscCraftApp {
         });
         ui.menu_button(tl!("Distribute"), |ui| {
             let enabled = self.can_arrange(self.distribute_to_safe_area);
-            push(clicked, ui, Action::DistributeVertically, enabled);
-            push(clicked, ui, Action::DistributeHorizontally, enabled);
+            push_indented(clicked, ui, Action::DistributeVertically, enabled);
+            push_indented(clicked, ui, Action::DistributeHorizontally, enabled);
             ui.separator();
             if menu_check(
                 ui,
@@ -468,9 +466,9 @@ impl DiscCraftApp {
     }
 
     fn view_menu(&self, ui: &mut Ui, clicked: &mut Vec<Action>) {
-        push(clicked, ui, Action::ZoomIn, true);
-        push(clicked, ui, Action::ZoomOut, true);
-        push(clicked, ui, Action::FitInWindow, true);
+        push_indented(clicked, ui, Action::ZoomIn, true);
+        push_indented(clicked, ui, Action::ZoomOut, true);
+        push_indented(clicked, ui, Action::FitInWindow, true);
         ui.separator();
         let states = [
             (Action::ShowNormal, HighlightPreview::Normal),
@@ -498,8 +496,8 @@ impl DiscCraftApp {
         if menu_check(ui, Action::LockGuides, self.lock_guides) {
             clicked.push(Action::LockGuides);
         }
-        push(clicked, ui, Action::ClearGuides, self.has_guides());
-        push(clicked, ui, Action::NewGuide, menu_shown);
+        push_indented(clicked, ui, Action::ClearGuides, self.has_guides());
+        push_indented(clicked, ui, Action::NewGuide, menu_shown);
         ui.separator();
         if menu_check(ui, Action::ShowRouting, self.show_routing) {
             clicked.push(Action::ShowRouting);
@@ -636,6 +634,17 @@ impl DiscCraftApp {
             Action::ImportFilmCraftMarkers => self.import_filmcraft_markers(),
             Action::NewTimelineFromFilmCraft => self.new_timeline_from_filmcraft(),
             Action::About => self.about_open = true,
+            Action::JoinDiscord => self.open_link(ui.ctx(), crate::help::DISCORD),
+            Action::ArtCraftWebsite => self.open_link(ui.ctx(), crate::help::WEBSITE),
+            Action::DiscCraftOnGitHub => self.open_link(ui.ctx(), crate::help::GITHUB),
+            Action::ReportIssue => self.open_link(ui.ctx(), crate::help::ISSUES),
+            Action::RevealLogFiles => self.reveal_log_files(),
+            Action::SystemReport => self.system_report_open = true,
+            Action::CheckForUpdates => self.update_open = true,
+            Action::Help => {
+                let url = crate::help::manual_url(self.language);
+                self.open_link(ui.ctx(), url);
+            }
             Action::Undo => self.undo(),
             Action::Redo => self.redo(),
             Action::Rename => self.start_rename(),
@@ -1042,6 +1051,13 @@ const WINDOW_ACTIONS: [Action; 14] = [
 ];
 
 /// `action` の項目を描き、クリックされたら `clicked` に積む。
+/// [`push`] in a menu with checkable items: the label lines up with theirs.
+fn push_indented(clicked: &mut Vec<Action>, ui: &mut Ui, action: Action, enabled: bool) {
+    if crate::actions::menu_item_indented(ui, action, enabled) {
+        clicked.push(action);
+    }
+}
+
 fn push(clicked: &mut Vec<Action>, ui: &mut Ui, action: Action, enabled: bool) {
     if menu_item(ui, action, enabled) {
         clicked.push(action);

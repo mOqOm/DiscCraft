@@ -22,6 +22,16 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "disc.setRomContent",
+        label: "ROM コンテンツのフォルダーを設定",
+        menu: &["ディスク"],
+        shortcut: None,
+        params: r#"{"path": string | null}"#,
+        enabled: always_enabled,
+        run: run_set_rom_content,
+        journal: true,
+    },
+    CommandSpec {
         id: "disc.setDescription",
         label: "ディスクの説明を設定",
         menu: &["ディスク"],
@@ -116,7 +126,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "Blu-ray の映像を設定",
         menu: &["ディスク"],
         shortcut: None,
-        params: r#"{"video": "sd"|"1080p23.976"|"1080p24"|"1080p25"|"1080p29.97"|"1080p50"|"1080p59.94"|"720p59.94"|"720p50"|"720p23.976"|"720p24"}"#,
+        params: r#"{"video": "sd"|"1080p23.976"|"1080p24"|"1080i59.94"|"1080i50"|"720p59.94"|"720p50"|"720p23.976"|"720p24"}"#,
         enabled: always_enabled,
         run: run_set_bluray_video,
         journal: true,
@@ -151,6 +161,24 @@ fn run_set_name(session: &mut Session, params: &Value) -> CommandResult {
         ));
     }
     session.project.settings.name = name;
+    Ok(empty_object())
+}
+
+/// The folder whose files go on the disc beside the video (Encore's Build panel: DVD-ROM content / BD-ROM
+/// content); `null` or an empty path for none. The folder must exist; its files are read when the disc is built.
+fn run_set_rom_content(session: &mut Session, params: &Value) -> CommandResult {
+    let path = match params.get("path") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(path)) if path.trim().is_empty() => None,
+        Some(Value::String(path)) => Some(path.trim().to_owned()),
+        Some(_) => return Err("parameter \"path\" must be a folder path or null".to_string()),
+    };
+    if let Some(path) = &path
+        && !std::path::Path::new(path).is_dir()
+    {
+        return Err(format!("the folder {path} does not exist"));
+    }
+    session.project.settings.rom_content = path;
     Ok(empty_object())
 }
 
@@ -487,6 +515,88 @@ mod tests {
             session.project.settings.bd_video,
             disccraft_project::BdVideo::Sd
         );
+        Ok(())
+    }
+
+    /// M10.14: the interlaced HD formats by their names; their rate is their frames'.
+    #[test]
+    fn the_blu_ray_video_can_be_1080i() -> Result<(), Box<dyn Error>> {
+        let mut session = Session::new();
+        session.execute("disc.setBlurayVideo", &json!({"video": "1080i59.94"}))?;
+        let video = session.project.settings.bd_video;
+        assert_eq!(video, disccraft_project::BdVideo::Hd1080i59);
+        assert!(video.interlaced());
+        assert_eq!(video.hd(), Some((1920, 1080, 30_000, 1001)));
+        let text = serde_json::to_string(&session.project.settings)?;
+        assert!(text.contains("\"bdVideo\":\"1080i59.94\""), "{text}");
+        session.execute("disc.setBlurayVideo", &json!({"video": "1080i50"}))?;
+        let video = session.project.settings.bd_video;
+        assert_eq!(video.hd(), Some((1920, 1080, 25, 1)));
+        // Every format's name in commands is its name in the project file.
+        for video in disccraft_project::BdVideo::ALL {
+            assert_eq!(
+                serde_json::to_value(video)?,
+                serde_json::Value::String(video.id().to_string())
+            );
+            assert_eq!(video.interlaced(), video.id().starts_with("1080i"));
+        }
+        // The progressive 1080 formats outside the Blu-ray standard are no longer offered; a project file that
+        // has one opens as the standard's format of the same frame rate.
+        for (old, now) in [
+            ("1080p29.97", "1080i59.94"),
+            ("1080p25", "1080i50"),
+            ("1080p59.94", "720p59.94"),
+            ("1080p50", "720p50"),
+        ] {
+            assert!(
+                session
+                    .execute("disc.setBlurayVideo", &json!({"video": old}))
+                    .is_err()
+            );
+            let read: disccraft_project::BdVideo = serde_json::from_value(json!(old))?;
+            assert_eq!(read.id(), now);
+        }
+        Ok(())
+    }
+
+    /// M13.11: the ROM content folder is set, counted in the disc's usage, and cleared.
+    #[test]
+    fn rom_content_is_set_counted_and_cleared() -> Result<(), Box<dyn Error>> {
+        let dir = std::env::temp_dir().join(format!("disccraft-romcmd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("readme.txt"), vec![0_u8; 5000])?;
+        let mut session = Session::new();
+        let folder = dir.to_string_lossy().into_owned();
+        session.execute("disc.setRomContent", &json!({"path": folder}))?;
+        assert_eq!(
+            session.project.settings.rom_content.as_deref(),
+            Some(folder.as_str())
+        );
+        // Three sectors of data and one for the file's entry.
+        let usage = session.execute("disc.usage", &json!({}))?;
+        assert_eq!(
+            usage.get("romBytes").and_then(serde_json::Value::as_u64),
+            Some(4 * 2048)
+        );
+        assert_eq!(
+            usage
+                .get("estimatedBytes")
+                .and_then(serde_json::Value::as_u64),
+            Some(4 * 2048)
+        );
+        assert!(
+            session
+                .execute("disc.setRomContent", &json!({"path": dir.join("missing")}))
+                .is_err()
+        );
+        session.execute("disc.setRomContent", &json!({"path": null}))?;
+        assert_eq!(session.project.settings.rom_content, None);
+        session.execute("edit.undo", &json!({}))?;
+        assert_eq!(
+            session.project.settings.rom_content.as_deref(),
+            Some(folder.as_str())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 

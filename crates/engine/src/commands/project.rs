@@ -229,6 +229,7 @@ fn run_usage(session: &mut Session, _params: &Value) -> CommandResult {
         "capacityBytes": e.capacity_bytes,
         "estimatedBytes": e.estimated_bytes,
         "passthroughBytes": e.passthrough_bytes,
+        "romBytes": e.rom_bytes,
         "transcodeSeconds": e.transcode_seconds,
         "videoBitrate": e.video_bitrate,
         "fits": e.estimated_bytes <= e.capacity_bytes,

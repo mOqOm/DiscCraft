@@ -465,6 +465,134 @@ fn an_hd_title_joins_trimmed_clips() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+/// M10.14: a 1080i 59.94 disc (the Blu-ray format for 29.97 frames a second in HD) is MPEG-2 MP@HL everywhere:
+/// the title (two trimmed clips with a black gap between them, joined), the menu's still, and the clips'
+/// attributes (1080i, 29.97). ffmpeg decodes both clips without an error. Needs the `ntsc.m2v` fixture and
+/// ffmpeg; skipped without.
+#[test]
+fn a_1080i_disc_is_mpeg2_hd() {
+    let (Some(ffmpeg), Some(ffprobe)) = (
+        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
+        tool("DISCCRAFT_FFPROBE", "ffprobe"),
+    ) else {
+        eprintln!("ffmpeg / ffprobe not found; skipping");
+        return;
+    };
+    let video = fixtures().join("ntsc.m2v");
+    if !video.is_file() {
+        eprintln!("ntsc.m2v fixture not found; skipping");
+        return;
+    }
+    let mut p = Project::default();
+    p.settings.kind = DiscKind::BluRay;
+    p.settings.bd_video = disccraft_project::BdVideo::Hd1080i59;
+    let v = p.add_asset(&video).unwrap();
+    let t = p.add_timeline(v, Some("Main".to_string())).unwrap();
+    let _ = p
+        .append_timeline_video(t, v, Tick(599 * 8_475_667_200))
+        .unwrap();
+    p.timeline_mut(t).unwrap().video_trims = vec![
+        disccraft_project::ClipTrim {
+            start: 0,
+            end: Some(30),
+        },
+        disccraft_project::ClipTrim {
+            start: 52,
+            end: Some(82),
+        },
+    ];
+    p.timeline_mut(t).unwrap().video_gaps = vec![0, 15];
+    let menu = p.add_menu(Some("Main menu".to_string())).unwrap();
+    p.add_button(
+        menu,
+        "Play".to_string(),
+        None,
+        Link::Timeline { id: t, chapter: 0 },
+    )
+    .unwrap();
+    p.settings.first_play = Link::Menu {
+        id: menu,
+        button: None,
+    };
+
+    let out = fixtures().join("bd_1080i_out");
+    let _ = std::fs::remove_dir_all(&out);
+    let report = build_bdmv(&p, &out).unwrap();
+    assert_eq!(report.titles.len(), 1);
+
+    let mut clips: Vec<PathBuf> = std::fs::read_dir(out.join("BDMV/STREAM"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    clips.sort();
+    assert_eq!(clips.len(), 2, "{clips:?}");
+    let mut frames = Vec::new();
+    for stream in &clips {
+        // The same frame rate as the source: 30 + 15 + 30 frames in the title, one in the menu.
+        let probe = Command::new(&ffprobe)
+            .args(["-v", "error", "-select_streams", "v:0", "-count_packets"])
+            .args(["-show_entries"])
+            .args(["stream=codec_name,profile,level,width,height,r_frame_rate,nb_read_packets"])
+            .args(["-of", "csv=p=0"])
+            .arg(stream)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&probe.stdout);
+        let line = text.lines().next().unwrap_or_default().trim().to_string();
+        let count = line
+            .trim_end_matches(',')
+            .rsplit(',')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        // Main profile at High level (level_idc 4).
+        assert!(
+            line.starts_with("mpeg2video,Main,1920,1080,4,"),
+            "{stream:?}: {text}"
+        );
+        let count = count.parse::<u32>().unwrap_or(0);
+        // (ffprobe guesses the rate of the menu's single picture from its fields.)
+        assert!(
+            count == 1 || line.contains(",30000/1001,"),
+            "{stream:?}: {text}"
+        );
+        frames.push(count);
+
+        let decode = Command::new(&ffmpeg)
+            .args(["-v", "error", "-xerror", "-err_detect", "explode", "-i"])
+            .arg(stream)
+            .args(["-map", "0:v:0", "-f", "null", "-"])
+            .output()
+            .unwrap();
+        // (Probing a menu clip, ffmpeg tries its short graphics stream as MP3 audio and says so.)
+        let errors = String::from_utf8_lossy(&decode.stderr);
+        let errors: Vec<&str> = errors
+            .lines()
+            .filter(|line| !line.contains("mp3float") && !line.contains("Last message repeated"))
+            .collect();
+        assert!(
+            decode.status.success() && errors.is_empty(),
+            "{stream:?}: {errors:?}"
+        );
+    }
+    frames.sort_unstable();
+    assert_eq!(frames, vec![1, 75]);
+
+    // Every clip says MPEG-2, 1080i, 29.97, 16:9.
+    for entry in std::fs::read_dir(out.join("BDMV/CLIPINF")).unwrap() {
+        let path = entry.unwrap().path();
+        let info = disccraft_bdmv::clpi::read_clpi(&std::fs::read(&path).unwrap()).unwrap();
+        let text = format!("{info:?}");
+        assert!(
+            text.contains("Mpeg2Video { video_format: 4, frame_rate: 4, aspect: 3 }"),
+            "{path:?}: {text}"
+        );
+    }
+    if std::env::var_os("DISCCRAFT_KEEP_OUTPUT").is_none() {
+        let _ = std::fs::remove_dir_all(&out);
+    }
+}
+
 /// M6.221: a subtitle track's colour group reaches the Blu-ray's subtitle stream. With group 2 set to red letters,
 /// the picture ffmpeg draws with the subtitle over it has red where the default (white) subtitle has none: at the
 /// bottom centre the test picture is yellow and blue. Needs the `ntsc.m2v` fixture and ffmpeg; skipped without.
@@ -729,4 +857,158 @@ fn an_hd_title_makes_no_dvd_transcode() {
     );
     assert!(!codecs.contains("mpeg2video"), "{codecs}");
     let _ = std::fs::remove_dir_all(&out);
+}
+
+/// The decoded pictures of `file`'s first video stream as one MD5 (ffmpeg's `md5` muxer).
+fn video_md5(ffmpeg: &Path, file: &Path) -> String {
+    let output = Command::new(ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(file)
+        .args(["-map", "0:v:0", "-f", "md5", "-"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{file:?}");
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// M10.16: interlaced H.264 in a Matroska file (which the media decoder does not read) goes on a 1080i disc as it
+/// is. The source has no access unit delimiters and its parameter sets only in the track's header, B pictures (so
+/// its decode times are worked out) and times rounded to milliseconds; the clip decodes to the same pictures.
+#[test]
+fn interlaced_h264_in_an_mkv_goes_on_a_1080i_disc_as_it_is() {
+    interlaced_h264_goes_on_a_1080i_disc_as_it_is("mkv");
+}
+
+/// M10.17: the same from an MP4 file, whose samples have their own decode times and whose key frames are its sync
+/// samples.
+#[test]
+fn interlaced_h264_in_an_mp4_goes_on_a_1080i_disc_as_it_is() {
+    interlaced_h264_goes_on_a_1080i_disc_as_it_is("mp4");
+}
+
+fn interlaced_h264_goes_on_a_1080i_disc_as_it_is(container: &str) {
+    let (Some(ffmpeg), Some(ffprobe)) = (
+        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
+        tool("DISCCRAFT_FFPROBE", "ffprobe"),
+    ) else {
+        eprintln!("ffmpeg / ffprobe not found; skipping");
+        return;
+    };
+    let video = fixtures().join(format!("h264_1080i.{container}"));
+    if !video.is_file() {
+        std::fs::create_dir_all(fixtures()).unwrap();
+        let made = Command::new(&ffmpeg)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .args([
+                "testsrc2=size=1920x1080:rate=30000/1001",
+                "-f",
+                "lavfi",
+                "-i",
+            ])
+            .args(["sine=frequency=440:sample_rate=48000", "-t", "3"])
+            .args([
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-profile:v",
+                "high",
+            ])
+            .args(["-level", "4.1", "-pix_fmt", "yuv420p", "-b:v", "6M"])
+            .args(["-flags", "+ildct+ilme", "-x264-params"])
+            .args(["tff=1:bframes=2:keyint=30:aud=0:8x8dct=1:vbv-maxrate=20000:vbv-bufsize=20000"])
+            .args(["-c:a", "aac", "-b:a", "128k"])
+            .arg(&video)
+            .status();
+        if !made.is_ok_and(|status| status.success()) {
+            let _ = std::fs::remove_file(&video);
+            eprintln!("ffmpeg cannot make interlaced H.264 (no libx264?); skipping");
+            return;
+        }
+    }
+    let mut p = Project::default();
+    p.settings.kind = DiscKind::BluRay;
+    p.settings.bd_video = disccraft_project::BdVideo::Hd1080i59;
+    let v = p.add_asset(&video).unwrap();
+    let t = p.add_timeline(v, Some("Main".to_string())).unwrap();
+    p.settings.first_play = Link::Timeline { id: t, chapter: 0 };
+
+    // M12.16: its length, size and rate come from the file's header (the file is not opened as media).
+    let probe = disccraft_transcode::probe_video(&video).unwrap();
+    assert_eq!((probe.width, probe.height), (1920, 1080));
+    assert!((probe.fps - 30_000.0 / 1001.0).abs() < 1e-9, "{probe:?}");
+    assert!((probe.seconds - 3.0).abs() < 0.1, "{probe:?}");
+    assert!(probe.wide && probe.has_audio, "{probe:?}");
+    let sound = disccraft_transcode::probe_audio_seconds(&video).unwrap();
+    assert!((sound - probe.seconds).abs() < 1e-9);
+
+    // The size estimate counts the file as it is: nothing to encode.
+    let estimate = disccraft_dvd::estimate(&p).unwrap();
+    assert!(estimate.passthrough_bytes > 0, "{estimate:?}");
+    assert!(estimate.transcode_seconds.abs() < 1e-9, "{estimate:?}");
+
+    let out = fixtures().join(format!("bd_h264_1080i_{container}_out"));
+    let _ = std::fs::remove_dir_all(&out);
+    let report = build_bdmv(&p, &out).unwrap();
+    assert_eq!(report.titles.len(), 1);
+
+    let stream = out.join("BDMV/STREAM/00001.m2ts");
+    let probe = Command::new(&ffprobe)
+        .args(["-v", "error", "-select_streams", "v:0", "-count_packets"])
+        .args(["-show_entries"])
+        .args(["stream=codec_name,profile,width,height,field_order,r_frame_rate,nb_read_packets"])
+        .args(["-of", "csv=p=0"])
+        .arg(&stream)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&probe.stdout);
+    let line = text.lines().next().unwrap_or_default().trim();
+    assert_eq!(line, "h264,High,1920,1080,tt,30000/1001,90", "{text}");
+
+    // Decodes without an error, to the pictures of the source.
+    let decode = Command::new(&ffmpeg)
+        .args(["-v", "error", "-xerror", "-err_detect", "explode", "-i"])
+        .arg(&stream)
+        .args(["-f", "null", "-"])
+        .output()
+        .unwrap();
+    assert!(
+        decode.status.success() && decode.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&decode.stderr)
+    );
+    assert_eq!(video_md5(&ffmpeg, &stream), video_md5(&ffmpeg, &video));
+
+    // Decode times rise by a frame and never pass the picture's own time.
+    let packets = Command::new(&ffprobe)
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries"])
+        .args(["packet=pts,dts", "-of", "csv=p=0"])
+        .arg(&stream)
+        .output()
+        .unwrap();
+    let times: Vec<(i64, i64)> = String::from_utf8_lossy(&packets.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.trim().trim_end_matches(',').split(',');
+            Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+        })
+        .collect();
+    assert_eq!(times.len(), 90);
+    assert!(times.iter().all(|(pts, dts)| dts <= pts), "{times:?}");
+    assert!(
+        times.array_windows().all(|[a, b]| b.1 - a.1 == 3003),
+        "{times:?}"
+    );
+    assert!(times.iter().any(|(pts, dts)| pts > dts), "no reordering");
+
+    // The clip says H.264, 1080i, 29.97, 16:9.
+    let info = std::fs::read(out.join("BDMV/CLIPINF/00001.clpi")).unwrap();
+    let text = format!("{:?}", disccraft_bdmv::clpi::read_clpi(&info).unwrap());
+    assert!(
+        text.contains("H264Video { video_format: 4, frame_rate: 4, aspect: 3 }"),
+        "{text}"
+    );
+    if std::env::var_os("DISCCRAFT_KEEP_OUTPUT").is_none() {
+        let _ = std::fs::remove_dir_all(&out);
+    }
 }

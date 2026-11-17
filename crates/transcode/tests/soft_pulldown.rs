@@ -21,6 +21,7 @@ fn soft_pulldown_stream() -> Vec<u8> {
         bitrate: 6_000_000,
         max_bitrate: 9_000_000,
         wide: false,
+        format: disccraft_mpeg2venc::encoder::Format::Sd,
     })
     .unwrap();
     let mut stream = Vec::new();

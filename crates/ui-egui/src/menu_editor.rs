@@ -1212,27 +1212,32 @@ impl DiscCraftApp {
         if let Some(cached) = self.timed_frames.get(&key) {
             return cached.clone();
         }
-        let frame = self
-            .run_query(
-                "asset.frame",
-                serde_json::json!({
-                    "asset": asset.0,
-                    "seconds": time.seconds().max(0.0),
-                    "bright": bright,
-                    "bars": !thumbnail,
-                }),
-            )
-            .and_then(|value| {
-                let width = usize::try_from(value.get("width")?.as_u64()?).ok()?;
-                let height = usize::try_from(value.get("height")?.as_u64()?).ok()?;
-                let rgb: Vec<u8> = value
-                    .get("rgb")?
-                    .as_array()?
-                    .iter()
-                    .map(|byte| byte.as_u64().and_then(|b| u8::try_from(b).ok()))
-                    .collect::<Option<Vec<u8>>>()?;
-                Some((std::sync::Arc::new(rgb), width, height))
-            });
+        // Not waited for: asked again once the file is open.
+        let value = self.run_query(
+            "asset.frame",
+            serde_json::json!({
+                "asset": asset.0,
+                "seconds": time.seconds().max(0.0),
+                "bright": bright,
+                "bars": !thumbnail,
+                "wait": false,
+            }),
+        );
+        if crate::project_panel::is_pending(value.as_ref()) {
+            self.media_pending = true;
+            return None;
+        }
+        let frame = value.and_then(|value| {
+            let width = usize::try_from(value.get("width")?.as_u64()?).ok()?;
+            let height = usize::try_from(value.get("height")?.as_u64()?).ok()?;
+            let rgb: Vec<u8> = value
+                .get("rgb")?
+                .as_array()?
+                .iter()
+                .map(|byte| byte.as_u64().and_then(|b| u8::try_from(b).ok()))
+                .collect::<Option<Vec<u8>>>()?;
+            Some((std::sync::Arc::new(rgb), width, height))
+        });
         let _ = self.timed_frames.insert(key, frame.clone());
         frame
     }
@@ -1245,22 +1250,25 @@ impl DiscCraftApp {
         if let Some(cached) = self.first_frames.get(&asset.0) {
             return cached.clone();
         }
-        let frame = self
-            .run_query(
-                "asset.frame",
-                serde_json::json!({ "asset": asset.0, "seconds": 0.0 }),
-            )
-            .and_then(|value| {
-                let width = usize::try_from(value.get("width")?.as_u64()?).ok()?;
-                let height = usize::try_from(value.get("height")?.as_u64()?).ok()?;
-                let rgb: Vec<u8> = value
-                    .get("rgb")?
-                    .as_array()?
-                    .iter()
-                    .map(|byte| byte.as_u64().and_then(|b| u8::try_from(b).ok()))
-                    .collect::<Option<Vec<u8>>>()?;
-                Some((std::sync::Arc::new(rgb), width, height))
-            });
+        let value = self.run_query(
+            "asset.frame",
+            serde_json::json!({ "asset": asset.0, "seconds": 0.0, "wait": false }),
+        );
+        if crate::project_panel::is_pending(value.as_ref()) {
+            self.media_pending = true;
+            return None;
+        }
+        let frame = value.and_then(|value| {
+            let width = usize::try_from(value.get("width")?.as_u64()?).ok()?;
+            let height = usize::try_from(value.get("height")?.as_u64()?).ok()?;
+            let rgb: Vec<u8> = value
+                .get("rgb")?
+                .as_array()?
+                .iter()
+                .map(|byte| byte.as_u64().and_then(|b| u8::try_from(b).ok()))
+                .collect::<Option<Vec<u8>>>()?;
+            Some((std::sync::Arc::new(rgb), width, height))
+        });
         let _ = self.first_frames.insert(asset.0, frame.clone());
         frame
     }

@@ -174,6 +174,22 @@ pub(crate) enum Action {
     NewTimelineFromFilmCraft,
     /// Show the About DiscCraft dialog.
     About,
+    /// Open the ArtCraft Discord in the web browser.
+    JoinDiscord,
+    /// Open the ArtCraft website.
+    ArtCraftWebsite,
+    /// Open DiscCraft's repository on GitHub.
+    DiscCraftOnGitHub,
+    /// Open DiscCraft's issues on GitHub, to report a problem.
+    ReportIssue,
+    /// Save this session's log and show it in the file manager.
+    RevealLogFiles,
+    /// Show the System Compatibility Report.
+    SystemReport,
+    /// Show this version and the releases on GitHub.
+    CheckForUpdates,
+    /// Open the user manual (F1).
+    Help,
     /// Zoom in.
     ZoomIn,
     /// Zoom out.
@@ -245,7 +261,7 @@ pub(crate) enum Trigger {
 
 impl Action {
     /// Every action, in menu order.
-    pub(crate) const ALL: [Action; 111] = [
+    pub(crate) const ALL: [Action; 119] = [
         Action::NewProject,
         Action::NewMenu,
         Action::NewTimeline,
@@ -328,6 +344,14 @@ impl Action {
         Action::ImportFilmCraftMarkers,
         Action::NewTimelineFromFilmCraft,
         Action::About,
+        Action::JoinDiscord,
+        Action::ArtCraftWebsite,
+        Action::DiscCraftOnGitHub,
+        Action::ReportIssue,
+        Action::RevealLogFiles,
+        Action::SystemReport,
+        Action::CheckForUpdates,
+        Action::Help,
         Action::ZoomIn,
         Action::ZoomOut,
         Action::FitInWindow,
@@ -444,7 +468,15 @@ impl Action {
             Self::ImportSubtitles => tl!("Import Subtitles…"),
             Self::ImportFilmCraftMarkers => tl!("Import FilmCraft Markers…"),
             Self::NewTimelineFromFilmCraft => tl!("New Timeline from FilmCraft Sequence…"),
-            Self::About => tl!("About DiscCraft…"),
+            Self::About => tl!("About DiscCraft"),
+            Self::JoinDiscord => tl!("Join the ArtCraft Discord…"),
+            Self::ArtCraftWebsite => tl!("ArtCraft Website"),
+            Self::DiscCraftOnGitHub => tl!("DiscCraft on GitHub"),
+            Self::ReportIssue => tl!("Report an Issue…"),
+            Self::RevealLogFiles => tl!("Reveal Log Files…"),
+            Self::SystemReport => tl!("System Compatibility Report…"),
+            Self::CheckForUpdates => tl!("Check for Updates…"),
+            Self::Help => tl!("DiscCraft Help…"),
             Self::ZoomIn => tl!("Zoom In"),
             Self::ZoomOut => tl!("Zoom Out"),
             Self::FitInWindow => tl!("Fit in Window"),
@@ -483,8 +515,16 @@ impl Action {
             Self::NewMenu => key_shortcut(Modifiers::COMMAND, Key::M),
             Self::NewTimeline => key_shortcut(Modifiers::COMMAND, Key::T),
             Self::NewSlideshow => key_shortcut(Modifiers::COMMAND, Key::G),
+            Self::Help => key_shortcut(Modifiers::NONE, Key::F1),
             Self::NewPlaylist
             | Self::NewChapterPlaylist
+            | Self::JoinDiscord
+            | Self::ArtCraftWebsite
+            | Self::DiscCraftOnGitHub
+            | Self::ReportIssue
+            | Self::RevealLogFiles
+            | Self::SystemReport
+            | Self::CheckForUpdates
             | Self::ConvertToObject
             | Self::BuildFolder
             | Self::BuildImage
@@ -842,10 +882,49 @@ const CHECK_WIDTH: f32 = 16.0;
 /// shows a check mark in a column on the left instead of a highlighted background, so the open panels read at a
 /// glance and the labels stay aligned.
 pub(crate) fn menu_check(ui: &mut Ui, action: Action, checked: bool) -> bool {
-    let mark = if checked { "✔" } else { "" };
-    let button = egui::Button::new((mark.atom_size(egui::vec2(CHECK_WIDTH, 0.0)), action.label()))
-        .shortcut_text(action.shortcut_text(ui.ctx()));
-    ui.add(button).clicked()
+    let response = ui.add(check_column_button(ui, action));
+    if checked {
+        paint_check(ui, &response, true);
+    }
+    response.clicked()
+}
+
+/// A menu item without a check mark in a menu that has checkable items: its label starts where theirs do, behind
+/// the (empty) check mark column. Returns whether it was clicked.
+pub(crate) fn menu_item_indented(ui: &mut Ui, action: Action, enabled: bool) -> bool {
+    ui.add_enabled(enabled, check_column_button(ui, action))
+        .clicked()
+}
+
+/// The button of a menu item whose label is behind the check mark column.
+fn check_column_button(ui: &Ui, action: Action) -> egui::Button<'static> {
+    egui::Button::new(("".atom_size(egui::vec2(CHECK_WIDTH, 0.0)), action.label()))
+        .shortcut_text(action.shortcut_text(ui.ctx()))
+}
+
+/// Draws the check mark of a checked menu item in its column, on the middle of the row. It is drawn as two
+/// strokes, not as a font's "✔": the glyph comes from a fallback font whose line sits lower than the label's, so
+/// the mark hung below its row.
+fn paint_check(ui: &Ui, response: &egui::Response, enabled: bool) {
+    let rect = response.rect;
+    let padding = ui.spacing().button_padding.x;
+    let center = egui::pos2(rect.left() + padding + CHECK_WIDTH * 0.5, rect.center().y);
+    let size = (CHECK_WIDTH * 0.3).min(rect.height() * 0.28);
+    let color = if enabled {
+        ui.style().interact(response).text_color()
+    } else {
+        ui.visuals().widgets.noninteractive.text_color()
+    };
+    let stroke = egui::Stroke::new(1.6, color);
+    let knee = center + egui::vec2(-size * 0.3, size * 0.75);
+    ui.painter().line(
+        vec![
+            center + egui::vec2(-size, 0.05 * size),
+            knee,
+            center + egui::vec2(size, -size * 0.8),
+        ],
+        stroke,
+    );
 }
 
 #[cfg(test)]

@@ -754,6 +754,7 @@ fn motion_encoder(standard: Standard, menu: &Menu, wide: bool) -> Result<Encoder
         bitrate: 6_000_000,
         max_bitrate: 8_000_000,
         wide,
+        format: disccraft_mpeg2venc::encoder::Format::Sd,
     };
 
     Encoder::new(config).map_err(|err| unsupported_menu(menu, err))

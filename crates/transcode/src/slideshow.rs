@@ -36,6 +36,89 @@ pub struct SlideInput {
     pub fit: SlideFit,
     /// The transition into this slide when it differs from the show's (ignored on the first slide).
     pub transition: Option<Transition>,
+    /// Pan and zoom while the slide is up (Encore's slide effect); `None` holds the picture still.
+    pub motion: Option<Motion>,
+}
+
+/// A slide's pan and zoom: the picture is scaled by up to [`MOTION_SCALE`] and travels across the room that
+/// leaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Motion {
+    /// The way the picture travels across the frame: -1, 0 or 1 horizontally (left / right) and vertically
+    /// (up / down).
+    pub pan: (i8, i8),
+    /// 1 grows the picture (zoom in), -1 shrinks it back to its size (zoom out), 0 keeps its size.
+    pub zoom: i8,
+}
+
+/// How much a slide's picture is enlarged at the far end of a zoom (and all through a pan without zoom, which
+/// needs room to travel in).
+const MOTION_SCALE: f32 = 1.12;
+
+impl Motion {
+    /// The scale of the picture and where its centre sits (in frame widths and heights from the frame's centre)
+    /// at `t` from 0 (the slide's first frame) to 1 (its last).
+    fn at(self, t: f32) -> (f32, f32, f32) {
+        let t = t.clamp(0.0, 1.0);
+        let scale = match self.zoom.signum() {
+            1 => 1.0 + (MOTION_SCALE - 1.0) * t,
+            -1 => MOTION_SCALE - (MOTION_SCALE - 1.0) * t,
+            // No zoom: enlarged all the way when the picture pans, as it is otherwise.
+            _ if self.pan != (0, 0) => MOTION_SCALE,
+            _ => 1.0,
+        };
+        // The part of the picture the frame cannot show, as a share of the frame: the room to travel in.
+        let slack = 1.0 - 1.0 / scale;
+        // From one side to the other over the slide. The picture moving left means the view moving right.
+        let along = (2.0 * t - 1.0) * slack / 2.0;
+        (
+            scale,
+            f32::from(self.pan.0.signum()) * -along,
+            f32::from(self.pan.1.signum()) * -along,
+        )
+    }
+
+    /// `rgb` (a frame of `width` x `height`) as the slide shows it at `t`.
+    fn frame(self, rgb: &[u8], (width, height): (u32, u32), t: f32) -> Vec<u8> {
+        let (scale, centre_x, centre_y) = self.at(t);
+        let (w, h) = (width as usize, height as usize);
+        if scale <= 1.0 && centre_x == 0.0 && centre_y == 0.0
+            || rgb.len() < w * h * 3
+            || w == 0
+            || h == 0
+        {
+            return rgb.to_vec();
+        }
+        let (wf, hf) = (width as f32, height as f32);
+        // The source position of the frame's centre.
+        let (cx, cy) = (wf / 2.0 + centre_x * wf, hf / 2.0 + centre_y * hf);
+        let mut out = vec![0u8; w * h * 3];
+        let sample = |x: usize, y: usize, channel: usize| -> f32 {
+            rgb.get((y * w + x) * 3 + channel)
+                .copied()
+                .map_or(0.0, f32::from)
+        };
+        for (y, row) in out.chunks_exact_mut(w * 3).enumerate() {
+            let sy = (cy + (y as f32 + 0.5 - hf / 2.0) / scale - 0.5).clamp(0.0, hf - 1.0);
+            let y0 = sy.floor() as usize;
+            let y1 = (y0 + 1).min(h - 1);
+            let fy = sy - y0 as f32;
+            for (x, pixel) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+                let sx = (cx + (x as f32 + 0.5 - wf / 2.0) / scale - 0.5).clamp(0.0, wf - 1.0);
+                let x0 = sx.floor() as usize;
+                let x1 = (x0 + 1).min(w - 1);
+                let fx = sx - x0 as f32;
+                for (channel, value) in pixel.iter_mut().enumerate() {
+                    let top = sample(x0, y0, channel) * (1.0 - fx) + sample(x1, y0, channel) * fx;
+                    let bottom =
+                        sample(x0, y1, channel) * (1.0 - fx) + sample(x1, y1, channel) * fx;
+                    // `as` saturates; the mix of bytes stays in their range.
+                    *value = (top * (1.0 - fy) + bottom * fy).round() as u8;
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Where a picture lands in the output frame; it may stick out (negative x / y, or a size past the frame) and is
@@ -372,6 +455,20 @@ fn for_each_frame(
     let mut previous_rgb: Option<Vec<u8>> = None;
     let mut next_rgb: Option<Vec<u8>> = None;
 
+    // How far through its frames a slide is (0 at the first, 1 at the last).
+    let progress = |position: u64, frames: u64| -> f32 {
+        if frames <= 1 {
+            0.0
+        } else {
+            // Frame counts of a slide are small; the float holds them exactly.
+            position as f32 / (frames - 1) as f32
+        }
+    };
+    // A slide's picture at `t`: moved by its pan and zoom, or as it is.
+    let shown = |slide: &SlideInput, rgb: &[u8], t: f32| -> Option<Vec<u8>> {
+        slide.motion.map(|motion| motion.frame(rgb, size, t))
+    };
+
     for (index, (slide, frames)) in slides.iter().zip(frame_counts).enumerate() {
         let rgb = match next_rgb.take() {
             Some(rgb) => rgb,
@@ -379,28 +476,34 @@ fn for_each_frame(
         };
         let half_in = halves.get(index).copied().unwrap_or(0);
         let half_out = halves.get(index.saturating_add(1)).copied().unwrap_or(0);
+        // The next slide as its first frame shows it, for the cut out of this one.
+        let mut next_first: Option<Vec<u8>> = None;
         if half_out > 0
             && let Some(next) = slides.get(index.saturating_add(1))
         {
-            next_rgb = Some(slide_rgb(&next.image, size, canvas.target, next.fit)?);
+            let base = slide_rgb(&next.image, size, canvas.target, next.fit)?;
+            next_first = shown(next, &base, 0.0);
+            next_rgb = Some(base);
         }
 
         for position in 0..*frames {
+            let moved = shown(slide, &rgb, progress(position, *frames));
+            let current: &[u8] = moved.as_deref().unwrap_or(&rgb);
             // Position within the transition at the cut before this slide (second half) or after it (first half).
             let blend = if position < half_in {
                 previous_rgb.as_deref().map(|prev| {
                     (
                         prev,
-                        rgb.as_slice(),
+                        current,
                         half_in.saturating_add(position),
                         half_in,
                         cuts.get(index).map_or(transition.kind, |cut| cut.kind),
                     )
                 })
             } else if frames.saturating_sub(position) <= half_out {
-                next_rgb.as_deref().map(|next| {
+                next_first.as_deref().or(next_rgb.as_deref()).map(|next| {
                     (
-                        rgb.as_slice(),
+                        current,
                         next,
                         position.saturating_sub(frames.saturating_sub(half_out)),
                         half_out,
@@ -418,10 +521,13 @@ fn for_each_frame(
                     let mixed = transition_frame(kind, from, to, alpha, width);
                     frame(&mixed, None)?;
                 }
+                // A moving slide is a new picture every frame; a still one is the same as the frame before.
+                None if moved.is_some() => frame(current, None)?,
                 None => frame(&rgb, Some(index))?,
             }
         }
-        previous_rgb = Some(rgb);
+        // The slide as its last frame showed it, for the cut into the next one.
+        previous_rgb = Some(shown(slide, &rgb, 1.0).unwrap_or(rgb));
     }
     Ok(())
 }
@@ -609,6 +715,7 @@ fn encoder_config(options: &TranscodeOptions, max_bitrate: u32) -> EncoderConfig
         bitrate: options.video_bitrate,
         max_bitrate,
         wide: options.wide,
+        format: disccraft_mpeg2venc::encoder::Format::Sd,
     }
 }
 
@@ -1054,6 +1161,69 @@ mod tests {
     use std::error::Error;
 
     /// A wide (2:1) vector slide is rendered sharp and letterboxed into the 4:3 frame.
+    /// A zoom in starts with the picture as it is and ends enlarged about its centre; a pan without zoom keeps the
+    /// enlarged size and travels from one side to the other; no motion leaves the picture alone.
+    #[test]
+    fn pan_and_zoom_move_the_picture() {
+        use super::Motion;
+        // A 16 x 8 frame, black with one white column at x = 12.
+        let (width, height) = (16u32, 8u32);
+        let mut rgb = vec![0u8; 16 * 8 * 3];
+        for y in 0..8 {
+            for channel in 0..3 {
+                if let Some(value) = rgb.get_mut((y * 16 + 12) * 3 + channel) {
+                    *value = 255;
+                }
+            }
+        }
+        // The x of the brightest pixel in the middle row.
+        let bright = |frame: &[u8]| -> usize {
+            (0..16)
+                .max_by_key(|x| frame.get((4 * 16 + x) * 3).copied().unwrap_or(0))
+                .unwrap_or(0)
+        };
+        let zoom_in = Motion {
+            pan: (0, 0),
+            zoom: 1,
+        };
+        assert_eq!(zoom_in.frame(&rgb, (width, height), 0.0), rgb);
+        // Enlarged about the centre (x = 8): the column moves outwards.
+        assert!(bright(&zoom_in.frame(&rgb, (width, height), 1.0)) >= 12);
+        assert_eq!(zoom_in.at(0.0).0, 1.0);
+        assert!((zoom_in.at(1.0).0 - super::MOTION_SCALE).abs() < 1e-6);
+        let zoom_out = Motion {
+            pan: (0, 0),
+            zoom: -1,
+        };
+        assert_eq!(zoom_out.frame(&rgb, (width, height), 1.0), rgb);
+
+        // The picture moving left: the view's centre goes from left of the middle to right of it.
+        let left = Motion {
+            pan: (-1, 0),
+            zoom: 0,
+        };
+        let (scale, first, _) = left.at(0.0);
+        let (_, last, _) = left.at(1.0);
+        assert!((scale - super::MOTION_SCALE).abs() < 1e-6);
+        assert!(first < 0.0 && last > 0.0 && (first + last).abs() < 1e-6);
+        let right = Motion {
+            pan: (1, 0),
+            zoom: 0,
+        };
+        assert!(right.at(0.0).1 > 0.0 && right.at(1.0).1 < 0.0);
+        let up = Motion {
+            pan: (0, -1),
+            zoom: 0,
+        };
+        assert!(up.at(0.0).2 < 0.0 && up.at(1.0).2 > 0.0 && up.at(0.5).1 == 0.0);
+
+        let still = Motion {
+            pan: (0, 0),
+            zoom: 0,
+        };
+        assert_eq!(still.frame(&rgb, (width, height), 0.7), rgb);
+    }
+
     #[test]
     fn slides_are_matted_cropped_or_left_alone() {
         // A 2:1 picture in the 4:3 frame (720 anamorphic pixels wide, so 2:1 is 320 of the 480 lines).

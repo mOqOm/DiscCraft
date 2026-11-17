@@ -766,9 +766,23 @@ fn parse_fid_at(buf: &[u8], off: usize) -> Result<(ParsedFid, usize), UdfError> 
     ))
 }
 
+/// A file identifier's name (OSTA UDF 2.1.1): after the compression byte, one Latin-1 byte a character (8) or
+/// two bytes a UTF-16 unit, the high byte first (16).
 fn decode_fid_ident(ident: &[u8]) -> String {
-    let body = if ident.is_empty() { &[] } else { &ident[1..] };
-    String::from_utf8_lossy(body).into_owned()
+    let Some((compression, body)) = ident.split_first() else {
+        return String::new();
+    };
+    if *compression == 16 {
+        let units: Vec<u16> = body
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_be_bytes(*pair))
+            .collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        body.iter().map(|byte| char::from(*byte)).collect()
+    }
 }
 
 fn verify_pvd(buf: &[u8]) -> Result<(), UdfError> {

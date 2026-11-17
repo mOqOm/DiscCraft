@@ -143,7 +143,7 @@ fn load_titles(
 ) -> Result<Vec<TitleStreams>, DvdError> {
     let budget = prepare::budget(project)?;
     // Transcode the titles in parallel first; the titles below then come from the cache.
-    prepare::prepare_all_of(project, cache_dir, &budget, progress, timeline_video)?;
+    prepare::prepare_all_of(project, cache_dir, &budget, progress, timeline_video, None)?;
     let mut titles = Vec::new();
     let standard = project.settings.standard;
     for timeline in project.timelines.values() {

@@ -149,6 +149,10 @@ pub struct DiscSettings {
     /// The video of a Blu-ray disc's titles (Encore's Blu-ray transcode settings): SD MPEG-2, or HD H.264.
     #[serde(default, skip_serializing_if = "BdVideo::is_sd")]
     pub bd_video: BdVideo,
+    /// The folder whose files go on the disc beside the video, for a computer to read (Encore's Build panel:
+    /// DVD-ROM content / BD-ROM content). Its files are in the disc's root, its folders with them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rom_content: Option<String>,
 }
 
 /// The video format of a Blu-ray disc's titles, encoded to H.264 when HD. 1080p 23.976 / 24 and the 720p formats are
@@ -166,23 +170,21 @@ pub enum BdVideo {
     /// 1920 x 1080, 24 frames per second.
     #[serde(rename = "1080p24")]
     Hd1080p24,
-    /// 1920 x 1080, 25 frames per second (outside the Blu-ray standard).
-    #[serde(rename = "1080p25")]
-    Hd1080p25,
-    /// 1920 x 1080, 29.97 frames per second (outside the Blu-ray standard).
-    #[serde(rename = "1080p29.97")]
-    Hd1080p29,
-    /// 1920 x 1080, 50 frames per second (outside the Blu-ray standard).
-    #[serde(rename = "1080p50")]
-    Hd1080p50,
-    /// 1920 x 1080, 59.94 frames per second (outside the Blu-ray standard).
-    #[serde(rename = "1080p59.94")]
-    Hd1080p59,
-    /// 1280 x 720, 59.94 frames per second.
-    #[serde(rename = "720p59.94")]
+    /// 1920 x 1080 interlaced, 59.94 fields (29.97 frames) per second, MPEG-2.
+    /// (`1080p29.97` in a project file is read as this: the progressive format DiscCraft once offered is outside
+    /// the Blu-ray standard, which has 29.97 frames a second at 1920 x 1080 only as 59.94i.)
+    #[serde(rename = "1080i59.94", alias = "1080p29.97")]
+    Hd1080i59,
+    /// 1920 x 1080 interlaced, 50 fields (25 frames) per second, MPEG-2.
+    /// (`1080p25` in a project file is read as this.)
+    #[serde(rename = "1080i50", alias = "1080p25")]
+    Hd1080i50,
+    /// 1280 x 720, 59.94 frames per second. (`1080p59.94` in a project file, a format outside the Blu-ray standard
+    /// that DiscCraft once offered, is read as this: the standard's format with that many frames a second.)
+    #[serde(rename = "720p59.94", alias = "1080p59.94")]
     Hd720p59,
-    /// 1280 x 720, 50 frames per second.
-    #[serde(rename = "720p50")]
+    /// 1280 x 720, 50 frames per second. (`1080p50` in a project file is read as this.)
+    #[serde(rename = "720p50", alias = "1080p50")]
     Hd720p50,
     /// 1280 x 720, 23.976 frames per second.
     #[serde(rename = "720p23.976")]
@@ -194,26 +196,22 @@ pub enum BdVideo {
 
 impl BdVideo {
     /// Every format, SD first.
-    pub const ALL: [BdVideo; 11] = [
+    pub const ALL: [BdVideo; 9] = [
         BdVideo::Sd,
         BdVideo::Hd1080p23,
         BdVideo::Hd1080p24,
-        BdVideo::Hd1080p25,
-        BdVideo::Hd1080p29,
-        BdVideo::Hd1080p50,
-        BdVideo::Hd1080p59,
+        BdVideo::Hd1080i59,
+        BdVideo::Hd1080i50,
         BdVideo::Hd720p59,
         BdVideo::Hd720p50,
         BdVideo::Hd720p23,
         BdVideo::Hd720p24,
     ];
 
-    /// Whether the Blu-ray standard allows the format (SD, 1080p 23.976 / 24, 720p).
-    pub fn in_standard(self) -> bool {
-        !matches!(
-            self,
-            BdVideo::Hd1080p25 | BdVideo::Hd1080p29 | BdVideo::Hd1080p50 | BdVideo::Hd1080p59
-        )
+    /// Whether the format is interlaced 1920 x 1080 (59.94i / 50i): its frames, 29.97 or 25 a second, are coded
+    /// as MPEG-2 (the H.264 encoder codes progressive frames only).
+    pub fn interlaced(self) -> bool {
+        matches!(self, BdVideo::Hd1080i59 | BdVideo::Hd1080i50)
     }
 
     /// Whether this is SD (nothing written to the project file).
@@ -227,10 +225,8 @@ impl BdVideo {
             BdVideo::Sd => "sd",
             BdVideo::Hd1080p23 => "1080p23.976",
             BdVideo::Hd1080p24 => "1080p24",
-            BdVideo::Hd1080p25 => "1080p25",
-            BdVideo::Hd1080p29 => "1080p29.97",
-            BdVideo::Hd1080p50 => "1080p50",
-            BdVideo::Hd1080p59 => "1080p59.94",
+            BdVideo::Hd1080i59 => "1080i59.94",
+            BdVideo::Hd1080i50 => "1080i50",
             BdVideo::Hd720p59 => "720p59.94",
             BdVideo::Hd720p50 => "720p50",
             BdVideo::Hd720p23 => "720p23.976",
@@ -243,16 +239,15 @@ impl BdVideo {
         BdVideo::ALL.into_iter().find(|video| video.id() == id)
     }
 
-    /// The HD frame size and rate (numerator, denominator); `None` for SD.
+    /// The HD frame size and frame rate (numerator, denominator); `None` for SD. An interlaced format's rate is
+    /// its frames' (29.97 for 59.94i, 25 for 50i).
     pub fn hd(self) -> Option<(u32, u32, u32, u32)> {
         match self {
             BdVideo::Sd => None,
             BdVideo::Hd1080p23 => Some((1920, 1080, 24_000, 1001)),
             BdVideo::Hd1080p24 => Some((1920, 1080, 24, 1)),
-            BdVideo::Hd1080p25 => Some((1920, 1080, 25, 1)),
-            BdVideo::Hd1080p29 => Some((1920, 1080, 30_000, 1001)),
-            BdVideo::Hd1080p50 => Some((1920, 1080, 50, 1)),
-            BdVideo::Hd1080p59 => Some((1920, 1080, 60_000, 1001)),
+            BdVideo::Hd1080i59 => Some((1920, 1080, 30_000, 1001)),
+            BdVideo::Hd1080i50 => Some((1920, 1080, 25, 1)),
             BdVideo::Hd720p59 => Some((1280, 720, 60_000, 1001)),
             BdVideo::Hd720p50 => Some((1280, 720, 50, 1)),
             BdVideo::Hd720p23 => Some((1280, 720, 24_000, 1001)),
@@ -362,14 +357,18 @@ impl AssetKind {
             .map(|e| e.to_ascii_lowercase());
         match ext.as_deref() {
             Some("mp4") | Some("mov") | Some("mkv") | Some("mxf") | Some("m2v") | Some("mpg")
-            | Some("mpeg") | Some("vob") | Some("m2ts") | Some("ts") | Some("avi")
+            | Some("mpeg") | Some("vob") | Some("m2ts") | Some("ts") | Some("avi") | Some("m4v")
+            | Some("webm") | Some("mts") | Some("m2t")
             // EffectCraft compositions are rendered to video.
             | Some("ecproj") => {
                 AssetKind::Video
             }
             Some("wav") | Some("ac3") | Some("dts") | Some("aif") | Some("aiff") | Some("mp3") | Some("m4a")
             // SoundCraft sessions are mixed down to audio.
-            | Some("flac") | Some("scraft") => AssetKind::Audio,
+            | Some("flac") | Some("scraft")
+            // More sound files a tester may have: all go through the same decoders.
+            | Some("aac") | Some("mka") | Some("mp2") | Some("ogg") | Some("oga") | Some("opus")
+            => AssetKind::Audio,
             Some("png") | Some("jpg") | Some("jpeg") | Some("bmp") | Some("tif") | Some("tiff")
             // Vector drawings are rendered at the size they are shown at; PhotoCraft documents are composited.
             | Some("psd") | Some("psb") | Some("pcraft") | Some("svg") => AssetKind::Image,
@@ -1554,6 +1553,40 @@ mod flowchart_tests {
 
 #[cfg(test)]
 mod tests {
+    /// The sound and video files testers bring are taken as audio and video, whatever the case of the name.
+    #[test]
+    fn common_media_extensions_are_recognised() {
+        use std::path::Path;
+        for name in [
+            "a.wav", "a.ac3", "a.dts", "a.mp3", "a.AAC", "a.m4a", "a.mka", "a.mp2", "a.ogg",
+            "a.oga", "a.opus", "a.flac", "a.aiff",
+        ] {
+            assert_eq!(
+                AssetKind::guess_from_path(Path::new(name)),
+                AssetKind::Audio,
+                "{name}"
+            );
+        }
+        for name in [
+            "v.mp4", "v.m4v", "v.mov", "v.MKV", "v.webm", "v.avi", "v.mpg", "v.vob", "v.m2ts",
+            "v.mts", "v.m2t", "v.ts",
+        ] {
+            assert_eq!(
+                AssetKind::guess_from_path(Path::new(name)),
+                AssetKind::Video,
+                "{name}"
+            );
+        }
+        // Files the decoders cannot read stay out.
+        for name in ["a.wma", "a.eac3", "v.wmv", "v.flv", "notes.docx"] {
+            assert_eq!(
+                AssetKind::guess_from_path(Path::new(name)),
+                AssetKind::Other,
+                "{name}"
+            );
+        }
+    }
+
     /// An EffectCraft project shown as a chosen composition is opened by a name under the project file; any
     /// other asset by its own path.
     #[test]

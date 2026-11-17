@@ -31,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bitrate,
         max_bitrate,
         wide: true,
+        format: disccraft_mpeg2venc::encoder::Format::Sd,
     })?;
 
     let mut buffer = vec![0u8; luma + 2 * chroma];

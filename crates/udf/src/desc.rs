@@ -141,15 +141,19 @@ pub fn dstring(text: &str, field_len: usize) -> Vec<u8> {
     out
 }
 
-/// Build a file identifier field.
-///
-/// This is a compression byte `8` followed by ASCII characters, with non-ASCII
-/// characters replaced by `_`. There is no length byte and no padding.
+/// Build a file identifier field (OSTA UDF 2.1.1, compressed Unicode): a compression byte `8` and one byte a
+/// character when every character is in Latin-1 (U+0000 to U+00FF), else `16` and two bytes a UTF-16 unit, the
+/// high byte first (a Japanese file name). There is no length byte and no padding.
 pub fn fid_identifier(text: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.chars().count().saturating_add(1));
-    out.push(8);
-    for ch in text.chars() {
-        out.push(if ch.is_ascii() { ch as u8 } else { b'_' });
+    if text.chars().all(|ch| u32::from(ch) <= 0xFF) {
+        out.push(8);
+        out.extend(text.chars().map(|ch| u32::from(ch) as u8));
+    } else {
+        out.push(16);
+        for unit in text.encode_utf16() {
+            out.extend_from_slice(&unit.to_be_bytes());
+        }
     }
     out
 }
@@ -892,7 +896,7 @@ mod tests {
         assert_eq!(i[52], 0);
         assert_eq!(&i[53..76], b"OSTA Compressed Unicode");
         // The logical volume identifier: the volume's name (8-bit compressed, its length in the last byte).
-        assert_eq!(&i[116..120], b"DVD");
+        assert_eq!(&i[116..120], b"\x08DVD");
         assert_eq!(i[243], 4);
         assert_eq!(i[244], 0);
         assert_eq!(i[280], 0);

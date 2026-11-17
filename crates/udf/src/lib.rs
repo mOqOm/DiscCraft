@@ -12,5 +12,6 @@ pub mod desc;
 pub mod image;
 pub mod iso9660;
 pub mod read;
+mod rom;
 pub mod tree;
 mod udf250;

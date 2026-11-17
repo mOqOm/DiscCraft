@@ -126,6 +126,8 @@ impl BuildJob {
 pub(crate) struct Usage {
     pub(crate) estimated_bytes: u64,
     pub(crate) capacity_bytes: u64,
+    /// ROM コンテンツ（映像のそばに置くファイル）のバイト数。
+    pub(crate) rom_bytes: u64,
     /// タイムラインごとのエンコード後のサイズの見積もり（バイト）。
     pub(crate) timelines: std::collections::BTreeMap<u64, u64>,
 }
@@ -198,6 +200,7 @@ pub(crate) fn parse_usage(value: &Value) -> Option<Usage> {
     Some(Usage {
         estimated_bytes,
         capacity_bytes,
+        rom_bytes: get_u64(object, &["romBytes"]).unwrap_or(0),
         timelines,
     })
 }
@@ -334,6 +337,29 @@ impl DiscCraftApp {
 
         if let Some(path) = path {
             self.build_path = path.to_string_lossy().to_string();
+        }
+    }
+
+    /// Chooses the ROM content folder (Encore's DVD-ROM content / BD-ROM content ▸ Browse…).
+    pub(crate) fn pick_rom_content(&mut self) {
+        if let Some(path) = FileDialog::new().pick_folder() {
+            let path = path.to_string_lossy().into_owned();
+            if self
+                .run_command("disc.setRomContent", serde_json::json!({ "path": path }))
+                .is_some()
+            {
+                self.refresh_usage();
+            }
+        }
+    }
+
+    /// Takes the ROM content off the disc.
+    pub(crate) fn clear_rom_content(&mut self) {
+        if self
+            .run_command("disc.setRomContent", serde_json::json!({ "path": null }))
+            .is_some()
+        {
+            self.refresh_usage();
         }
     }
 
@@ -488,6 +514,80 @@ impl DiscCraftApp {
         self.simulate = None;
     }
 
+    /// Encore's Transcode Now: makes the transcodes a build would make, on a thread of its own, into the build's
+    /// cache (the build's Location decides where, as for a build). `only` is one asset (the timelines that play
+    /// it); `None` is the whole project.
+    pub(crate) fn start_transcode_now(&mut self, only: Option<disccraft_project::AssetId>) {
+        if self.build_job.is_running() || self.transcode_job.is_running() {
+            self.status = tl!("A build or a transcode is already running").to_string();
+            return;
+        }
+        if self.build_path.trim().is_empty() {
+            self.build_path = self.default_build_path().to_string_lossy().into_owned();
+        }
+        let path = self.build_path.trim().to_owned();
+        let Some(target) = build_target(
+            self.build_output,
+            Path::new(&path),
+            &self.session.project.settings.name,
+        ) else {
+            self.status = tl!("The destination path is not valid.").to_string();
+            return;
+        };
+        let project = self.session.project.clone();
+        let options = BuildOptions {
+            output: self.build_output,
+            path: target,
+            cache: None,
+            audio_language: Some(crate::i18n::current().code().to_owned()),
+        };
+        let runner = move |project: &Project,
+                           options: &BuildOptions,
+                           progress: &mut dyn FnMut(&str, f32)| {
+            let started = Instant::now();
+            disccraft_build::transcode_now(project, options, only, progress)?;
+            Ok(BuildReport {
+                output: disccraft_build::cache_dir(options),
+                titles: 0,
+                chapters: 0,
+                total_bytes: 0,
+                seconds: started.elapsed().as_secs_f64(),
+                layer_break: None,
+            })
+        };
+        self.transcode_job.start(project, options, runner, true);
+        self.status = tl!("Transcode started").to_string();
+    }
+
+    /// Called as the window is drawn: says in the status bar how far Transcode Now is, and what came of it.
+    pub(crate) fn poll_transcode_now(&mut self, ctx: &egui::Context) {
+        if let Some(result) = self.transcode_job.poll() {
+            self.status = match result {
+                Ok(report) => tlf!(
+                    "Transcode finished ({time})",
+                    time = elapsed_text(report.seconds as u64)
+                ),
+                Err(error) => tlf!("Cannot transcode: {message}", message = error),
+            };
+            // The statuses in the Project panel are asked for again.
+            self.transcode_dirty = true;
+        }
+        if !self.transcode_job.is_running() {
+            return;
+        }
+        let time = elapsed_text(self.transcode_job.elapsed_seconds());
+        self.status = match self.transcode_job.current_progress() {
+            Some((step, fraction)) => tlf!(
+                "Transcoding {step}: {percent}% ({time})",
+                step = step,
+                percent = (fraction * 100.0).round() as u32,
+                time = time
+            ),
+            None => tlf!("Transcoding… ({time})", time = time),
+        };
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+    }
+
     pub(crate) fn simulate_last_build(&mut self) {
         if self.last_output_kind != Some(OutputKind::Folder) {
             self.status = tl!("Simulate is available after a folder build").to_string();
@@ -513,7 +613,11 @@ impl DiscCraftApp {
 /// a folder: there is nothing to name the image); a folder build goes into a folder named after the disc inside
 /// an existing location, unless the location already is a disc folder (a rebuild goes to the same place) or the
 /// disc has no name.
-fn build_target(output: OutputKind, location: &Path, disc_name: &str) -> Option<PathBuf> {
+pub(crate) fn build_target(
+    output: OutputKind,
+    location: &Path,
+    disc_name: &str,
+) -> Option<PathBuf> {
     match output {
         OutputKind::Iso => (!location.is_dir()).then(|| location.to_path_buf()),
         OutputKind::Folder => {

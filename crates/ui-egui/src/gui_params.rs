@@ -79,6 +79,15 @@ pub(crate) fn create_named(name: &str) -> Value {
     json!({ "name": name })
 }
 
+/// `slideshow.create` のパラメータ。スライドの長さは、Encore の初期値（6 秒）と違うときだけ渡す。
+pub(crate) fn create_slideshow(name: &str, still_seconds: u32) -> Value {
+    if still_seconds == 6 {
+        json!({ "name": name })
+    } else {
+        json!({ "name": name, "slideSeconds": still_seconds })
+    }
+}
+
 /// `slideshow.addSlide` のパラメータ。
 pub(crate) fn add_slide(slideshow: u64, asset: u64, seconds: Option<f64>) -> Value {
     match seconds {

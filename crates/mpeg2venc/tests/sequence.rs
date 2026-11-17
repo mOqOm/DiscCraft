@@ -61,6 +61,7 @@ fn run(standard: Standard, w: usize, h: usize, frames: usize, gop: u16, check_si
         bitrate: 6_000_000,
         max_bitrate: 9_800_000,
         wide: false,
+        format: disccraft_mpeg2venc::encoder::Format::Sd,
     })
     .unwrap();
     let sources: Vec<Frame420> = (0..frames).map(|t| synthetic(w, h, t)).collect();
@@ -148,6 +149,7 @@ fn gop_header_is_closed() {
         bitrate: 6_000_000,
         max_bitrate: 9_800_000,
         wide: false,
+        format: disccraft_mpeg2venc::encoder::Format::Sd,
     })
     .unwrap();
     let au = enc.encode_frame(&synthetic(720, 480, 0)).unwrap();
@@ -171,6 +173,7 @@ fn a_gop_starts_where_asked() {
         bitrate: 6_000_000,
         max_bitrate: 9_800_000,
         wide: false,
+        format: disccraft_mpeg2venc::encoder::Format::Sd,
     };
     let starts_of = |forced: &[usize], frames: usize, regular: bool| -> Vec<usize> {
         let mut enc = Encoder::new(config.clone()).unwrap();
@@ -192,4 +195,134 @@ fn a_gop_starts_where_asked() {
     assert_eq!(starts_of(&[7, 22], 40, false), vec![0, 7, 22]);
     // Asked for nothing: still a GOP every 18 frames at the most.
     assert_eq!(starts_of(&[], 40, false), vec![0, 18, 36]);
+}
+
+/// An HD sequence (1920 x 1080 as 59.94i or 50i, MP@HL): the frames are given at the coded 1920 x 1088, decode
+/// without errors to the lines shown, and say what they are in their headers.
+fn run_hd(standard: Standard, frame_rate_code: u8) {
+    use disccraft_mpeg2venc::encoder::Format;
+    let (w, h) = (1920usize, 1088usize);
+    assert_eq!(Format::Hd1080.coded_size(standard), (1920, 1088));
+    let mut enc = Encoder::new(EncoderConfig {
+        standard,
+        gop_size: 15,
+        bitrate: 25_000_000,
+        max_bitrate: 35_000_000,
+        wide: true,
+        format: Format::Hd1080,
+    })
+    .unwrap();
+    let frames = 4;
+    // The square moves 24 pixels a frame: further than an SD sequence's vectors reach.
+    let sources: Vec<Frame420> = (0..frames).map(|t| synthetic(w, h, t * 8)).collect();
+    let mut es = Vec::new();
+    for f in &sources {
+        es.extend_from_slice(&enc.encode_frame(f).unwrap());
+    }
+    es.extend_from_slice(&enc.finish());
+    std::fs::create_dir_all(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../target/fixtures"
+    ))
+    .unwrap();
+    std::fs::write(
+        format!(
+            "{}/../../target/fixtures/ip_hd_{frame_rate_code}.m2v",
+            env!("CARGO_MANIFEST_DIR")
+        ),
+        &es,
+    )
+    .unwrap();
+
+    // Sequence header: 1920 x 1080, 16:9, the frame rate, a 597 x 16,384-bit VBV buffer.
+    assert_eq!(&es[..4], &[0, 0, 1, 0xB3]);
+    assert_eq!(&es[4..7], &[0x78, 0x04, 0x38]);
+    assert_eq!(es[7], 0x30 | frame_rate_code);
+    let vbv = (u16::from(es[10] & 0x1F) << 5) | u16::from(es[11] >> 3);
+    assert_eq!(vbv, 597);
+    // Sequence extension: MP@HL, not a progressive sequence, 4:2:0, the marker bit; then the display extension
+    // with BT.709.
+    assert_eq!(&es[12..16], &[0, 0, 1, 0xB5]);
+    assert_eq!(&es[16..22], &[0x14, 0x42, 0x00, 0x01, 0x00, 0x00]);
+    assert_eq!(&es[22..26], &[0, 0, 1, 0xB5]);
+    assert_eq!(&es[26..30], &[0x21, 0x01, 0x01, 0x01]);
+
+    let mut dec = Decoder::new();
+    let mut pics = Vec::new();
+    for (i, range) in craft_video::mpeg2::access_units(&es)
+        .into_iter()
+        .enumerate()
+    {
+        pics.extend(dec.decode(&es[range], i as i64).unwrap());
+    }
+    pics.extend(dec.flush());
+    assert_eq!(dec.errors(), 0, "decoder errors: {:?}", dec.last_error());
+    assert_eq!(pics.len(), frames);
+    for (i, (p, s)) in pics.iter().zip(&sources).enumerate() {
+        assert_eq!(p.width as usize, w);
+        let shown = w * (p.height as usize).min(1080);
+        let q = psnr(&p.y[..shown], &s.y[..shown]);
+        assert!(q > 30.0, "frame {i}: PSNR {q:.1} dB");
+    }
+}
+
+#[test]
+fn hd_1080i_59_94_sequence_decodes() {
+    run_hd(Standard::Ntsc, 4);
+}
+
+#[test]
+fn hd_1080i_50_sequence_decodes() {
+    run_hd(Standard::Pal, 3);
+}
+
+/// An SD sequence's extension is the 48 bits of 13818-2 6.2.2.3 (MP@ML, the marker bit set).
+#[test]
+fn sd_sequence_extension_is_well_formed() {
+    let mut enc = Encoder::new(EncoderConfig {
+        standard: Standard::Ntsc,
+        gop_size: 15,
+        bitrate: 6_000_000,
+        max_bitrate: 9_800_000,
+        wide: false,
+        format: disccraft_mpeg2venc::encoder::Format::Sd,
+    })
+    .unwrap();
+    let es = enc.encode_frame(&synthetic(720, 480, 0)).unwrap();
+    assert_eq!(&es[12..16], &[0, 0, 1, 0xB5]);
+    assert_eq!(&es[16..22], &[0x14, 0x82, 0x00, 0x01, 0x00, 0x00]);
+    // The GOP header follows at once.
+    assert_eq!(&es[22..26], &[0, 0, 1, 0xB8]);
+}
+
+/// An HD still: one I picture of a sequence, ended by a sequence end code, that fits the VBV buffer.
+#[test]
+fn hd_still_decodes() {
+    use disccraft_mpeg2venc::encoder::Format;
+    let enc = Encoder::new(EncoderConfig {
+        standard: Standard::Ntsc,
+        gop_size: 15,
+        bitrate: 25_000_000,
+        max_bitrate: 35_000_000,
+        wide: true,
+        format: Format::Hd1080,
+    })
+    .unwrap();
+    let source = synthetic(1920, 1088, 0);
+    let es = enc.encode_still(&source, 2).unwrap();
+    assert!(es.ends_with(&[0, 0, 1, 0xB7]));
+    assert!((es.len() as u64) * 8 <= Format::Hd1080.vbv_bits());
+    let mut dec = Decoder::new();
+    let mut pics = Vec::new();
+    for (i, range) in craft_video::mpeg2::access_units(&es)
+        .into_iter()
+        .enumerate()
+    {
+        pics.extend(dec.decode(&es[range], i as i64).unwrap());
+    }
+    pics.extend(dec.flush());
+    assert_eq!(dec.errors(), 0, "decoder errors: {:?}", dec.last_error());
+    assert_eq!(pics.len(), 1);
+    let shown = 1920 * 1080;
+    assert!(psnr(&pics[0].y[..shown], &source.y[..shown]) > 35.0);
 }

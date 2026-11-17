@@ -3,7 +3,9 @@
 English | [日本語](user-guide.ja.md)
 
 How to use DiscCraft, in the order the work goes. Names of commands and
-panels are the ones the English interface shows.
+panels are the ones the English interface shows. Chapters 1 to 13 are the reference for every screen;
+[chapter 14](#14-advanced-techniques) is the recipes: scene-selection menus, hidden buttons, routing by
+hand, motion menus, bit budgeting.
 
 ## Contents
 
@@ -20,12 +22,13 @@ panels are the ones the English interface shows.
 11. [Checking the project](#11-checking-the-project)
 12. [Previewing](#12-previewing)
 13. [Building](#13-building)
-14. [Preferences](#14-preferences)
-15. [Keyboard shortcuts](#15-keyboard-shortcuts)
-16. [Command line and scripts](#16-command-line-and-scripts)
-17. [Using it from an AI agent (MCP)](#17-using-it-from-an-ai-agent-mcp)
-18. [Limits and rules](#18-limits-and-rules)
-19. [When something does not work](#19-when-something-does-not-work)
+14. [Advanced techniques](#14-advanced-techniques)
+15. [Preferences](#15-preferences)
+16. [Keyboard shortcuts](#16-keyboard-shortcuts)
+17. [Command line and scripts](#17-command-line-and-scripts)
+18. [Using it from an AI agent (MCP)](#18-using-it-from-an-ai-agent-mcp)
+19. [Limits and rules](#19-limits-and-rules)
+20. [When something does not work](#20-when-something-does-not-work)
 
 ## 1. About DiscCraft
 
@@ -49,10 +52,15 @@ What it does not do (for now):
 - Copy protection (CSS, AACS and the like). Only the region code flags
 - BD-J menus (Blu-ray is HDMV only), encoding DTS / Dolby TrueHD / DTS-HD (a DTS file can go on a DVD as it is)
 - Editing video itself (edit in FilmCraft, make the disc in DiscCraft)
-- 1080i and MPEG-2 HD, 4K (Ultra HD Blu-ray)
+- 4K (Ultra HD Blu-ray)
 
-Blu-ray video is SD (720×480 / 720×576) MPEG-2 or HD (1080p, 720p) H.264.
-HD 1080p at 25 / 29.97 / 50 / 59.94 is outside the Blu-ray specification and will be removed.
+Blu-ray video is SD (720×480 / 720×576) MPEG-2 or HD. HD is H.264 for 1080p (23.976 / 24) and 720p, and
+MPEG-2 for 1080i (59.94 / 50). Sources shot at 29.97 or 25 fps become HD at their own speed with 1080i 59.94 / 50
+(the Blu-ray specification has no 1920×1080 at 29.97p / 25p, so each frame goes on the disc as the two fields of 1080i).
+HD video averages 12 Mbps as H.264 and 25 Mbps as 1080i MPEG-2. When the titles are too long to fit the disc at that rate,
+it is lowered automatically until they fit (down to 3 Mbps for H.264 and 8 Mbps for MPEG-2; past that the disc cannot be built).
+The capacity meter and Check Project estimate with the same bitrate.
+H.264 in an `.m2ts` / `.mkv` / `.mp4` / `.mov` that a Blu-ray can carry goes on the disc as it is, without conversion (see 4.1).
 
 ## 2. Getting started
 
@@ -80,7 +88,7 @@ The **New Project** dialog has two tabs, **Basic** and **Advanced**.
 | Advanced | Aspect ratio (4:3 / 16:9), disc size (DVD5 / DVD9, BD25 / BD50 / BD100 / BD128) |
 
 - With an empty location, you are asked for one when you save
-- The default television standard can be changed in [Preferences](#14-preferences)
+- The default television standard can be changed in [Preferences](#15-preferences)
 - **OK** creates `<location>/<name>.dcproj` at once and editing starts
 
 What you can change later: authoring mode, aspect ratio and size in **File ▸ Project Settings…**; the disc's name
@@ -129,6 +137,9 @@ Items and shortcuts follow Encore's defaults. The ones used most:
   importing and exporting subtitles, adding chapter points)
 - **View ▸** (zoom, the three subpicture states, safe area, button routing, guides, chapter names)
 - **Window ▸** (workspaces, showing and hiding panels, display language)
+- **Help ▸** (Join the ArtCraft Discord… / ArtCraft Website / DiscCraft on GitHub / Report an Issue… /
+  Reveal Log Files… / System Compatibility Report… / Check for Updates… / About DiscCraft / DiscCraft Help… (F1)).
+  Resting the pointer on an item shows the address it opens or what it does. **DiscCraft Help…** opens this manual
 
 ### 3.2 Toolbar
 
@@ -207,15 +218,48 @@ switches as well.
 - **File ▸ Import ▸ Menu… / Pop-up Menu… / Menu Page…** (Shift+Ctrl+I / Shift+Ctrl+K /
   Shift+Ctrl+U): makes a menu from a layered PSD (or a PhotoCraft `.pcraft`)
 
+A large video hours long (an mkv or mp4 of tens of gigabytes) is opened in the background right after it is imported.
+The window does not stop meanwhile; the status bar says "Reading media…", and when the file is open its length, size and
+thumbnail and the disc's usage come in. A file's length, size and thumbnail are remembered once it has been opened, so
+the next time the project is opened there is no wait (while the file's place, size and modification time stay the same).
+The length, size and frame rate of an mkv (H.264) are read from the front of the file, so they and the disc's usage are
+there at once; only its thumbnail waits for the file to be opened.
+The frames shown in the Monitor and in menus, and the pictures of a timeline's clips, also stay empty until the file is
+open, and the window does not stop.
+The Monitor's picture is decoded in the background, so while the playhead is dragged it shows each frame that is ready
+in time.
+
+Interlaced H.264 (1080i from a camcorder or a recorder) cannot be decoded to pictures yet. It imports, and its length and
+size are shown, but the thumbnail and the Monitor stay empty and a build cannot convert it. A Blu-ray can still carry it
+as it is, without conversion ("H.264 that goes on an HD Blu-ray as it is" below). For a DVD, convert it to progressive first.
+A video whose picture cannot be decoded still plays its sound on the timeline. The Monitor shows a black screen with the
+reason, and the time and the playhead move on, so chapter points can be placed by ear.
+
+**H.264 that goes on an HD Blu-ray as it is**: H.264 in an `.m2ts` / `.ts` / `.mkv` / `.mp4` / `.m4v` / `.mov` goes on the disc without re-encoding
+(the picture quality is kept, and the build is fast) when all of these hold.
+
+- Its size, frame rate and scan are those of Blu-ray Video in the disc's properties (interlaced 1920×1080 at
+  29.97 / 25 fps for 1080i 59.94 / 50; progressive for 1080p 23.976 / 24 and 720p)
+- High or Main profile, up to level 4.1, 4:2:0 at 8 bits, and no more than 40 Mbps averaged over the whole file
+- It starts with a key frame (IDR)
+- It is not trimmed on the timeline (for 1080i, it is the timeline's only clip)
+
+Such a file shows "Don't Transcode" as its transcode status in the Project panel, and the size estimate counts the file's size.
+The sound is handled as before (anything but AC-3 and WAV is converted to Dolby Digital). Other files are converted.
+
 ### 4.2 Files that can be read
 
 | Kind | Extensions |
 |---|---|
-| Importable as assets | mp4, mov, m4v, avi, mkv, m2v, wav, ac3, dts, mp3, aac, flac, png, jpg, jpeg, bmp, tif, tiff, psd, pcraft, svg, srt |
-| Video that can become a timeline | mp4, mov, m4v, avi, mkv, mxf, m2v, mpg, mpeg, vob, m2ts, ts |
-| Subtitles | srt, vtt, txt |
+| Video | mp4, mov, m4v, avi, mkv, webm, mxf, m2v, mpg, mpeg, vob, m2ts, mts, m2t, ts |
+| Audio | wav, ac3, dts, mp3, aac, m4a, mka, mp2, ogg, oga, opus, flac, aif, aiff |
+| Images | png, jpg, jpeg, bmp, tif, tiff, psd, psb, pcraft, svg |
+| Subtitles | srt, vtt, txt, idx (VobSub), sup (PGS) |
 | Menu designs | psd, pcraft |
 | Craft documents | `.scraft` (a SoundCraft session → audio), `.ecproj` (an EffectCraft project → video), `.fcproj` (a FilmCraft sequence → a timeline) |
+
+A WAV goes on the disc as it is (LPCM) when it is 16-bit 48 kHz; any other (44.1 kHz, 24-bit and so on) is converted.
+When a video file holds several audio streams, only the first is used.
 
 SVG is drawn at the size it is shown, so it does not blur. Subtitle text is read as UTF-8 / UTF-16 / Shift_JIS.
 
@@ -238,6 +282,11 @@ It cannot go on a Blu-ray yet, and it is silent in the Monitor and the preview.
   SoundCraft for audio, FilmCraft or EffectCraft for video). It is read again automatically when you save
 - The Project panel's right-click menu has **Replace Asset…** (tell it where offline media is now) and
   **Show in Explorer**
+- **Transcode Now** in the right-click menu converts that media ahead of the build. It runs in the background (the
+  status bar shows how far it is), and you can go on editing meanwhile. When it is done the transcode status becomes
+  "Transcoded", and the build uses that conversion. The conversion is kept inside the Build panel's destination. It
+  cannot be chosen for media that needs no conversion, nor for media whose picture cannot be decoded (what cannot
+  be decoded cannot be converted either)
 - Media in use cannot be deleted. Taking an item out of use sets the links to it back to Not Set
 
 ## 5. Making a timeline
@@ -277,7 +326,8 @@ Audio and subtitle media dropped on the Timeline Viewer go into A1 / S1.
   shows the names on the timeline
 - The **Poster Frame** button of the Monitor sets the poster frame to the picture at the playhead
 
-A DVD takes up to 99 chapters in a title.
+A DVD takes up to 99 chapters in a title. For a menu of scene buttons that show these chapters, see
+[scene-selection menus with pictures](#141-a-scene-selection-menu-with-pictures).
 
 ### 5.4 Tracks
 
@@ -298,7 +348,7 @@ The timeline's sheet in the Properties panel has the same three link fields as E
 | Override | Where to go after the end action's target has finished (a flow like warning → feature → extras menu) |
 | Remote Menu | The menu the remote control's Menu button shows (the pop-up menu on a Blu-ray) |
 
-There are three ways to set a link.
+Links can be set in five ways ([five ways to link a button](#147-five-ways-to-link-a-button)). The three quickest:
 
 - Press **▶** to the right of the field, then click an item in the Project panel (the pick whip)
 - **Object ▸ Specify Link…** (Ctrl+L) and choose in the dialog
@@ -316,6 +366,7 @@ the first image, with the default slide length of 6 seconds).
 | Scale | Scale and Crop to Fit / fill / no scaling |
 | Transition | None / Cross Dissolve / Dip to Black / Wipe. 0.1 to 10 seconds long (2 seconds by default). Each slide can have its own |
 | Manual advance | When on, each slide waits until the viewer moves on with the remote control |
+| Pan & Zoom | With **Pan & Zoom** on in a slide's properties, the picture moves slowly while the slide is up (Pan: None / Pan Left / Pan Right / Pan Up / Pan Down; Zoom: Zoom In / Zoom Out / None). The slideshow's **Random Pan & Zoom** gives a motion to every slide that has no setting of its own |
 | Create Subtitle | Makes subtitles from each slide's name and description (**Include** also takes the next slide's name). Each slide can choose its highlight (group), stroke and alignment; the colours come from the slideshow's colour set |
 
 Drag slides to reorder them; **Edit ▸ Clear** (Delete) removes them. Adding audio lets you fit the length to it.
@@ -391,7 +442,8 @@ Button properties:
 
 **View ▸ Show Button Routing** (Ctrl+7) shows the cross of routes. The routing defaults (movement up, down, left and
 right, how to wrap, whether to leave out "Next" and "Previous" buttons) and the syncing of button names are set in
-[Preferences ▸ Menus](#14-preferences) (kept in the project).
+[Preferences ▸ Menus](#15-preferences) (kept in the project). To lay the routes out yourself, turn off
+**Automatically Route Buttons** and drag the arrows: [routing and numbering by hand](#143-routing-and-numbering-by-hand).
 
 ### 8.3 Text and shapes
 
@@ -410,18 +462,21 @@ right, how to wrap, whether to leave out "Next" and "Previous" buttons) and the 
 **Menu ▸ Edit Menu Color Set…** sets the normal / selected / activated colours
 (highlight frames, text and subpictures). **Highlight groups** let several buttons light up together.
 **View ▸ Show Normal Subpicture / Show Selected Subpicture / Show Activated Subpicture** (Ctrl+3 / Ctrl+4 / Ctrl+5) compare them on the canvas.
+For choosing the groups button by button, and for invisible highlights, see
+[highlight colours, button by button](#145-highlight-colours-button-by-button).
 
 ### 8.5 Background and motion menus
 
 Set in the menu's sheet of the Properties panel (**Basic / Motion / Pop-up**).
 
-- The background is a colour / an image / a timeline (video). With video it becomes a motion menu
+- The background is a colour / an image / a video asset (not a timeline). With video it becomes a motion menu
 - Loop count and loop point, duration (a menu is at most 254 seconds)
 - **End Action** (where to go when time runs out; Menu ▸ Set End Action… opens it too) and **Override**
 - The **Pop-up** sheet makes it a pop-up menu and sets its background timeline / background frame (Blu-ray)
 
 **Menu ▸ Create EffectCraft Composition…** makes an EffectCraft project from the menu's layers; the rendered movie
-can be the menu's background (a motion menu).
+can be the menu's background (a motion menu). [Motion menus, with sound and movement](#146-motion-menus-with-sound-and-movement)
+is the whole job, including the loop, the audio and what to hide afterwards.
 
 ### 8.6 Reworking in a PSD
 
@@ -455,6 +510,9 @@ the Project panel or the Flowchart and choose **Set as First Play** (the Title B
 - The right-click menu has Open / Specify Link / Rename / Set as First Play and more
 - A row of **unlinked items** appears below (useful for finding orphans)
 - **View ▸ Show All Thumbnails** puts pictures in the boxes
+
+For reading a whole disc off the page — First Play, menus that lead back up, what nothing links to — see
+[the Flowchart as a map of the disc](#148-the-flowchart-as-a-map-of-the-disc).
 
 ### 9.3 Kinds of links
 
@@ -576,7 +634,7 @@ DTS tracks are silent.
 | Build | Starts the build. It saves the project and checks it first |
 | Source | The current project (the Build panel writes only the project that is open) |
 | Destination | When empty, the place shown in faint text (`<project name>_DVD` / `_BD` beside the project; `<project name>.iso` for an image). For a folder, naming an existing folder makes a `<disc name>` folder inside it (a place that already has `VIDEO_TS` / `BDMV` is built again in place). An image cannot be given a folder |
-| Disc Info | The usage bar (**Refresh Usage** calculates it), the disc's name (also the ISO's volume label), the size |
+| Disc Info | The usage bar (**Refresh Usage** calculates it), the disc's name (also the ISO's volume label), the size, **DVD-ROM content** / **BD-ROM content** (**Browse…** chooses a folder; its files and folders go in the disc's root, beside `VIDEO_TS` / `BDMV`: a manual or photos to read on a computer. A folder build copies them, an image holds them. They take that much of the capacity from the video, and the line under the bar shows their size. **Clear** takes them off. A file must be under 4 GB, folders at most 7 deep) |
 | Layer Break | DVD-9 only. Automatic / manual. Manual is set by timeline and position (timecode / frame / seconds, **Playhead**) |
 | Region Codes | DVD only. All regions / custom (ticks for 1 to 8) |
 | Project Check | The check results (the same rows as the check window) |
@@ -589,22 +647,328 @@ During a build a bar shows the progress and the time taken (also in the status b
 - An ISO is UDF + ISO 9660. On Windows a double click in Explorer mounts it
 - A DVD-9 image with a layer break leaves a note in `<name>.layerbreak.txt` at the same place
 - Nothing is burned to a disc. Use other software to burn
+- How much of the disc is left, and what to do when it is not enough:
+  [reading the disc's size as you work](#149-reading-the-discs-size-as-you-work)
 
-## 14. Preferences
+## 14. Advanced techniques
+
+The chapters before this one go in the order the work does. This chapter is the part that makes a disc
+feel authored: scene-selection menus with pictures in the buttons, menus built out of the Library, routes
+you set by hand, hidden buttons, highlight colours chosen button by button, motion menus with sound, and
+reading the disc's size as you work. Each section is steps you can follow, with the limits next to them.
+
+> Screenshots are placeholders for now. They are to be added under `docs/images/user-guide/`; until they
+> are there, the picture shows as a broken link and the words below are all there is.
+
+### 14.1 A scene-selection menu with pictures
+
+Chapter points mark where scenes start. Link them to buttons and the viewer can jump to a scene instead of
+scrubbing for it, and can step through the video with the remote control's Next and Previous Chapter buttons.
+
+1. **File ▸ Import ▸ Timeline…** (Shift+Ctrl+T) makes an asset and a timeline for every video you choose,
+   so the timelines do not have to be made one at a time. The first video becomes **First Play**.
+2. Double-click a timeline in the Project panel to open it in the Timeline Viewer, and make sure the
+   Monitor is showing (**Window ▸ Monitor**, F9).
+3. Move the playhead to an obvious scene change and press **Timeline ▸ Add Chapter Point** (the `*` on the
+   numeric keypad). Points are numbered in order and renumber themselves when one is added between two
+   others.
+4. Name the point in its properties. A chapter's name is normally the name of the button that will lead to
+   it; **View ▸ Show Chapter Names** (Ctrl+8) puts the names on the timeline where you can read them.
+5. Work through the video. **Add Chapter Points at Interval…** is for a video whose scenes are even
+   (5 minutes by default).
+6. Give the button a better picture than the scene's first frame. Move the playhead to a frame that stands
+   for the scene and press the Monitor's **Poster Frame** button, or type a timecode into **Poster Frame**
+   in the chapter's properties. The poster frame gets a flag of its own with the chapter's number; drag it
+   to move it, and empty the field to go back to the chapter's own frame.
+7. Make the menu: **Menu ▸ Create Chapter Index** for a button per chapter, or the Library's
+   **Thumbnail Grid** preset for a menu of picture buttons. A button linked to a chapter shows that
+   chapter's poster frame, or the chapter's own frame when it has none.
+
+Things to know:
+
+- Chapter 1 is always the first frame of the timeline. It cannot be moved or removed, and a new timeline
+  comes with one.
+- For MPEG-2 that goes on the disc as it is, a chapter point can only land on a GOP start. Drop the point
+  where you want it and DiscCraft moves it to the nearest free GOP start, so a point in the middle of a
+  GOP will not stay exactly where you left it. Trims snap the same way.
+- A still thumbnail with no poster frame shows the chapter's first bright (non-black) frame, so a scene
+  that opens on a fade-in from black still shows something in the button.
+- A DVD takes 99 chapters in a title. A page of a chapter index holds 18 chapter buttons, or 6 when the
+  index is made as multiple pages.
+- With **Motion Buttons** on, a thumbnail button plays its video instead of holding one picture, from the
+  linked chapter's start or its poster frame.
+
+![Timeline Viewer with chapter points and poster frames](images/user-guide/chapter-poster.png)
+
+### 14.2 Building a menu out of the Library
+
+The Library holds DiscCraft's own menu, button, image, background and shape presets, and the ones you save
+into it. A menu made this way is an ordinary menu afterwards; nothing marks where it came from.
+
+1. In the **Library** panel, choose the kind (**Menus**) and the set (**General**, or **User** for your
+   own), select a preset and press **New Menu**. It opens in the Menu Viewer and appears in the Project
+   and Menus panels.
+2. Name it (**Alt+Ctrl+R**) — "Menu #1", "Scene Selection", whatever you will recognise next month.
+3. Switch the kind to **Buttons** and press **Place** once for every timeline the menu is to offer. The
+   buttons land on the canvas.
+4. With the **Selection tool** (V), move them roughly where they belong. Select several (Shift-click, or
+   drag around them) and use **Object ▸ Distribute** and **Object ▸ Align** to space and line them up.
+   With **Align Relative to Safe Area** on, the safe area frame is the reference instead of the canvas.
+5. For a title in the same look as the buttons: select a button, **Ctrl+C** and **Ctrl+V**, then
+   **Object ▸ Convert to Object**. The button goes and its text stays where it was, at the same size in
+   the same face. Retype it with the **Text tool** (T). Copy and paste between menus the same way to carry
+   the look along.
+6. Select the title and choose **Object ▸ Drop Shadow…** (Shift+Ctrl+O). Tick **Drop Shadow** and
+   **Preview**, set colour, opacity, angle, distance, size and spread, and press **OK**. The same dialog
+   works on a button, an image or a shape.
+7. For a way back, paste the text again, change it to "Main Menu" and press **Ctrl+B**
+   (**Object ▸ Convert to Button**). This is how a button is made out of nothing.
+8. Link each button ([14.7](#147-five-ways-to-link-a-button)), and set the menu's **End Action** and
+   **Default Button**.
+9. When a menu is worth keeping, **Menu ▸ Save Menu as Template…** (Ctrl+Alt+M) puts it in the Library's
+   **User** set, and it is there in the next project too.
+
+A background can be changed at any time: select a background in the Library and press **Place** or
+**Set Background**. **Replace** swaps the open menu's design for another preset's and keeps the links by
+button number.
+
+![The Library panel and a menu built from its buttons](images/user-guide/library-menu.png)
+
+### 14.3 Routing and numbering by hand
+
+Routing is the path the highlight follows when the viewer presses the arrow keys. DiscCraft works out a
+sensible path for you (the rules are in [Preferences ▸ Menus](#15-preferences) and are kept in the
+project, so the disc routes the same wherever it is built). Set it by hand when the buttons are arranged
+oddly, when a row should not wrap, or when a route should lead somewhere nobody would think to look.
+
+1. Click the menu's background — not a button or text — so the Properties panel shows the menu's sheet,
+   and turn off **Automatically Route Buttons** on the **Basic** tab.
+2. **View ▸ Show Button Routing** (Ctrl+7) draws a cross on every button: the number in the middle is the
+   button's number, and the number on each arrow is the button that arrow key moves to (0 is nowhere).
+3. Set the numbers first. **Number** in the button's sheet moves the button in the list, and the arrows
+   point at numbers, so numbering left to right and top to bottom makes the rest of the job obvious. The
+   menu's **Offset** is where the remote control's number keys start counting.
+4. Drag an arrow of the cross onto the button it should lead to. Releasing it over empty canvas clears
+   that route. The directions you have not touched stay automatic.
+5. Turn the routing display off and try it: **File ▸ Preview** (Alt+Ctrl+Space) and the arrow keys.
+
+![The button routing cross](images/user-guide/routing.png)
+
+### 14.4 A hidden button and an Easter egg
+
+An Easter egg is an asset nobody finds by accident. On a disc it is reached through a button that is not
+drawn — or not drawn until the highlight lands on it — and through a route nobody walks by default. There
+are two kinds, and they differ only in which highlight is visible:
+
+- one that shows its highlight when the cursor arrives, so a careful viewer can find it,
+- one whose highlight is invisible too, so the only way to know you have found it is to press Enter.
+
+Make one like this:
+
+1. Make a menu (**File ▸ New ▸ Menu**, Ctrl+M, or a Library preset) and place two or three ordinary
+   buttons and one image (**Library ▸ Images ▸ Place**). Do not overlap them.
+2. Select the image and press **Ctrl+B**. That is the hidden button. Give it its link now — a timeline, a
+   playlist, a slideshow — because a button with no link is reported by the check.
+3. Click the background and turn off **Automatically Route Buttons**, so the route is yours to lay out.
+4. In the **Layers** panel, open the button sets of the two buttons that are only there to be walked
+   through and switch their eyes off. Their text and picture disappear; they stay buttons, and their
+   highlights and links still work.
+5. Select those two buttons and set **Highlight** to **Group 2**. Leave the visible button and the image
+   button on **Group 1**.
+6. **Menu ▸ Edit Menu Color Set…**, choose **Menu Default**, tick **Preview**, and set every opacity in
+   Highlight Group 2 to 0 % — colours 1, 2 and 3, in both the selected and the activated column. The group 2
+   buttons vanish completely.
+7. In the same dialog, give Highlight Group 1 a colour you will notice (bright green is the classic) —
+   that is the sign that the viewer has arrived. If the egg should stay dark even when it is found, set
+   its opacity to 0 as well and the button is invisible even when selected.
+8. Turn the routing display on and number the buttons: the visible one 1, the invisible ones 2 and 3, the
+   hidden one last. Then drag the arrows so that the only way to the hidden button is a silly path —
+   left, up, left — and every wrong key sends the viewer back to button 1.
+9. Preview it with the arrow keys, not the mouse.
+
+Notes:
+
+- A hidden button is still a button. It holds its space, its highlight must not overlap another's, and it
+  counts towards the 36 buttons of a menu.
+- Keep it inside the frame. A button outside the frame is reported by the check and cannot be reached.
+- An invisible button with no link is an error you will never see on the screen; run
+  **File ▸ Check Project…** (Shift+Ctrl+L) before you build.
+- To have the egg give the viewer their way back, link it to a timeline whose **End Action** is
+  **Last menu**, or set the end action to the menu they came from.
+- The other trick worth knowing: a button can link to a menu **with a button chosen**, so the menu opens
+  with that button already highlighted.
+
+![A menu with invisible buttons and the route between them](images/user-guide/hidden-button.png)
+
+### 14.5 Highlight colours, button by button
+
+A menu's highlights are subpictures: overlay pictures drawn on or around a button when the cursor arrives
+(selected) and when the button is pressed (activated). A menu has a colour set — a normal group and three
+highlight groups, and each group has three colours, each with a selected and an activated colour and
+opacity. Every button says which group it uses.
+
+1. Select the menu and choose **Menu Default** in **Color Set** instead of **Automatic**. Automatic
+   invents colours for each menu, which is fine when there is one menu and messy when there are six.
+2. **View ▸ Show Normal Subpicture / Show Selected Subpicture / Show Activated Subpicture**
+   (Ctrl+3 / Ctrl+4 / Ctrl+5) shows each state on the canvas.
+3. Select a button (click inside its border, off the routing cross) and change **Highlight** to another
+   group. Buttons in the same group are highlighted together, which is what makes a row of "Chapter 1 / 2 / 3"
+   buttons read as one group.
+4. **Menu ▸ Edit Menu Color Set…** is where the colours are. Tick **Preview** and move the dialog aside so
+   some buttons are still visible: change a colour or an opacity and the menu changes with it. **Use
+   Selected Colors as Activated Colors** makes pressing a button look like arriving at it.
+5. Most discs use one colour scheme throughout. Change Menu Default once and every menu that uses it
+   follows.
+
+To carry colours into another project, save the menu as a template (Ctrl+Alt+M) and open that template
+there; a menu's colour set has no file of its own. Subtitle colour sets do (`.dccolors`,
+[10.3](#103-appearance)).
+
+![The Menu Color Set dialog](images/user-guide/color-set.png)
+
+### 14.6 Motion menus, with sound and movement
+
+A menu becomes a motion menu the moment its background is video. There are three ways to get one, in
+order of how much trouble they are.
+
+**A video behind an ordinary menu**
+
+1. Import the video as an asset (**File ▸ Import ▸ Asset…**, Ctrl+I). It is the video, not a timeline,
+   that goes behind a menu.
+2. Select the menu, open the **Motion** tab of its sheet, and choose the video in **Background**. The
+   first frame appears behind the buttons; the buttons and the graphics stay as they were.
+3. Set **Loop** (how many seconds of the video the menu uses), **Loop #** (**None** for once only, a
+   number, or **Infinite**) and, if the loop should not start at the beginning, **Loop Point**.
+4. Set **Duration** (a menu is at most 254 seconds) and the **End Action** for when the time runs out.
+   Without an end action a motion menu loops; a still menu with no end action stops on its last picture.
+5. **Audio** is what plays while the menu is up. A still menu repeats with the length of its audio.
+
+**Movement made in EffectCraft**
+
+**Menu ▸ Create EffectCraft Composition…** writes the menu out as a layered PSD, makes an EffectCraft
+project from it at the disc's frame rate and pixel shape, and puts a render of the menu's movie in the
+render queue. Animate the layers there — a title that slides in, a background that breathes — and render.
+When the movie appears, DiscCraft reads it and sets it as the menu's background automatically. Then:
+
+- hide the layers you animated in the **Layers** panel, so on the disc they start empty and arrive with
+  the movie instead of being drawn twice,
+- set **Loop #** to **None**, so the movie plays when the menu opens and stops on its last frame instead
+  of starting again,
+- watch it after building (**Window ▸ Monitor**, F9, **Open Build Output**). In the Menu Viewer and the
+  Project Preview a motion menu shows the background's first frame — the same as Encore before you press
+  Render.
+
+**Movement in the buttons**
+
+**Motion Buttons** on the **Motion** tab makes the menu's thumbnail buttons play their video. It costs bit
+rate, and it is the kind of motion menu that older players mind most, so try it on a real player before a run
+of discs.
+
+![The Motion tab of a menu](images/user-guide/motion-tab.png)
+
+### 14.7 Five ways to link a button
+
+| Way | How | Use it when |
+|---|---|---|
+| Drag from the Project panel | Drag a timeline, slideshow, playlist or chapter playlist onto the canvas. It becomes a button there, named after the item and linked to it | You are making the menu and the item is to hand |
+| The **Link** field | Select the button and choose the target in its sheet. A button's list has the timelines' chapters as well as the timelines | You are setting several buttons in order |
+| The pick whip | Press **▶** at the right of the field and click the item in the Project panel | The target is far down a long list |
+| **Object ▸ Specify Link…** (Ctrl+L) | A dialog with every target grouped by kind. For buttons it also sets the audio and subtitle the button switches to | You want the whole project in one list, streams included |
+| The Flowchart | Drag from a button's port to another node, or right-click a node ▸ **Specify Link…** | You are drawing the navigation and want to see where it goes |
+
+The same five ways set an end action, an override and a remote menu. Two targets are worth remembering:
+**Stop** ends playback, and **Last menu** goes back to the menu the viewer came from — that is what makes
+"Play All" behave.
+
+### 14.8 The Flowchart as a map of the disc
+
+The Flowchart (**Window ▸ Flowchart**, F5) is where the navigation can be read instead of hunted for. The
+disc node is at the top with its **First Play**, **Title button** and the disc's **Override**; below it,
+menus, timelines, slideshows and playlists as boxes with their links as lines.
+
+- Drag a box out of the **unlinked items** row at the bottom onto the disc node's **First Play** port to
+  make it the first thing the disc does.
+- Drag from a button's port to a menu, timeline, slideshow or playlist to link it. Drag from an end
+  action's port to say where the item goes when it finishes. Every line has an arrow head at its target,
+  so a menu that leads back up to a higher menu reads as a loop rather than a tangle, and a box with no
+  line into it is an orphan.
+- **Auto Layout** / **Auto Layout All** tidy the boxes; a box you have moved by hand stays where you put
+  it until you ask for **Auto Layout** on it.
+- Right-click a node for **Open**, **Specify Link…**, **Rename…**, **Set as First Play**, and
+  **Preview from Here** (the preview starts at that item).
+- **View ▸ Show All Thumbnails** puts a picture in every box, which is the fastest way to find the menu
+  you meant.
+
+A disc that plays badly is usually one with a missing end action or an orphan. The check finds both
+([11](#11-checking-the-project)), and the Flowchart shows them as boxes with no line into them.
+
+![The Flowchart with linked menus and timelines](images/user-guide/flowchart.png)
+
+### 14.9 Reading the disc's size as you work
+
+Bit budgeting is deciding how much picture quality fits on the disc. The disc's size is fixed; the video's
+bit rate is what gives.
+
+- The **Build** panel's **Disc Info** bar is the running total (**Refresh Usage** recalculates it). Small
+  projects need nothing more than a glance at it now and then.
+- A DVD holds everything at once: video, audio, subtitles and the menus' own video. The ceiling is
+  9.8 Mbps for a title, and the check reports a timeline that passes it (**Timeline Bitrate Too High**)
+  when the video is used as it is.
+- When the video is converted, DiscCraft chooses the bit rate to fill the disc, up to 9.8 Mbps by default.
+  Longer content means a lower rate, and a lower rate shows first in fast motion and in film grain.
+- If the disc is over, the choices are the same three they always were: cut content, lower the rate, or
+  use a bigger disc (DVD9, BD50…). DVD-9 adds the layer break, which is best placed at a scene change —
+  set it by timeline and timecode under **Layer Break** ([13](#13-building)).
+- Keep the audio honest too. Converted audio is AC-3 192 kbps; AC-3, WAV and DTS go on as they are, so a
+  1.5 Mbps WAV track or a 1.5 Mbps DTS track is 1.5 Mbps taken off the video.
+- A rough figure for a DVD5: about an hour at the top rate, and two hours at a rate most people will not
+  complain about. Two hours of busy action on one disc is where the quality starts to suffer.
+
+### 14.10 Blu-ray
+
+The same project can be built as a Blu-ray. **File ▸ Project Settings…** or the **Disc** panel switches the
+authoring mode, and the **Disc** panel also chooses the video's size, SD (MPEG-2) or HD (H.264).
+
+- Blu-ray is HDMV only (no BD-J), and the menus work as they do on a DVD.
+- A **pop-up menu** is the Blu-ray's version of a remote menu: make it on the menu's **Pop-up** tab, and
+  set the timeline's **Remote Menu** to it. The viewer can call it up in the middle of a title.
+- HD (1080p, 720p) is H.264, and clips are joined at IDR pictures, so trims come out exactly where you
+  cut them — unlike a DVD, where a converted clip is cut at a GOP start.
+- A DTS file cannot go on a Blu-ray yet.
+- Subtitles on an HD or PAL Blu-ray need 5 frames between one subtitle and the next on the same track; the
+  check reports it (**Subtitle Spacing**).
+- Build it the same way (**File ▸ Build ▸ Folder… / Image…**); the folder is `BDMV` instead of `VIDEO_TS`.
+  The Project Preview and the Monitor play a built Blu-ray, pop-up menu included.
+
+### 14.11 What is not here yet
+
+So that you are not looking for it:
+
+| Encore has | DiscCraft |
+|---|---|
+| Burning to a disc, DDP export | Not there. DiscCraft writes a folder or an ISO |
+| Copy protection (CSS, AACS) | Not there. Only the region code flags |
+| BD-J menus | Not there. Blu-ray is HDMV |
+| Motion menus rendered inside the application | Not there. The Menu Viewer and the Project Preview show the background's first frame; render in EffectCraft, or build and watch the result |
+| Highlight colour sets shared between projects as a file | Not there for menus (subtitle colour sets have `.dccolors`). Save the menu as a template instead |
+| GOP headers as marks on the ruler, and Alt-stepping between them | Not there. Chapter points and trims snap to GOP starts automatically |
+
+## 15. Preferences
 
 **Edit ▸ Preferences…** (Ctrl+K). Categories on the left, settings on the right.
 
 | Category | Contents |
 |---|---|
 | General | The default television standard (for new projects). Kept in `workspace.json` |
+| Timelines | Still duration (the slide duration of new slideshows; 6 seconds by default), Subtitle duration (the length of a subtitle added in the Monitor; 2 seconds by default), Audio language / Subtitle language (the language of new tracks; empty uses the disc's audio language). Kept in `workspace.json` |
 | Menus | Button routing (movement up, down, left and right, how and by which rule to wrap, leaving out "Next" and "Previous" buttons), the default for syncing button names. **Kept in the project** (the routing is the same whichever computer builds it) |
 | Appearance | Display language (日本語 / English). **Window ▸ Language** switches it too. Until you choose one, every start follows the operating system's display language (Japanese on a Japanese system; English on an English system and on one in any other language) |
 
-## 15. Keyboard shortcuts
+## 16. Keyboard shortcuts
 
 `Ctrl` is `Cmd` on macOS. Some (Ctrl+Z and others) do not act while you type text.
 
-### 15.1 Files and projects
+### 16.1 Files and projects
 
 | Key | Operation |
 |---|---|
@@ -617,7 +981,7 @@ During a build a bar shows the progress and the time taken (also in the status b
 | Alt+Ctrl+Space | Preview |
 | Ctrl+Q | Exit |
 
-### 15.2 Creating and editing
+### 16.2 Creating and editing
 
 | Key | Operation |
 |---|---|
@@ -631,7 +995,7 @@ During a build a bar shows the progress and the time taken (also in the status b
 | Shift+Ctrl+M | Edit Menu in PhotoCraft |
 | Ctrl+K | Preferences… |
 
-### 15.3 Objects
+### 16.3 Objects
 
 | Key | Operation |
 |---|---|
@@ -644,7 +1008,7 @@ During a build a bar shows the progress and the time taken (also in the status b
 | Ctrl+Alt+M | Save Menu as Template… |
 | V / A / M / R / T / Y / Z | Selection / Direct Select / Move / Rotate / Text / Vertical Text / Zoom tool |
 
-### 15.4 View and playback
+### 16.4 View and playback
 
 | Key | Operation |
 |---|---|
@@ -657,15 +1021,16 @@ During a build a bar shows the progress and the time taken (also in the status b
 | Ctrl+: / Shift+Ctrl+: / Alt+Ctrl+: | Show Guides / Snap to Guides / Lock Guides |
 | Shift+Alt+Ctrl+: | New Guide… |
 
-### 15.5 Window
+### 16.5 Window
 
 | Key | Operation |
 |---|---|
+| F1 | DiscCraft Help… (this manual) |
 | F2 / F4 / F5 | Build / Check Project / Flowchart |
 | F6 / F7 / F8 / F9 | Layers / Library / Menus / Monitor |
 | F11 / F12 / Ctrl+F3 | Project / Properties / Timelines |
 
-## 16. Command line and scripts
+## 17. Command line and scripts
 
 Everything the GUI does can also be done from `disccraft-cli` (building, inspecting a project, running scripts).
 
@@ -686,7 +1051,7 @@ cargo run -p disccraft-cli -- build <project.dcproj> --iso <file> [--cache <dir>
 - `build` makes a folder with `--out` and an image with `--iso`. `--cache` names where converted media is kept;
   `--audio-language` gives the language (ISO 639-1) of audio that has none
 
-## 17. Using it from an AI agent (MCP)
+## 18. Using it from an AI agent (MCP)
 
 `disccraft-cli mcp` runs as an MCP server (JSON-RPC over standard input and output). It has three tools.
 
@@ -699,7 +1064,7 @@ cargo run -p disccraft-cli -- build <project.dcproj> --iso <file> [--cache <dir>
 In your MCP client, register `<repository path>/target/release/disccraft-cli` as the command with `mcp` as its
 argument (connected over stdio).
 
-## 18. Limits and rules
+## 19. Limits and rules
 
 | Item | Limit |
 |---|---|
@@ -733,7 +1098,7 @@ Other rules:
 - MPEG-2 video that fits a DVD (720 / 704 / 352 wide) is not converted. The clips of one title must have the same
   width
 
-## 19. When something does not work
+## 20. When something does not work
 
 | Symptom | What to do |
 |---|---|
@@ -741,9 +1106,12 @@ Other rules:
 | The build stops with "there are problems" | Open **Check Project…** and read **Name** and **Problem**. When it cannot be fixed, choose **Ignore and Continue** in the dialog |
 | A menu does not play | Check First Play, the button links and the end actions in the Flowchart |
 | A button does not respond | See whether highlights overlap (red frame); **View ▸ Show Button Routing** shows where the arrows lead |
+| A hidden button cannot be reached | Its route has to come from a button that can be reached: [a hidden button and an Easter egg](#144-a-hidden-button-and-an-easter-egg) |
 | No sound | Choose the track you hear with the speaker button in the Monitor's track header. DTS tracks are silent in the Monitor and the preview (they do go on the disc). On Linux the ALSA development package (`libasound2-dev` or the like) is needed |
 | An EffectCraft project does not show the picture you expected | Choose the composition to use under **Composition** in the asset's properties |
 | Garbled text | Switch the display language in **Window ▸ Language**. Subtitles are read as UTF-8 / UTF-16 / Shift_JIS |
 | The layout is a mess | **Window ▸ Workspace ▸ Reset “name”** |
 | The written disc does not play | Open the written folder or image in a software player (VLC and the like) and see whether ffprobe reads its streams, to tell where it stops |
+| You want to report a problem | **Copy** in **Help ▸ System Compatibility Report…** gives your setup, and **Help ▸ Reveal Log Files…** gives the record of what was done since DiscCraft started (the log); add them to **Help ▸ Report an Issue…**. When DiscCraft stops unexpectedly, the log of that moment is left in the log folder too |
+| You want to know whether there is a newer version | **Help ▸ Check for Updates…** shows this version and opens the releases on GitHub (DiscCraft does not go online by itself) |
 | A panel cannot be found | The **Window** menu has the name of every panel (one closed with × opens again from here) |

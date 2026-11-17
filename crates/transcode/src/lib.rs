@@ -15,6 +15,11 @@
 
 mod audio;
 pub mod hd;
+mod media_cache;
+mod mkv_probe;
+pub use media_cache::{
+    cached_blob, enable_probe_cache, media_open, probe_ready, store_blob, warm, warming,
+};
 mod picture;
 mod pulldown;
 mod session;
@@ -162,8 +167,26 @@ pub(crate) fn io_error(path: &Path, error: std::io::Error) -> TranscodeError {
 
 /// Duration of a media file in seconds (opens it with the same FilmCraft openers as [`transcode`]).
 pub fn probe_seconds(input: &Path) -> Result<f64, TranscodeError> {
-    let source = source::Source::open(input)?;
-    Ok(source.info().duration.0 as f64 / 254_016_000_000.0)
+    // Remembered from an earlier look at the file, when the application keeps a probe cache.
+    if let Some(video) = remembered_video(input) {
+        return Ok(video.seconds);
+    }
+    probe_video(input).map(|probe| probe.seconds)
+}
+
+/// The facts of a video file remembered in the probe cache (`media_cache`), if any.
+fn remembered_video(input: &Path) -> Option<VideoProbe> {
+    let text = media_cache::fact("video", input)?;
+    let mut parts = text.split(',');
+    let probe = VideoProbe {
+        seconds: parts.next()?.parse().ok()?,
+        width: parts.next()?.parse().ok()?,
+        height: parts.next()?.parse().ok()?,
+        fps: parts.next()?.parse().ok()?,
+        wide: parts.next()? == "1",
+        has_audio: parts.next()? == "1",
+    };
+    (probe.seconds.is_finite() && probe.fps.is_finite()).then_some(probe)
 }
 
 /// The GOPs of an MPEG-2 video elementary stream (`.m2v`), read without decoding: when each one's first picture is
@@ -218,6 +241,32 @@ pub fn is_wide(width: u32, height: u32, par: (u32, u32)) -> bool {
 
 /// Probe a video file: duration, dimensions and frame rate.
 pub fn probe_video(input: &Path) -> Result<VideoProbe, TranscodeError> {
+    if let Some(probe) = remembered_video(input) {
+        return Ok(probe);
+    }
+    let probe = probe_video_now(input)?;
+    media_cache::remember(
+        "video",
+        input,
+        &format!(
+            "{},{},{},{},{},{}",
+            probe.seconds,
+            probe.width,
+            probe.height,
+            probe.fps,
+            u8::from(probe.wide),
+            u8::from(probe.has_audio)
+        ),
+    );
+    Ok(probe)
+}
+
+/// [`probe_video`] by opening the file.
+fn probe_video_now(input: &Path) -> Result<VideoProbe, TranscodeError> {
+    // A Matroska file says it all in its header: it is not read through to be asked.
+    if let Some(probe) = mkv_probe::quick(input) {
+        return Ok(probe);
+    }
     let source = source::Source::open(input)?;
     let info = source.info();
     let seconds = info.duration.0 as f64 / 254_016_000_000.0;
@@ -429,10 +478,22 @@ impl FrameReader {
 /// Duration of an audio-only media file in seconds. A raw AC-3 elementary stream (which the openers do not
 /// read) is measured from its sync frames: 1536 samples each.
 pub fn probe_audio_seconds(input: &Path) -> Result<f64, TranscodeError> {
-    match source::Source::open_audio(input) {
-        Ok(source) => Ok(source.info().duration.0 as f64 / 254_016_000_000.0),
-        Err(error) => ac3_seconds(input).ok_or(error),
+    if let Some(seconds) = media_cache::fact("audio", input)
+        .and_then(|text| text.parse::<f64>().ok())
+        .filter(|seconds| seconds.is_finite())
+    {
+        return Ok(seconds);
     }
+    let seconds = match mkv_probe::quick(input).filter(|probe| probe.has_audio) {
+        // A Matroska video's sound is as long as the file.
+        Some(probe) => probe.seconds,
+        None => match source::Source::open_audio(input) {
+            Ok(source) => source.info().duration.0 as f64 / 254_016_000_000.0,
+            Err(error) => ac3_seconds(input).ok_or(error)?,
+        },
+    };
+    media_cache::remember("audio", input, &seconds.to_string());
+    Ok(seconds)
 }
 
 /// The length of a raw AC-3 file from its frame count, `None` when it is not AC-3. Files past 64 MiB are
