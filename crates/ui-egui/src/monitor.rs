@@ -700,10 +700,21 @@ impl DiscCraftApp {
     /// `open` (the parameters of `preview.open`) with the player's parental level, when it has one set.
     pub(crate) fn with_player_settings(&self, mut open: serde_json::Value) -> serde_json::Value {
         let level = self.preview_prefs.parental_level;
-        if (1..=8).contains(&level)
-            && let Some(fields) = open.as_object_mut()
-        {
+        let Some(fields) = open.as_object_mut() else {
+            return open;
+        };
+        if (1..=8).contains(&level) {
             let _ = fields.insert("parentalLevel".to_owned(), json!(level));
+        }
+        // A built Blu-ray's player picks its streams by these languages (M6.369; a DVD's are picked by the
+        // monitor when the disc chose none).
+        for (name, language) in [
+            ("audioLanguage", &self.preview_prefs.audio_language),
+            ("subtitleLanguage", &self.preview_prefs.subtitle_language),
+        ] {
+            if language.len() == 2 {
+                let _ = fields.insert(name.to_owned(), json!(language));
+            }
         }
         open
     }

@@ -208,6 +208,16 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "slideshow.setParentalLevel",
+        label: "視聴制限レベルを設定",
+        menu: &["スライドショー"],
+        shortcut: None,
+        params: r#"{"slideshow": id, "level": null (ディスクのレベル) | 0 (なし) | 1-8}"#,
+        enabled: always_enabled,
+        run: run_set_slideshow_parental_level,
+        journal: true,
+    },
+    CommandSpec {
         id: "slideshow.setEndAction",
         label: "終了アクションを設定",
         menu: &["スライドショー"],
@@ -808,6 +818,17 @@ fn run_set_slideshow_end_action(session: &mut Session, params: &Value) -> Comman
     };
 
     slideshow.end_action = target;
+    Ok(empty_object())
+}
+
+/// The slideshow's own parental level (M6.363).
+fn run_set_slideshow_parental_level(session: &mut Session, params: &Value) -> CommandResult {
+    let id = req_u64(params, "slideshow")?;
+    let level = super::timeline::parental_level_param(params)?;
+    let Some(slideshow) = session.project.slideshow_mut(id) else {
+        return Err(format!("slideshow {id} does not exist"));
+    };
+    slideshow.parental_level = level;
     Ok(empty_object())
 }
 

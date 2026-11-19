@@ -53,6 +53,19 @@ impl Source {
         Ok(source)
     }
 
+    /// [`Source::open_audio`], or when the media reader cannot open a transport stream (interlaced H.264), the
+    /// sound taken out of it (M6.366). Not for opening a file ahead (`crate::media_cache::warm`): that its
+    /// pictures cannot be read must stay known.
+    pub(crate) fn open_audio_or_extracted(path: &Path) -> Result<Self, TranscodeError> {
+        match Self::open_audio(path) {
+            Ok(source) => Ok(source),
+            Err(error) => match crate::ts_audio::extracted(path) {
+                Some(audio) => Self::open_audio(&audio),
+                None => Err(error),
+            },
+        }
+    }
+
     /// Borrow source metadata.
     pub(crate) fn info(&self) -> &MediaInfo {
         match &self.timing {

@@ -464,6 +464,41 @@ impl DiscCraftApp {
                 &link,
             );
         }
+        // M6.363: the title's own parental level, and what plays in its place when it is not raised.
+        if let Some(level) =
+            self.title_parental_level_row(ui, "timeline_parental_level", timeline.parental_level)
+        {
+            let _ = self.run_command(
+                "timeline.setParentalLevel",
+                serde_json::json!({ "timeline": id.0, "level": level }),
+            );
+        }
+        let asks = timeline
+            .effective_parental_level(self.session.project.settings.parental_level)
+            .is_some();
+        let mut alternative = None;
+        let _ = ui
+            .add_enabled_ui(asks, |ui| {
+                alternative = self.link_row(
+                    ui,
+                    tl!("If Not Allowed:"),
+                    Port::ParentalAlternative(id),
+                    &timeline.parental_alternative,
+                    &targets,
+                );
+            })
+            .response
+            .on_hover_text(tl!(
+                "What plays in the title's place on a player below its parental level (not set: it stops)"
+            ))
+            .on_disabled_hover_text(tl!("Set a parental level first"));
+        if let Some(link) = alternative {
+            let _ = self.run_link_command_pub(
+                "timeline.setParentalAlternative",
+                serde_json::json!({ "timeline": id.0 }),
+                &link,
+            );
+        }
         // 再生中にリモコンのメニューボタンを押したときの飛び先。未設定なら何も起きない（Blu-ray ではメニューだけ、
         // ポップアップメニューとして）。
         let remote_targets = link_targets(&self.session.project, true);
@@ -1910,6 +1945,14 @@ impl DiscCraftApp {
         ) {
             self.set_slideshow_end_action(id, &link);
         }
+        if let Some(level) =
+            self.title_parental_level_row(ui, "slideshow_parental_level", slideshow.parental_level)
+        {
+            let _ = self.run_command(
+                "slideshow.setParentalLevel",
+                serde_json::json!({ "slideshow": id, "level": level }),
+            );
+        }
         ui.separator();
         ui.horizontal(|ui| {
             prop_label(ui, "");
@@ -2520,6 +2563,16 @@ impl DiscCraftApp {
         {
             self.set_chapter_playlist_end_action(id, &link);
         }
+        if let Some(level) = self.title_parental_level_row(
+            ui,
+            "chapter_playlist_parental_level",
+            playlist.parental_level,
+        ) {
+            let _ = self.run_command(
+                "chapterplaylist.setParentalLevel",
+                serde_json::json!({ "chapterPlaylist": id, "level": level }),
+            );
+        }
         let can_override = matches!(
             playlist.end_action,
             Link::Timeline { .. }
@@ -3074,6 +3127,39 @@ impl DiscCraftApp {
     }
 
     /// リンクの行: ラベル、ピックウィップ、選択欄。選ばれたリンクを返す。
+    /// A title's own parental level (M6.363): the disc's, none, or 1 to 8. The new choice when it changes.
+    fn title_parental_level_row(
+        &mut self,
+        ui: &mut Ui,
+        salt: &str,
+        current: Option<u8>,
+    ) -> Option<Option<u8>> {
+        let disc = self.session.project.settings.parental_level;
+        let name = |level: Option<u8>| match level {
+            None if (1..=8).contains(&disc) => tlf!("Disc's ({level})", level = disc),
+            None => tl!("Disc's (none)").to_owned(),
+            Some(0) => tl!("None").to_owned(),
+            Some(level) => level.to_string(),
+        };
+        let mut chosen = current;
+        let _ = ui
+            .horizontal(|ui| {
+                prop_label(ui, tl!("Parental level:"));
+                egui::ComboBox::from_id_salt(salt)
+                    .selected_text(name(current))
+                    .show_ui(ui, |ui| {
+                        for choice in [None, Some(0)].into_iter().chain((1..=8).map(Some)) {
+                            let _ = ui.selectable_value(&mut chosen, choice, name(choice));
+                        }
+                    });
+            })
+            .response
+            .on_hover_text(tl!(
+                "A player set to a lower level asks for its password before the title plays"
+            ));
+        (chosen != current).then_some(chosen)
+    }
+
     fn link_row(
         &mut self,
         ui: &mut Ui,
@@ -3434,7 +3520,7 @@ pub(crate) fn prop_label(ui: &mut Ui, text: &str) {
 }
 
 /// Blu-ray のタイトルの映像の表示名。
-fn bd_video_name(video: disccraft_project::BdVideo) -> &'static str {
+pub(crate) fn bd_video_name(video: disccraft_project::BdVideo) -> &'static str {
     match video {
         disccraft_project::BdVideo::Sd => tl!("SD (MPEG-2)"),
         disccraft_project::BdVideo::Hd1080p23 => "1920x1080 23.976p (H.264)",

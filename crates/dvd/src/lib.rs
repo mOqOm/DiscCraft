@@ -22,7 +22,7 @@ mod preview;
 mod sup;
 mod vobsub;
 pub use demux::{
-    BdVideoFormat, Passthrough, demux_h264_for_bd, demux_mpeg2_for_bd, demux_video_for_bd,
+    BdVideoFormat, Passthrough, TsH264, demux_h264_for_bd, demux_mpeg2_for_bd, demux_video_for_bd,
     h264_fits_bd, mpeg2_fits_bd, video_fits_bd,
 };
 pub use demux_mkv::H264Samples;

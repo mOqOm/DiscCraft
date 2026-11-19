@@ -346,6 +346,7 @@ mod tests {
     #[test]
     fn entry_seconds_sum_the_chapter_spans_and_skip_missing_chapters() {
         let playlist = ChapterPlaylist {
+            parental_level: None,
             id: 1,
             name: String::new(),
             timeline: TimelineId(1),

@@ -79,6 +79,7 @@ pub fn file_metadata(path: &Path) -> Metadata {
         }
     }
     let groups = embedded_packet(path)
+        .or_else(|| png_packet(path))
         .and_then(|bytes| parse_packet(&bytes))
         .unwrap_or_default();
     Metadata {
@@ -132,6 +133,50 @@ fn embedded_packet(path: &Path) -> Option<Vec<u8>> {
         TAIL_BYTES + HEAD_BYTES,
     )?;
     packet_in(&tail).map(<[u8]>::to_vec)
+}
+
+/// The largest picture of a PNG file decoded to reach a packet kept after it.
+const MAX_PNG_PICTURE: usize = 256 << 20;
+
+/// The packet of a PNG file kept in a compressed `iTXt` chunk (keyword `XML:com.adobe.xmp`; XMP Specification
+/// Part 3, PNG): it is not plain text in the file, so the search for the packet's text does not find it. A chunk
+/// after the picture is reached by decoding the picture (up to [`MAX_PNG_PICTURE`]).
+fn png_packet(path: &Path) -> Option<Vec<u8>> {
+    const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n'];
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 8];
+    file.read_exact(&mut head).ok()?;
+    if head != SIGNATURE {
+        return None;
+    }
+    let _ = file.seek(SeekFrom::Start(0)).ok()?;
+    let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
+    decoder.set_ignore_text_chunk(false);
+    let mut reader = decoder.read_info().ok()?;
+    if let Some(packet) = png_xmp(reader.info()) {
+        return Some(packet);
+    }
+    let size = reader.output_buffer_size();
+    if size > MAX_PNG_PICTURE {
+        return None;
+    }
+    let mut picture = vec![0u8; size];
+    let _ = reader.next_frame(&mut picture).ok()?;
+    reader.finish().ok()?;
+    png_xmp(reader.info())
+}
+
+/// The packet in a PNG file's international text chunks, compressed or not.
+fn png_xmp(info: &png::Info<'_>) -> Option<Vec<u8>> {
+    info.utf8_text
+        .iter()
+        .filter(|chunk| chunk.keyword == "XML:com.adobe.xmp")
+        .find_map(|chunk| {
+            let mut chunk = chunk.clone();
+            chunk.decompress_text_with_limit(MAX_PACKET).ok()?;
+            let text = chunk.get_text().ok()?;
+            packet_in(text.as_bytes()).map(<[u8]>::to_vec)
+        })
 }
 
 /// The properties of an XMP packet, by schema. `None` when it is not well-formed XML or holds no property.
@@ -416,6 +461,59 @@ mod tests {
         std::fs::write(&plain, [1u8; 64])?;
         assert_eq!(file_metadata(&plain), Metadata::default());
         assert_eq!(file_metadata(&dir.join("missing.mov")), Metadata::default());
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// A PNG file with the packet in a compressed `iTXt` chunk, before or after the picture.
+    fn png_with_packet(
+        packet: &str,
+        after_picture: bool,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 4, 2);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut chunk = png::text_metadata::ITXtChunk::new("XML:com.adobe.xmp", packet);
+            chunk.compressed = true;
+            chunk.compress_text()?;
+            let mut writer = encoder.write_header()?;
+            if !after_picture {
+                writer.write_text_chunk(&chunk)?;
+            }
+            writer.write_image_data(&[90u8; 4 * 2 * 3])?;
+            if after_picture {
+                writer.write_text_chunk(&chunk)?;
+            }
+            writer.finish()?;
+        }
+        Ok(bytes)
+    }
+
+    #[test]
+    fn a_compressed_packet_in_a_png_is_read() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = std::env::temp_dir().join(format!("disccraft-xmp-png-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        for after_picture in [false, true] {
+            let file = dir.join(format!("menu-{after_picture}.png"));
+            let bytes = png_with_packet(PACKET, after_picture)?;
+            // Compressed: the packet's text is not in the file.
+            assert!(packet_in(&bytes).is_none());
+            std::fs::write(&file, &bytes)?;
+            let metadata = file_metadata(&file);
+            assert_eq!(item(&metadata, "Dublin Core", "title"), Some("Holiday"));
+            assert_eq!(item(&metadata, "Basic", "CreatorTool"), Some("A camera"));
+        }
+        // A broken PNG, and a chunk without a packet, give none.
+        let broken = dir.join("broken.png");
+        let mut bytes = png_with_packet(PACKET, false)?;
+        bytes.truncate(40);
+        std::fs::write(&broken, &bytes)?;
+        assert_eq!(file_metadata(&broken), Metadata::default());
+        let other = dir.join("other.png");
+        std::fs::write(&other, png_with_packet("no packet here", false)?)?;
+        assert_eq!(file_metadata(&other), Metadata::default());
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

@@ -1156,6 +1156,76 @@ fn render_rgb(
     Some(rgb)
 }
 
+/// [`render_rgb`] for a picture placed anywhere (a slideshow's pan and zoom, M6.365): at `(x, y)` of the output,
+/// `(width, height)` large, cut where it reaches past the frame. The arithmetic is the same as for a picture inside
+/// the frame: each column and row takes its source position from where it lies in the whole picture.
+pub(crate) fn render_rgb_placed(
+    rgba: &[u8],
+    (source_width, source_height): (u32, u32),
+    (x, y, width, height): (i64, i64, u32, u32),
+    (output_width, output_height): (u32, u32),
+) -> Option<Vec<u8>> {
+    let out_w = usize::try_from(output_width).ok()?;
+    let out_h = usize::try_from(output_height).ok()?;
+    let mut rgb = vec![0u8; out_w.checked_mul(out_h)?.checked_mul(3)?];
+    // The part of the picture inside the frame.
+    let (x0, x1) = (
+        x.max(0),
+        x.checked_add(i64::from(width))?
+            .min(i64::from(output_width)),
+    );
+    let (y0, y1) = (
+        y.max(0),
+        y.checked_add(i64::from(height))?
+            .min(i64::from(output_height)),
+    );
+    if width == 0 || height == 0 || x0 >= x1 || y0 >= y1 {
+        return Some(rgb);
+    }
+    let sw = usize::try_from(source_width).ok()?;
+    let sh = usize::try_from(source_height).ok()?;
+    if sw == 0 || sh == 0 {
+        return None;
+    }
+    let (pixels, _) = rgba.as_chunks::<4>();
+    let pixels = pixels.get(..sw.checked_mul(sh)?)?;
+    let axis = |offset: i64, content: u32, source: u32, last: usize| {
+        let at = source_coordinate(u32::try_from(offset).ok()?, 0, content, source);
+        let first = usize::try_from(at >> FIXED_POINT_SHIFT)
+            .unwrap_or(last)
+            .min(last);
+        let second = first.saturating_add(1).min(last);
+        let weight = u32::try_from(at & (FIXED_POINT_ONE - 1)).unwrap_or(0);
+        Some((first, second, weight))
+    };
+    let columns = (x0..x1)
+        .map(|column| axis(column - x, width, source_width, sw - 1))
+        .collect::<Option<Vec<_>>>()?;
+    let rows = (y0..y1)
+        .map(|row| axis(row - y, height, source_height, sh - 1))
+        .collect::<Option<Vec<_>>>()?;
+    let stride = out_w.checked_mul(3)?;
+    let left = usize::try_from(x0).ok()?.checked_mul(3)?;
+    let top = usize::try_from(y0).ok()?;
+    let content_rows = rgb.get_mut(top.checked_mul(stride)?..)?;
+    let place = Place {
+        stride,
+        left,
+        source_width: sw,
+        columns: &columns,
+        rows: &rows,
+    };
+    if pixels.iter().all(|pixel| pixel[3] == 255) {
+        fill_rows(content_rows, &place, pixels, |pixel: [u8; 4]| {
+            [pixel[0], pixel[1], pixel[2]]
+        });
+    } else {
+        let composited: Vec<[u8; 3]> = pixels.iter().map(|pixel| composite_pixel(*pixel)).collect();
+        fill_rows(content_rows, &place, &composited, |pixel: [u8; 3]| pixel);
+    }
+    Some(rgb)
+}
+
 /// Where [`fill_rows`] puts the picture: the output's bytes a row and the picture's first byte in a row, the
 /// source's width, and for every column and row of the picture the two source positions it lies between and
 /// its weight.

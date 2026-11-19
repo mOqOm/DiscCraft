@@ -485,6 +485,9 @@ pub(crate) fn ts_h264_keys(
 /// A file's H.264 that goes on a Blu-ray as it is ([`demux_h264_for_bd`]).
 #[derive(Debug)]
 pub enum Passthrough {
+    /// H.264 left in its transport stream (M6.367), read from there through the stream's index as the clip is
+    /// written.
+    Transport(TsH264),
     /// Taken out of a transport stream into the build cache: an Annex B stream and its access-unit index.
     Stream {
         /// The Annex B stream.
@@ -502,6 +505,95 @@ pub enum Passthrough {
         /// Its access-unit index.
         index: PathBuf,
     },
+}
+
+/// H.264 left in a transport stream (M6.367): each access unit is read from the file through the stream's index
+/// (held for the build, so it is not made again) as the disc's clip is written, so the video is not copied into
+/// the build cache first.
+#[derive(Clone)]
+pub struct TsH264 {
+    path: PathBuf,
+    index: Arc<File>,
+    stream: usize,
+    /// For each access unit, the unit of the stream it is.
+    picks: Vec<usize>,
+    /// The access units: lengths, times (90 kHz from the first shown picture), key frames; offsets as in one
+    /// stream of them.
+    units: Vec<disccraft_transcode::hd::AccessUnit>,
+}
+
+impl std::fmt::Debug for TsH264 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TsH264")
+            .field("path", &self.path)
+            .field("stream", &self.stream)
+            .field("units", &self.units.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for TsH264 {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+            && self.stream == other.stream
+            && self.picks == other.picks
+            && self.units == other.units
+    }
+}
+
+impl TsH264 {
+    /// The transport stream.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The access units, in decoding order.
+    #[must_use]
+    pub fn units(&self) -> &[disccraft_transcode::hd::AccessUnit] {
+        &self.units
+    }
+
+    /// The units `indices` alone, as the access units `units` (the same pictures, timed anew): a trimmed clip.
+    #[must_use]
+    pub(crate) fn keep(
+        &self,
+        indices: &[usize],
+        units: Vec<disccraft_transcode::hd::AccessUnit>,
+    ) -> Self {
+        Self {
+            picks: indices
+                .iter()
+                .filter_map(|index| self.picks.get(*index).copied())
+                .collect(),
+            units,
+            ..self.clone()
+        }
+    }
+
+    /// Access unit `unit` as Annex B bytes, read from `file` (the transport stream, opened).
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be read, or the unit is not as long as when the stream was indexed (the file changed).
+    pub fn read(&self, file: &mut fs::File, unit: usize) -> std::io::Result<Vec<u8>> {
+        let invalid = |what: String| std::io::Error::new(std::io::ErrorKind::InvalidData, what);
+        let (Some(pick), Some(expected)) = (self.picks.get(unit), self.units.get(unit)) else {
+            return Err(invalid(format!("no unit {unit}")));
+        };
+        let source = ReadSeekSource::new(file)?;
+        let bytes = self
+            .index
+            .read_unit(&source, self.stream, *pick)
+            .map_err(|error| invalid(error.to_string()))?;
+        if u32::try_from(bytes.len()).ok() != Some(expected.len) {
+            return Err(invalid(format!(
+                "{}: the file changed since it was read",
+                self.path.display()
+            )));
+        }
+        Ok(bytes)
+    }
 }
 
 /// The frame rate code of an MPEG-2 sequence header for `rate` (ISO/IEC 13818-2 table 6-4), 0 for none.
@@ -580,6 +672,98 @@ fn mpeg2_plan(
     )
 }
 
+/// The head of an MPEG-2 video elementary stream (it starts with a sequence header), when `path` is one.
+fn mpeg2_es_head(path: &Path) -> Option<Vec<u8>> {
+    let mut head = vec![0u8; 512 * 1024];
+    let mut file = fs::File::open(path).ok()?;
+    let read = std::io::Read::read(&mut file, &mut head).ok()?;
+    head.truncate(read);
+    head.starts_with(&[0, 0, 1, 0xB3]).then_some(head)
+}
+
+/// The picture_structure of the first picture coding extension in `data` (3: a frame picture).
+fn first_picture_structure(data: &[u8]) -> Option<u8> {
+    data.windows(7)
+        .find(|window| {
+            window.starts_with(&[0, 0, 1, 0xB5]) && window.get(4).is_some_and(|byte| byte >> 4 == 8)
+        })
+        .and_then(|window| window.get(6))
+        .map(|byte| byte & 0x03)
+}
+
+/// Whether the head of the elementary stream `path` says its video goes on a Blu-ray title of `format` as it is:
+/// a sequence that fits, starting with an I picture after a GOP header, of frame pictures.
+fn mpeg2_es_head_fits(path: &Path, format: BdVideoFormat) -> bool {
+    let Some(head) = mpeg2_es_head(path) else {
+        return false;
+    };
+    let Ok(parsed) = disccraft_psmux::es::parse_video(&head, 0) else {
+        return false;
+    };
+    mpeg2_sequence_fits(&parsed.sequence, format)
+        && parsed.pictures.first().is_some_and(|picture| {
+            picture.gop_start && picture.kind == disccraft_psmux::es::PictureType::I
+        })
+        && first_picture_structure(&head) == Some(3)
+}
+
+/// An HD MPEG-2 video elementary stream (`.m2v`, M6.370) as it is, for an HD title of `format`: the stream is read
+/// from the file itself as the clip is written, so only its access-unit index (timed from its first shown
+/// picture; an open GOP's leading pictures left out) goes in `cache_dir`. `None` when it does not fit
+/// ([`mpeg2_es_head_fits`]).
+fn mpeg2_es_for_bd(
+    path: &Path,
+    cache_dir: &Path,
+    format: BdVideoFormat,
+) -> Result<Option<Passthrough>, DvdError> {
+    if !mpeg2_es_head_fits(path, format) {
+        return Ok(None);
+    }
+    fs::create_dir_all(cache_dir).map_err(|err| crate::io_error(cache_dir, err))?;
+    let key = format!("{}-{}", audio_cache_key(path)?, format.key());
+    let index_path = cache_dir.join(format!("{key}.passthrough.es.idx"));
+    let marker = cache_dir.join(format!("{key}.passthrough.es.ok"));
+    if marker.is_file() && index_path.is_file() {
+        return Ok(Some(Passthrough::Mpeg2 {
+            es: path.to_path_buf(),
+            index: index_path,
+        }));
+    }
+    let unsupported = |what: String| DvdError::Unsupported(format!("{}: {what}", path.display()));
+    let file = fs::File::open(path).map_err(|err| crate::io_error(path, err))?;
+    let video = disccraft_psmux::es::parse_video_reader(std::io::BufReader::new(file), 0)
+        .map_err(|err| unsupported(err.to_string()))?;
+    let Some(start) = video.pictures.first().map(|picture| picture.pts) else {
+        return Ok(None);
+    };
+    // 27 MHz to 90 kHz.
+    let units: Vec<disccraft_transcode::hd::AccessUnit> = video
+        .pictures
+        .iter()
+        .filter(|picture| picture.pts >= start)
+        .map(|picture| {
+            Ok(disccraft_transcode::hd::AccessUnit {
+                offset: u64::try_from(picture.offset)
+                    .map_err(|_| unsupported("a picture is too far in".to_string()))?,
+                len: u32::try_from(picture.len)
+                    .map_err(|_| unsupported("a picture is too large".to_string()))?,
+                pts: (picture.pts - start) / 300,
+                dts: (picture.dts - start) / 300,
+                keyframe: picture.kind == disccraft_psmux::es::PictureType::I,
+            })
+        })
+        .collect::<Result<_, DvdError>>()?;
+    let index_part = cache_dir.join(format!("{key}.{}.es.idx.part", part_number()));
+    disccraft_transcode::hd::write_h264_index(&index_part, &units)
+        .map_err(|err| unsupported(err.to_string()))?;
+    fs::rename(&index_part, &index_path).map_err(|err| crate::io_error(&index_part, err))?;
+    fs::write(&marker, b"ok").map_err(|err| crate::io_error(&marker, err))?;
+    Ok(Some(Passthrough::Mpeg2 {
+        es: path.to_path_buf(),
+        index: index_path,
+    }))
+}
+
 /// Whether `path`'s MPEG-2 video would go on a Blu-ray title of `format` as it is ([`demux_mpeg2_for_bd`]):
 /// HD MPEG-2 in a transport stream (HDV, a broadcast recording).
 #[must_use]
@@ -600,11 +784,14 @@ pub fn mpeg2_fits_bd(path: &Path, format: BdVideoFormat) -> bool {
     if let Some(known) = memo.lock().ok().and_then(|memo| memo.get(&key).copied()) {
         return known;
     }
-    let fits = is_container(path)
-        && open(path).is_some_and(|(source, file)| {
+    let fits = if is_container(path) {
+        open(path).is_some_and(|(source, file)| {
             file.find(Kind::Video, |codec| *codec == Codec::Mpeg2Video)
                 .is_some_and(|index| mpeg2_plan(&source, &file, index, format).is_some())
-        });
+        })
+    } else {
+        mpeg2_es_head_fits(path, format)
+    };
     if let Ok(mut memo) = memo.lock() {
         let _ = memo.insert(key, fits);
     }
@@ -649,7 +836,7 @@ pub fn demux_mpeg2_for_bd(
     format: BdVideoFormat,
 ) -> Result<Option<Passthrough>, DvdError> {
     if !is_container(path) {
-        return Ok(None);
+        return mpeg2_es_for_bd(path, cache_dir, format);
     }
     let Some((source, file)) = open(path) else {
         return Ok(None);
@@ -783,18 +970,58 @@ pub fn demux_h264_for_bd(
         return Ok(None);
     };
 
-    fs::create_dir_all(cache_dir).map_err(|err| crate::io_error(cache_dir, err))?;
+    // M6.367: left in the file; what an earlier version copied into the cache goes.
     let key = format!("{}-{}", audio_cache_key(path)?, format.key());
-    let es = cache_dir.join(format!("{key}.passthrough.h264"));
-    let index_path = cache_dir.join(format!("{key}.passthrough.idx"));
-    let marker = cache_dir.join(format!("{key}.passthrough.ok"));
-    if marker.is_file() && es.is_file() && index_path.is_file() {
-        return Ok(Some(Passthrough::Stream {
-            es,
-            index: index_path,
-        }));
+    for extension in ["h264", "idx", "ok"] {
+        let _ = fs::remove_file(cache_dir.join(format!("{key}.passthrough.{extension}")));
     }
+    let unsupported =
+        |what: String| DvdError::Unsupported(format!("demux {}: {what}", path.display()));
+    let mut units = Vec::with_capacity(stream.units.len());
+    let mut offset = 0u64;
+    for unit in &stream.units {
+        let pts = unit
+            .pts
+            .ok_or_else(|| unsupported("a picture has no time".to_string()))?;
+        units.push(disccraft_transcode::hd::AccessUnit {
+            offset,
+            len: unit.size,
+            pts: pts - origin,
+            dts: unit.dts.unwrap_or(pts) - origin,
+            keyframe: unit.key,
+        });
+        offset += u64::from(unit.size);
+    }
+    progress(1.0);
+    let picks = (0..stream.units.len()).collect();
+    drop(source);
+    Ok(Some(Passthrough::Transport(TsH264 {
+        path: path.to_path_buf(),
+        index: Arc::clone(&file),
+        stream: index,
+        picks,
+        units,
+    })))
+}
 
+/// [`demux_h264_for_bd`] as it was before M6.367, copying the stream into the cache: kept for the tests that
+/// compare the two.
+#[cfg(test)]
+fn copy_h264_for_bd(path: &Path, cache_dir: &Path) -> Result<(PathBuf, PathBuf), DvdError> {
+    let (source, file) = open(path).ok_or_else(|| DvdError::Invalid("not a stream".to_string()))?;
+    let index = file
+        .find(Kind::Video, |codec| *codec == Codec::H264)
+        .ok_or_else(|| DvdError::Invalid("no H.264".to_string()))?;
+    let stream = file
+        .streams
+        .get(index)
+        .ok_or_else(|| DvdError::Invalid("no H.264".to_string()))?;
+    let origin = video_origin(&file).ok_or_else(|| DvdError::Invalid("no origin".to_string()))?;
+    fs::create_dir_all(cache_dir).map_err(|err| crate::io_error(cache_dir, err))?;
+    let key = audio_cache_key(path)?;
+    let es = cache_dir.join(format!("{key}.copied.h264"));
+    let index_path = cache_dir.join(format!("{key}.copied.idx"));
+    let marker = cache_dir.join(format!("{key}.copied.ok"));
     let unsupported =
         |what: String| DvdError::Unsupported(format!("demux {}: {what}", path.display()));
     let number = part_number();
@@ -840,10 +1067,7 @@ pub fn demux_h264_for_bd(
     fs::rename(&es_part, &es).map_err(|err| crate::io_error(&es_part, err))?;
     fs::rename(&index_part, &index_path).map_err(|err| crate::io_error(&index_part, err))?;
     fs::write(&marker, b"ok").map_err(|err| crate::io_error(&marker, err))?;
-    Ok(Some(Passthrough::Stream {
-        es,
-        index: index_path,
-    }))
+    Ok((es, index_path))
 }
 
 /// Whether stream `index` of `file` is H.264 a Blu-ray HD title of `format` can carry as it is.
@@ -885,4 +1109,61 @@ fn h264_fits(
         && (probe.fps - rate).abs() <= rate * 0.005
         && probe.seconds > 0.0
         && bytes as f64 * 8.0 / probe.seconds <= BD_MAX_VIDEO_BITRATE
+}
+
+#[cfg(test)]
+mod direct_tests {
+    use super::{BdVideoFormat, Passthrough, copy_h264_for_bd, demux_h264_for_bd};
+    use std::path::PathBuf;
+
+    /// M6.367: H.264 left in its transport stream gives, unit for unit, the access units and bytes that the copy
+    /// into the cache had; a trimmed part reads its own units.
+    #[test]
+    fn units_read_from_the_stream_are_the_copied_ones() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/fixtures/h264_1080i_tones.m2ts");
+        if !fixture.is_file() {
+            eprintln!("h264_1080i_tones.m2ts fixture not found; skipping");
+            return Ok(());
+        }
+        let dir = std::env::temp_dir().join(format!("disccraft-ts-direct-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let format =
+            BdVideoFormat::of_video(disccraft_project::BdVideo::Hd1080i59).ok_or("no format")?;
+        let Some(Passthrough::Transport(ts)) =
+            demux_h264_for_bd(&fixture, &dir, format, &mut |_| {})?
+        else {
+            return Err("not left in the transport stream".into());
+        };
+        // Nothing of the video was written to the cache.
+        let written = std::fs::read_dir(&dir).map_or(0, |entries| entries.count());
+        assert_eq!(written, 0);
+        let (es, index) = copy_h264_for_bd(&fixture, &dir)?;
+        let copied = disccraft_transcode::hd::read_h264_index(&index)?;
+        assert_eq!(ts.units(), copied.as_slice());
+        assert!(copied.len() >= 60, "{}", copied.len());
+        let data = std::fs::read(&es)?;
+        let mut file = std::fs::File::open(&fixture)?;
+        let bytes_of = |unit: &disccraft_transcode::hd::AccessUnit| {
+            let start = usize::try_from(unit.offset).unwrap_or(usize::MAX);
+            data.get(start..start.saturating_add(unit.len as usize))
+                .map(<[u8]>::to_vec)
+        };
+        for (number, unit) in copied.iter().enumerate() {
+            assert_eq!(
+                Some(ts.read(&mut file, number)?),
+                bytes_of(unit),
+                "{number}"
+            );
+        }
+        let (second, third) = (
+            copied.get(2).cloned().ok_or("short")?,
+            copied.get(3).cloned().ok_or("short")?,
+        );
+        let part = ts.keep(&[2, 3], vec![second, third.clone()]);
+        assert_eq!(Some(part.read(&mut file, 1)?), bytes_of(&third));
+        assert!(part.read(&mut file, 2).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
 }

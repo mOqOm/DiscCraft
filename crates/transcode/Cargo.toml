@@ -13,6 +13,7 @@ disccraft-photo.workspace = true
 disccraft-sound.workspace = true
 disccraft-motion.workspace = true
 disccraft-psmux.workspace = true
+disccraft-m2tsmux.workspace = true
 # The AC-3 decoder: a raw .ac3 file is decoded for the monitor's sound and its waveform (never for the disc).
 craft-audio = { workspace = true, features = ["ac3-decode"] }
 craft-media.workspace = true

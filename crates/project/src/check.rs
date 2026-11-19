@@ -343,6 +343,30 @@ impl Project {
             ));
         }
 
+        // A title's own level (M6.363).
+        let own_levels = self
+            .timelines
+            .values()
+            .map(|timeline| (timeline.name.as_str(), timeline.parental_level))
+            .chain(
+                self.slideshows
+                    .values()
+                    .map(|show| (show.name.as_str(), show.parental_level)),
+            )
+            .chain(
+                self.chapter_playlists
+                    .values()
+                    .map(|list| (list.name.as_str(), list.parental_level)),
+            );
+        for (name, level) in own_levels {
+            if let Some(level) = level.filter(|level| *level > 8) {
+                problems.push(error(
+                    "badParentalLevel",
+                    format!("the parental level {level} of \"{name}\" is outside 0..=8"),
+                ));
+            }
+        }
+
         for region in &self.settings.regions {
             if !(1..=8).contains(region) {
                 problems.push(error(

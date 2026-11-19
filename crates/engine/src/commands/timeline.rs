@@ -142,6 +142,26 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "timeline.setParentalLevel",
+        label: "視聴制限レベルを設定",
+        menu: &["タイムライン"],
+        shortcut: None,
+        params: r#"{"timeline": id, "level": null (ディスクのレベル) | 0 (なし) | 1-8}"#,
+        enabled: always_enabled,
+        run: run_set_parental_level,
+        journal: true,
+    },
+    CommandSpec {
+        id: "timeline.setParentalAlternative",
+        label: "視聴制限で再生しないときの行き先を設定",
+        menu: &["タイムライン"],
+        shortcut: None,
+        params: r#"{"timeline": id, "target": Link (未設定: 停止)}"#,
+        enabled: always_enabled,
+        run: run_set_parental_alternative,
+        journal: true,
+    },
+    CommandSpec {
         id: "timeline.setMenuRemote",
         label: "リモートメニューを設定",
         menu: &["タイムライン"],
@@ -581,15 +601,121 @@ fn run_append_video(session: &mut Session, params: &Value) -> CommandResult {
         .project
         .append_timeline_video(timeline, asset, join)
         .map_err(|error| error.to_string())?;
+    let sound = place_own_sound(session, timeline, asset, join)?;
     Ok(object(&[
         ("clip", Value::from(spans.len())),
         ("chapter", Value::from(chapter)),
+        ("audioTrack", sound.map_or(Value::Null, Value::from)),
         ("time", Value::from(join.0)),
         (
             "timecode",
             Value::String(format_time(join, &session.project.settings)),
         ),
     ]))
+}
+
+/// Encore lays a clip's sound beside its picture (M6.361): the sound of video `asset`, just appended at `join`, goes
+/// on the timeline at the clip's place. It joins the track of the clips' own sounds (one whose clips are all the
+/// timeline's video files; the sound of the clip before is cut at the join when it runs on). A timeline without
+/// audio tracks gets a track of all its clips' own sounds, each cut as its clip is. Nothing is placed for a video
+/// without sound, nor when the tracks hold other sound. Returns the track it went on.
+fn place_own_sound(
+    session: &mut Session,
+    timeline: TimelineId,
+    asset: AssetId,
+    join: Tick,
+) -> Result<Option<usize>, String> {
+    let has_sound = |session: &Session, asset: AssetId| {
+        session.project.assets.get(&asset).is_some_and(|found| {
+            found.kind == AssetKind::Video
+                && disccraft_transcode::probe_video(&found.media_file())
+                    .is_ok_and(|probe| probe.has_audio)
+        })
+    };
+    if !has_sound(session, asset) {
+        return Ok(None);
+    }
+    let rate = session.project.settings.frame_rate();
+    let frame = |tick: Tick| u32::try_from(rate.frame_at(tick).max(0)).unwrap_or(u32::MAX);
+    let at = frame(join);
+    let spans = clip_spans(session, timeline)?;
+    let Some(found) = session.project.timeline(timeline) else {
+        return Ok(None);
+    };
+    let videos = found.videos();
+    let earlier = videos.get(..videos.len().saturating_sub(1)).unwrap_or(&[]);
+    if found.audio.is_empty() {
+        // The clips' own sounds, as the preview plays a timeline without a track.
+        let mut clips = Vec::new();
+        for (index, (clip_asset, start, _)) in spans.iter().enumerate() {
+            if has_sound(session, *clip_asset) {
+                let trim = found.video_trim(index);
+                clips.push(disccraft_project::AudioClip {
+                    asset: *clip_asset,
+                    start: frame(*start),
+                    trim_start: trim.start,
+                    trim_end: trim.end,
+                });
+            }
+        }
+        let Some(first) = clips.first().copied() else {
+            return Ok(None);
+        };
+        let track = AudioTrack {
+            more: clips.get(1..).unwrap_or(&[]).to_vec(),
+            asset: first.asset,
+            language: String::new(),
+            start: first.start,
+            trim_start: first.trim_start,
+            trim_end: first.trim_end,
+        };
+        if let Some(found) = session.project.timeline_mut(timeline) {
+            found.audio.push(track);
+        }
+        return Ok(Some(0));
+    }
+    let Some(index) = found.audio.iter().position(|track| {
+        track
+            .clips()
+            .iter()
+            .all(|(_, clip)| earlier.contains(&clip.asset))
+    }) else {
+        return Ok(None);
+    };
+    let Some(track) = found.audio.get(index).cloned() else {
+        return Ok(None);
+    };
+    if track.more.len().saturating_add(1) >= disccraft_project::MAX_AUDIO_CLIPS {
+        return Ok(None);
+    }
+    let mut track = track;
+    // The sound before the join ends there (a clip trimmed at its out point leaves its file's sound running on).
+    if let Some((number, last)) = track.clips().last().copied() {
+        let (start, end) = audio_clip_span(session, &last);
+        if end.is_none_or(|end| end > i64::from(at)) {
+            if start >= i64::from(at) {
+                return Ok(None);
+            }
+            let kept = u32::try_from(i64::from(at) - start).unwrap_or(u32::MAX);
+            let cut = disccraft_project::AudioClip {
+                trim_end: Some(last.trim_start.saturating_add(kept)),
+                ..last
+            };
+            let _ = track.set_clip(number, cut);
+        }
+    }
+    track.more.push(disccraft_project::AudioClip {
+        asset,
+        start: at,
+        trim_start: 0,
+        trim_end: None,
+    });
+    if let Some(found) = session.project.timeline_mut(timeline)
+        && let Some(slot) = found.audio.get_mut(index)
+    {
+        *slot = track;
+    }
+    Ok(Some(index))
 }
 
 /// Takes a clip after the first off the timeline; its chapters go with it and the rest moves up.
@@ -1025,6 +1151,49 @@ fn run_set_end_action(session: &mut Session, params: &Value) -> CommandResult {
     };
 
     timeline.end_action = target;
+    Ok(empty_object())
+}
+
+/// The parental level a title asks (M6.363): `null` the disc's, 0 none, 1 to 8.
+pub(crate) fn parental_level_param(params: &Value) -> Result<Option<u8>, String> {
+    match params.get("level") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .and_then(|level| u8::try_from(level).ok())
+            .filter(|level| *level <= 8)
+            .map(Some)
+            .ok_or_else(|| "parameter \"level\" must be null or 0 to 8".to_string()),
+    }
+}
+
+/// The title's own parental level (M6.363).
+fn run_set_parental_level(session: &mut Session, params: &Value) -> CommandResult {
+    let timeline = TimelineId(req_u64(params, "timeline")?);
+    let level = parental_level_param(params)?;
+    let Some(found) = session.project.timeline_mut(timeline) else {
+        return Err(format!("timeline {} does not exist", timeline.0));
+    };
+    found.parental_level = level;
+    Ok(empty_object())
+}
+
+/// What plays in the title's place for a player below its parental level (M6.363).
+fn run_set_parental_alternative(session: &mut Session, params: &Value) -> CommandResult {
+    let timeline = TimelineId(req_u64(params, "timeline")?);
+    let target = req_link(params, "target")?;
+    if target
+        == (Link::Timeline {
+            id: timeline,
+            chapter: 0,
+        })
+    {
+        return Err("a title cannot play itself in its own place".to_string());
+    }
+    let Some(found) = session.project.timeline_mut(timeline) else {
+        return Err(format!("timeline {} does not exist", timeline.0));
+    };
+    found.parental_alternative = target;
     Ok(empty_object())
 }
 
@@ -2369,6 +2538,125 @@ mod tests {
             ]),
         )?;
         assert_eq!(added.get("track"), Some(&Value::from(1)));
+        Ok(())
+    }
+
+    /// M6.361: an appended clip's sound goes on the timeline at the clip's place, as Encore lays it beside the
+    /// picture: on the track of the clips' sounds (the one before cut at the join), or a new track of all the
+    /// clips' sounds when there was none; a clip without sound adds none.
+    #[test]
+    fn an_appended_clips_sound_goes_beside_it() -> Result<(), Box<dyn Error>> {
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures");
+        let (with_sound, silent) = (fixtures.join("h264_aac.mp4"), fixtures.join("ntsc.m2v"));
+        if !with_sound.is_file() || !silent.is_file() {
+            println!("skipped: no target/fixtures/h264_aac.mp4 or ntsc.m2v");
+            return Ok(());
+        }
+        let mut session = Session::new();
+        let import = |session: &mut Session, path: &PathBuf| -> Result<u64, Box<dyn Error>> {
+            value_u64(
+                &session.execute("asset.import", &obj(&[("path", string_value(path))]))?,
+                "asset",
+            )
+        };
+        let (sound, quiet) = (
+            import(&mut session, &with_sound)?,
+            import(&mut session, &silent)?,
+        );
+        let create = |session: &mut Session, asset: u64| -> Result<u64, Box<dyn Error>> {
+            value_u64(
+                &session.execute("timeline.create", &obj(&[("asset", Value::from(asset))]))?,
+                "timeline",
+            )
+        };
+        let append = |session: &mut Session, timeline: u64, asset: u64| {
+            session.execute(
+                "timeline.appendVideo",
+                &obj(&[
+                    ("timeline", Value::from(timeline)),
+                    ("asset", Value::from(asset)),
+                ]),
+            )
+        };
+        let rate = session.project.settings.frame_rate();
+        let join_frame = |appended: &Value| {
+            appended
+                .get("time")
+                .and_then(Value::as_i64)
+                .map(|ticks| u32::try_from(rate.frame_at(super::Tick(ticks))).unwrap_or(0))
+        };
+        let clips = |session: &Session, timeline: u64, track: usize| {
+            session
+                .project
+                .timeline(disccraft_project::TimelineId(timeline))
+                .and_then(|found| found.audio.get(track))
+                .map(|track| {
+                    track
+                        .clips()
+                        .into_iter()
+                        .map(|(_, clip)| clip)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+
+        // Audio 1 is the first clip's sound; the second clip's joins it at the join, its first clip trimmed at its
+        // out point is cut there.
+        let movie = create(&mut session, sound)?;
+        if let Some(found) = session
+            .project
+            .timeline_mut(disccraft_project::TimelineId(movie))
+        {
+            found.video_trims = vec![disccraft_project::ClipTrim {
+                start: 0,
+                end: Some(30),
+            }];
+        }
+        let appended = append(&mut session, movie, sound)?;
+        assert_eq!(appended.get("audioTrack"), Some(&Value::from(0)));
+        let at = join_frame(&appended).ok_or("no join")?;
+        assert_eq!(at, 30);
+        let laid = clips(&session, movie, 0);
+        assert_eq!(laid.len(), 2);
+        assert_eq!(
+            laid.first().map(|clip| (clip.start, clip.trim_end)),
+            Some((0, Some(30)))
+        );
+        assert_eq!(
+            laid.get(1)
+                .map(|clip| (clip.asset.0, clip.start, clip.trim_start, clip.trim_end)),
+            Some((sound, 30, 0, None))
+        );
+        // A clip without sound adds none.
+        let appended = append(&mut session, movie, quiet)?;
+        assert_eq!(appended.get("audioTrack"), Some(&Value::Null));
+        assert_eq!(clips(&session, movie, 0).len(), 2);
+
+        // A timeline of a silent video has no track: the appended clip's sound makes one, from the join.
+        let silent_movie = create(&mut session, quiet)?;
+        let appended = append(&mut session, silent_movie, sound)?;
+        assert_eq!(appended.get("audioTrack"), Some(&Value::from(0)));
+        let at = join_frame(&appended).ok_or("no join")?;
+        assert!(at > 0);
+        let laid = clips(&session, silent_movie, 0);
+        assert_eq!(
+            laid.iter()
+                .map(|clip| (clip.asset.0, clip.start))
+                .collect::<Vec<_>>(),
+            [(sound, at)]
+        );
+        // A track of another file's sound is left alone.
+        let other = create(&mut session, quiet)?;
+        session.execute(
+            "timeline.addAudioTrack",
+            &obj(&[
+                ("timeline", Value::from(other)),
+                ("asset", Value::from(sound)),
+            ]),
+        )?;
+        let appended = append(&mut session, other, sound)?;
+        assert_eq!(appended.get("audioTrack"), Some(&Value::Null));
+        assert_eq!(clips(&session, other, 0).len(), 1);
         Ok(())
     }
 

@@ -88,6 +88,67 @@ pub fn bd_lpcm_layout(channels: u8, mask: u32) -> Option<(u8, Vec<usize>)> {
     Some((*code, order))
 }
 
+/// What a BD LPCM unit's header says (M6.366: the sound of a transport stream is read back as a WAV).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BdLpcmFormat {
+    /// The channels the sound has.
+    pub channels: u8,
+    /// The channels stored a sample frame: an even count (a mono stream stores two).
+    pub stored: u8,
+    /// Samples a second: 48, 96 or 192 kHz.
+    pub rate: u32,
+    /// Bytes a stored sample: 2 (16 bits) or 3 (20 and 24 bits).
+    pub sample_bytes: u8,
+    /// The bits a sample says it holds: 16, 20 or 24.
+    pub bits: u8,
+    /// The WAV speakers (`dwChannelMask`) of the channels; 0 for mono and stereo.
+    pub mask: u32,
+    /// For each channel of the stream, in its order, the WAV channel it is.
+    pub wav_order: Vec<usize>,
+}
+
+/// Reads the four-byte header of a BD LPCM unit (the inverse of what [`bd_lpcm_units_of`] writes); `None` for a
+/// channel assignment, rate or sample size the format does not have.
+#[must_use]
+pub fn read_bd_lpcm_header(header: &[u8]) -> Option<BdLpcmFormat> {
+    let (third, fourth) = (*header.get(2)?, *header.get(3)?);
+    let rate = match third & 0x0F {
+        1 => 48_000,
+        4 => 96_000,
+        5 => 192_000,
+        _ => return None,
+    };
+    let (bits, sample_bytes) = match fourth >> 6 {
+        1 => (16, 2),
+        2 => (20, 3),
+        3 => (24, 3),
+        _ => return None,
+    };
+    let (channels, mask, wav_order) = match third >> 4 {
+        1 => (1, 0, vec![0]),
+        3 => (2, 0, vec![0, 1]),
+        code => {
+            let (_, speakers) = LAYOUTS.iter().find(|(found, _)| *found == code)?;
+            let mask = speakers.iter().fold(0, |all, speaker| all | speaker);
+            // A WAV's channels are in the order of their speakers' bits.
+            let order = speakers
+                .iter()
+                .map(|speaker| usize::try_from((mask & speaker.wrapping_sub(1)).count_ones()).ok())
+                .collect::<Option<Vec<_>>>()?;
+            (u8::try_from(speakers.len()).ok()?, mask, order)
+        }
+    };
+    Some(BdLpcmFormat {
+        channels,
+        stored: channels.max(2).next_multiple_of(2),
+        rate,
+        sample_bytes,
+        bits,
+        mask,
+        wav_order,
+    })
+}
+
 /// Split big-endian interleaved samples of `bits` (16 or 24) at `sample_rate` (48, 96 or 192 kHz) of `channels`
 /// on WAV speakers `mask` (see [`bd_lpcm_layout`]) into 5 ms BD LPCM units: 240 sample frames at 48 kHz, 480 at
 /// 96 kHz, 960 at 192 kHz. The channels go in the stream's order; an odd count is stored with one more, silent
@@ -220,6 +281,46 @@ fn unit_pts(start_pts: u64, index: usize) -> Result<u64, M2tsError> {
 mod tests {
     use super::{BC, BL, BR, FC, FL, FR, SL, SR, bd_lpcm_units};
     use crate::M2tsError;
+
+    /// M6.366: a header written for a WAV is read back as that WAV's channels, rate and sample size.
+    #[test]
+    fn a_header_reads_back_as_it_was_written() -> Result<(), M2tsError> {
+        use super::{LFE, bd_lpcm_layout, bd_lpcm_units_of, read_bd_lpcm_header};
+        for (channels, mask, bits, rate) in [
+            (1u8, 0u32, 16u8, 48_000u32),
+            (2, 0, 24, 96_000),
+            (6, FL | FR | FC | LFE | BL | BR, 16, 48_000),
+            (8, FL | FR | FC | LFE | BL | BR | SL | SR, 24, 48_000),
+            (3, FL | FR | BC, 16, 48_000),
+        ] {
+            let stored = usize::from(channels.max(2).next_multiple_of(2));
+            let frame = stored * usize::from(bits / 8);
+            let samples = vec![0u8; usize::from(channels) * usize::from(bits / 8) * 240];
+            let units = bd_lpcm_units_of(&samples, channels, mask, (bits, rate), 0)?;
+            let header = units
+                .first()
+                .map(|unit| unit.data.clone())
+                .unwrap_or_default();
+            let read =
+                read_bd_lpcm_header(&header).ok_or_else(|| M2tsError("no header".to_string()))?;
+            assert_eq!(
+                (read.channels, usize::from(read.stored)),
+                (channels, stored)
+            );
+            assert_eq!((read.bits, read.rate), (bits, rate));
+            assert_eq!(
+                usize::from(read.stored) * usize::from(read.sample_bytes),
+                frame
+            );
+            // The stream's channel i is the WAV's channel the writer took it from.
+            let (_, order) =
+                bd_lpcm_layout(channels, mask).ok_or_else(|| M2tsError("no layout".to_string()))?;
+            assert_eq!(read.wav_order, order, "{channels}");
+        }
+        assert_eq!(read_bd_lpcm_header(&[0, 0, 0x30, 0x40]), None);
+        assert_eq!(read_bd_lpcm_header(&[0, 0, 0x21, 0x40]), None);
+        Ok(())
+    }
 
     /// M13.16: 24 bits and 96 kHz: the header says so, and a unit is still 5 ms.
     #[test]

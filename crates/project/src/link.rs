@@ -43,6 +43,14 @@ pub enum Link {
     },
 }
 
+impl Link {
+    /// Whether no target is set (what a link field leaves out when saved).
+    #[must_use]
+    pub fn is_not_set(&self) -> bool {
+        *self == Self::NotSet
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(untagged)]
 enum LinkRepr {

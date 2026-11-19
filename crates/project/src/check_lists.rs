@@ -480,6 +480,7 @@ mod tests {
         project.slideshows.insert(
             1,
             Slideshow {
+                parental_level: None,
                 id: 2,
                 name: "S".to_string(),
                 slides: Vec::new(),
@@ -510,6 +511,7 @@ mod tests {
         project.slideshows.insert(
             1,
             Slideshow {
+                parental_level: None,
                 id: 1,
                 name: "S".to_string(),
                 slides: Vec::new(),

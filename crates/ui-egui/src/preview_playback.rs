@@ -1436,6 +1436,8 @@ mod tests {
 
     fn timeline(id: u64, video: u64) -> Timeline {
         Timeline {
+            parental_level: None,
+            parental_alternative: disccraft_project::Link::NotSet,
             id: TimelineId(id),
             name: format!("T{id}"),
             video: AssetId(video),

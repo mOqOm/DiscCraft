@@ -83,9 +83,13 @@ fn is_bdmv(path: &Path) -> bool {
 }
 
 impl BdPreview {
-    fn open(path: &Path, project: &Project) -> Result<Self, String> {
+    fn open(
+        path: &Path,
+        project: &Project,
+        languages: (Option<[u8; 3]>, Option<[u8; 3]>),
+    ) -> Result<Self, String> {
         let disc = load_bdmv(path).map_err(|error| error.to_string())?;
-        let state = BdVm::start(&disc)
+        let state = BdVm::start_with_languages(&disc, languages)
             .map_err(|error| error.to_string())?
             .state()
             .clone();
@@ -303,8 +307,13 @@ impl Preview {
 
     /// ビルドした Blu-ray（`BDMV` か、それを入れたフォルダー）を開いてファーストプレイから。プレイリストと
     /// `project` のタイムライン・メニューの対応はビルドと同じ並びから。
-    pub(crate) fn open_bd(&mut self, path: &Path, project: &Project) -> Result<(), String> {
-        let bd = BdPreview::open(path, project)?;
+    pub(crate) fn open_bd(
+        &mut self,
+        path: &Path,
+        project: &Project,
+        languages: (Option<[u8; 3]>, Option<[u8; 3]>),
+    ) -> Result<(), String> {
+        let bd = BdPreview::open(path, project, languages)?;
         self.model = None;
         self.location = Location::Stopped;
         self.registers = Registers::default();
@@ -581,7 +590,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "プレビューを開く",
         menu: &["プレビュー"],
         shortcut: None,
-        params: r#"{"path"?: "VIDEO_TS フォルダ（なければビルドせずにプロジェクトから）", "menu"?: VMGM の PGCN, "button"?: n (menu のときに選んでおくボタン。1 から), "title"?: n, "chapter"?: n, "parentalLevel"?: 1..8 (プレーヤーの視聴制限レベル)}"#,
+        params: r#"{"path"?: "VIDEO_TS フォルダ（なければビルドせずにプロジェクトから）", "menu"?: VMGM の PGCN, "button"?: n (menu のときに選んでおくボタン。1 から), "title"?: n, "chapter"?: n, "parentalLevel"?: 1..8 (プレーヤーの視聴制限レベル), "audioLanguage"?: "en" など (ビルドした Blu-ray: プレーヤーのオーディオの言語), "subtitleLanguage"?: 同じく字幕}"#,
         enabled: always_enabled,
         run: run_open,
         journal: false,
@@ -691,9 +700,27 @@ fn run_open(session: &mut Session, params: &Value) -> CommandResult {
     match path {
         // ビルドした Blu-ray: HDMV の解釈器で。
         Some(path) if is_bdmv(Path::new(&path)) => {
+            // The player's languages (ISO 639-1, Preferences > Preview; M6.369) choose the streams while the
+            // disc chooses none.
+            let language = |name: &str| -> Result<Option<[u8; 3]>, String> {
+                match opt_str(params, name)?.filter(|code| !code.is_empty()) {
+                    None => Ok(None),
+                    Some(code) => {
+                        let two: [u8; 2] = code
+                            .to_ascii_lowercase()
+                            .as_bytes()
+                            .try_into()
+                            .map_err(|_| {
+                                format!("parameter \"{name}\" must be a two-letter code")
+                            })?;
+                        Ok(Some(disccraft_bdmv::iso639_2(Some(two))))
+                    }
+                }
+            };
+            let languages = (language("audioLanguage")?, language("subtitleLanguage")?);
             session
                 .preview
-                .open_bd(Path::new(&path), &session.project)?;
+                .open_bd(Path::new(&path), &session.project, languages)?;
         }
         Some(path) => session.preview.open(Path::new(&path), start, parental)?,
         // Encore のプロジェクトプレビュー: ビルドせずに、ビルドが書くのと同じナビゲーションで（ボタンの
@@ -1063,6 +1090,43 @@ mod tests {
         assert!(
             session
                 .execute("preview.open", &json!({ "parentalLevel": 9 }))
+                .is_err()
+        );
+        // M6.363: the title asks 4 of its own and plays a second title in its place when it is not raised.
+        let other = session.project.add_timeline(asset, None)?;
+        session.execute(
+            "timeline.setParentalLevel",
+            &json!({ "timeline": timeline.0, "level": 4 }),
+        )?;
+        session.execute(
+            "timeline.setParentalAlternative",
+            &json!({ "timeline": timeline.0, "target": { "timeline": other.0 } }),
+        )?;
+        session.execute("preview.open", &json!({ "parentalLevel": 3 }))?;
+        assert_eq!(
+            session.preview.location(),
+            Location::Title {
+                title: 2,
+                chapter: 1
+            }
+        );
+        session.execute("preview.open", &json!({ "parentalLevel": 4 }))?;
+        assert_eq!(session.preview.location(), playing);
+        // A title cannot stand in for itself; levels past 8 are refused.
+        assert!(
+            session
+                .execute(
+                    "timeline.setParentalAlternative",
+                    &json!({ "timeline": timeline.0, "target": { "timeline": timeline.0 } }),
+                )
+                .is_err()
+        );
+        assert!(
+            session
+                .execute(
+                    "timeline.setParentalLevel",
+                    &json!({ "timeline": timeline.0, "level": 9 }),
+                )
                 .is_err()
         );
         let _ = std::fs::remove_dir_all(&dir);

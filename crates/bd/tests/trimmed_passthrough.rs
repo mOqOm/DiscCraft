@@ -446,3 +446,94 @@ fn hd_mpeg2_in_a_transport_stream_goes_on_the_disc_as_it_is() {
         }
     }
 }
+
+/// M6.370: HD MPEG-2 as an elementary stream (`.m2v`, 1920 x 1080i) goes on a 1080i disc as it is, read from the
+/// file itself: nothing is encoded, only its index is in the cache, and the disc's pictures are the file's.
+#[test]
+fn an_hd_mpeg2_elementary_stream_goes_on_the_disc_as_it_is() {
+    let (Some(ffmpeg), Some(ffprobe)) = (
+        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
+        tool("DISCCRAFT_FFPROBE", "ffprobe"),
+    ) else {
+        eprintln!("ffmpeg / ffprobe not found; skipping");
+        return;
+    };
+    let video = fixtures().join("mpeg2_1920x1080i.m2v");
+    if !video.is_file() {
+        std::fs::create_dir_all(fixtures()).unwrap();
+        let made = Command::new(&ffmpeg)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("testsrc2=size=1920x1080:rate=30000/1001")
+            .args(["-t", "3", "-c:v", "mpeg2video", "-pix_fmt", "yuv420p"])
+            .args(["-profile:v", "4", "-level:v", "4"])
+            .args(["-b:v", "18M", "-maxrate", "25M", "-bufsize", "9M"])
+            .args(["-vf", "setfield=tff", "-flags", "+ildct+ilme"])
+            .args([
+                "-bf",
+                "2",
+                "-g",
+                "15",
+                "-aspect",
+                "16:9",
+                "-f",
+                "mpeg2video",
+            ])
+            .arg(&video)
+            .status();
+        if !made.is_ok_and(|status| status.success()) {
+            let _ = std::fs::remove_file(&video);
+            eprintln!("ffmpeg cannot make the fixture; skipping");
+            return;
+        }
+    }
+    let mut p = Project::default();
+    p.settings.kind = DiscKind::BluRay;
+    p.settings.bd_video = BdVideo::Hd1080i59;
+    let v = p.add_asset(&video).unwrap();
+    let t = p.add_timeline(v, Some("Main".to_string())).unwrap();
+    p.settings.first_play = Link::Timeline { id: t, chapter: 0 };
+    let estimate = disccraft_dvd::estimate(&p).unwrap();
+    assert!(estimate.transcode_seconds.abs() < 1e-9, "{estimate:?}");
+
+    let out = fixtures().join("bd_mpeg2_es_out");
+    let _ = std::fs::remove_dir_all(&out);
+    let report = build_bdmv(&p, &out).unwrap();
+    assert_eq!(report.titles.len(), 1);
+    let cache: Vec<(String, u64)> = std::fs::read_dir(out.join("disccraft-cache"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| {
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                entry.metadata().map_or(0, |meta| meta.len()),
+            )
+        })
+        .collect();
+    // No encode, and no copy of the video: the cache holds a small index.
+    assert!(
+        cache
+            .iter()
+            .all(|(name, size)| !name.starts_with("hd-") && *size < 100_000),
+        "{cache:?}"
+    );
+    let stream = out.join("BDMV/STREAM/00001.m2ts");
+    let probe = Command::new(&ffprobe)
+        .args(["-v", "error", "-count_packets", "-show_entries"])
+        .args([
+            "stream=codec_name,width,height,nb_read_packets",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(&stream)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&probe.stdout);
+    assert!(text.contains("mpeg2video,1920,1080,90"), "{text}");
+    assert_eq!(
+        video_md5(&ffmpeg, &stream, None),
+        video_md5(&ffmpeg, &video, None)
+    );
+    if std::env::var_os("DISCCRAFT_KEEP_OUTPUT").is_none() {
+        let _ = std::fs::remove_dir_all(&out);
+    }
+}

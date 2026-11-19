@@ -236,11 +236,7 @@ pub fn build_bdmv_with(
     // title at its own format's codec's).
     let hd_budget =
         disccraft_dvd::hd_budget(project).map_err(|error| BdError::Prepare(error.to_string()))?;
-    let mut hd_titles = Vec::with_capacity(titles.len());
-    for title in &titles {
-        let rates = hd::title_rates(project, title, hd_budget.as_ref());
-        hd_titles.push(hd::hd_title(project, title, cache_dir, rates, progress)?);
-    }
+    let hd_titles = hd::hd_titles(project, &titles, cache_dir, hd_budget.as_ref(), progress)?;
 
     let mut output = BuildOutput::default();
     let pending = write_title_clips(project, (&titles, &hd_titles), &dirs, &mut output)?;

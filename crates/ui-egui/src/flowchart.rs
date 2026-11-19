@@ -75,6 +75,8 @@ pub(crate) enum Port {
     MenuRemote(TimelineId),
     /// A timeline's override: where to go after the title its end action leads to.
     Override(TimelineId),
+    /// What plays in a timeline's place on a player below its parental level (M6.363).
+    ParentalAlternative(TimelineId),
     /// A menu's override: where to go after the title its end action plays.
     MenuOverride(MenuId),
     /// The disc's override: where to go after the title the first play plays.
@@ -105,6 +107,7 @@ pub(crate) fn port_accepts(port: &Port, node: NodeId) -> bool {
         | Port::EndAction(_)
         | Port::MenuRemote(_)
         | Port::Override(_)
+        | Port::ParentalAlternative(_)
         | Port::MenuOverride(_)
         | Port::DiscOverride
         | Port::ChapterPlaylistOverride(_)
@@ -465,6 +468,10 @@ fn source_link<'a>(project: &'a Project, port: &Port) -> Option<&'a Link> {
             .timelines
             .get(id)
             .and_then(|timeline| timeline.override_link.as_ref()),
+        Port::ParentalAlternative(id) => project
+            .timelines
+            .get(id)
+            .map(|timeline| &timeline.parental_alternative),
         Port::MenuOverride(id) => project
             .menus
             .get(id)
@@ -1283,6 +1290,11 @@ pub(crate) fn command_for_port(port: &Port) -> Option<(&'static str, Map<String,
             let mut map = Map::new();
             let _ = map.insert("timeline".to_owned(), Value::from(id.0));
             Some(("timeline.setOverride", map))
+        }
+        Port::ParentalAlternative(id) => {
+            let mut map = Map::new();
+            let _ = map.insert("timeline".to_owned(), Value::from(id.0));
+            Some(("timeline.setParentalAlternative", map))
         }
         Port::MenuOverride(id) => {
             let mut map = Map::new();

@@ -84,14 +84,17 @@ The **New Project** dialog has two tabs, **Basic** and **Advanced**.
 
 | Tab | Fields |
 |---|---|
-| Basic | Name, location, authoring mode (DVD / Blu-ray), television standard (NTSC / PAL), a summary of the transcode settings |
+| Basic | Name, location, authoring mode (DVD / Blu-ray), television standard (NTSC / PAL), Blu-ray video format (Blu-ray only), a summary of the transcode settings |
 | Advanced | Aspect ratio (4:3 / 16:9), disc size (DVD5 / DVD9, BD25 / BD50 / BD100 / BD128) |
 
 - With an empty location, you are asked for one when you save
 - The default television standard can be changed in [Preferences](#15-preferences)
+- A new Blu-ray project is HD: 1920 x 1080 at 23.976 fps with NTSC, 1080i at 25 fps with PAL. Files that fit the
+  format go on the disc as they are; the others are converted, by default at 12 Mbps on average with H.264 and
+  25 Mbps with MPEG-2 (1080i). With **SD (MPEG-2)** as the Blu-ray video format, HD sources are converted down to SD
 - **OK** creates `<location>/<name>.dcproj` at once and editing starts
 
-What you can change later: authoring mode, aspect ratio and size in **File ▸ Project Settings…**; the disc's name
+What you can change later: authoring mode, Blu-ray video format, aspect ratio and size in **File ▸ Project Settings…**; the disc's name
 and size under **Disc Info** in the **Build** panel; all the disc's settings in the **Disc** panel
 (the Blu-ray video size, SD (MPEG-2) / HD (H.264), is there too).
 
@@ -244,8 +247,9 @@ A video whose picture cannot be decoded still plays its sound on the timeline. T
 reason, and the time and the playhead move on, so chapter points can be placed by ear.
 Interlaced H.264 in a transport stream (`.m2ts` / `.mts` / `.ts`: AVCHD camcorders, recorders) imports too. Its length,
 size and frame rate are read from the file's time stamps and header, and its Dolby Digital sound goes on the disc as it is.
-Such a file cannot be opened for its sound alone, though, so the Monitor plays no sound for it, and sound other than Dolby
-Digital (LPCM, AAC) cannot be used in a build (put an audio file on an audio track instead).
+Its sound (Dolby Digital, LPCM, AAC or MPEG audio) is taken out of the file the first time it is needed and kept in the
+media cache, so the Monitor plays it, the waveform shows it, and a build converts sound other than Dolby Digital. Its
+pictures still cannot be shown (no thumbnail or Monitor picture), nor converted for a DVD.
 
 **H.264 that goes on an HD Blu-ray as it is**: H.264 in an `.m2ts` / `.ts` / `.mkv` / `.mp4` / `.m4v` / `.mov` goes on the disc without re-encoding
 (the picture quality is kept, and the build is fast) when all of these hold.
@@ -266,7 +270,8 @@ the same part. When the key pictures have leading B pictures (open GOPs), the cl
 without re-encoding too, when its size, frame rate and scan are those of the disc's Blu-ray Video, it is Main profile
 at High or High-1440 level, no faster than 40 Mbps, coded as frame pictures, and it is the only clip of its timeline,
 used whole (a trimmed clip, or one joined with others, is encoded). A recording that starts in the middle of a GOP
-loses the two or so B pictures in front of its first I picture.
+loses the two or so B pictures in front of its first I picture. An MPEG-2 elementary stream (`.m2v`) that fits goes
+on as it is in the same way, read from the file itself (only a small index is kept in the cache).
 
 Such a file shows "Don't Transcode" as its transcode status in the Project panel, and the size estimate counts the file's size.
 The sound is handled as before (anything but AC-3 and WAV is converted to Dolby Digital). Other files are converted.
@@ -335,7 +340,7 @@ A DTS file (`.dts`) goes into a DVD's or a Blu-ray's audio track as it is, witho
 - **Window ▸ Metadata** shows the XMP metadata of the selected asset's file (of a timeline: its video's), by schema
   (Dublin Core, Basic, Rights Management, Media Management, Dynamic Media and so on; other schemas under their
   namespace), with a search field and **Reload**. A sidecar file (`name.xmp` or `name.ext.xmp` beside the media) is
-  read before the file itself. It only shows: DiscCraft writes nothing into your media files, so the values cannot be
+  read before the file itself; a PNG's packet is also read when it is compressed. It only shows: DiscCraft writes nothing into your media files, so the values cannot be
   edited here
 - **Window ▸ Progress** (F10) shows what a build or Transcode Now is converting and how far it is, the list of the
   files it still has to convert (each goes from the list when it is done), and the media files being read in the
@@ -439,7 +444,9 @@ For a work edited in FilmCraft there is **Timeline ▸ New Timeline from FilmCra
 ### 5.2 Several video clips
 
 Drag another video onto the Timeline Viewer and it is butted on right after the clip before it, with a chapter at
-the join (up to 99 clips in one title). Drag a clip's edge to trim it; the cut snaps to the start of an MPEG-2 GOP.
+the join (up to 99 clips in one title). As in Encore, the clip's sound goes beside it: on the audio track of the
+clips' sounds (the sound of the clip before is cut at the join), or on a new Audio 1 when the timeline had no audio
+track. Drag a clip's edge to trim it; the cut snaps to the start of an MPEG-2 GOP.
 
 - MPEG-2 clips that need no conversion pass through as trimmed
 - Clips that need a conversion (H.264 and the like) can be joined and built too, but on a DVD (and an SD Blu-ray)
@@ -679,8 +686,8 @@ preview does. A DVD's highlights stay in the colour set's colours.
   as **(=1) Subpicture** in the Layers panel), added to what it had; the button is then highlighted in that shape
   instead of its text or frame. The layer's colour and opacity do not matter, only its shape. A layer that reaches
   past the button widens the button to take it in, as in Encore (its text and video thumbnail stay where they were;
-  the part outside the frame is left out); the highlight and the remote use the wider button. On a turned button
-  only the part over the button is used. Taking the subpicture away fits the button to its content again
+  the part outside the frame is left out); the highlight and the remote use the wider button. A turned button
+  widens the same way, turned with it. Taking the subpicture away fits the button to its content again
 
 Button properties:
 
@@ -941,7 +948,7 @@ DTS tracks are silent.
 | Destination | When empty, the place shown in faint text (`<project name>_DVD` / `_BD` beside the project; `<project name>.iso` for an image). For a folder, naming an existing folder makes a `<disc name>` folder inside it (a place that already has `VIDEO_TS` / `BDMV` is built again in place). An image cannot be given a folder |
 | Disc Info | The usage bar (**Refresh Usage** calculates it), the disc's name (also the ISO's volume label), the size (**Custom**, last in the list, takes a size of your own in GB beside it — 1 GB = 1,000,000,000 bytes — from 0.001 GB up to a single-layer DVD's 4.7 GB, or a BDXL's 128 GB on a Blu-ray; a larger DVD is DVD9. The usage bar and the project check then measure against it), **DVD-ROM content** / **BD-ROM content** (**Browse…** chooses a folder; its files and folders go in the disc's root, beside `VIDEO_TS` / `BDMV`: a manual or photos to read on a computer. A folder build copies them, an image holds them. They take that much of the capacity from the video, and the line under the bar shows their size. **Clear** takes them off. A file must be under 4 GB, folders at most 7 deep) |
 | Layer Break | DVD-9 only. Automatic / manual. Manual is set by timeline and position (timecode / frame / seconds, **Playhead**) |
-| Region Codes | DVD only. All regions / custom (ticks for 1 to 8). **Parental level**: none, or 1 to 8 (8 is the most restricted). A player whose parental level is set lower asks for its password before the disc plays (at the start, and when a title is started from the remote) and stops when it is not given; a player with no level set plays as usual. Country-specific ratings are not written, and this has not been tried on a hardware player |
+| Region Codes | DVD only. All regions / custom (ticks for 1 to 8). **Parental level**: none, or 1 to 8 (8 is the most restricted). A player whose parental level is set lower asks for its password before the disc plays (at the start, and when a title is started from the remote) and stops when it is not given; a player with no level set plays as usual. A timeline, slideshow or chapter playlist can ask a level of its own (**Parental level** in its properties: the disc's, none, or 1 to 8), and a timeline can name what plays in its place when the level is not raised (**If Not Allowed**: another title or a menu, as a parental block; not set, the player stops). Country-specific ratings are not written, and this has not been tried on a hardware player |
 | Project Check | The check results (the same rows as the check window) |
 | Result | Errors, the number of titles / chapters / the size, **Simulate** (runs the VM after building to a folder) |
 
@@ -1268,7 +1275,7 @@ So that you are not looking for it:
 | General | The default television standard (for new projects). **Playback quality** (as in Encore: High, Draft, Automatic): how large the Monitor plays a title's pictures — High at the disc's frame size, Draft at half, Automatic (the default) at half only for HD larger than 1280 × 720, so 1080-line titles play smoothly. Kept in `workspace.json` |
 | Audio/Video Output | **Audio output device**: the system's default, or one of the output devices, for playback in the Monitor and the previews (from the next time playback starts; a device that is no longer there gives way to the default). **Video output**: Off, **A window of its own**, or (on Windows) one of the connected displays — the picture of the title the Monitor or a preview plays is then also shown there, full screen on that display or in a window you can put anywhere; Esc in that window turns it off. Menus are not sent out, only titles' pictures. **Disable video output when in the background** (on by default) takes the output window away while no DiscCraft window is in front. Kept in `workspace.json` |
 | Timelines | Still duration (the slide duration of new slideshows; 6 seconds by default), Subtitle duration (the length of a subtitle added in the Monitor; 2 seconds by default), Audio language / Subtitle language (the language of new tracks; empty uses the disc's audio language), Snap subtitle clips (off by default). Kept in `workspace.json` |
-| Preview | The player the Project Preview and the Monitor stand for. **TV mode**: 16:9 Widescreen, 4:3 Letterbox (a 16:9 title is shown with bars above and below, on a 4:3 screen), or 4:3 Pan & Scan (the middle of a 16:9 title fills the 4:3 screen, its sides cut). **Player region code**: All regions, or one of 1 to 8 — a DVD limited to other regions does not open in the preview (the status bar says why). **Audio language**: when the disc chooses no audio track itself, a title's first track in this language is heard. **Subtitle language**: when no subtitles are shown, a title's first subtitle track in this language is shown. **Player parental level**: None, or 1 to 8 — a disc whose parental level (Build panel) is higher does not play, as on a locked player (the preview has no password to give). The defaults (widescreen, all regions, no language, no level) play every disc as it is. **Preview playback quality**: the same choice for the Project Preview's titles (High by default). Kept in `workspace.json` |
+| Preview | The player the Project Preview and the Monitor stand for. **TV mode**: 16:9 Widescreen, 4:3 Letterbox (a 16:9 title is shown with bars above and below, on a 4:3 screen), or 4:3 Pan & Scan (the middle of a 16:9 title fills the 4:3 screen, its sides cut). **Player region code**: All regions, or one of 1 to 8 — a DVD limited to other regions does not open in the preview (the status bar says why). **Audio language**: when the disc chooses no audio track itself, a title's first track in this language is heard. **Subtitle language**: when no subtitles are shown, a title's first subtitle track in this language is shown. A built Blu-ray opened in the preview picks its first audio and subtitle streams in these languages too, as a player does, while the disc has chosen none. **Player parental level**: None, or 1 to 8 — a disc whose parental level (Build panel) is higher does not play, as on a locked player (the preview has no password to give). The defaults (widescreen, all regions, no language, no level) play every disc as it is. **Preview playback quality**: the same choice for the Project Preview's titles (High by default). Kept in `workspace.json` |
 | Media | Where DiscCraft keeps its **Library Content** (your own library items) and its **Media Cache Database** (the lengths, sizes and thumbnails remembered of media files), each with **Browse…** (put it in another folder), **Default** (back beside the settings) and **Show in Explorer**. A library folder that already holds a library is opened as it is; an empty one gets the items you have now. A new cache folder is used from then on, and the old one is left as it is. **Clean** empties the media cache: the files are read again when next needed (a build's transcodes are in the build's destination and are not touched). Nothing is ever written into or beside your media files |
 | Menus | Button routing (movement up, down, left and right, how and by which rule to wrap, leaving out "Next" and "Previous" buttons), the default for syncing button names. **Kept in the project** (the routing is the same whichever computer builds it) |
 | Memory | **Installed RAM**, and **Transcodes at a time**: Automatic (one for every processor core), or a number. A build and Transcode Now convert several titles at once and each takes memory of its own, so choose fewer to leave more for other applications. Kept in `workspace.json` |
@@ -1415,7 +1422,8 @@ Other rules:
 - MPEG-2 video that fits a DVD (720 / 704 / 352 wide) is not converted. The clips of one title must have the same
   width
 - MPEG-1 video (a VCD's `.mpg`, an `.m1v`) of 352x240 (NTSC) or 352x288 (PAL) whose stream says up to 1.856 Mbps goes
-  on a DVD as it is, 4:3; one marked as variable bit rate is converted. Its MPEG audio is converted to Dolby Digital.
+  on a DVD as it is, 4:3. One marked as variable bit rate is measured over the whole file: it goes on as it is when no
+  second of it is above 1.856 Mbps, else it is converted. Its MPEG audio is converted to Dolby Digital.
   MPEG-1 and MPEG-2 clips are not joined in one title. On a Blu-ray MPEG-1 is converted
 
 ## 20. When something does not work

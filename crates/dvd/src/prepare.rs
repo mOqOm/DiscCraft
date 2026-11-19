@@ -2757,6 +2757,14 @@ fn is_mpeg1_at(data: &[u8], pos: usize) -> bool {
 /// The picture size of an MPEG-1 sequence header that goes on a DVD of `standard` as it is (M6.350): 352x240 at
 /// 29.97 or 352x288 at 25 frames a second, up to 1.856 Mbit/s (any pixel aspect ratio: the title is 4:3).
 fn mpeg1_header_size(slice: &[u8], standard: VideoStandard) -> Option<(u16, u16)> {
+    mpeg1_header(slice, standard)
+        .filter(|(_, bit_rate)| u64::from(*bit_rate) * 400 <= crate::source::MPEG1_MAX_BITRATE)
+        .map(|(size, _)| size)
+}
+
+/// The picture size and bit rate field (units of 400 bit/s) of an MPEG-1 sequence header whose picture goes on a
+/// DVD of `standard` (352x240 at 29.97 or 352x288 at 25 frames a second), whatever its rate.
+fn mpeg1_header(slice: &[u8], standard: VideoStandard) -> Option<((u16, u16), u32)> {
     let (height, want_rate) = match standard {
         VideoStandard::Ntsc => (240, 4u8),
         VideoStandard::Pal => (288, 3u8),
@@ -2769,11 +2777,117 @@ fn mpeg1_header_size(slice: &[u8], standard: VideoStandard) -> Option<(u16, u16)
         (u16::from(b1 & 0x0F) << 8) | u16::from(b2),
     );
     let bit_rate = (u32::from(b4) << 10) | (u32::from(b5) << 2) | (u32::from(b6) >> 6);
-    let fits = size == (352, height)
-        && b3 & 0x0F == want_rate
-        && b3 >> 4 != 0
-        && u64::from(bit_rate) * 400 <= crate::source::MPEG1_MAX_BITRATE;
-    fits.then_some(size)
+    let fits = size == (352, height) && b3 & 0x0F == want_rate && b3 >> 4 != 0;
+    fits.then_some((size, bit_rate))
+}
+
+/// The picture size of an MPEG-1 video marked variable (M6.362) whose first sequence header in `head` (its head)
+/// fits a DVD of `standard`: `None` for anything else. Whether its rate fits is measured over the whole stream
+/// ([`measured_mpeg1_rate`]).
+fn variable_mpeg1_size(head: &[u8], standard: VideoStandard) -> Option<(u16, u16)> {
+    let pos = head
+        .windows(4)
+        .position(|window| window == [0x00, 0x00, 0x01, 0xB3])?;
+    if !is_mpeg1_at(head, pos) {
+        return None;
+    }
+    let slice = head.get(pos..pos.saturating_add(SEQUENCE_HEADER_BYTES))?;
+    mpeg1_header(slice, standard)
+        .filter(|(_, bit_rate)| *bit_rate == crate::source::MPEG1_VARIABLE_RATE)
+        .map(|(size, _)| size)
+}
+
+/// Counts the bytes of each picture of an MPEG-1 / MPEG-2 video elementary stream written to it (from one picture
+/// start code `00 00 01 00` to the next).
+struct PictureMeter {
+    /// The last four bytes seen.
+    tail: u32,
+    /// The bytes since the current picture's start code began.
+    since: u64,
+    started: bool,
+    sizes: Vec<u64>,
+}
+
+impl PictureMeter {
+    fn new() -> Self {
+        Self {
+            tail: u32::MAX,
+            since: 0,
+            started: false,
+            sizes: Vec::new(),
+        }
+    }
+
+    /// Each picture's bytes, once the whole stream is written.
+    fn sizes(mut self) -> Vec<u64> {
+        if self.started {
+            self.sizes.push(self.since);
+        }
+        self.sizes
+    }
+}
+
+impl std::io::Write for PictureMeter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        for byte in data {
+            self.since = self.since.saturating_add(1);
+            self.tail = (self.tail << 8) | u32::from(*byte);
+            if self.tail == 0x0000_0100 {
+                if self.started {
+                    self.sizes.push(self.since.saturating_sub(4));
+                }
+                self.started = true;
+                self.since = 4;
+            }
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The measured peak rate (bit/s) of the video at `path` (an elementary stream, or the video of a program
+/// stream), read whole once and remembered by the file's path, size and time while the program runs.
+fn measured_mpeg1_rate(path: &Path, standard: VideoStandard) -> Option<u64> {
+    type Key = (PathBuf, u64, Option<std::time::SystemTime>, bool);
+    static MEASURED: std::sync::Mutex<Option<std::collections::HashMap<Key, Option<u64>>>> =
+        std::sync::Mutex::new(None);
+    let metadata = fs::metadata(path).ok()?;
+    let key = (
+        path.to_path_buf(),
+        metadata.len(),
+        metadata.modified().ok(),
+        standard == VideoStandard::Ntsc,
+    );
+    if let Some(known) = MEASURED
+        .lock()
+        .ok()
+        .and_then(|cache| cache.as_ref().and_then(|cache| cache.get(&key).copied()))
+    {
+        return known;
+    }
+    let measure = || -> Option<u64> {
+        let mut file = fs::File::open(path).ok()?;
+        let mut meter = PictureMeter::new();
+        let head = read_head(path)?;
+        if disccraft_psmux::demux::is_program_stream(&head) {
+            let _ = disccraft_psmux::demux::demux(&mut file, Some(&mut meter), None, None).ok()?;
+        } else {
+            let _ = std::io::copy(&mut std::io::BufReader::new(file), &mut meter).ok()?;
+        }
+        Some(crate::source::peak_bit_rate(meter.sizes(), standard))
+    };
+    let measured = measure();
+    if let Ok(mut cache) = MEASURED.lock() {
+        let cache = cache.get_or_insert_with(std::collections::HashMap::new);
+        if cache.len() > 256 {
+            cache.clear();
+        }
+        let _ = cache.insert(key, measured);
+    }
+    measured
 }
 
 /// Whether the video at `path` (an elementary stream, or the video of a program stream) is MPEG-1 (M6.350).
@@ -2798,8 +2912,8 @@ fn is_mpeg1_video(path: &Path) -> bool {
 }
 
 /// The bit rate (bit/s) in the first sequence header of the video at `path` (an elementary stream, or the video of
-/// a program stream): the most the stream says it uses.
-fn header_bit_rate(path: &Path) -> Option<u32> {
+/// a program stream): the most the stream says it uses. An MPEG-1 video marked variable is measured (M6.362).
+fn header_bit_rate(path: &Path, standard: VideoStandard) -> Option<u32> {
     let mut data = read_head(path)?;
     if disccraft_psmux::demux::is_program_stream(&data) {
         let mut file = fs::File::open(path).ok()?;
@@ -2813,6 +2927,9 @@ fn header_bit_rate(path: &Path) -> Option<u32> {
         .position(|window| window == [0x00, 0x00, 0x01, 0xB3])?;
     let byte = |index: usize| data.get(at.checked_add(index)?).copied().map(u32::from);
     let rate = (byte(8)? << 10) | (byte(9)? << 2) | (byte(10)? >> 6);
+    if rate == crate::source::MPEG1_VARIABLE_RATE && is_mpeg1_at(&data, at) {
+        return measured_mpeg1_rate(path, standard).and_then(|rate| u32::try_from(rate).ok());
+    }
     rate.checked_mul(400)
 }
 
@@ -2853,7 +2970,7 @@ pub fn timeline_rates(project: &Project) -> Vec<TimelineRate> {
                     let path = asset_path(project, *id).ok()?;
                     let path: &Path = &path;
                     passes_through(project, path)
-                        .then(|| header_bit_rate(path))
+                        .then(|| header_bit_rate(path, project.settings.standard))
                         .flatten()
                 })
                 .max()?;
@@ -2907,12 +3024,23 @@ fn dvd_picture_size(path: &Path, standard: VideoStandard) -> Option<(u16, u16)> 
         let mut head = Vec::new();
         let limit = u64::try_from(HEAD_BYTES).unwrap_or(u64::MAX);
         disccraft_psmux::demux::demux(&mut file, Some(&mut head), None, Some(limit)).ok()?;
-        return first_sequence_header_size(&head, standard);
+        return first_sequence_header_size(&head, standard)
+            .or_else(|| variable_mpeg1_fits(path, &head, standard));
     }
     if !has_passthrough_extension(path) {
         return None;
     }
     first_sequence_header_size(&data, standard)
+        .or_else(|| variable_mpeg1_fits(path, &data, standard))
+}
+
+/// The picture size of an MPEG-1 video marked variable ([`variable_mpeg1_size`]) whose measured rate a DVD
+/// carries (M6.362).
+fn variable_mpeg1_fits(path: &Path, head: &[u8], standard: VideoStandard) -> Option<(u16, u16)> {
+    let size = variable_mpeg1_size(head, standard)?;
+    measured_mpeg1_rate(path, standard)
+        .filter(|rate| *rate <= crate::source::MPEG1_MAX_BITRATE)
+        .map(|_| size)
 }
 
 /// Whether the video at `path` goes on the project's disc as it is: it fits ([`fits_as_is`]) and is not transcoded
@@ -4068,6 +4196,52 @@ mod tests {
         let mpeg2 = header(352, 240, 4, 2875, 0xB5);
         assert!(!super::is_mpeg1_at(&mpeg2, 0));
         assert_eq!(super::first_sequence_header_size(&mpeg2, ntsc), None);
+        // M6.362: marked variable, its size is known from the head and its rate is measured.
+        assert_eq!(
+            super::variable_mpeg1_size(&header(352, 240, 4, 0x3FFFF, 0xB8), ntsc),
+            Some((352, 240))
+        );
+        assert_eq!(super::variable_mpeg1_size(&vcd, ntsc), None);
+        assert_eq!(
+            super::variable_mpeg1_size(&header(352, 240, 4, 0x3FFFF, 0xB5), ntsc),
+            None
+        );
+    }
+
+    /// M6.362: the pictures of a stream are counted from one picture start code to the next, written in any
+    /// pieces; the peak is the most of a second's run of them.
+    #[test]
+    fn a_streams_pictures_are_measured() -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Write;
+        let mut stream = vec![0, 0, 1, 0xB3, 9, 9, 9, 9];
+        let mut sizes = Vec::new();
+        for picture in 0..40u32 {
+            // Pictures of 1000 bytes, and 4000 for ten of them.
+            let size = if (10..20).contains(&picture) {
+                4000
+            } else {
+                1000
+            };
+            stream.extend_from_slice(&[0, 0, 1, 0]);
+            stream.resize(stream.len() + size - 4, 0x55);
+            sizes.push(size as u64);
+        }
+        let mut meter = super::PictureMeter::new();
+        for piece in stream.chunks(7) {
+            meter.write_all(piece)?;
+        }
+        let measured = meter.sizes();
+        // The header's bytes go with no picture; the first picture starts at its start code.
+        assert_eq!(measured, sizes);
+        // 30 pictures: 20 of 1000 and 10 of 4000 bytes at 29.97 a second.
+        let peak = crate::source::peak_bit_rate(measured.iter().copied(), VideoStandard::Ntsc);
+        assert_eq!(peak, 60_000 * 8 * 1000 / 1001);
+        assert_eq!(
+            crate::source::peak_bit_rate([1000; 25], VideoStandard::Pal),
+            200_000
+        );
+        assert_eq!(crate::source::peak_bit_rate([], VideoStandard::Pal), 0);
+        Ok(())
     }
 
     /// A WAV is taken as LPCM only as 16-bit 48 kHz integer PCM; the header is read, also an extensible one.

@@ -114,6 +114,40 @@ impl StreamCoding {
             Self::Igs { .. } => 0x91,
         }
     }
+
+    /// The stream's language (ISO 639-2); `None` for video.
+    #[must_use]
+    pub fn language(&self) -> Option<[u8; 3]> {
+        match self {
+            Self::Mpeg2Video { .. } | Self::H264Video { .. } => None,
+            Self::Lpcm { language, .. }
+            | Self::Ac3 { language, .. }
+            | Self::Dts { language, .. }
+            | Self::Pgs { language, .. }
+            | Self::Igs { language, .. } => Some(*language),
+        }
+    }
+}
+
+/// The ISO 639-2 code a Blu-ray names a language with, for an ISO 639-1 one (`ja` → `jpn`); `und` for one it
+/// does not know, and for none.
+#[must_use]
+pub fn iso639_2(language: Option<[u8; 2]>) -> [u8; 3] {
+    match language {
+        Some([b'j', b'a']) => *b"jpn",
+        Some([b'e', b'n']) => *b"eng",
+        Some([b'f', b'r']) => *b"fra",
+        Some([b'd', b'e']) => *b"deu",
+        Some([b'e', b's']) => *b"spa",
+        Some([b'i', b't']) => *b"ita",
+        Some([b'z', b'h']) => *b"zho",
+        Some([b'k', b'o']) => *b"kor",
+        Some([b'p', b't']) => *b"por",
+        Some([b'r', b'u']) => *b"rus",
+        Some([b'n', b'l']) => *b"nld",
+        Some([b's', b'v']) => *b"swe",
+        Some(_) | None => *b"und",
+    }
 }
 
 /// One elementary stream of a clip: its PID and coding.

@@ -1265,3 +1265,39 @@ fn a_dts_file_goes_on_a_blu_ray_as_it_is() {
         let _ = std::fs::remove_dir_all(&out);
     }
 }
+
+/// M6.368: HD titles are made side by side; two that play the same clip encode it once (the second waits for the
+/// first's file), and both titles carry it.
+#[test]
+fn hd_titles_of_one_clip_encode_it_once() {
+    let video = fixtures().join("h264_aac.mp4");
+    if !video.is_file() {
+        eprintln!("h264_aac.mp4 fixture not found; skipping");
+        return;
+    }
+    let mut p = Project::default();
+    p.settings.kind = DiscKind::BluRay;
+    p.settings.bd_video = disccraft_project::BdVideo::Hd720p59;
+    let v = p.add_asset(&video).unwrap();
+    let first = p.add_timeline(v, Some("One".to_string())).unwrap();
+    let _ = p.add_timeline(v, Some("Two".to_string())).unwrap();
+    p.settings.first_play = Link::Timeline {
+        id: first,
+        chapter: 0,
+    };
+    let out = std::env::temp_dir().join(format!("disccraft-hd-once-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = build_bdmv(&p, &out).unwrap();
+    let encodes = std::fs::read_dir(out.join("disccraft-cache"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "h264"))
+        .count();
+    assert_eq!(encodes, 1);
+    let size = |name: &str| {
+        std::fs::metadata(out.join("BDMV/STREAM").join(name)).map_or(0, |meta| meta.len())
+    };
+    let (one, two) = (size("00001.m2ts"), size("00002.m2ts"));
+    assert!(one > 100_000 && one == two, "{one} {two}");
+    let _ = std::fs::remove_dir_all(&out);
+}

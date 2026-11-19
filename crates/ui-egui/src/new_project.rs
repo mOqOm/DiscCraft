@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::i18n::{tl, tlf};
-use disccraft_project::{Capacity, DiscKind, VideoStandard};
+use disccraft_project::{BdVideo, Capacity, DiscKind, VideoStandard};
 use egui::text::{CCursor, CCursorRange};
 use egui::{Align, Button, Layout, Ui};
 
@@ -38,6 +38,8 @@ pub(crate) struct NewProjectForm {
     pub(crate) wide: bool,
     /// Disc capacity.
     pub(crate) capacity: Capacity,
+    /// A Blu-ray's video format (M6.357: HD unless the user picks SD).
+    pub(crate) bd_video: BdVideo,
     /// The tab in front.
     pub(crate) tab: NewProjectTab,
     /// Focus the name field and select its text on the next frame.
@@ -56,10 +58,22 @@ impl Default for NewProjectForm {
             standard: VideoStandard::Ntsc,
             wide: false,
             capacity: Capacity::Dvd5,
+            bd_video: default_bd_video(VideoStandard::Ntsc),
             tab: NewProjectTab::Basic,
             focus_name: true,
             settings: false,
         }
+    }
+}
+
+/// The Blu-ray video format a new project starts with (M6.357): HD, as Encore's New Project dialog does. On an NTSC
+/// disc 1080p 23.976 (H.264), which most films and their files are; on a PAL disc 1080i 50 (MPEG-2), the
+/// format that plays 25 fps sources at their own speed. A Blu-ray had been SD until it was changed, so an HD file
+/// was converted down to SD unless the user found the setting.
+pub(crate) fn default_bd_video(standard: VideoStandard) -> BdVideo {
+    match standard {
+        VideoStandard::Ntsc => BdVideo::Hd1080p23,
+        VideoStandard::Pal => BdVideo::Hd1080i50,
     }
 }
 
@@ -73,10 +87,12 @@ impl NewProjectForm {
             .cloned()
             .or_else(documents_dir)
             .unwrap_or_default();
+        let standard = crate::workspace::load_default_standard();
         Self {
             location,
             history,
-            standard: crate::workspace::load_default_standard(),
+            standard,
+            bd_video: default_bd_video(standard),
             ..Self::default()
         }
     }
@@ -102,6 +118,7 @@ impl NewProjectForm {
             standard: settings.standard,
             wide: settings.widescreen,
             capacity: settings.capacity,
+            bd_video: settings.bd_video,
             tab: NewProjectTab::Basic,
             focus_name: false,
             settings: true,
@@ -146,8 +163,8 @@ pub(crate) enum FormAction {
     Cancel,
 }
 
-/// Height of the tab area (fits the Basic tab).
-const TAB_HEIGHT: f32 = 212.0;
+/// Height of the tab area (fits the Basic tab, with a Blu-ray's video row).
+const TAB_HEIGHT: f32 = 252.0;
 
 /// Draw the dialog contents. Returns OK or Cancel when pressed.
 pub(crate) fn draw_new_project(ui: &mut Ui, form: &mut NewProjectForm) -> Option<FormAction> {
@@ -292,9 +309,26 @@ fn draw_settings_group(ui: &mut Ui, form: &mut NewProjectForm) {
                 ui.add_enabled_ui(!form.settings, |ui| draw_standard_combo(ui, form));
                 ui.end_row();
 
+                // A Blu-ray's video: HD from the start, SD only when picked (M6.357).
+                if form.kind == DiscKind::BluRay {
+                    ui.label(tl!("Blu-ray video:"));
+                    egui::ComboBox::from_id_salt("new_project_bd_video")
+                        .selected_text(crate::properties::bd_video_name(form.bd_video))
+                        .show_ui(ui, |ui| {
+                            for video in BdVideo::ALL {
+                                ui.selectable_value(
+                                    &mut form.bd_video,
+                                    video,
+                                    crate::properties::bd_video_name(video),
+                                );
+                            }
+                        });
+                    ui.end_row();
+                }
+
                 ui.label(tl!("Transcode settings:"));
                 ui.vertical(|ui| {
-                    for line in transcode_summary(form.kind, form.standard) {
+                    for line in transcode_summary(form.kind, form.standard, form.bd_video) {
                         ui.small(line);
                     }
                 });
@@ -304,6 +338,7 @@ fn draw_settings_group(ui: &mut Ui, form: &mut NewProjectForm) {
 }
 
 fn draw_standard_combo(ui: &mut Ui, form: &mut NewProjectForm) {
+    let before = form.standard;
     egui::ComboBox::from_id_salt("new_project_standard")
         .selected_text(standard_label(form.standard))
         .show_ui(ui, |ui| {
@@ -311,6 +346,17 @@ fn draw_standard_combo(ui: &mut Ui, form: &mut NewProjectForm) {
                 ui.selectable_value(&mut form.standard, standard, standard_label(standard));
             }
         });
+    form.follow_standard(before);
+}
+
+impl NewProjectForm {
+    /// After the TV standard changed from `before`: a Blu-ray video format still at the old standard's default
+    /// becomes the new one's (one the user picked stays).
+    pub(crate) fn follow_standard(&mut self, before: VideoStandard) {
+        if self.standard != before && self.bd_video == default_bd_video(before) {
+            self.bd_video = default_bd_video(self.standard);
+        }
+    }
 }
 
 /// The Advanced tab: aspect ratio and disc capacity.
@@ -369,10 +415,44 @@ fn draw_buttons(ui: &mut Ui, form: &NewProjectForm) -> Option<FormAction> {
     action
 }
 
-/// Lines describing the transcode settings DiscCraft uses for this mode and standard. They follow the actual
-/// pipeline: MPEG-2 progressive frames (`mpeg2venc`), AC-3 192 kbps stereo for transcoded audio and the bitrate budget
-/// that fills the disc with video up to 9.8 Mbps (`dvd::prepare`). Blu-ray currently reuses the same SD video.
-pub(crate) fn transcode_summary(kind: DiscKind, standard: VideoStandard) -> Vec<String> {
+/// Lines describing the transcode settings DiscCraft uses for this mode, standard and (on a Blu-ray) video format.
+/// They follow the actual pipeline: SD MPEG-2 progressive frames (`mpeg2venc`) in the bitrate budget that fills the
+/// disc with video up to 9.8 Mbps (`dvd::prepare`); HD H.264 or 1080i MPEG-2 at the format's usual rates, lower when
+/// the titles do not fit (`dvd::hd_budget`, through `disccraft_build::hd_default_kbps`), and a file whose video already fits the format kept as it is; AC-3
+/// 192 kbps stereo for transcoded audio.
+pub(crate) fn transcode_summary(
+    kind: DiscKind,
+    standard: VideoStandard,
+    bd_video: BdVideo,
+) -> Vec<String> {
+    let audio = tl!("Audio: Dolby Digital (AC-3) 192 kbps stereo (AC-3 and WAV sources are kept)")
+        .to_owned();
+    if let (DiscKind::BluRay, Some((width, height, num, den))) = (kind, bd_video.hd()) {
+        let (codec, (target, peak)) = if bd_video.interlaced() {
+            ("MPEG-2", disccraft_build::hd_default_kbps(true))
+        } else {
+            ("H.264", disccraft_build::hd_default_kbps(false))
+        };
+        let rate = format!("{:.3}", f64::from(num) / f64::from(den.max(1)))
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_owned();
+        return vec![
+            tlf!(
+                "Video: {codec}, {width} x {height}, {rate} fps (files that fit go on as they are)",
+                codec = codec,
+                width = width,
+                height = height,
+                rate = rate
+            ),
+            audio,
+            tlf!(
+                "Bitrate: {target} Mbps on average, up to {peak} (lower if the disc is too small)",
+                target = target / 1000,
+                peak = peak / 1000
+            ),
+        ];
+    }
     let (width, height, rate) = match standard {
         VideoStandard::Ntsc => (720, 480, "29.97"),
         VideoStandard::Pal => (720, 576, "25"),
@@ -384,12 +464,11 @@ pub(crate) fn transcode_summary(kind: DiscKind, standard: VideoStandard) -> Vec<
             height = height,
             rate = rate
         ),
-        tl!("Audio: Dolby Digital (AC-3) 192 kbps stereo (AC-3 and WAV sources are kept)")
-            .to_owned(),
+        audio,
         tl!("Bitrate: automatic, to fit the disc (video up to 9.8 Mbps)").to_owned(),
     ];
     if kind == DiscKind::BluRay {
-        lines.push(tl!("Blu-ray currently uses the same standard-definition video.").to_owned());
+        lines.push(tl!("Standard definition: HD sources are converted down to SD.").to_owned());
     }
     lines
 }
@@ -467,8 +546,8 @@ fn capacity_label(capacity: &Capacity) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{NewProjectForm, location_history, transcode_summary};
-    use disccraft_project::{Capacity, DiscKind, VideoStandard};
+    use super::{NewProjectForm, default_bd_video, location_history, transcode_summary};
+    use disccraft_project::{BdVideo, Capacity, DiscKind, VideoStandard};
     use std::path::PathBuf;
 
     fn file_name(form: &NewProjectForm) -> Option<String> {
@@ -542,13 +621,57 @@ mod tests {
     #[test]
     fn summary_matches_the_standard() {
         crate::i18n::set_current(crate::i18n::Language::En);
-        let ntsc = transcode_summary(DiscKind::Dvd, VideoStandard::Ntsc);
-        let pal = transcode_summary(DiscKind::BluRay, VideoStandard::Pal);
+        let ntsc = transcode_summary(DiscKind::Dvd, VideoStandard::Ntsc, BdVideo::Sd);
+        let pal = transcode_summary(DiscKind::BluRay, VideoStandard::Pal, BdVideo::Sd);
+        let hd = transcode_summary(DiscKind::BluRay, VideoStandard::Ntsc, BdVideo::Hd1080p23);
+        let interlaced =
+            transcode_summary(DiscKind::BluRay, VideoStandard::Pal, BdVideo::Hd1080i50);
         crate::i18n::set_current(crate::i18n::Language::Ja);
 
         assert!(ntsc.first().is_some_and(|line| line.contains("720 x 480")));
         assert!(pal.first().is_some_and(|line| line.contains("720 x 576")));
         assert_eq!(ntsc.len(), 3);
         assert_eq!(pal.len(), 4);
+        // M6.357: an HD Blu-ray says its own video and rates.
+        assert!(
+            hd.first()
+                .is_some_and(|line| line.contains("H.264, 1920 x 1080, 23.976 fps")),
+            "{hd:?}"
+        );
+        assert!(
+            hd.get(2).is_some_and(|line| line.contains("12 Mbps")),
+            "{hd:?}"
+        );
+        assert!(
+            interlaced
+                .first()
+                .is_some_and(|line| line.contains("MPEG-2, 1920 x 1080, 25 fps")),
+            "{interlaced:?}"
+        );
+    }
+
+    /// M6.357: a new Blu-ray project is HD (by the TV standard) and follows a change of the standard until the user
+    /// picks a format; a project's settings show its own format.
+    #[test]
+    fn a_new_blu_ray_is_hd() {
+        let mut form = NewProjectForm::default();
+        assert_eq!(form.bd_video, BdVideo::Hd1080p23);
+        form.standard = VideoStandard::Pal;
+        form.follow_standard(VideoStandard::Ntsc);
+        assert_eq!(form.bd_video, BdVideo::Hd1080i50);
+        assert_eq!(default_bd_video(VideoStandard::Pal), BdVideo::Hd1080i50);
+        // A format the user picked stays.
+        form.bd_video = BdVideo::Hd720p50;
+        form.standard = VideoStandard::Ntsc;
+        form.follow_standard(VideoStandard::Pal);
+        assert_eq!(form.bd_video, BdVideo::Hd720p50);
+        let settings = disccraft_project::DiscSettings {
+            bd_video: BdVideo::Sd,
+            ..Default::default()
+        };
+        assert_eq!(
+            NewProjectForm::for_project(None, &settings).bd_video,
+            BdVideo::Sd
+        );
     }
 }

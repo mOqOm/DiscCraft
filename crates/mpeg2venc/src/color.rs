@@ -17,18 +17,49 @@ pub(crate) fn rgb_to_frame420(
         return Err(error("rgb length mismatch"));
     }
 
-    let mut y = vec![0u8; expected / 3];
-    fill_luma(rgb, &mut y);
-
     let cw = w.div_ceil(2);
     let ch = h.div_ceil(2);
     let c_len = cw
         .checked_mul(ch)
         .ok_or_else(|| error("invalid chroma size"))?;
-
+    let mut y = vec![0u8; expected / 3];
     let mut cb = vec![0u8; c_len];
     let mut cr = vec![0u8; c_len];
-    fill_chroma(rgb, w, h, &mut cb, &mut cr);
+    if w == 0 || h == 0 {
+        return Ok(Frame420 {
+            width,
+            height,
+            y,
+            cb,
+            cr,
+        });
+    }
+
+    // Bands of whole chroma rows (two picture rows each), each on a thread of its own: at least
+    // [`BAND_ROWS`] picture rows a band, as more threads cost more to start than they save (M6.365).
+    let bands = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(ch.div_ceil(BAND_ROWS / 2))
+        .max(1);
+    let band = ch.div_ceil(bands);
+    let jobs = y
+        .chunks_mut(band * 2 * w)
+        .zip(cb.chunks_mut(band * cw))
+        .zip(cr.chunks_mut(band * cw))
+        .enumerate();
+    if bands == 1 {
+        for (index, ((y_band, cb_band), cr_band)) in jobs {
+            convert_band(rgb, (w, h), index * band, y_band, (cb_band, cr_band));
+        }
+    } else {
+        std::thread::scope(|scope| {
+            for (index, ((y_band, cb_band), cr_band)) in jobs {
+                let _ = scope.spawn(move || {
+                    convert_band(rgb, (w, h), index * band, y_band, (cb_band, cr_band));
+                });
+            }
+        });
+    }
 
     Ok(Frame420 {
         width,
@@ -39,77 +70,74 @@ pub(crate) fn rgb_to_frame420(
     })
 }
 
+/// The fewest picture rows a thread of [`rgb_to_frame420`] converts.
+const BAND_ROWS: usize = 48;
+
+/// Converts the picture rows of the chroma rows from `first_cy` on: their luma into `y_band` (whole rows of
+/// `width`), their chroma into `cb_band` / `cr_band` (whole rows of half the width). A chroma sample is the mean
+/// of the chroma of the (up to four) pixels it covers, each worked out on its own, rounded half up.
+fn convert_band(
+    rgb: &[u8],
+    (width, height): (usize, usize),
+    first_cy: usize,
+    y_band: &mut [u8],
+    (cb_band, cr_band): (&mut [u8], &mut [u8]),
+) {
+    let cw = width.div_ceil(2);
+    let row_bytes = width * 3;
+    for (offset, (cb_row, cr_row)) in cb_band
+        .chunks_mut(cw)
+        .zip(cr_band.chunks_mut(cw))
+        .enumerate()
+    {
+        let cy = first_cy + offset;
+        let top = cy * 2;
+        let source = |py: usize| {
+            (py < height)
+                .then(|| rgb.get(py * row_bytes..(py + 1) * row_bytes))
+                .flatten()
+        };
+        let rows = [source(top), source(top + 1)];
+        for (dy, row) in rows.iter().enumerate() {
+            let Some(row) = row else {
+                continue;
+            };
+            let at = (offset * 2 + dy) * width;
+            if let Some(out) = y_band.get_mut(at..at + width) {
+                for (slot, pixel) in out.iter_mut().zip(row.as_chunks::<3>().0) {
+                    let [r, g, b] = *pixel;
+                    *slot = luma_from_rgb(r, g, b);
+                }
+            }
+        }
+        for (cx, (cb_slot, cr_slot)) in cb_row.iter_mut().zip(cr_row.iter_mut()).enumerate() {
+            let (mut sum_cb, mut sum_cr, mut count) = (0i32, 0i32, 0i32);
+            for row in rows.iter().flatten() {
+                for px in [cx * 2, cx * 2 + 1] {
+                    if px >= width {
+                        continue;
+                    }
+                    if let Some([r, g, b]) = row
+                        .get(px * 3..px * 3 + 3)
+                        .and_then(|p| <[u8; 3]>::try_from(p).ok())
+                    {
+                        let (cb, cr) = chroma_from_rgb(r, g, b);
+                        sum_cb += cb;
+                        sum_cr += cr;
+                        count += 1;
+                    }
+                }
+            }
+            if count > 0 {
+                *cb_slot = clamp_u8((sum_cb + count / 2) / count, 16, 240);
+                *cr_slot = clamp_u8((sum_cr + count / 2) / count, 16, 240);
+            }
+        }
+    }
+}
+
 fn error(message: &str) -> EncodeError {
     EncodeError(message.to_string())
-}
-
-fn fill_luma(rgb: &[u8], y: &mut [u8]) {
-    for (index, pixel) in rgb.as_chunks::<3>().0.iter().enumerate() {
-        if let [r, g, b] = pixel
-            && let Some(slot) = y.get_mut(index)
-        {
-            *slot = luma_from_rgb(*r, *g, *b);
-        }
-    }
-}
-
-fn fill_chroma(rgb: &[u8], width: usize, height: usize, cb: &mut [u8], cr: &mut [u8]) {
-    let cw = width.div_ceil(2);
-    let ch = height.div_ceil(2);
-
-    for cy in 0..ch {
-        for cx in 0..cw {
-            if let Some((cb_value, cr_value)) = chroma_block(rgb, width, height, cx, cy) {
-                let index = cy * cw + cx;
-                if let Some(slot) = cb.get_mut(index) {
-                    *slot = cb_value;
-                }
-                if let Some(slot) = cr.get_mut(index) {
-                    *slot = cr_value;
-                }
-            }
-        }
-    }
-}
-
-fn chroma_block(rgb: &[u8], width: usize, height: usize, cx: usize, cy: usize) -> Option<(u8, u8)> {
-    let mut sum_cb = 0i32;
-    let mut sum_cr = 0i32;
-    let mut count = 0i32;
-
-    for dy in 0..2 {
-        let py = cy.checked_mul(2)?.checked_add(dy)?;
-        if py >= height {
-            continue;
-        }
-
-        for dx in 0..2 {
-            let px = cx.checked_mul(2)?.checked_add(dx)?;
-            if px >= width {
-                continue;
-            }
-
-            let start = py.checked_mul(width)?.checked_add(px)?.checked_mul(3)?;
-            let end = start.checked_add(3)?;
-
-            if let Some(pixel) = rgb.get(start..end)
-                && let [r, g, b] = pixel
-            {
-                let (cb, cr) = chroma_from_rgb(*r, *g, *b);
-                sum_cb += cb;
-                sum_cr += cr;
-                count += 1;
-            }
-        }
-    }
-
-    if count == 0 {
-        return None;
-    }
-
-    let cb = (sum_cb + count / 2) / count;
-    let cr = (sum_cr + count / 2) / count;
-    Some((clamp_u8(cb, 16, 240), clamp_u8(cr, 16, 240)))
 }
 
 fn luma_from_rgb(r: u8, g: u8, b: u8) -> u8 {
@@ -138,6 +166,74 @@ fn clamp_u8(value: i32, min: u8, max: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::rgb_to_frame420;
+
+    /// The conversion as it was before M6.365 (a pixel at a time): the new one gives the same bytes.
+    fn reference(width: usize, height: usize, rgb: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let y: Vec<u8> = rgb
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|[r, g, b]| super::luma_from_rgb(*r, *g, *b))
+            .collect();
+        let (cw, ch) = (width.div_ceil(2), height.div_ceil(2));
+        let (mut cb, mut cr) = (vec![0u8; cw * ch], vec![0u8; cw * ch]);
+        for cy in 0..ch {
+            for cx in 0..cw {
+                let (mut sum_cb, mut sum_cr, mut count) = (0i32, 0i32, 0i32);
+                for py in [cy * 2, cy * 2 + 1] {
+                    for px in [cx * 2, cx * 2 + 1] {
+                        if px < width
+                            && py < height
+                            && let Some([r, g, b]) = rgb
+                                .get((py * width + px) * 3..(py * width + px) * 3 + 3)
+                                .and_then(|p| <[u8; 3]>::try_from(p).ok())
+                        {
+                            let (c_b, c_r) = super::chroma_from_rgb(r, g, b);
+                            sum_cb += c_b;
+                            sum_cr += c_r;
+                            count += 1;
+                        }
+                    }
+                }
+                if let Some(slot) = cb.get_mut(cy * cw + cx) {
+                    *slot = super::clamp_u8((sum_cb + count / 2) / count, 16, 240);
+                }
+                if let Some(slot) = cr.get_mut(cy * cw + cx) {
+                    *slot = super::clamp_u8((sum_cr + count / 2) / count, 16, 240);
+                }
+            }
+        }
+        (y, cb, cr)
+    }
+
+    #[test]
+    fn bands_give_the_pixel_at_a_time_bytes() -> Result<(), String> {
+        for (width, height) in [
+            (720, 480),
+            (720, 576),
+            (1920, 1080),
+            (7, 5),
+            (1, 1),
+            (2, 97),
+            (353, 241),
+        ] {
+            let mut seed = 0x1234_5678_u32 ^ (width as u32 * 31 + height as u32);
+            let rgb: Vec<u8> = (0..width * height * 3)
+                .map(|_| {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (seed >> 24) as u8
+                })
+                .collect();
+            let frame =
+                rgb_to_frame420(width as u16, height as u16, &rgb).map_err(|e| e.to_string())?;
+            let (y, cb, cr) = reference(width, height, &rgb);
+            assert!(
+                frame.y == y && frame.cb == cb && frame.cr == cr,
+                "{width}x{height}"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn white_is_studio_range() -> Result<(), String> {

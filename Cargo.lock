@@ -2972,6 +2972,7 @@ dependencies = [
 name = "disccraft-engine"
 version = "0.1.0"
 dependencies = [
+ "disccraft-bdmv",
  "disccraft-build",
  "disccraft-check",
  "disccraft-dvd",
@@ -3108,6 +3109,7 @@ dependencies = [
  "craft-audio 0.1.0 (git+https://github.com/storytold/craft-libs?rev=56c3c833bb869a140271e2aceec2112322cacc58)",
  "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=56c3c833bb869a140271e2aceec2112322cacc58)",
  "craft-video 0.1.0 (git+https://github.com/storytold/craft-libs?rev=56c3c833bb869a140271e2aceec2112322cacc58)",
+ "disccraft-m2tsmux",
  "disccraft-motion",
  "disccraft-mpeg2venc",
  "disccraft-photo",

@@ -582,22 +582,7 @@ pub(crate) fn video_coding(settings: &DiscSettings, wide: bool) -> StreamCoding 
 }
 
 pub(crate) fn iso639_2(language: Option<[u8; 2]>) -> [u8; 3] {
-    match language {
-        Some([b'j', b'a']) => *b"jpn",
-        Some([b'e', b'n']) => *b"eng",
-        Some([b'f', b'r']) => *b"fra",
-        Some([b'd', b'e']) => *b"deu",
-        Some([b'e', b's']) => *b"spa",
-        Some([b'i', b't']) => *b"ita",
-        Some([b'z', b'h']) => *b"zho",
-        Some([b'k', b'o']) => *b"kor",
-        Some([b'p', b't']) => *b"por",
-        Some([b'r', b'u']) => *b"rus",
-        Some([b'n', b'l']) => *b"nld",
-        Some([b's', b'v']) => *b"swe",
-        Some(_) => *b"und",
-        None => *b"und",
-    }
+    disccraft_bdmv::iso639_2(language)
 }
 
 pub(crate) fn to_90k(timestamp: i64) -> Result<u64, BdError> {

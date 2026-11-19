@@ -687,6 +687,13 @@ impl DiscCraftApp {
         self.new_project();
         self.set_disc_kind(form.kind);
         self.set_disc_standard(form.standard);
+        // A Blu-ray starts in the format picked in the dialog (HD unless SD was chosen, M6.357).
+        if form.kind == DiscKind::BluRay {
+            let _ = self.run_command(
+                "disc.setBlurayVideo",
+                json!({ "video": form.bd_video.id() }),
+            );
+        }
         if form.wide {
             let _ = self.run_command("disc.setAspect", json!({ "aspect": "16:9" }));
         }
@@ -701,6 +708,12 @@ impl DiscCraftApp {
         let settings = self.session.project.settings.clone();
         if form.kind != settings.kind {
             self.set_disc_kind(form.kind);
+        }
+        if form.kind == DiscKind::BluRay && form.bd_video != settings.bd_video {
+            let _ = self.run_command(
+                "disc.setBlurayVideo",
+                json!({ "video": form.bd_video.id() }),
+            );
         }
         if form.wide != settings.widescreen {
             let aspect = if form.wide { "16:9" } else { "4:3" };
