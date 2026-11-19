@@ -13,6 +13,7 @@ disccraft-build.workspace = true
 disccraft-dvd.workspace = true
 disccraft-project.workspace = true
 disccraft-vm.workspace = true
+disccraft-bdmv.workspace = true
 disccraft-transcode.workspace = true
 disccraft-photo.workspace = true
 disccraft-film.workspace = true

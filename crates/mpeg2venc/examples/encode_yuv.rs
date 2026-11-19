@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! ffmpeg -i clip.vob -t 30 -s 720x480 -pix_fmt yuv420p -f rawvideo clip.yuv
-//! cargo run --release -p disccraft-mpeg2venc --example encode_yuv -- clip.yuv clip.m2v [bitrate] [max_bitrate]
+//! cargo run --release -p disccraft-mpeg2venc --example encode_yuv -- clip.yuv clip.m2v [bitrate] [max_bitrate] [interlaced]
 //! ```
 //!
 //! The frames are 720×480 (NTSC); the bitrates are in bits per second (defaults: 6,000,000 and 9,000,000).
@@ -34,6 +34,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         format: disccraft_mpeg2venc::encoder::Format::Sd,
         pulldown: false,
     })?;
+    // An `interlaced` fifth argument codes the frames as interlaced, the top field first (M6.371).
+    if args.get(5).is_some_and(|flag| flag == "interlaced") {
+        encoder.set_interlaced(true);
+    }
 
     let mut buffer = vec![0u8; luma + 2 * chroma];
     let mut sizes = Vec::new();

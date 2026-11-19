@@ -424,3 +424,93 @@ fn film_is_shown_by_pulldown() {
         assert!(refused.is_err(), "{standard:?} {format:?}");
     }
 }
+
+/// Interlaced material: a checkered picture that moves 6 px sideways a field, its top field taken half a frame
+/// before its bottom one (combing on every vertical edge).
+fn interlaced(w: usize, h: usize, t: usize) -> Frame420 {
+    let picture = |field_time: usize| -> Vec<u8> {
+        let shift = 6 * field_time;
+        (0..w * h)
+            .map(|i| {
+                let (row, col) = (i / w, i % w);
+                if ((col + shift) / 12 + row / 12).is_multiple_of(2) {
+                    190
+                } else {
+                    70
+                }
+            })
+            .collect()
+    };
+    let (top, bottom) = (picture(2 * t), picture(2 * t + 1));
+    let mut y = top;
+    for row in (1..h).step_by(2) {
+        y[row * w..(row + 1) * w].copy_from_slice(&bottom[row * w..(row + 1) * w]);
+    }
+    let base = synthetic(w, h, t);
+    Frame420 { y, ..base }
+}
+
+/// Encodes `frames` of `interlaced` at 3 Mbit/s, as interlaced pictures or not; the decoded pictures, their mean
+/// luma PSNR and the last picture's distance from the encoder's reconstruction.
+fn interlaced_run(as_fields: bool, frames: usize) -> (f64, f64) {
+    let (w, h) = (720, 480);
+    let mut enc = Encoder::new(EncoderConfig {
+        standard: Standard::Ntsc,
+        gop_size: 15,
+        bitrate: 3_000_000,
+        max_bitrate: 6_000_000,
+        wide: false,
+        format: disccraft_mpeg2venc::encoder::Format::Sd,
+        pulldown: false,
+    })
+    .unwrap();
+    if as_fields {
+        enc.set_interlaced(true);
+    }
+    let sources: Vec<Frame420> = (0..frames).map(|t| interlaced(w, h, t)).collect();
+    let mut es = Vec::new();
+    for f in &sources {
+        es.extend_from_slice(&enc.encode_frame(f).unwrap());
+    }
+    let last_recon = enc.reconstruction().unwrap().y.clone();
+    es.extend_from_slice(&enc.finish());
+    let mut dec = Decoder::new();
+    let mut pics = Vec::new();
+    for (i, range) in craft_video::mpeg2::access_units(&es)
+        .into_iter()
+        .enumerate()
+    {
+        pics.extend(dec.decode(&es[range], i as i64).unwrap());
+    }
+    pics.extend(dec.flush());
+    assert_eq!(dec.errors(), 0, "decoder errors: {:?}", dec.last_error());
+    assert_eq!(pics.len(), frames);
+    let mean = pics
+        .iter()
+        .zip(&sources)
+        .map(|(p, s)| psnr(&p.y, &s.y))
+        .sum::<f64>()
+        / frames as f64;
+    let last = pics.last().unwrap();
+    let mad = last
+        .y
+        .iter()
+        .zip(&last_recon)
+        .map(|(&a, &b)| (i32::from(a) - i32::from(b)).abs())
+        .sum::<i32>() as f64
+        / last_recon.len() as f64;
+    (mean, mad)
+}
+
+/// M6.371: interlaced pictures (frame_pred_frame_dct 0, frame_motion_type and a dct_type a macroblock) decode
+/// without errors, as the encoder reconstructed them. (They do not code this material better than progressive
+/// frames yet: about 25 dB against 30 at 3 Mbit/s; the transcodes do not use them.)
+#[test]
+fn interlaced_pictures_decode_as_reconstructed() {
+    let (fields, drift) = interlaced_run(true, 30);
+    assert!(
+        drift < 0.25,
+        "decoder vs encoder reconstruction drift {drift}"
+    );
+    assert!(fields > 20.0, "{fields:.2} dB");
+}

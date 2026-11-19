@@ -24,6 +24,8 @@ pub enum TrimmedPassthrough {
     },
     /// Pictures left in their Matroska or MP4 file.
     Samples(H264Samples),
+    /// Pictures left in their transport stream (M6.367).
+    Transport(crate::TsH264),
 }
 
 /// The frame of the standard rate a 90 kHz time (from the first shown picture) rounds to.
@@ -154,6 +156,7 @@ impl Passthrough {
     pub fn units(&self) -> Result<Vec<AccessUnit>, DvdError> {
         match self {
             Self::Samples(samples) => Ok(samples.units().to_vec()),
+            Self::Transport(ts) => Ok(ts.units().to_vec()),
             Self::Stream { index, .. } | Self::Mpeg2 { index, .. } => {
                 disccraft_transcode::hd::read_h264_index(index)
                     .map_err(|error| DvdError::Unsupported(format!("{}: {error}", index.display())))
@@ -171,6 +174,13 @@ impl Passthrough {
                     std::fs::File::open(path).map_err(|error| crate::io_error(path, error))?;
                 samples
                     .read(&mut file, index)
+                    .map_err(|error| crate::io_error(path, error))
+            }
+            Self::Transport(ts) => {
+                let path = ts.path();
+                let mut file =
+                    std::fs::File::open(path).map_err(|error| crate::io_error(path, error))?;
+                ts.read(&mut file, index)
                     .map_err(|error| crate::io_error(path, error))
             }
             Self::Stream { es, .. } | Self::Mpeg2 { es, .. } => {
@@ -224,6 +234,7 @@ impl Passthrough {
         }
         Ok(Some(match self {
             Self::Samples(samples) => TrimmedPassthrough::Samples(samples.keep(&indices, kept)),
+            Self::Transport(ts) => TrimmedPassthrough::Transport(ts.keep(&indices, kept)),
             Self::Stream { es, .. } | Self::Mpeg2 { es, .. } => TrimmedPassthrough::Stream {
                 es: es.clone(),
                 units: kept,

@@ -52,6 +52,10 @@ pub struct BdDisc {
 pub struct BdPlaylist {
     /// How many marks (chapters) it has.
     pub marks: u32,
+    /// The languages (ISO 639-2) of its audio streams, in their order (stream 1 first).
+    pub audio_languages: Vec<[u8; 3]>,
+    /// The languages of its PG (subtitle) streams.
+    pub pg_languages: Vec<[u8; 3]>,
     /// The interactive graphics of its (first) clip: a menu, or a pop-up menu over a title.
     pub menu: Option<BdMenu>,
 }
@@ -108,6 +112,12 @@ pub struct BdState {
     pub subtitle: (bool, u16),
     /// PSR10 / PSR11: the button and page Set_ButtonPage asked the next menu for.
     pub button_page: (Option<u16>, Option<u16>),
+    /// Whether the audio and the PG stream have been chosen (by the disc's SetStream, or by the player's
+    /// language when a playlist first played, M6.369): until then a playlist's streams are chosen by the
+    /// player's languages.
+    pub chosen: (bool, bool),
+    /// The player's audio and subtitle languages (PSR16 / PSR17: ISO 639-2), when it has them.
+    pub languages: (Option<[u8; 3]>, Option<[u8; 3]>),
 }
 
 /// Load the navigation of a built disc: `dir` is the `BDMV` folder or the folder that holds it.
@@ -149,7 +159,26 @@ pub fn load_bdmv(dir: &Path) -> Result<BdDisc, VmError> {
             }
             _ => None,
         };
-        let _ = playlists.insert(number, BdPlaylist { marks, menu });
+        let languages = |streams: &[disccraft_bdmv::Stream]| -> Vec<[u8; 3]> {
+            streams
+                .iter()
+                .map(|stream| stream.coding.language().unwrap_or(*b"und"))
+                .collect()
+        };
+        let (audio_languages, pg_languages) = playlist
+            .items
+            .first()
+            .map(|item| (languages(&item.streams.audio), languages(&item.streams.pg)))
+            .unwrap_or_default();
+        let _ = playlists.insert(
+            number,
+            BdPlaylist {
+                marks,
+                audio_languages,
+                pg_languages,
+                menu,
+            },
+        );
     }
     Ok(BdDisc {
         first_playback: index.first_playback,
@@ -311,9 +340,25 @@ impl<'a> BdVm<'a> {
     ///
     /// Navigation that cannot run (see [`BdVm::press`]).
     pub fn start(disc: &'a BdDisc) -> Result<Self, VmError> {
+        Self::start_with_languages(disc, (None, None))
+    }
+
+    /// [`BdVm::start`] on a player with audio and subtitle languages of its own (ISO 639-2, PSR16 / PSR17,
+    /// M6.369): a playlist plays the first stream in them while the disc has chosen none.
+    ///
+    /// # Errors
+    ///
+    /// As [`BdVm::start`].
+    pub fn start_with_languages(
+        disc: &'a BdDisc,
+        languages: (Option<[u8; 3]>, Option<[u8; 3]>),
+    ) -> Result<Self, VmError> {
         let mut vm = Self {
             disc,
-            state: BdState::default(),
+            state: BdState {
+                languages,
+                ..BdState::default()
+            },
         };
         vm.run_object(disc.first_playback, 0)?;
         Ok(vm)
@@ -581,8 +626,10 @@ impl<'a> BdVm<'a> {
                 Command::SetStream(streams) => {
                     if streams & 0x8000_0000 != 0 {
                         self.state.audio = u16::try_from((streams >> 16) & 0x0FFF).unwrap_or(0);
+                        self.state.chosen.0 = true;
                     }
                     if streams & 0x8000 != 0 {
+                        self.state.chosen.1 = true;
                         self.state.subtitle = (
                             streams & 0x4000 != 0,
                             u16::try_from(streams & 0x0FFF).unwrap_or(0),
@@ -623,6 +670,28 @@ impl<'a> BdVm<'a> {
             .get(&playlist)
             .ok_or_else(|| VmError::Invalid(format!("playlist {playlist} does not exist")))?;
         self.state.location = BdLocation::Playing { playlist, mark };
+        // A player with a language of its own picks the first stream in it, while the disc has not chosen
+        // (M6.369; as the stream selection of a player whose PSR1 / PSR2 is not set yet).
+        let (audio_language, pg_language) = self.state.languages;
+        let first_in = |languages: &[[u8; 3]], wanted: Option<[u8; 3]>| {
+            let wanted = wanted?;
+            languages
+                .iter()
+                .position(|language| *language == wanted)
+                .and_then(|index| u16::try_from(index + 1).ok())
+        };
+        if !self.state.chosen.0
+            && let Some(stream) = first_in(&found.audio_languages, audio_language)
+        {
+            self.state.audio = stream;
+            self.state.chosen.0 = true;
+        }
+        if !self.state.chosen.1
+            && let Some(stream) = first_in(&found.pg_languages, pg_language)
+        {
+            self.state.subtitle = (true, stream);
+            self.state.chosen.1 = true;
+        }
         let (button, page) = std::mem::take(&mut self.state.button_page);
         self.state.menu = found.menu.as_ref().and_then(|menu| {
             let index = page
@@ -743,6 +812,8 @@ mod tests {
             1,
             BdPlaylist {
                 marks: 2,
+                audio_languages: vec![*b"jpn", *b"eng"],
+                pg_languages: vec![*b"eng"],
                 menu: Some(popup),
             },
         );
@@ -750,6 +821,8 @@ mod tests {
             2,
             BdPlaylist {
                 marks: 1,
+                audio_languages: Vec::new(),
+                pg_languages: Vec::new(),
                 menu: Some(menu),
             },
         );
@@ -781,6 +854,28 @@ mod tests {
             ],
             playlists,
         }
+    }
+
+    /// M6.369: a player with languages of its own plays a playlist's first audio and subtitle streams in them
+    /// while the disc has chosen none; without, the streams stay as they are; what the disc chose stays.
+    #[test]
+    fn a_players_languages_choose_the_streams() -> Result<(), crate::VmError> {
+        let disc = disc();
+        let mut vm = BdVm::start_with_languages(&disc, (Some(*b"eng"), Some(*b"eng")))?;
+        vm.play(1, 0)?;
+        assert_eq!((vm.state().audio, vm.state().subtitle), (2, (true, 1)));
+        // Chosen once: a later playlist keeps them.
+        vm.play(2, 0)?;
+        vm.play(1, 0)?;
+        assert_eq!(vm.state().audio, 2);
+        let mut plain = BdVm::start(&disc)?;
+        plain.play(1, 0)?;
+        assert_eq!((plain.state().audio, plain.state().subtitle.0), (0, false));
+        // A language the playlist does not have leaves the streams alone.
+        let mut french = BdVm::start_with_languages(&disc, (Some(*b"fra"), None))?;
+        french.play(1, 0)?;
+        assert_eq!(french.state().audio, 0);
+        Ok(())
     }
 
     #[test]

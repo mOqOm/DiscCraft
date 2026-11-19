@@ -319,7 +319,9 @@
 	Video: MPEG-2, {width} x {height}, {rate} fps, progressive	ビデオ: MPEG-2、{width} x {height}、{rate} fps、プログレッシブ
 	Audio: LPCM 48 kHz stereo (AC-3 sources are kept)	オーディオ: LPCM 48 kHz ステレオ (AC-3 の素材はそのまま)
 	Bitrate: automatic, to fit the disc (video up to 9.8 Mbps)	ビットレート: ディスク容量に合わせて自動 (ビデオは最大 9.8 Mbps)
-	Blu-ray currently uses the same standard-definition video.	Blu-ray も今は同じ SD のビデオを使います。
+	Standard definition: HD sources are converted down to SD.	SD（標準画質）: HD の素材は SD に縮めて変換します。
+	Video: {codec}, {width} x {height}, {rate} fps (files that fit go on as they are)	ビデオ: {codec}、{width} x {height}、{rate} fps（合うファイルはそのまま）
+	Bitrate: {target} Mbps on average, up to {peak} (lower if the disc is too small)	ビットレート: 平均 {target} Mbps、最大 {peak} Mbps（入りきらないときは下げる）
 	Format:	形式:
 	{kind} Folder	{kind} フォルダー
 	{kind} Image	{kind} イメージ
@@ -1456,3 +1458,9 @@
 	Toggle text style display	テキストスタイル表示の切り替え
 	Toggle shape style display	シェイプスタイル表示の切り替え
 	Select an image or a shape in the Menu Viewer to apply this style	このスタイルを適用する画像かシェイプをメニュービューアで選んでください
+	If Not Allowed:	制限で再生しないとき:
+	What plays in the title's place on a player below its parental level (not set: it stops)	プレーヤーの視聴制限レベルが足りないとき、このタイトルの代わりに再生するもの（未設定: 停止）
+	Set a parental level first	先に視聴制限レベルを設定してください
+	Disc's ({level})	ディスクのレベル（{level}）
+	Disc's (none)	ディスクのレベル（なし）
+	A player set to a lower level asks for its password before the title plays	それより低いレベルのプレーヤーは、タイトルを再生する前にパスワードを求める

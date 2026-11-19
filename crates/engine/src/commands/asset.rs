@@ -1853,19 +1853,22 @@ mod tests {
                         .any(|problem| problem.get("code") == Some(&json!("undecodableVideo")))
                 }))
         };
-        // Wait until the file is open (its length is known at once from its header).
+        // Asked until the file is open (its length is known at once from its header; the thumbnail's question
+        // opens it). The check is asked each time, not once after the wait: the tests that run beside this one
+        // open files too and can push it out of the few kept open (M6.358), and then the check cannot tell.
         let start = std::time::Instant::now();
         loop {
-            let pending = session.execute("asset.pending", &json!({}))?;
+            let _ = session.execute("asset.pending", &json!({}))?;
             let _ = session.execute("asset.thumbnail", &json!({"asset": id, "wait": false}));
-            if pending == json!({"pending": [], "opening": []}) && start.elapsed().as_millis() > 200
-            {
+            if undecodable(&mut session)? {
                 break;
             }
-            assert!(start.elapsed() < std::time::Duration::from_secs(60));
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(60),
+                "a DVD would have to convert it"
+            );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        assert!(undecodable(&mut session)?, "a DVD would have to convert it");
         // A 1080i Blu-ray carries it as it is.
         session.execute("disc.setKind", &json!({"kind": "bluRay"}))?;
         session.execute("disc.setBlurayVideo", &json!({"video": "1080i59.94"}))?;
@@ -1875,7 +1878,8 @@ mod tests {
     }
 
     /// M12.13: asked without waiting, a video that is not open yet is opened on its own thread and answered
-    /// "pending"; once `asset.pending` lists nothing, the same question is answered at once.
+    /// "pending"; once `asset.pending` lists nothing (neither pending nor opening), the same question is answered
+    /// at once.
     #[test]
     fn a_video_is_opened_ahead_and_asked_without_waiting() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -1910,30 +1914,34 @@ mod tests {
             "{waiting}"
         );
 
+        // Once neither list names it ("opening": its facts are known, its pictures not yet), all three are
+        // answered without a wait. They are asked again when one is still pending: the tests that run beside this
+        // one open files too and can push it out of the few kept open (M6.358), and then the lists name it again.
         let start = std::time::Instant::now();
-        loop {
-            let pending = session.execute("asset.pending", &json!({}))?;
-            if pending
-                .get("pending")
-                .and_then(Value::as_array)
-                .is_some_and(Vec::is_empty)
-            {
-                break;
+        let (probe, thumbnail, shown) = loop {
+            let lists = session.execute("asset.pending", &json!({}))?;
+            if lists == json!({"pending": [], "opening": []}) {
+                let probe = session.execute("asset.probe", &json!({"asset": id, "wait": false}))?;
+                let thumbnail =
+                    session.execute("asset.thumbnail", &json!({"asset": id, "wait": false}))?;
+                let shown = session.execute("asset.frame", &frame)?;
+                if [&probe, &thumbnail, &shown]
+                    .iter()
+                    .all(|answer| answer.get("pending").is_none())
+                {
+                    break (probe, thumbnail, shown);
+                }
             }
             assert!(start.elapsed() < std::time::Duration::from_secs(60));
             std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        let probe = session.execute("asset.probe", &json!({"asset": id, "wait": false}))?;
+        };
         assert_eq!(
             probe.get("width").and_then(Value::as_u64),
             Some(720),
             "{probe}"
         );
-        assert!(probe.get("pending").is_none());
-        let thumbnail = session.execute("asset.thumbnail", &json!({"asset": id, "wait": false}))?;
-        assert!(thumbnail.get("rgb").is_some());
-        let shown = session.execute("asset.frame", &frame)?;
-        assert!(shown.get("rgb").is_some() && shown.get("pending").is_none());
+        assert!(thumbnail.get("rgb").is_some(), "{thumbnail}");
+        assert!(shown.get("rgb").is_some(), "{shown}");
 
         // A file that is not there is not waited for: the probe answers as before (no length).
         std::fs::remove_file(&video)?;

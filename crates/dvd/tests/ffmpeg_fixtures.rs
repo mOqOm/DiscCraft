@@ -351,6 +351,92 @@ fn a_vcd_mpeg1_stream_goes_on_as_it_is() -> Result<(), Box<dyn Error>> {
     result
 }
 
+/// M6.362: an MPEG-1 stream marked variable (bit rate field all ones) goes on a DVD as it is when its measured peak
+/// fits (1.856 Mbit/s); a faster one is converted.
+#[test]
+fn a_variable_mpeg1_stream_is_measured() -> Result<(), Box<dyn Error>> {
+    let ffmpeg = ffmpeg_path();
+    let ffprobe = ffprobe_path();
+    if !tool_available(&ffmpeg) || !tool_available(&ffprobe) {
+        println!("skipped: ffmpeg not found");
+        return Ok(());
+    }
+    let _guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
+    let fixtures = fixtures_dir();
+    fs::create_dir_all(&fixtures)?;
+    let make =
+        |path: &Path, source: &str, quality: &str, seconds: &str| -> Result<(), Box<dyn Error>> {
+            if path.is_file() {
+                return Ok(());
+            }
+            let made = Command::new(&ffmpeg)
+                .args([
+                    "-v", "error", "-y", "-f", "lavfi", "-i", source, "-f", "lavfi", "-i",
+                ])
+                .args(["sine=frequency=440:sample_rate=44100", "-t", seconds])
+                .args(["-c:v", "mpeg1video", "-q:v", quality, "-g", "15"])
+                .args(["-c:a", "mp2", "-b:a", "224k", "-f", "mpeg"])
+                .arg(path)
+                .status()?;
+            assert!(made.success(), "ffmpeg could not make the fixture");
+            Ok(())
+        };
+    let slow = fixtures.join("vbr_mpeg1.mpg");
+    let fast = fixtures.join("vbr_mpeg1_fast.mpg");
+    make(&slow, "testsrc=size=352x240:rate=30000/1001", "4", "3")?;
+    make(
+        &fast,
+        "nullsrc=size=352x240:rate=30000/1001,geq=random(1)*255:128:128",
+        "2",
+        "2",
+    )?;
+    // Both are marked variable.
+    for path in [&slow, &fast] {
+        let data = fs::read(path)?;
+        let at = data
+            .windows(4)
+            .position(|window| window == [0, 0, 1, 0xB3])
+            .ok_or("no sequence header")?;
+        let field = data.get(at + 8..at + 11).ok_or("short header")?;
+        let rate =
+            (u32::from(field[0]) << 10) | (u32::from(field[1]) << 2) | (u32::from(field[2]) >> 6);
+        assert_eq!(rate, 0x3FFFF);
+    }
+
+    let mut project = Project::default();
+    project.settings.kind = DiscKind::Dvd;
+    project.settings.standard = VideoStandard::Ntsc;
+    let slow_asset = project.add_asset(&slow)?;
+    let fast_asset = project.add_asset(&fast)?;
+    let slow_title = project.add_timeline(slow_asset, Some("Slow".to_string()))?;
+    let fast_title = project.add_timeline(fast_asset, Some("Fast".to_string()))?;
+    // The slow one goes on as it is, at its measured rate; the fast one is converted (no rate of its own).
+    let rates = disccraft_dvd::timeline_rates(&project);
+    let rate_of = |id: disccraft_project::TimelineId| {
+        rates
+            .iter()
+            .find(|rate| rate.timeline == id.0)
+            .map(|rate| rate.video)
+    };
+    let slow_rate = rate_of(slow_title).ok_or("the slow stream is not as it is")?;
+    assert!((100_000..=1_856_000).contains(&slow_rate), "{slow_rate}");
+    assert_eq!(rate_of(fast_title), None);
+
+    let _ = project.remove_timeline(fast_title);
+    let dir = temp_dir("vbr_mpeg1");
+    let _ = fs::remove_dir_all(&dir);
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        let _ = build_video_ts(&project, &dir)?;
+        let ifo = fs::read(dir.join("VIDEO_TS").join("VTS_01_0.IFO"))?;
+        assert_eq!(ifo.get(0x200..0x202), Some(&[0x03, 0x18][..]));
+        let vob = dir.join("VIDEO_TS").join("VTS_01_1.VOB");
+        expect_contains(&probe_codecs(&ffprobe, &vob)?, "mpeg1video")?;
+        Ok(())
+    })();
+    let _ = fs::remove_dir_all(&dir);
+    result
+}
+
 /// A gap between two video clips (Encore: a clip moved along the track) plays black: the title is as long as the
 /// clips and the gap, decodes without errors, and a picture from the gap is black.
 #[test]

@@ -72,6 +72,9 @@ pub struct ChapterPlaylist {
     /// Action at the end.
     #[serde(default)]
     pub end_action: Link,
+    /// The title's own parental level (M6.363): `None` the disc's, `Some(0)` none, `Some(1..=8)` that level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parental_level: Option<u8>,
     /// Optional override link (Encore's 上書き).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub override_link: Option<Link>,
@@ -116,6 +119,7 @@ impl Project {
         self.chapter_playlists.insert(
             id,
             ChapterPlaylist {
+                parental_level: None,
                 id,
                 name,
                 timeline,

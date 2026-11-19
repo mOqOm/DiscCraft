@@ -130,7 +130,7 @@ disccraft-cli build project.dcproj --iso disc.iso
 
 規格に合わない素材はビルドのときに変換し、出力先の `disccraft-cache` に残す（2 回目からは変換を飛ばす）。
 
-画面ごとの使い方は [ユーザーマニュアル](docs/user-guide.ja.md) にある。
+画面ごとの使い方は [ユーザーマニュアル](docs/user-guide.ja.md) にある。まだできないことは [残りの課題と予定](docs/open-issues.ja.md) にまとめた。
 
 ## AI エージェントから使う（MCP）
 

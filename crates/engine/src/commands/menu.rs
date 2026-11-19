@@ -797,8 +797,8 @@ fn replace_subpicture(
 /// button's own subpicture (a `(=1)` layer), over what the subpicture had; a button without one gets one, so it is
 /// highlighted by that shape instead of its text or frame. Where the layer reaches past the button, the subpicture
 /// reaches as far and the button widens to it (M6.329: Encore's button set takes the layer in), its text and
-/// thumbnail staying where they are; a turned button keeps the part over it. Refused when the layer does not reach
-/// the button.
+/// thumbnail staying where they are; a turned button widens in its own upright frame, turned with it (M6.360).
+/// Refused when the layer does not reach the button.
 fn run_paste_subpicture(session: &mut Session, params: &Value) -> CommandResult {
     let menu_id = MenuId(req_u64(params, "menu")?);
     let index = req_usize(params, "button")?;
@@ -825,16 +825,29 @@ fn run_paste_subpicture(session: &mut Session, params: &Value) -> CommandResult 
         disccraft_project::rotated_bounds(graphic.rect, graphic.orientation.angle),
         frame,
     );
-    let reaches_button = layer.is_some_and(|layer| overlaps(layer, content));
-    if !reaches_button {
-        return Err("the layer does not reach the button".to_string());
-    }
-    let area = match layer {
-        Some(layer) if !turned => union(current, layer),
-        _ => current,
+    let pivot = button.content_centre();
+    let angle = button.orientation.angle;
+    // A turned button's content is drawn turned about the content box's centre: the layer is met where it lies
+    // on screen.
+    let on_screen = disccraft_project::rotated_bounds_about(content, pivot, angle);
+    let layer = layer
+        .filter(|layer| overlaps(*layer, on_screen))
+        .ok_or_else(|| "the layer does not reach the button".to_string())?;
+    let (area, covered) = if turned {
+        turned_coverage(
+            &session.project,
+            &graphic,
+            layer,
+            current,
+            (pivot, angle),
+            frame,
+        )?
+    } else {
+        let area = union(current, layer);
+        let covered = disccraft_menu::graphic_coverage(&session.project, &graphic, area, frame)
+            .ok_or_else(|| "the button has no size".to_string())?;
+        (area, covered)
     };
-    let covered = disccraft_menu::graphic_coverage(&session.project, &graphic, area, frame)
-        .ok_or_else(|| "the button has no size".to_string())?;
     let (width, height) = (usize::from(area.w), usize::from(area.h));
     // What the subpicture had, stretched over where it lay, now inside the wider area.
     let old = button.subpicture.as_ref().and_then(|old| {
@@ -889,6 +902,85 @@ fn run_paste_subpicture(session: &mut Session, params: &Value) -> CommandResult 
     // The button's rectangle takes the subpicture in (its content box stays).
     refit_button(menu, index, frame)?;
     Ok(empty_object())
+}
+
+/// [`run_paste_subpicture`] for a button turned by a free angle about `pivot` (M6.360): its subpicture lies in the
+/// button's own, upright frame and is drawn turned. The layer (`layer`: where it lies on screen) is turned back into
+/// that frame; the subpicture's area (`current`, upright) widens to hold it, and each of its pixels takes the
+/// layer's coverage at the screen pixel it is drawn on. The area does not reach left of or above the frame's origin.
+fn turned_coverage(
+    project: &disccraft_project::Project,
+    graphic: &disccraft_project::MenuGraphic,
+    layer: disccraft_project::Rect,
+    current: disccraft_project::Rect,
+    ((cx, cy), angle): ((f32, f32), i16),
+    frame: (u16, u16),
+) -> Result<(disccraft_project::Rect, Vec<bool>), String> {
+    let on_screen = disccraft_menu::graphic_coverage(project, graphic, layer, frame)
+        .ok_or_else(|| "the layer has no size".to_string())?;
+    let (sin, cos) = (f32::from(angle) / 10.0).to_radians().sin_cos();
+    // Upright → screen, and screen → upright (as the highlight draws a turned subpicture).
+    let to_screen = |x: f32, y: f32| {
+        let (px, py) = (x - cx, y - cy);
+        (px * cos - py * sin + cx, px * sin + py * cos + cy)
+    };
+    let to_upright = |x: f32, y: f32| {
+        let (px, py) = (x - cx, y - cy);
+        (px * cos + py * sin + cx, -px * sin + py * cos + cy)
+    };
+    let (x0, y0) = (f32::from(layer.x), f32::from(layer.y));
+    let (x1, y1) = (x0 + f32::from(layer.w), y0 + f32::from(layer.h));
+    let corners = [
+        to_upright(x0, y0),
+        to_upright(x1, y0),
+        to_upright(x0, y1),
+        to_upright(x1, y1),
+    ];
+    let bound = |pick: fn(&(f32, f32)) -> f32, lowest: bool| {
+        let values = corners.iter().map(pick);
+        if lowest {
+            values.fold(f32::INFINITY, f32::min).floor()
+        } else {
+            values.fold(f32::NEG_INFINITY, f32::max).ceil()
+        }
+    };
+    let side = |value: f32| -> u16 {
+        // Rounded and kept between 0 and the largest frame position; `as` saturates.
+        value.clamp(0.0, f32::from(u16::MAX)) as u16
+    };
+    let left = side(bound(|c| c.0, true)).min(current.x);
+    let top = side(bound(|c| c.1, true)).min(current.y);
+    let right = side(bound(|c| c.0, false)).max(current.x.saturating_add(current.w));
+    let bottom = side(bound(|c| c.1, false)).max(current.y.saturating_add(current.h));
+    let area = disccraft_project::Rect {
+        x: left,
+        y: top,
+        w: right.saturating_sub(left).max(1),
+        h: bottom.saturating_sub(top).max(1),
+    };
+    let (width, height) = (usize::from(area.w), usize::from(area.h));
+    let layer_w = usize::from(layer.w);
+    let mut covered = vec![false; width * height];
+    for row in 0..height {
+        for col in 0..width {
+            let (sx, sy) = to_screen(
+                f32::from(area.x) + col as f32 + 0.5,
+                f32::from(area.y) + row as f32 + 0.5,
+            );
+            let (dx, dy) = (sx.floor() - x0, sy.floor() - y0);
+            if dx < 0.0 || dy < 0.0 || dx >= f32::from(layer.w) || dy >= f32::from(layer.h) {
+                continue;
+            }
+            // Inside the layer's rectangle; `as` truncates the non-negative position.
+            let at = (dy as usize) * layer_w + dx as usize;
+            if on_screen.get(at).copied().unwrap_or(false)
+                && let Some(slot) = covered.get_mut(row * width + col)
+            {
+                *slot = true;
+            }
+        }
+    }
+    Ok((area, covered))
 }
 
 /// The part of `rect` inside a frame of `frame` pixels; `None` when none is.
@@ -2385,6 +2477,93 @@ mod tests {
                 )
                 .is_err()
         );
+        Ok(())
+    }
+
+    /// M6.360: on a button turned a quarter clockwise, a layer that reaches past it widens the subpicture in the
+    /// button's upright frame: drawn turned, the subpicture covers the layer where it lies on screen.
+    #[test]
+    fn a_layer_is_pasted_on_a_turned_button() -> Result<(), Box<dyn Error>> {
+        let mut session = Session::new();
+        let menu = session.project.add_menu(None)?;
+        let rect = disccraft_project::Rect {
+            x: 200,
+            y: 200,
+            w: 200,
+            h: 80,
+        };
+        let _ = session
+            .project
+            .add_button(menu, String::new(), Some(rect), Link::NotSet)?;
+        if let Some(button) = session
+            .project
+            .menu_mut(menu)
+            .and_then(|menu| menu.buttons.first_mut())
+        {
+            button.orientation.angle = 900;
+        }
+        // On screen the button covers x 260..340, y 140..340; the layer x 330..390, y 300..360 reaches past it.
+        session.execute(
+            "button.pasteSubpicture",
+            &serde_json::json!({ "menu": menu.0, "button": 0, "graphic": {
+                "rect": { "x": 330, "y": 300, "w": 60, "h": 60 },
+                "kind": { "shape": { "shape": "rectangle", "color": [0, 0, 255] } },
+            } }),
+        )?;
+        let button = session
+            .project
+            .menu(menu)
+            .and_then(|menu| menu.buttons.first())
+            .cloned()
+            .ok_or("button")?;
+        // Upright, the layer is x 360..420, y 150..210: the area holds it and the content box.
+        let area = button.subpicture_rect().ok_or("no subpicture")?;
+        assert_eq!(
+            area,
+            disccraft_project::Rect {
+                x: 200,
+                y: 150,
+                w: 220,
+                h: 130
+            }
+        );
+        assert_eq!(button.content_box(), rect);
+        let subpicture = button.subpicture.as_ref().ok_or("no subpicture")?;
+        let pixels = subpicture.values().ok_or("no values")?;
+        assert_eq!((subpicture.width, subpicture.height), (220, 130));
+        let at = |x: usize, y: usize| pixels.get((y - 150) * 220 + (x - 200)).copied();
+        assert_eq!(at(410, 160), Some(1));
+        assert_eq!(at(365, 205), Some(1));
+        assert_eq!(at(355, 205), Some(0));
+        assert_eq!(at(250, 250), Some(0));
+        let count = pixels.iter().filter(|value| **value == 1).count();
+        assert!((3500..=3700).contains(&count), "{count}");
+        // The button's rectangle takes in the turned area: x 260..390, y 140..360 on screen.
+        let near = |a: u16, b: u16| a.abs_diff(b) <= 1;
+        assert!(
+            near(button.rect.x, 260)
+                && near(button.rect.y, 140)
+                && near(button.rect.w, 130)
+                && near(button.rect.h, 220),
+            "{:?}",
+            button.rect
+        );
+        // The highlight shows the layer where it lies on screen.
+        let highlight = disccraft_menu::render_menu(
+            &session.project,
+            session.project.menu(menu).ok_or("menu")?,
+        )?
+        .highlight;
+        let shown = |x: u16, y: u16| {
+            let (dx, dy) = (x - highlight.x, y - highlight.y);
+            highlight
+                .pixels
+                .get(usize::from(dy) * usize::from(highlight.width) + usize::from(dx))
+                .copied()
+        };
+        assert_ne!(shown(385, 355), Some(0));
+        assert_ne!(shown(335, 305), Some(0));
+        assert_eq!(shown(300, 240), Some(0));
         Ok(())
     }
 

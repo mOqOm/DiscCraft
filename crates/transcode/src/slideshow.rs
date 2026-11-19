@@ -172,7 +172,9 @@ impl Transition {
 const MAX_TRANSITION_SECONDS: f64 = 10.0;
 
 const OUTPUT_WIDTH: u32 = 720;
+#[cfg(test)]
 const FIXED_POINT_SHIFT: u32 = 16;
+#[cfg(test)]
 const FIXED_POINT_ONE: u64 = 1 << FIXED_POINT_SHIFT;
 
 #[derive(Clone, Copy)]
@@ -702,7 +704,7 @@ fn write_slideshow_audio(
     }
     let sources = audio
         .iter()
-        .map(|path| Source::open_audio(path))
+        .map(|path| Source::open_audio_or_extracted(path))
         .collect::<Result<Vec<_>, _>>()?;
     let _ = crate::audio::write_audio_sequence(&sources, sample_frames, loop_audio, audio_out)?;
     Ok(())
@@ -942,8 +944,26 @@ fn clamp_u128(value: u128, max: u32) -> u32 {
     }
 }
 
-/// Draws the picture into a black frame of `output` at `placement`, cut to the frame.
+/// Draws the picture into a black frame of `output` at `placement`, cut to the frame: the HD transcode's scaler
+/// (the columns' and rows' positions worked out once, the rows shared between the cores; M6.365).
 fn render_rgb(
+    rgba: &[u8],
+    source_width: u32,
+    source_height: u32,
+    placement: Placement,
+    output: (u32, u32),
+) -> Option<Vec<u8>> {
+    crate::hd::render_rgb_placed(
+        rgba,
+        (source_width, source_height),
+        (placement.x, placement.y, placement.width, placement.height),
+        output,
+    )
+}
+
+/// [`render_rgb`] a pixel at a time, as it was before M6.365: what its result is checked against.
+#[cfg(test)]
+fn render_rgb_one_by_one(
     rgba: &[u8],
     source_width: u32,
     source_height: u32,
@@ -988,6 +1008,7 @@ fn render_rgb(
     Some(rgb)
 }
 
+#[cfg(test)]
 fn source_coordinate(output_pos: u32, origin: u32, content_size: u32, source_size: u32) -> u64 {
     if content_size <= 1 || source_size <= 1 {
         return 0;
@@ -1008,6 +1029,7 @@ fn source_coordinate(output_pos: u32, origin: u32, content_size: u32, source_siz
     scaled / u64::from(denom)
 }
 
+#[cfg(test)]
 fn sample_bilinear(
     rgba: &[u8],
     source_width: u32,
@@ -1049,6 +1071,7 @@ fn sample_bilinear(
     Some(interpolate_rgb(c00, c01, c10, c11, fx, fy))
 }
 
+#[cfg(test)]
 fn pixel_at(rgba: &[u8], width: usize, x: usize, y: usize) -> Option<[u8; 4]> {
     let index = y.checked_mul(width)?.checked_add(x)?.checked_mul(4)?;
     let end = index.checked_add(4)?;
@@ -1062,6 +1085,7 @@ fn pixel_at(rgba: &[u8], width: usize, x: usize, y: usize) -> Option<[u8; 4]> {
     Some(pixel)
 }
 
+#[cfg(test)]
 fn composite_pixel(pixel: [u8; 4]) -> [u8; 3] {
     let [r, g, b, a] = pixel;
     [
@@ -1071,11 +1095,13 @@ fn composite_pixel(pixel: [u8; 4]) -> [u8; 3] {
     ]
 }
 
+#[cfg(test)]
 fn composite_channel(color: u8, alpha: u8) -> u8 {
     let value = (u32::from(color) * u32::from(alpha) + 127) / 255;
     u8::try_from(value).unwrap_or(255)
 }
 
+#[cfg(test)]
 fn interpolate_rgb(
     c00: [u8; 3],
     c01: [u8; 3],
@@ -1096,6 +1122,7 @@ fn interpolate_rgb(
     ]
 }
 
+#[cfg(test)]
 fn interpolate_channel(c00: u8, c01: u8, c10: u8, c11: u8, fx: u32, fy: u32) -> u8 {
     let top =
         (u32::from(c00) * (FIXED_POINT_ONE as u32 - fx) + u32::from(c01) * fx) >> FIXED_POINT_SHIFT;
@@ -1106,6 +1133,7 @@ fn interpolate_channel(c00: u8, c01: u8, c10: u8, c11: u8, fx: u32, fy: u32) -> 
     u8::try_from(value).unwrap_or(255)
 }
 
+#[cfg(test)]
 fn write_rgb(rgb: &mut [u8], output_width: usize, y: u32, x: u32, pixel: [u8; 3]) -> Option<()> {
     let row = usize::try_from(y).ok()?.checked_mul(output_width)?;
     let col = usize::try_from(x).ok()?;
@@ -1194,6 +1222,50 @@ fn write_u16_le<W: Write>(path: &Path, writer: &mut W, value: u16) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::{FOUR_THREE, Placement, SIXTEEN_NINE, SlideFit, placement, slide_rgb};
+
+    /// M6.365: the slideshow's scaler gives, byte for byte, what the pixel-at-a-time one gave: inside the frame,
+    /// reaching past each edge (pan and zoom), enlarged and reduced, with see-through pixels, and wholly outside.
+    #[test]
+    fn the_slide_scaler_gives_the_pixel_at_a_time_bytes() {
+        let (sw, sh) = (37u32, 23u32);
+        let mut seed = 77u32;
+        let rgba: Vec<u8> = (0..sw * sh * 4)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                (seed >> 16) as u8
+            })
+            .collect();
+        let opaque: Vec<u8> = rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|[r, g, b, _]| [*r, *g, *b, 255])
+            .collect();
+        for picture in [&opaque, &rgba] {
+            for (x, y, width, height) in [
+                (10, 8, 700, 460),
+                (-40, -30, 800, 540),
+                (300, 200, 1000, 900),
+                (-500, 100, 600, 50),
+                (0, 0, 1, 1),
+                (720, 0, 20, 20),
+                (-10, -10, 5, 5),
+                (5, 3, 20, 11),
+            ] {
+                let placement = Placement {
+                    x,
+                    y,
+                    width,
+                    height,
+                };
+                assert_eq!(
+                    super::render_rgb(picture, sw, sh, placement, (720, 480)),
+                    super::render_rgb_one_by_one(picture, sw, sh, placement, (720, 480)),
+                    "{x} {y} {width} {height}"
+                );
+            }
+        }
+    }
 
     /// M6.294: a slide whose alpha channel is ignored keeps its colours, every pixel opaque.
     #[test]

@@ -177,6 +177,9 @@ pub struct Encoder {
     last: Option<PictureStats>,
     /// How hard motion is searched for (Encore's quality, [`MIN_QUALITY`] to [`BEST_QUALITY`]).
     quality: u8,
+    /// Interlaced pictures (M6.371): the field that comes first, `true` for the top one; `None` codes frames
+    /// as progressive.
+    interlaced: Option<bool>,
 }
 
 /// The best quality (Encore's presets' 5, its "High quality"): the whole search range, to half a pixel.
@@ -467,6 +470,7 @@ impl Encoder {
             plan: None,
             last: None,
             quality: BEST_QUALITY,
+            interlaced: None,
         })
     }
 
@@ -476,6 +480,15 @@ impl Encoder {
     /// the pictures are a little worse at the same bit rate.
     pub fn set_quality(&mut self, quality: u8) {
         self.quality = quality.clamp(MIN_QUALITY, BEST_QUALITY);
+    }
+
+    /// Codes the pictures as interlaced (M6.371): frames whose two fields were taken at different times, the top
+    /// one first when `top_first`. Each macroblock is then transformed as a frame or as two fields, whichever its
+    /// levels are cheaper (dct_type), with frame prediction, and the pictures say they are not progressive. Not
+    /// with 3:2 pulldown (its pictures are progressive frames). The transcodes do not use it yet: it did not code
+    /// interlaced material better than progressive frames (see the backlog).
+    pub fn set_interlaced(&mut self, top_first: bool) {
+        self.interlaced = Some(top_first);
     }
 
     /// The motion search range and whether vectors are refined to half a pixel, at the encoder's quality.
@@ -711,12 +724,19 @@ impl Encoder {
         }
 
         write_picture_header(&mut writer, picture_type, temporal_reference);
+        let field = self.interlaced.filter(|_| !self.config.pulldown);
         let fields = if self.config.pulldown {
             pulldown_flags(self.frames_encoded)
         } else {
-            (true, false)
+            (field.unwrap_or(true), false)
         };
-        write_picture_coding_extension(&mut writer, picture_type, self.params.f_code, fields);
+        write_picture_coding_extension(
+            &mut writer,
+            picture_type,
+            self.params.f_code,
+            fields,
+            field.is_some(),
+        );
 
         let qs = u16::from(code).saturating_mul(2);
 
@@ -737,6 +757,7 @@ impl Encoder {
             f_code: self.params.f_code,
             search,
             half_pel,
+            field: field.is_some(),
         };
         encode_slices(frame, reference, &mut recon, (coding, workers), &mut data)?;
         Ok((data, recon))
@@ -800,6 +821,8 @@ struct Coding {
     search: i32,
     /// Whether vectors are refined to half a pixel.
     half_pel: bool,
+    /// Whether macroblocks choose frame or field DCT (an interlaced picture: frame_pred_frame_dct 0).
+    field: bool,
 }
 
 /// Encodes the picture's slices (one per macroblock row) into `out` and `recon`, the rows in bands on several
@@ -912,7 +935,14 @@ fn encode_row(
     match reference {
         None => {
             for col in 0..mb_cols {
-                encode_intra_macroblock(writer, frame, recon, col * 16, y, qs, &mut predictors);
+                encode_intra_macroblock(
+                    writer,
+                    frame,
+                    recon,
+                    (col * 16, y),
+                    (qs, coding.field),
+                    &mut predictors,
+                );
             }
         }
         Some(reference) => {
@@ -1094,6 +1124,7 @@ fn write_picture_coding_extension(
     picture_type: PictureType,
     f_code: u8,
     (top_field_first, repeat_first_field): (bool, bool),
+    interlaced: bool,
 ) {
     let (f00, f01) = match picture_type {
         PictureType::I => (15, 15),
@@ -1109,14 +1140,15 @@ fn write_picture_coding_extension(
     writer.write_bits(0, 2); // intra_dc_precision: 8 bits
     writer.write_bits(3, 2); // picture_structure: frame
     writer.write_bits(u32::from(top_field_first), 1);
-    writer.write_bits(1, 1); // frame_pred_frame_dct
+    // frame_pred_frame_dct: 0 lets each macroblock choose frame or field DCT (with frame prediction).
+    writer.write_bits(u32::from(!interlaced), 1);
     writer.write_bits(0, 1); // concealment_motion_vectors
     writer.write_bits(0, 1); // q_scale_type: linear
     writer.write_bits(1, 1); // intra_vlc_format: table one (B.15) for intra AC coefficients
     writer.write_bits(0, 1); // alternate_scan
     writer.write_bits(u32::from(repeat_first_field), 1);
     writer.write_bits(1, 1); // chroma_420_type
-    writer.write_bits(1, 1); // progressive_frame
+    writer.write_bits(u32::from(!interlaced), 1); // progressive_frame
     writer.write_bits(0, 1); // composite_display_flag
 }
 
@@ -1131,16 +1163,70 @@ fn encode_intra_macroblock(
     writer: &mut BitWriter,
     frame: &Frame420,
     recon: &mut Frame420,
-    x: usize,
-    y: usize,
-    qs: u16,
+    (x, y): (usize, usize),
+    (qs, field): (u16, bool),
     predictors: &mut Predictors,
 ) {
     writer.write_bits(1, 1);
     writer.write_bits(1, 1);
-    encode_intra_blocks(writer, frame, recon, x, y, qs, predictors);
+    let field_dct = field && intra_field_dct(frame, x, y, qs);
+    if field {
+        writer.write_bits(u32::from(field_dct), 1); // dct_type
+    }
+    encode_intra_blocks(writer, frame, recon, x, y, qs, field_dct, predictors);
 }
 
+/// Where the four luma blocks of the macroblock at `(x, y)` of a plane `w` wide are (the plane's width as read,
+/// x, y), and where they are in its 16 x 16 prediction (stride, x, y): the frame's quarters, or with field DCT
+/// (13818-2 6.1.3, figure 6-13) the top field's two halves then the bottom field's, read from the plane seen at
+/// twice its width, where a row is two of the frame's (M6.371).
+fn luma_layout(
+    field_dct: bool,
+    w: usize,
+    (x, y): (usize, usize),
+) -> [((usize, usize, usize), (usize, usize, usize)); 4] {
+    if field_dct {
+        let (wide, row) = (w * 2, y / 2);
+        [
+            ((wide, x, row), (32, 0, 0)),
+            ((wide, x + 8, row), (32, 8, 0)),
+            ((wide, x + w, row), (32, 16, 0)),
+            ((wide, x + w + 8, row), (32, 24, 0)),
+        ]
+    } else {
+        [
+            ((w, x, y), (16, 0, 0)),
+            ((w, x + 8, y), (16, 8, 0)),
+            ((w, x, y + 8), (16, 0, 8)),
+            ((w, x + 8, y + 8), (16, 8, 8)),
+        ]
+    }
+}
+
+/// What a macroblock's four quantised luma blocks would cost: a rough count of the bits of their coefficients
+/// (each coefficient that is not 0, and the size of its level).
+fn levels_cost(blocks: &[[i16; 64]; 4]) -> u32 {
+    blocks
+        .iter()
+        .flatten()
+        .filter(|level| **level != 0)
+        .map(|level| 4 + (16 - level.unsigned_abs().leading_zeros()))
+        .sum()
+}
+
+/// Whether the intra macroblock at `(x, y)` costs less transformed as two fields than as a frame (M6.371): both
+/// are quantised at `qs` and the cheaper kept.
+fn intra_field_dct(frame: &Frame420, x: usize, y: usize, qs: u16) -> bool {
+    let w = usize::from(frame.width);
+    let levels = |field: bool| {
+        luma_layout(field, w, (x, y)).map(|((pw, bx, by), _)| {
+            quant::quantise_intra(&dct::forward_dct8x8(&block8x8(&frame.y, pw, bx, by)), qs)
+        })
+    };
+    levels_cost(&levels(true)) < levels_cost(&levels(false))
+}
+
+#[allow(clippy::too_many_arguments)] // TODO: group into a context struct (tech debt)
 fn encode_intra_blocks(
     writer: &mut BitWriter,
     frame: &Frame420,
@@ -1148,67 +1234,28 @@ fn encode_intra_blocks(
     x: usize,
     y: usize,
     qs: u16,
+    field_dct: bool,
     predictors: &mut Predictors,
 ) {
     let w = usize::from(frame.width);
     let cw = w / 2;
 
-    encode_intra_block(
-        writer,
-        &frame.y,
-        w,
-        x,
-        y,
-        qs,
-        true,
-        &mut predictors.y,
-        &mut recon.y,
-        w,
-        x,
-        y,
-    );
-    encode_intra_block(
-        writer,
-        &frame.y,
-        w,
-        x + 8,
-        y,
-        qs,
-        true,
-        &mut predictors.y,
-        &mut recon.y,
-        w,
-        x + 8,
-        y,
-    );
-    encode_intra_block(
-        writer,
-        &frame.y,
-        w,
-        x,
-        y + 8,
-        qs,
-        true,
-        &mut predictors.y,
-        &mut recon.y,
-        w,
-        x,
-        y + 8,
-    );
-    encode_intra_block(
-        writer,
-        &frame.y,
-        w,
-        x + 8,
-        y + 8,
-        qs,
-        true,
-        &mut predictors.y,
-        &mut recon.y,
-        w,
-        x + 8,
-        y + 8,
-    );
+    for ((plane_width, bx, by), _) in luma_layout(field_dct, w, (x, y)) {
+        encode_intra_block(
+            writer,
+            &frame.y,
+            plane_width,
+            bx,
+            by,
+            qs,
+            true,
+            &mut predictors.y,
+            &mut recon.y,
+            plane_width,
+            bx,
+            by,
+        );
+    }
 
     encode_intra_block(
         writer,
@@ -1312,12 +1359,16 @@ fn encode_p_macroblock(
         vlc::write_macroblock_address_increment_after(writer, *skipped);
         *skipped = 0;
         vlc::write_p_macroblock_type(writer, vlc::PType::Intra);
+        let field_dct = coding.field && intra_field_dct(cur, x, y, qs);
+        if coding.field {
+            writer.write_bits(u32::from(field_dct), 1); // dct_type
+        }
 
         if !*prev_intra {
             *predictors = Predictors::new();
         }
 
-        encode_intra_blocks(writer, cur, recon, x, y, qs, predictors);
+        encode_intra_blocks(writer, cur, recon, x, y, qs, field_dct, predictors);
 
         *prev_intra = true;
         *pmv_x = 0;
@@ -1330,10 +1381,25 @@ fn encode_p_macroblock(
     let w = usize::from(cur.width);
     let cw = w / 2;
 
-    let levels0 = quantise_residual_block(&cur.y, w, x, y, &pred_y, 16, 0, 0, qs);
-    let levels1 = quantise_residual_block(&cur.y, w, x + 8, y, &pred_y, 16, 8, 0, qs);
-    let levels2 = quantise_residual_block(&cur.y, w, x, y + 8, &pred_y, 16, 0, 8, qs);
-    let levels3 = quantise_residual_block(&cur.y, w, x + 8, y + 8, &pred_y, 16, 8, 8, qs);
+    // An interlaced picture's macroblock transforms its residual as two fields when they are closer (M6.371).
+    let quantised = |field: bool| {
+        luma_layout(field, w, (x, y)).map(|((pw, bx, by), (ps, px, py))| {
+            quantise_residual_block(&cur.y, pw, bx, by, &pred_y, ps, px, py, qs)
+        })
+    };
+    let frame_levels = quantised(false);
+    let (field_dct, luma_levels) = if coding.field {
+        let field_levels = quantised(true);
+        if levels_cost(&field_levels) < levels_cost(&frame_levels) {
+            (true, field_levels)
+        } else {
+            (false, frame_levels)
+        }
+    } else {
+        (false, frame_levels)
+    };
+    let layout = luma_layout(field_dct, w, (x, y));
+    let [levels0, levels1, levels2, levels3] = luma_levels;
     let levels4 = quantise_residual_block(&cur.cb, cw, x / 2, y / 2, &pred_cb, 8, 0, 0, qs);
     let levels5 = quantise_residual_block(&cur.cr, cw, x / 2, y / 2, &pred_cr, 8, 0, 0, qs);
 
@@ -1372,6 +1438,13 @@ fn encode_p_macroblock(
         } else {
             vlc::write_p_macroblock_type(writer, vlc::PType::McNotCoded);
         }
+        if coding.field {
+            // frame_motion_type: frame-based prediction (13818-2 table 6-17); then dct_type when coded.
+            writer.write_bits(2, 2);
+            if cbp != 0 {
+                writer.write_bits(u32::from(field_dct), 1);
+            }
+        }
 
         let delta_x = vlc::wrap_motion_delta(mv_x - *pmv_x, f_code);
         let delta_y = vlc::wrap_motion_delta(mv_y - *pmv_y, f_code);
@@ -1388,65 +1461,27 @@ fn encode_p_macroblock(
     *pmv_x = mv_x;
     *pmv_y = mv_y;
 
-    if cbp & 1 != 0 {
-        write_non_intra_block(writer, &levels0);
-        reconstruct_inter_block(&mut recon.y, w, x, y, &pred_y, 16, 0, 0, Some(&levels0), qs);
-    } else {
-        reconstruct_inter_block(&mut recon.y, w, x, y, &pred_y, 16, 0, 0, None, qs);
-    }
-
-    if cbp & 2 != 0 {
-        write_non_intra_block(writer, &levels1);
+    for (index, (((pw, bx, by), (ps, px, py)), levels)) in layout
+        .iter()
+        .zip([&levels0, &levels1, &levels2, &levels3])
+        .enumerate()
+    {
+        let coded = cbp & (1 << index) != 0;
+        if coded {
+            write_non_intra_block(writer, levels);
+        }
         reconstruct_inter_block(
             &mut recon.y,
-            w,
-            x + 8,
-            y,
+            *pw,
+            *bx,
+            *by,
             &pred_y,
-            16,
-            8,
-            0,
-            Some(&levels1),
+            *ps,
+            *px,
+            *py,
+            coded.then_some(levels),
             qs,
         );
-    } else {
-        reconstruct_inter_block(&mut recon.y, w, x + 8, y, &pred_y, 16, 8, 0, None, qs);
-    }
-
-    if cbp & 4 != 0 {
-        write_non_intra_block(writer, &levels2);
-        reconstruct_inter_block(
-            &mut recon.y,
-            w,
-            x,
-            y + 8,
-            &pred_y,
-            16,
-            0,
-            8,
-            Some(&levels2),
-            qs,
-        );
-    } else {
-        reconstruct_inter_block(&mut recon.y, w, x, y + 8, &pred_y, 16, 0, 8, None, qs);
-    }
-
-    if cbp & 8 != 0 {
-        write_non_intra_block(writer, &levels3);
-        reconstruct_inter_block(
-            &mut recon.y,
-            w,
-            x + 8,
-            y + 8,
-            &pred_y,
-            16,
-            8,
-            8,
-            Some(&levels3),
-            qs,
-        );
-    } else {
-        reconstruct_inter_block(&mut recon.y, w, x + 8, y + 8, &pred_y, 16, 8, 8, None, qs);
     }
 
     if cbp & 16 != 0 {
@@ -1786,6 +1821,7 @@ mod tests {
                 f_code: 2,
                 search: 15,
                 half_pel: true,
+                field: false,
             };
             encode_slices(frame, reference, &mut recon, (coding, workers), &mut out)
                 .map(|()| (out, recon))

@@ -21,6 +21,8 @@ use std::time::Instant;
 
 use disccraft_bd::{BdBuildReport, build_bdmv_with};
 pub use disccraft_dvd::TranscodeStatus;
+/// The usual target and peak bitrate (kbit/s) of HD video, MPEG-2 or H.264 (the New Project dialog says them).
+pub use disccraft_dvd::hd_default_kbps;
 /// Whether a video asset fits the project's disc as it is (a DVD preset of its own transcodes it all the same).
 pub use disccraft_dvd::video_fits_as_is;
 /// Whether a video asset would fit a Blu-ray title in a format as it is (for a format being chosen).

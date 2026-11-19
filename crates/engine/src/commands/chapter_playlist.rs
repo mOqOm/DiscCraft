@@ -50,6 +50,16 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "chapterplaylist.setParentalLevel",
+        label: "視聴制限レベルを設定",
+        menu: &["チャプター再生リスト"],
+        shortcut: None,
+        params: r#"{"chapterPlaylist": id, "level": null (ディスクのレベル) | 0 (なし) | 1-8}"#,
+        enabled: always_enabled,
+        run: run_set_parental_level,
+        journal: true,
+    },
+    CommandSpec {
         id: "chapterplaylist.setEndAction",
         label: "終了アクションを設定",
         menu: &["チャプター再生リスト"],
@@ -183,6 +193,17 @@ fn run_set_end_action(session: &mut Session, params: &Value) -> CommandResult {
         return Err(format!("chapter playlist {id} does not exist"));
     };
     playlist.end_action = target;
+    Ok(empty_object())
+}
+
+/// The chapter playlist's own parental level (M6.363).
+fn run_set_parental_level(session: &mut Session, params: &Value) -> CommandResult {
+    let id = req_u64(params, "chapterPlaylist")?;
+    let level = super::timeline::parental_level_param(params)?;
+    let Some(playlist) = session.project.chapter_playlist_mut(id) else {
+        return Err(format!("chapter playlist {id} does not exist"));
+    };
+    playlist.parental_level = level;
     Ok(empty_object())
 }
 

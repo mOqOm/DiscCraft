@@ -40,6 +40,7 @@ pub use pixel_aspect::{
 pub use session::{document_metadata, document_of, set_compositions};
 pub mod slideshow;
 mod source;
+mod ts_audio;
 pub mod ts_index;
 mod ts_probe;
 mod wav;
@@ -239,7 +240,7 @@ pub fn transcode_audio(
     wav_out: &Path,
     seconds: Option<f64>,
 ) -> Result<f64, TranscodeError> {
-    let source = source::Source::open_audio(input)?;
+    let source = source::Source::open_audio_or_extracted(input)?;
 
     let sample_frames = match seconds {
         Some(seconds) => audio::sample_frames_from_seconds(seconds).ok_or_else(|| {
@@ -507,7 +508,7 @@ impl AudioReader {
     /// When the file cannot be read or has no audio stream.
     pub fn open(input: &Path) -> Result<Self, TranscodeError> {
         Ok(Self {
-            source: source::Source::open_audio(input)?,
+            source: source::Source::open_audio_or_extracted(input)?,
         })
     }
 

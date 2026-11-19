@@ -382,23 +382,40 @@ pub fn compile(project: &Project) -> Result<CompiledNav, NavError> {
         first_play.push(cmd::set_gprm(GPRM_OVERRIDE, number));
     }
     first_play.extend(compile_first_play(&mut ctx, &project.settings.first_play)?);
-    check_pgc_limit(&ctx)?;
-    // The disc's parental level: asked at the first play, and again at each title (a title can be started from
-    // the remote without the first play).
-    let level = project.settings.parental_level;
+    // The parental levels (M13.15): the disc's is asked at the first play. Each title asks its own, or the disc's
+    // when it has none of its own (M6.363), at its start: a title can be started from the remote without the first
+    // play. A timeline names what plays in its place when the level is not raised (a parental block).
+    let disc_level = project.settings.parental_level;
+    let asked =
+        |own: Option<u8>| Some(own.unwrap_or(disc_level)).filter(|level| (1..=8).contains(level));
     let (mut titles, mut slideshows, mut chapter_playlists) =
         (titles, slideshows, chapter_playlists);
-    if (1..=8).contains(&level) {
-        first_play = parental_guard(level, first_play)?;
-        for pre in titles
-            .iter_mut()
-            .map(|title| &mut title.pre)
-            .chain(slideshows.iter_mut().map(|show| &mut show.pre))
-            .chain(chapter_playlists.iter_mut().map(|list| &mut list.pre))
-        {
-            *pre = parental_guard(level, std::mem::take(pre))?;
+    if let Some(level) = asked(None) {
+        first_play = parental_guard(level, first_play, Vec::new())?;
+    }
+    for (title, timeline) in titles.iter_mut().zip(project.timelines.values()) {
+        if let Some(level) = asked(timeline.parental_level) {
+            let refused = match &timeline.parental_alternative {
+                Link::NotSet => Vec::new(),
+                link => link_command(&mut ctx, link, true)?,
+            };
+            title.pre = parental_guard(level, std::mem::take(&mut title.pre), refused)?;
         }
     }
+    for (show, slideshow) in slideshows.iter_mut().zip(project.slideshows.values()) {
+        if let Some(level) = asked(slideshow.parental_level) {
+            show.pre = parental_guard(level, std::mem::take(&mut show.pre), Vec::new())?;
+        }
+    }
+    for (list, playlist) in chapter_playlists
+        .iter_mut()
+        .zip(project.chapter_playlists.values())
+    {
+        if let Some(level) = asked(playlist.parental_level) {
+            list.pre = parental_guard(level, std::mem::take(&mut list.pre), Vec::new())?;
+        }
+    }
+    check_pgc_limit(&ctx)?;
 
     Ok(CompiledNav {
         first_play,
@@ -415,32 +432,42 @@ pub fn compile(project: &Project) -> Result<CompiledNav, NavError> {
 
 /// The system parameter that holds the player's parental level (1 to 8; 15 when the player has none set).
 const SPRM_PARENTAL_LEVEL: u8 = 13;
-/// The lines of [`parental_guard`].
-const GUARD_LINES: u8 = 3;
-
 /// `commands` behind a check of the player's parental level: a player set to `level` or above (or to none) goes
-/// straight on; a lower one asks whether the level may be raised for this disc, and stops when it may not.
-fn parental_guard(level: u8, commands: Vec<Cmd>) -> Result<Vec<Cmd>, NavError> {
-    let first = GUARD_LINES + 1;
+/// straight on; a lower one asks whether the level may be raised for this disc, and when it may not runs `refused`
+/// (what plays in the title's place, M6.363), or stops.
+fn parental_guard(level: u8, commands: Vec<Cmd>, refused: Vec<Cmd>) -> Result<Vec<Cmd>, NavError> {
+    // Never on into the commands when refused: the player stops after whatever `refused` does.
+    let mut refused = refused;
+    refused.push(cmd::exit());
+    let lines = u8::try_from(refused.len().saturating_add(2))
+        .map_err(|_| NavError::Invalid("too many commands".to_string()))?;
+    let first = lines
+        .checked_add(1)
+        .ok_or_else(|| NavError::Invalid("too many commands".to_string()))?;
     let mut out = vec![
         // 1: allowed as the player is set.
         cmd::if_sprm_ge_goto(SPRM_PARENTAL_LEVEL, u16::from(level), first),
         // 2: ask; on to the commands when the level is raised.
         cmd::set_tmp_pml(level, first),
-        // 3: refused.
-        cmd::exit(),
     ];
-    for mut command in commands {
-        // A Goto (type 0, command 1, with or without a compare) names a line of this list: three further down now.
+    // A Goto (type 0, command 1, with or without a compare) names a line of its own list: further down now.
+    let moved = |mut command: Cmd, by: u8| -> Result<Cmd, NavError> {
         if command[0] == 0x00 && command[1] & 0x0F == 0x01 {
             command[7] = command[7]
-                .checked_add(GUARD_LINES)
+                .checked_add(by)
                 .ok_or_else(|| NavError::Invalid("too many commands".to_string()))?;
         }
-        out.push(command);
+        Ok(command)
+    };
+    // 3 on: refused.
+    for command in refused {
+        out.push(moved(command, 2)?);
+    }
+    for command in commands {
+        out.push(moved(command, lines)?);
     }
     // The Goto needs a line to go to.
-    if out.len() == usize::from(GUARD_LINES) {
+    if out.len() == usize::from(lines) {
         out.push(cmd::nop());
     }
     Ok(out)
@@ -2283,10 +2310,74 @@ mod tests {
         assert_eq!(title.pre, [guard, plain_title.pre.clone()].concat());
         assert_eq!(title.post, plain_title.post);
         // A Goto of the guarded commands still names the same command.
-        let moved = super::parental_guard(1, vec![cmd::if_eq_goto(2, 0, 2), cmd::exit()])?;
+        let moved =
+            super::parental_guard(1, vec![cmd::if_eq_goto(2, 0, 2), cmd::exit()], Vec::new())?;
         assert_eq!(moved.get(3), Some(&cmd::if_eq_goto(2, 0, 5)));
         // With nothing behind it, the guard goes to a NOP.
-        assert_eq!(super::parental_guard(1, Vec::new())?.get(3), Some(&[0; 8]));
+        assert_eq!(
+            super::parental_guard(1, Vec::new(), Vec::new())?.get(3),
+            Some(&[0; 8])
+        );
+        Ok(())
+    }
+
+    /// M6.363: a title asks its own parental level (the disc's when it has none; 0 asks none), and a timeline
+    /// names what plays in its place when the player's level is not raised.
+    #[test]
+    fn a_title_asks_its_own_parental_level() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::default();
+        let asset = project.add_asset(std::path::Path::new("movie.mp4"))?;
+        let first = project.add_timeline(asset, None)?;
+        let second = project.add_timeline(asset, None)?;
+        let plain = compile(&project)?;
+        let guard = |level: u8, refused: Vec<super::Cmd>| {
+            let lines = u8::try_from(refused.len() + 3).unwrap_or(0);
+            [
+                vec![
+                    [0x00, 0xC1, 0x00, 0x8D, 0x00, level, 0x00, lines + 1],
+                    [0x00, 0x03, 0x00, 0x00, 0x00, 0x00, level, lines + 1],
+                ],
+                refused,
+                vec![cmd::exit()],
+            ]
+            .concat()
+        };
+        // The first title asks 3 and plays the second in its place; the disc asks nothing.
+        if let Some(timeline) = project.timeline_mut(first) {
+            timeline.parental_level = Some(3);
+            timeline.parental_alternative = Link::Timeline {
+                id: second,
+                chapter: 0,
+            };
+        }
+        let nav = compile(&project)?;
+        assert_eq!(nav.first_play, plain.first_play);
+        let pre = |nav: &super::CompiledNav, index: usize| {
+            nav.titles
+                .get(index)
+                .map(|title| title.pre.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            pre(&nav, 0),
+            [guard(3, vec![cmd::jump_tt(2)]), pre(&plain, 0)].concat()
+        );
+        assert_eq!(pre(&nav, 1), pre(&plain, 1));
+        // The disc asks 6: the second title (none of its own) asks 6, the first still 3; 0 asks none.
+        project.settings.parental_level = 6;
+        let nav = compile(&project)?;
+        assert_eq!(
+            pre(&nav, 1),
+            [guard(6, Vec::new()), pre(&plain, 1)].concat()
+        );
+        assert_eq!(
+            pre(&nav, 0),
+            [guard(3, vec![cmd::jump_tt(2)]), pre(&plain, 0)].concat()
+        );
+        if let Some(timeline) = project.timeline_mut(second) {
+            timeline.parental_level = Some(0);
+        }
+        assert_eq!(pre(&compile(&project)?, 1), pre(&plain, 1));
         Ok(())
     }
 

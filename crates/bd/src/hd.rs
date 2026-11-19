@@ -141,8 +141,12 @@ impl disccraft_m2tsmux::UnitData for HdReader {
             .lock()
             .map_err(|_| std::io::Error::other("the HD stream reader was poisoned"))?;
         // Pictures left in their own file are read from it as access units.
-        if let HdSource::Samples(samples) = source {
-            return samples.read(&mut file, unit.saturating_sub(*first));
+        match source {
+            HdSource::Samples(samples) => {
+                return samples.read(&mut file, unit.saturating_sub(*first));
+            }
+            HdSource::Transport(ts) => return ts.read(&mut file, unit.saturating_sub(*first)),
+            HdSource::File(_) => {}
         }
         file.seek(SeekFrom::Start(offset.saturating_sub(*base)))?;
         let mut bytes = vec![0u8; len as usize];
@@ -162,6 +166,8 @@ pub(crate) enum HdSource {
     File(PathBuf),
     /// The pictures of a Matroska or MP4 file whose H.264 goes on the disc as it is, left in that file.
     Samples(std::sync::Arc<disccraft_dvd::H264Samples>),
+    /// The pictures of a transport stream whose H.264 goes on the disc as it is, left in that file (M6.367).
+    Transport(std::sync::Arc<disccraft_dvd::TsH264>),
 }
 
 impl HdSource {
@@ -169,6 +175,7 @@ impl HdSource {
         match self {
             Self::File(path) => path,
             Self::Samples(samples) => samples.path(),
+            Self::Transport(ts) => ts.path(),
         }
     }
 }
@@ -253,6 +260,107 @@ pub(crate) fn title_rates(
 /// The HD video of `title` when the disc's titles are HD: a timeline's video or a slideshow's pictures, encoded
 /// once at `rates` (target and peak, kilobits per second: [`title_rates`]) in its format ([`title_video`]) and kept
 /// in `cache_dir` (a timeline's by the video file, its size and time, the format and the rates).
+/// The most titles made side by side ([`hd_titles`]).
+const MOST_TITLES_AT_ONCE: usize = 4;
+
+/// The HD video of every title (see [`hd_title`]), several made side by side (M6.368): the MPEG-2 encoder of a
+/// 1080i title works on one core, so titles made one after another left most of the machine idle (H.264's
+/// encoder uses every core already). One title for every eight cores, up to [`MOST_TITLES_AT_ONCE`]; the progress
+/// of each comes back here. After a title fails, no further one is started, and the first failure (in the titles'
+/// order) is returned.
+pub(crate) fn hd_titles(
+    project: &Project,
+    titles: &[TitleStreams],
+    cache_dir: &Path,
+    budget: Option<&disccraft_dvd::HdBudget>,
+    progress: &mut dyn FnMut(&str, f32),
+) -> Result<Vec<Option<HdTitle>>, BdError> {
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .div_euclid(8)
+        .clamp(1, MOST_TITLES_AT_ONCE)
+        .min(titles.len());
+    if workers <= 1 {
+        return titles
+            .iter()
+            .map(|title| {
+                let rates = title_rates(project, title, budget);
+                hd_title(project, title, cache_dir, rates, progress)
+            })
+            .collect();
+    }
+    enum Message {
+        Progress(String, f32),
+        Done(usize, Result<Option<HdTitle>, BdError>),
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let failed = std::sync::atomic::AtomicBool::new(false);
+    let mut results: Vec<Option<Result<Option<HdTitle>, BdError>>> =
+        titles.iter().map(|_| None).collect();
+    let (sender, receiver) = std::sync::mpsc::channel::<Message>();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let sender = sender.clone();
+            let (next, failed) = (&next, &failed);
+            let _ = scope.spawn(move || {
+                while !failed.load(std::sync::atomic::Ordering::SeqCst) {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let Some(title) = titles.get(index) else {
+                        break;
+                    };
+                    let rates = title_rates(project, title, budget);
+                    let result =
+                        hd_title(project, title, cache_dir, rates, &mut |label, fraction| {
+                            let _ = sender.send(Message::Progress(label.to_owned(), fraction));
+                        });
+                    if result.is_err() {
+                        failed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    if sender.send(Message::Done(index, result)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(sender);
+        for message in receiver {
+            match message {
+                Message::Progress(label, fraction) => progress(&label, fraction),
+                Message::Done(index, result) => {
+                    if let Some(slot) = results.get_mut(index) {
+                        *slot = Some(result);
+                    }
+                }
+            }
+        }
+    });
+    let mut made = Vec::with_capacity(titles.len());
+    for result in results {
+        match result {
+            Some(result) => made.push(result?),
+            // Not started after another title failed (whose error comes first, in order).
+            None => return Err(invalid("a title was not made")),
+        }
+    }
+    Ok(made)
+}
+
+/// The lock of the cache file `path` while it is made (M6.368): titles made side by side may play the same clip,
+/// whose encode the second waits for and then finds made.
+fn making(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    type Locks = std::collections::HashMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>;
+    static MAKING: std::sync::Mutex<Option<Locks>> = std::sync::Mutex::new(None);
+    let mut locks = MAKING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::sync::Arc::clone(
+        locks
+            .get_or_insert_with(Locks::new)
+            .entry(path.to_path_buf())
+            .or_default(),
+    )
+}
+
 pub(crate) fn hd_title(
     project: &Project,
     title: &TitleStreams,
@@ -382,6 +490,12 @@ pub(crate) fn hd_title(
                         title_codec = HdCodec::H264;
                         continue;
                     }
+                    Some(disccraft_dvd::TrimmedPassthrough::Transport(ts)) => {
+                        let units = ts.units().to_vec();
+                        parts.push((HdSource::Transport(std::sync::Arc::new(ts)), units));
+                        title_codec = HdCodec::H264;
+                        continue;
+                    }
                     Some(disccraft_dvd::TrimmedPassthrough::Stream { es, units }) => {
                         parts.push((HdSource::File(es), units));
                         title_codec = HdCodec::H264;
@@ -401,6 +515,11 @@ pub(crate) fn hd_title(
             Some(disccraft_dvd::Passthrough::Samples(samples)) => {
                 let units = samples.units().to_vec();
                 parts.push((HdSource::Samples(std::sync::Arc::new(samples)), units));
+                continue;
+            }
+            Some(disccraft_dvd::Passthrough::Transport(ts)) => {
+                let units = ts.units().to_vec();
+                parts.push((HdSource::Transport(std::sync::Arc::new(ts)), units));
                 continue;
             }
             Some(
@@ -426,6 +545,10 @@ pub(crate) fn hd_title(
                 ..options.clone()
             }
         };
+        let lock = making(&es);
+        let _made_alone = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !(es.is_file() && index.is_file()) {
             std::fs::create_dir_all(cache_dir).map_err(|error| io_error(cache_dir, error))?;
             let es_part = es.with_extension("h264.part");

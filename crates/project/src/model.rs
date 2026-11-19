@@ -1261,9 +1261,21 @@ pub struct Timeline {
     /// takes its video's aspect; `None` follows the disc.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub widescreen: Option<bool>,
+    /// The title's own parental level (M6.363): `None` the disc's, `Some(0)` none, `Some(1..=8)` that level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parental_level: Option<u8>,
+    /// What plays in the title's place for a player below its parental level that is not raised (a parental
+    /// block, M6.363); not set: the player stops.
+    #[serde(default, skip_serializing_if = "Link::is_not_set")]
+    pub parental_alternative: Link,
 }
 
 impl Timeline {
+    /// The parental level the title asks (1 to 8), its own or the disc's `disc`; `None` when it asks none.
+    pub fn effective_parental_level(&self, disc: u8) -> Option<u8> {
+        Some(self.parental_level.unwrap_or(disc)).filter(|level| (1..=8).contains(level))
+    }
+
     /// How clip `clip` (0 = the first) is trimmed.
     pub fn video_trim(&self, clip: usize) -> ClipTrim {
         self.video_trims.get(clip).copied().unwrap_or_default()
@@ -1597,6 +1609,8 @@ impl Project {
         self.timelines.insert(
             id,
             Timeline {
+                parental_level: None,
+                parental_alternative: Link::NotSet,
                 id,
                 name,
                 video,

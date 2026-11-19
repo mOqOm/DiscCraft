@@ -164,6 +164,13 @@ pub fn clear_probe_cache() -> usize {
             .and_then(|name| name.to_str())
             .is_some_and(|name| {
                 name == "media-facts.tsv"
+                    // The sound taken out of a transport stream (M6.366): `ts-audio-<16 hex digits>.<ext>`.
+                    || name
+                        .strip_prefix("ts-audio-")
+                        .and_then(|rest| rest.split_once('.'))
+                        .is_some_and(|(key, _)| {
+                            key.len() == 16 && key.chars().all(|c| c.is_ascii_hexdigit())
+                        })
                     || name.strip_suffix(".bin").is_some_and(|stem| {
                         stem.rsplit_once('-').is_some_and(|(kind, key)| {
                             !kind.is_empty()

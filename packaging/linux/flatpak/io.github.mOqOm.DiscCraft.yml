@@ -3,7 +3,7 @@
 # runtime's.
 id: io.github.mOqOm.DiscCraft
 runtime: org.freedesktop.Platform
-runtime-version: "24.08"
+runtime-version: "25.08"
 sdk: org.freedesktop.Sdk
 command: disccraft
 finish-args:

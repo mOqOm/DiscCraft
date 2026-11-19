@@ -485,6 +485,36 @@ fn read_path(path: &Path) -> Result<Vec<u8>, DvdError> {
 /// The fastest MPEG-1 video a DVD carries, bit/s.
 pub(crate) const MPEG1_MAX_BITRATE: u64 = 1_856_000;
 
+/// The bit rate field of an MPEG-1 sequence header whose stream's rate varies: all ones (ISO/IEC 11172-2
+/// 2.4.3.2).
+pub(crate) const MPEG1_VARIABLE_RATE: u32 = 0x3_FFFF;
+
+/// The most bits a second of a stream of `standard` carries (M6.362): the largest of every run of a second's
+/// pictures (30 at 29.97 a second, 25 at 25), given each picture's bytes in decode order, at the standard's frame
+/// rate. What a stream marked variable is measured by.
+pub(crate) fn peak_bit_rate(sizes: impl IntoIterator<Item = u64>, standard: VideoStandard) -> u64 {
+    let per_second = match standard {
+        VideoStandard::Ntsc => 30,
+        VideoStandard::Pal => 25,
+    };
+    let mut window = std::collections::VecDeque::with_capacity(per_second);
+    let (mut sum, mut most) = (0u64, 0u64);
+    for size in sizes {
+        window.push_back(size);
+        sum = sum.saturating_add(size);
+        if window.len() > per_second {
+            sum = sum.saturating_sub(window.pop_front().unwrap_or(0));
+        }
+        most = most.max(sum);
+    }
+    let bits = most.saturating_mul(8);
+    match standard {
+        // 30 pictures take 30 × 1001 / 30000 s.
+        VideoStandard::Ntsc => bits.saturating_mul(1000) / 1001,
+        VideoStandard::Pal => bits,
+    }
+}
+
 fn validate_video(video: &VideoStream, standard: VideoStandard) -> Result<(), DvdError> {
     let sequence = &video.sequence;
     let (ifo_standard, want_rate) = match standard {
@@ -508,7 +538,18 @@ fn validate_video(video: &VideoStream, standard: VideoStandard) -> Result<(), Dv
     // MPEG-1 video (M6.350): 352x240 / 352x288 at the standard's rate, up to 1.856 Mbit/s; its aspect code is a
     // pixel aspect ratio, and the title is 4:3.
     if sequence.is_mpeg1() {
-        let bit_rate = u64::from(sequence.bit_rate_400).saturating_mul(400);
+        // A stream marked variable is measured (M6.362).
+        let bit_rate = if sequence.bit_rate_400 == MPEG1_VARIABLE_RATE {
+            peak_bit_rate(
+                video
+                    .pictures
+                    .iter()
+                    .map(|picture| u64::try_from(picture.len).unwrap_or(u64::MAX)),
+                standard,
+            )
+        } else {
+            u64::from(sequence.bit_rate_400).saturating_mul(400)
+        };
         if resolution != disccraft_ifo::Resolution::Quarter
             || sequence.frame_rate_code != want_rate
             || bit_rate > MPEG1_MAX_BITRATE
