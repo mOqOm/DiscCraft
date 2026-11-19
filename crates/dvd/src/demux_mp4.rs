@@ -11,7 +11,7 @@ use craft_media::isobmff::{self, CodecConfig, Mp4File, TrackKind};
 use crate::DvdError;
 use crate::demux::{BdVideoFormat, sps_fits};
 use crate::demux_mkv::{Config, H264Samples, Picture, Pictures, demux_pictures, nal_type, nals};
-use crate::h264_sps;
+use disccraft_transcode::h264_sps;
 
 /// The most parameter-set bytes taken from a track's configuration record.
 const MAX_PARAMETER_SETS: usize = 64 * 1024;

@@ -93,10 +93,19 @@ pub struct DiscCraftApp {
     pub(crate) prefs: crate::prefs::PrefsWindow,
     /// 環境設定 ▸ タイムライン（起動時に読み、変えたら保存する）。
     pub(crate) timeline_prefs: crate::workspace::TimelinePrefs,
+    /// Preferences ▸ Preview: the player the previews stand for.
+    pub(crate) preview_prefs: crate::workspace::PreviewPrefs,
     /// ライブラリパネルの状態。
     pub(crate) library: crate::library_panel::LibraryState,
     /// ユーザーがライブラリに足した項目（`library.json`）。
     pub(crate) user_library: crate::user_library::UserLibrary,
+    /// The characters of the next text typed (Encore: the Character panel with nothing selected), as the fields
+    /// `menu.setText` takes; empty: the defaults.
+    pub(crate) next_text: serde_json::Map<String, serde_json::Value>,
+    /// The clip chosen in the timeline viewer (Edit ▸ Clear and Ripple Delete act on it).
+    pub(crate) clip_selection: Option<(TimelineId, crate::timeline_view::ClipPick)>,
+    /// The Library's New Set / Rename Set dialog while it is open.
+    pub(crate) library_set_dialog: Option<crate::library_panel::SetNameDraft>,
     /// 「一定間隔でチャプターポイントを追加」ダイアログ。
     pub(crate) chapter_interval: Option<crate::context_menus::ChapterInterval>,
     /// モニターに映しているタイムラインのフレーム（アセット ID、フレーム番号、テクスチャ）。
@@ -111,6 +120,9 @@ pub struct DiscCraftApp {
     pub(crate) photocraft_icon: Option<egui::TextureHandle>,
     /// 読んだ字幕ファイルの字幕（アセットの id ごと）。
     pub(crate) subtitle_cache: BTreeMap<u64, std::sync::Arc<Vec<crate::subtitles::SubtitleCue>>>,
+    /// Picture subtitles drawn as on the disc, by what they are drawn from (see `image_subtitle_texture`).
+    pub(crate) image_subtitles:
+        std::collections::HashMap<u64, Option<(egui::TextureHandle, [f32; 4])>>,
     /// タイムライン ▸ 字幕を書き出し で選んだトラックのアセット（メニューを閉じてから保存する）。
     pub(crate) subtitle_export: Option<AssetId>,
     /// モニターの拡大率。
@@ -143,10 +155,41 @@ pub struct DiscCraftApp {
     pub(crate) user_ops_dialog: Option<crate::user_ops::UserOpsDialog>,
     /// 開いている「再生リストの名前」ダイアログ（Encore の 新規 ▸ 再生リスト…）の入力中の名前。
     pub(crate) playlist_name_dialog: Option<String>,
+    /// The Transcode Settings dialog, while it is open.
+    pub(crate) transcode_settings_dialog: Option<crate::transcode_settings::TranscodeDraft>,
+    /// The user's quality presets (name, kbit/s), and the Edit Quality Presets dialog's copy while it is open.
+    pub(crate) quality_presets: Vec<crate::workspace::QualityPreset>,
+    pub(crate) quality_presets_dialog: Option<Vec<crate::transcode_settings::PresetRow>>,
+    /// Timeline ▸ Edit Timeline Color Set…: the timeline whose dialog is open.
+    pub(crate) timeline_color_set_dialog: Option<TimelineId>,
+    /// Timeline ▸ Import Subtitles ▸ Image Script / FAB Image Script: the script being imported (Map Colors).
+    pub(crate) image_script_import: Option<crate::image_script::ImageScriptImport>,
+    /// Where the video goes out (Preferences ▸ Audio/Video Output), and whether it stays up in the background.
+    pub(crate) video_output: crate::video_out::VideoOutput,
+    pub(crate) video_output_in_background: bool,
+    /// Window ▸ Tools: the toolbar under the menu bar is shown (M6.339).
+    pub(crate) show_tools: bool,
+    /// Preferences ▸ General ▸ Playback quality: how large the Monitor plays a title's pictures (M6.341).
+    pub(crate) playback_quality: crate::workspace::PlaybackQuality,
+    /// The picture the Monitor showed of a title this frame: what goes out.
+    pub(crate) video_out_frame: Option<crate::video_out::VideoFrame>,
+    /// The Styles panel: the set shown, the style selected, the user's styles.
+    pub(crate) styles: crate::styles_panel::StylesState,
+    /// The XMP metadata read of assets' files, for the Metadata panel (by asset).
+    pub(crate) metadata_cache:
+        std::collections::HashMap<u64, std::sync::Arc<disccraft_engine::metadata::Metadata>>,
+    /// What the Metadata panel's search field holds.
+    pub(crate) metadata_search: String,
+    /// The Interpret Footage dialog, while it is open.
+    pub(crate) interpret_footage_dialog: Option<crate::interpret_footage::InterpretDraft>,
     /// 開いている「リンクの指定」ダイアログ（Ctrl+L）。
     pub(crate) link_dialog: Option<crate::link_dialog::LinkDialog>,
     /// The Drop Shadow dialog while it is open.
     pub(crate) shadow_dialog: Option<crate::shadow_dialog::ShadowDialog>,
+    /// The rendered motion menu the project preview is playing (M6.334).
+    pub(crate) preview_motion: Option<crate::project_preview::MotionPlay>,
+    /// The Layer Effects dialog of an image or a shape, while it is open (M6.332).
+    pub(crate) effects_dialog: Option<crate::effects_dialog::EffectsDialog>,
     /// The Menu Color Set dialog while it is open.
     pub(crate) color_set_dialog: Option<crate::color_set_dialog::ColorSetDialog>,
     /// プロジェクトパネルの概要に出すメニューのサムネール（メニューの id → メニューのハッシュとテクスチャ）。
@@ -208,8 +251,13 @@ pub struct DiscCraftApp {
     pub(crate) project_preview: Option<crate::project_preview::ProjectPreview>,
     /// プレビューのタイトルの再生を一時停止している。
     pub(crate) preview_paused: bool,
+    /// A Random or Shuffle chapter playlist's play order in the preview (its title, and the entries still to
+    /// play, the one playing first), kept while it plays.
+    pub(crate) preview_order: Option<(u8, Vec<u16>)>,
     /// 次にプレビューのタイトルを再生し始める位置（秒。一時停止からの再生、オーディオ / 字幕の切り替え）。
     pub(crate) preview_resume: Option<f64>,
+    /// The slides' pictures shown in the preview, by asset (larger than the project's thumbnails).
+    pub(crate) preview_slides: std::collections::HashMap<u64, Option<egui::TextureHandle>>,
     pub(crate) menu_texture: Option<MenuTexture>,
     /// プロジェクトプレビューで再生中のタイトルに重ねる Blu-ray のポップアップメニューの絵（透明度つき）。
     pub(crate) popup_texture: Option<crate::project_preview::PopupTexture>,
@@ -217,6 +265,8 @@ pub struct DiscCraftApp {
     pub(crate) selected_buttons: Vec<usize>,
     /// 編集 ▸ コピー / 切り取りしたボタン。
     pub(crate) button_clipboard: Vec<crate::button_edit::ClipButton>,
+    /// The graphic layer last copied or cut (Edit ▸ Paste as Subpicture makes it a button's subpicture).
+    pub(crate) graphic_clipboard: Option<disccraft_project::MenuGraphic>,
     /// このフレームで Ctrl+V されたときのシステムのクリップボードの文字列。
     pub(crate) pasted_text: Option<String>,
     /// オブジェクト ▸ 整列 ▸ セーフエリアに相対的に整列。
@@ -295,6 +345,14 @@ pub struct DiscCraftApp {
     pub(crate) check_dirty: bool,
     /// アセットごとのトランスコードステータス（`asset.transcodeStatus`）。
     pub(crate) transcode: BTreeMap<u64, crate::project_panel::TranscodeState>,
+    /// The assets the running build or Transcode Now has to transcode, as they were when it started: the Progress
+    /// panel lists those not transcoded yet (Encore's list of the transcodes, M6.340).
+    pub(crate) transcode_queue: Vec<u64>,
+    /// When the Progress panel last had the transcode status looked at again while a job ran.
+    pub(crate) transcode_queue_checked: Option<std::time::Instant>,
+    /// Whether each video asset would fit a DVD and a Blu-ray as it is (`asset.transcodeStatus`'s "fitsDvd" and
+    /// "fitsBluray"), whether or not a preset of its own transcodes it all the same.
+    pub(crate) transcode_fits: BTreeMap<u64, (bool, bool)>,
     /// トランスコードステータスを問い合わせたときのビルドの出力先。変わったら問い合わせ直す。
     pub(crate) transcode_for: Option<(String, OutputKind)>,
     pub(crate) transcode_dirty: bool,
@@ -303,6 +361,12 @@ pub struct DiscCraftApp {
 impl DiscCraftApp {
     /// Creates a new application state.
     pub fn new(ctx: &Context) -> Self {
+        // Preferences that are not the window's own: the audio output device, and how many transcodes run at
+        // a time.
+        crate::audio_out::choose_device(crate::workspace::load_audio_device());
+        disccraft_build::set_parallel_transcodes(
+            usize::try_from(crate::workspace::load_parallel_transcodes()).unwrap_or(0),
+        );
         ctx.request_repaint();
 
         crate::help::log(&format!(
@@ -349,8 +413,12 @@ impl DiscCraftApp {
             allow_close: false,
             prefs: crate::prefs::PrefsWindow::default(),
             timeline_prefs: crate::workspace::load_timeline_prefs(),
+            preview_prefs: crate::workspace::load_preview_prefs(),
             library: crate::library_panel::LibraryState::default(),
             user_library: crate::user_library::UserLibrary::load(),
+            clip_selection: None,
+            next_text: serde_json::Map::new(),
+            library_set_dialog: None,
             chapter_interval: None,
             monitor_frame: None,
             monitor_loader: disccraft_engine::FrameLoader::new(),
@@ -362,7 +430,9 @@ impl DiscCraftApp {
             preview_playback: None,
             project_preview: None,
             preview_paused: false,
+            preview_order: None,
             preview_resume: None,
+            preview_slides: std::collections::HashMap::new(),
             monitor_zoom: crate::monitor::MonitorZoom::Fit,
             menu_zoom: crate::monitor::MonitorZoom::Fit,
             tool: crate::menu_text::Tool::Selection,
@@ -378,8 +448,29 @@ impl DiscCraftApp {
             route_drag: None,
             user_ops_dialog: None,
             playlist_name_dialog: None,
+            transcode_settings_dialog: None,
+            quality_presets: crate::workspace::load_quality_presets(),
+            quality_presets_dialog: None,
+            timeline_color_set_dialog: None,
+            image_script_import: None,
+            interpret_footage_dialog: None,
+            video_output: crate::video_out::VideoOutput::from_setting(
+                crate::workspace::load_video_output().0,
+            ),
+            video_output_in_background: crate::workspace::load_video_output().1,
+            show_tools: !crate::workspace::load_hide_tools(),
+            playback_quality: crate::workspace::load_playback_quality(),
+            video_out_frame: None,
+            styles: crate::styles_panel::StylesState {
+                user: crate::styles_panel::UserStyles::load(),
+                ..Default::default()
+            },
+            metadata_cache: std::collections::HashMap::new(),
+            metadata_search: String::new(),
             link_dialog: None,
             shadow_dialog: None,
+            preview_motion: None,
+            effects_dialog: None,
             color_set_dialog: None,
             menu_thumbnails: std::collections::HashMap::new(),
             first_frames: std::collections::HashMap::new(),
@@ -408,11 +499,13 @@ impl DiscCraftApp {
                 .map(|(index, _)| index)
                 .collect(),
             subtitle_cache: BTreeMap::new(),
+            image_subtitles: std::collections::HashMap::new(),
             subtitle_export: None,
             menu_texture: None,
             popup_texture: None,
             selected_buttons: Vec::new(),
             button_clipboard: Vec::new(),
+            graphic_clipboard: None,
             pasted_text: None,
             align_to_safe_area: false,
             distribute_to_safe_area: false,
@@ -463,6 +556,9 @@ impl DiscCraftApp {
             media_pending: false,
             usage_dirty: true,
             transcode: BTreeMap::new(),
+            transcode_queue: Vec::new(),
+            transcode_queue_checked: None,
+            transcode_fits: BTreeMap::new(),
             transcode_for: None,
             transcode_dirty: true,
             check_dirty: true,
@@ -533,8 +629,18 @@ impl DiscCraftApp {
         self.guide_dialog_window(ui.ctx());
         self.user_ops_window(ui.ctx());
         self.playlist_name_window(ui.ctx());
+        self.transcode_settings_window(ui.ctx());
+        self.quality_presets_window(ui.ctx());
+        self.library_set_window(ui.ctx());
+        self.timeline_color_set_window(ui.ctx());
+        self.image_script_window(ui.ctx());
+        self.video_output_window(ui.ctx());
+        // The next frame's picture is whatever the Monitor shows then.
+        self.video_out_frame = None;
+        self.interpret_footage_window(ui.ctx());
         self.link_window(ui.ctx());
         self.shadow_window(ui.ctx());
+        self.effects_window(ui.ctx());
         self.color_set_window(ui.ctx());
         self.about_window(ui.ctx());
         self.system_report_window(ui.ctx());
@@ -928,7 +1034,10 @@ impl DiscCraftApp {
         self.monitor_frame = None;
         self.playback = None;
         self.preview_playback = None;
+        self.preview_slides.clear();
+        self.metadata_cache.clear();
         self.subtitle_cache.clear();
+        self.image_subtitles.clear();
         self.subtitle_edit = None;
         self.selected_buttons.clear();
         self.button_label_menu = None;
@@ -1194,7 +1303,11 @@ impl DiscCraftApp {
                 self.transcode_dirty = true;
             }
             Err(error) => {
-                self.status = error;
+                self.status = if disccraft_build::was_stopped(&error) {
+                    tl!("Build stopped").to_owned()
+                } else {
+                    error
+                };
                 self.simulate = None;
             }
         }
@@ -1223,8 +1336,8 @@ impl DiscCraftApp {
             .add_filter(
                 tl!("Video files"),
                 &[
-                    "mp4", "mov", "m4v", "avi", "mkv", "mxf", "m2v", "mpg", "mpeg", "vob", "m2ts",
-                    "ts",
+                    "mp4", "mov", "m4v", "avi", "mkv", "mxf", "m2v", "m1v", "mpg", "mpeg", "vob",
+                    "m2ts", "ts",
                 ],
             )
             .pick_files()
@@ -1903,7 +2016,6 @@ pub(crate) fn rgb_to_hex(rgb: [u8; 3]) -> String {
 }
 
 /// Parses a `#rrggbb` or `rrggbb` string into RGB bytes.
-#[cfg(test)]
 pub(crate) fn hex_to_rgb(hex: &str) -> Option<[u8; 3]> {
     let text = hex.trim();
     let text = text.strip_prefix('#').unwrap_or(text);
@@ -1920,7 +2032,6 @@ pub(crate) fn hex_to_rgb(hex: &str) -> Option<[u8; 3]> {
     Some([r, g, b])
 }
 
-#[cfg(test)]
 fn parse_hex_pair(chunk: &[u8]) -> Option<u8> {
     if chunk.len() != 2 {
         return None;

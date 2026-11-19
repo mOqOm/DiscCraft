@@ -150,7 +150,10 @@ impl Project {
     pub fn asset_user(&self, id: AssetId) -> Option<String> {
         for timeline in self.timelines.values() {
             let uses = timeline.videos().contains(&id)
-                || timeline.audio.iter().any(|track| track.asset == id)
+                || timeline
+                    .audio
+                    .iter()
+                    .any(|track| track.assets().any(|asset| asset == id))
                 || timeline.subtitles.iter().any(|track| track.asset == id);
             if uses {
                 return Some(timeline.name.clone());

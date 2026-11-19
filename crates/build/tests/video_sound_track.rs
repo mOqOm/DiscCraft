@@ -92,9 +92,12 @@ fn the_videos_own_sound_as_audio_1_builds_like_the_implicit_soundtrack() {
         let t = project.add_timeline(v, Some("Main".to_string())).unwrap();
         if explicit {
             project.timeline_mut(t).unwrap().audio.push(AudioTrack {
+                more: Vec::new(),
                 asset: v,
                 language: String::new(),
                 start: 0,
+                trim_start: 0,
+                trim_end: None,
             });
         }
         project.settings.first_play = Link::Timeline { id: t, chapter: 0 };

@@ -17,8 +17,8 @@ mod packet;
 mod psi;
 mod read;
 
-pub use lpcm::bd_lpcm_units;
-pub use mux::{mux_m2ts, mux_m2ts_with};
+pub use lpcm::{bd_lpcm_layout, bd_lpcm_units, bd_lpcm_units_of};
+pub use mux::{STOPPED, mux_m2ts, mux_m2ts_stoppable, mux_m2ts_with};
 pub use read::pes_payloads;
 
 use std::fmt;
@@ -64,6 +64,8 @@ pub enum StreamKind {
     Lpcm,
     /// AC-3 audio.
     Ac3,
+    /// DTS audio (core frames, M6.348).
+    Dts,
     /// Presentation graphics (one segment per unit).
     Pgs,
     /// Interactive graphics (one segment per unit).
@@ -79,6 +81,7 @@ impl StreamKind {
             Self::H264Video => 0x1B,
             Self::Lpcm => 0x80,
             Self::Ac3 => 0x81,
+            Self::Dts => 0x82,
             Self::Pgs => 0x90,
             Self::Igs => 0x91,
         }
@@ -89,7 +92,7 @@ impl StreamKind {
     pub fn stream_id(self) -> u8 {
         match self {
             Self::Mpeg2Video | Self::H264Video => 0xE0,
-            Self::Lpcm | Self::Ac3 | Self::Pgs | Self::Igs => 0xBD,
+            Self::Lpcm | Self::Ac3 | Self::Dts | Self::Pgs | Self::Igs => 0xBD,
         }
     }
 
@@ -172,4 +175,17 @@ pub struct M2tsLayout {
     pub ep_pid: u16,
     /// Packets that arrived after their decoding time (should be 0).
     pub late_packets: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StreamKind;
+
+    /// M6.348: DTS is stream type 0x82 in private stream 1, an audio stream.
+    #[test]
+    fn dts_is_a_private_stream_of_type_0x82() {
+        assert_eq!(StreamKind::Dts.stream_type(), 0x82);
+        assert_eq!(StreamKind::Dts.stream_id(), 0xBD);
+        assert!(!StreamKind::Dts.is_video());
+    }
 }

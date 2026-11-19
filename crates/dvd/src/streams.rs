@@ -46,6 +46,8 @@ pub enum TitleAudio {
         /// ISO 639-1 language code, when set.
         language: Option<[u8; 2]>,
     },
+    /// MPEG-1 Layer II frames (a PAL DVD's; a Blu-ray title never has them).
+    Mp2,
 }
 
 /// One subtitle cue rendered as a 2-bit bitmap (0 transparent, 1 fill, 2 outline).
@@ -392,12 +394,13 @@ pub fn subtitle_tracks_sized(
             .map_err(|e| DvdError::Invalid(e.to_string()))?;
         let mut rendered = Vec::with_capacity(cues.len());
         let set = timeline.subtitle_colors.unwrap_or_default();
-        // A subtitle added in the Monitor and not typed yet has nothing to show.
-        for cue in cues.into_iter().filter(|cue| !cue.text.trim().is_empty()) {
+        // A subtitle added in the Monitor and not typed yet has nothing to show; a picture subtitle (an image
+        // script's) is its picture, at its place in the frame.
+        for cue in cues.into_iter().filter(disccraft_menu::subtitle::cue_shows) {
             // The subtitle's own group, stroke and place where it has them, else the track's.
             let colors = cue_colors(set.group(cue.look.group.unwrap_or(track.group)));
-            let bitmap = disccraft_menu::subtitle::render_cue_styled(
-                &cue.text,
+            let bitmap = disccraft_menu::subtitle::render_any_cue(
+                &cue,
                 width,
                 height,
                 disccraft_menu::subtitle::CueStyle {
@@ -532,5 +535,6 @@ fn convert_audio(audio: LoadedAudio) -> TitleAudio {
             language,
         },
         LoadedAudio::Lpcm { stream, language } => TitleAudio::Lpcm { stream, language },
+        LoadedAudio::Mp2 { .. } => TitleAudio::Mp2,
     }
 }

@@ -21,6 +21,7 @@ mod check_lists;
 mod check_menu;
 pub use check_menu::{has_overlapping_buttons, overlapping_buttons};
 mod duplicate;
+mod effects;
 pub use duplicate::Duplicate;
 mod folder;
 mod graphic;
@@ -28,11 +29,14 @@ mod hd_frame;
 mod ids;
 mod io;
 mod library;
+mod library_layers;
 mod link;
 mod lists;
+mod located;
 mod menu;
 mod model;
 mod pages;
+mod quantize;
 mod remove;
 mod replace;
 mod rom;
@@ -50,6 +54,9 @@ pub use chapter_index::FillChapterIndexError;
 pub use chapter_index::{CHAPTERS_PER_PAGE, ChapterIndexLabels, MAX_SINGLE_PAGE, chapter_grid};
 pub use chapter_playlist::{ChapterPlaylist, MAX_CHAPTER_PLAYLIST_ENTRIES, PlaybackOrder};
 pub use check::{Problem, Severity, has_errors};
+pub use effects::{
+    BevelEffect, GlowEffect, LayerEffects, MAX_EFFECT_SIZE, OverlayEffect, StrokeEffect,
+};
 pub use filmcraft_time::{FrameRate, Tick};
 pub use folder::{Folder, MAX_FOLDERS};
 pub use graphic::{
@@ -64,12 +71,14 @@ pub use library::{
     ButtonSpec, LIBRARY, LibraryItem, LibraryKind, MenuSpec, PresetButton, library_item,
     preset_rect,
 };
+pub use library_layers::{LAYER_PRESETS, LayerPreset, PresetLayer, layer_preset};
 pub use link::Link;
 pub use lists::{
     DEFAULT_SLIDE_DURATION, DEFAULT_SLIDE_SECONDS, DEFAULT_TRANSITION_DURATION, Playlist,
     PlaylistItem, Slide, SlideEffect, SlidePan, SlideScale, SlideStroke, SlideTransition,
     SlideZoom, Slideshow, TransitionKind,
 };
+pub use menu::{AUTO_LEADING, LINE_PITCHES, MAX_LINE_PITCH, MIN_LINE_PITCH};
 pub use menu::{
     Button, DEFAULT_TEXT_SIZE, MAX_BUTTONS, MAX_FONT_NAME_CHARS, MAX_LEADING,
     MAX_MENU_AUDIO_SECONDS, MAX_MENU_SECONDS, MAX_MENU_TEXTS, MAX_TEXT_CHARS, MAX_TEXT_SIZE,
@@ -89,21 +98,29 @@ pub use menu::{
     DropShadow, MAX_BASELINE, MAX_SHADOW_DISTANCE, MAX_SHADOW_SIZE, MIN_BASELINE, Orientation,
 };
 pub use menu::{MAX_MENU_LOOPS, MOTION_BUTTONS_SECONDS, MenuLoops};
+pub use menu::{
+    MAX_TEXT_BOX, MAX_TSUME, MIN_TEXT_BOX, TextKinsoku, TextKinsokuMethod, TextMojikumi,
+};
 pub use menu::{MAX_TEXT_SCALE, MIN_TEXT_SCALE, TextAntialias, TextScript};
 pub use model::BdVideo;
 pub use model::{
-    Asset, AssetKind, AudioTrack, Capacity, Chapter, DiscKind, DiscSettings, Menu, Project,
-    SubtitleColor, SubtitleColorSet, SubtitleDefault, SubtitleGroup, SubtitleTrack, Timeline,
-    VideoStandard,
+    Asset, AssetKind, AudioClip, AudioTrack, Capacity, Chapter, DiscKind, DiscSettings,
+    MAX_AUDIO_CLIPS, Menu, Project, SubtitleColor, SubtitleColorSet, SubtitleDefault,
+    SubtitleGroup, SubtitleTrack, Timeline, VideoStandard,
 };
 pub use model::{
-    ClipTrim, CueLook, MAX_COLOR_SET_NAME, MAX_COLOR_SETS, MAX_SUBTITLE_CUES, MAX_TIMELINE_CLIPS,
-    SubtitleCue, SubtitleJustify,
+    BEST_QUALITY, BlurayTranscode, MAX_TRANSCODE_KBPS, MIN_QUALITY, MIN_TRANSCODE_KBPS,
+    TranscodeAudio, TranscodeMode,
+};
+pub use model::{
+    ClipTrim, CueImage, CueLook, ImageCueColors, LocatedTranscode, MAX_COLOR_SET_NAME,
+    MAX_COLOR_SETS, MAX_SUBTITLE_CUES, MAX_TIMELINE_CLIPS, SubtitleCue, SubtitleJustify,
 };
 pub use model::{FLOWCHART_DISC, FLOWCHART_LIMIT, FlowPoint, LayerBreakPoint};
+pub use quantize::reduce_colors;
 pub use replace::{DesignButton, MenuDesign};
 pub use rom::{MAX_ROM_DEPTH, MAX_ROM_ENTRIES, RomFile, rom_disc_bytes, rom_files};
-pub use subpicture::{MAX_SUBPICTURE_SIDE, Subpicture};
+pub use subpicture::{ColorLayer, MAX_LAYER_COLORS, MAX_SUBPICTURE_SIDE, Subpicture};
 pub use thumbnail::{MenuThumbnail, THUMBNAIL_PARTS, ThumbnailArea, ThumbnailSource};
 pub use timecode::{format_frames, format_time, parse_time};
 pub use user_ops::{UserOp, dvd_uop_mask, normalized_ops};

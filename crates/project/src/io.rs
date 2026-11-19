@@ -168,29 +168,73 @@ fn assets_mut(value: &mut Value) -> Vec<&mut Map<String, Value>> {
 /// another drive).
 fn add_relative_paths(value: &mut Value, folder: &Path) {
     for asset in assets_mut(value) {
-        let relative = asset
-            .get("path")
-            .and_then(Value::as_str)
-            .and_then(|path| relative_path(folder, Path::new(path)));
-        match relative {
-            Some(relative) => {
-                asset.insert("relativePath".to_string(), Value::String(relative));
-            }
-            None => {
-                let _ = asset.remove("relativePath");
+        set_relative(asset, "path", "relativePath", folder);
+        // The transcoded files located for the asset (Locate Transcoded File), likewise.
+        for key in LOCATED_KEYS {
+            if let Some(located) = asset.get_mut(key).and_then(Value::as_object_mut) {
+                set_relative(located, "video", "relativeVideo", folder);
+                set_relative(located, "audio", "relativeAudio", folder);
             }
         }
     }
 }
 
+/// The asset fields that hold located transcoded files.
+const LOCATED_KEYS: [&str; 2] = ["locatedDvd", "locatedBluray"];
+
+/// Writes the path in `object[key]` relative to `folder` as `object[relative_key]` (left out when there is none).
+fn set_relative(object: &mut Map<String, Value>, key: &str, relative_key: &str, folder: &Path) {
+    let relative = object
+        .get(key)
+        .and_then(Value::as_str)
+        .and_then(|path| relative_path(folder, Path::new(path)));
+    match relative {
+        Some(relative) => {
+            object.insert(relative_key.to_string(), Value::String(relative));
+        }
+        None => {
+            let _ = object.remove(relative_key);
+        }
+    }
+}
+
+/// Points `object[key]` at the file its relative path from `folder` names, when the recorded file is gone and that
+/// one is there.
+fn find_moved(object: &mut Map<String, Value>, key: &str, relative_key: &str, folder: &Path) {
+    let gone = object
+        .get(key)
+        .and_then(Value::as_str)
+        .is_some_and(|path| !Path::new(path).exists());
+    if !gone {
+        return;
+    }
+    if let Some(found) = object
+        .get(relative_key)
+        .and_then(Value::as_str)
+        .and_then(|relative| resolve_relative(folder, relative))
+        .filter(|candidate| candidate.is_file())
+    {
+        object.insert(
+            key.to_string(),
+            Value::String(found.to_string_lossy().into_owned()),
+        );
+    }
+}
+
 /// An asset whose recorded path is gone but whose relative path from `folder` names a file takes that file (and is
-/// no longer offline): the project was moved together with its media.
+/// no longer offline): the project was moved together with its media. The pictures of its picture subtitles (an
+/// image script's) that are gone too are looked for in the same place relative to the moved file.
 fn find_moved_assets(value: &mut Value, folder: &Path) {
     for asset in assets_mut(value) {
-        let gone = asset
-            .get("path")
-            .and_then(Value::as_str)
-            .is_none_or(|path| !Path::new(path).exists());
+        // Located transcoded files are looked for whether or not the source is (it is often gone on purpose).
+        for key in LOCATED_KEYS {
+            if let Some(located) = asset.get_mut(key).and_then(Value::as_object_mut) {
+                find_moved(located, "video", "relativeVideo", folder);
+                find_moved(located, "audio", "relativeAudio", folder);
+            }
+        }
+        let old = asset.get("path").and_then(Value::as_str).map(PathBuf::from);
+        let gone = old.as_ref().is_none_or(|path| !path.exists());
         if !gone {
             continue;
         }
@@ -202,11 +246,42 @@ fn find_moved_assets(value: &mut Value, folder: &Path) {
         else {
             continue;
         };
+        if let (Some(old), Some(cues)) = (old, asset.get_mut("cues").and_then(Value::as_array_mut))
+        {
+            move_cue_pictures(cues, &old, &found);
+        }
         asset.insert(
             "path".to_string(),
             Value::String(found.to_string_lossy().into_owned()),
         );
         asset.insert("offline".to_string(), Value::Bool(false));
+    }
+}
+
+/// Points the pictures of picture subtitles whose files are gone at the files that stand where they stood
+/// relative to their subtitle file, now that the subtitle file moved from `old` to `new`.
+fn move_cue_pictures(cues: &mut [Value], old: &Path, new: &Path) {
+    let (Some(old_folder), Some(new_folder)) = (old.parent(), new.parent()) else {
+        return;
+    };
+    for cue in cues {
+        let Some(image) = cue.get_mut("image").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let moved = image
+            .get("path")
+            .and_then(Value::as_str)
+            .map(Path::new)
+            .filter(|picture| !picture.exists())
+            .and_then(|picture| relative_path(old_folder, picture))
+            .and_then(|relative| resolve_relative(new_folder, &relative))
+            .filter(|candidate| candidate.is_file());
+        if let Some(moved) = moved {
+            image.insert(
+                "path".to_string(),
+                Value::String(moved.to_string_lossy().into_owned()),
+            );
+        }
     }
 }
 
@@ -413,6 +488,99 @@ mod tests {
         assert_eq!(
             copied.assets.get(&asset).map(|asset| asset.path.clone()),
             Some(found.path.clone())
+        );
+        fs::remove_dir_all(&root)?;
+        Ok(())
+    }
+
+    /// Located transcoded files are found again in a moved project, even when the source is long gone.
+    #[test]
+    fn a_moved_project_finds_its_located_transcodes() -> Result<(), Box<dyn Error>> {
+        let root = temp_folder("moved-located")?;
+        let first = root.join("sample");
+        fs::create_dir_all(first.join("Transcodes"))?;
+        let (video, audio) = (
+            first.join("Transcodes").join("movie.m2v"),
+            first.join("Transcodes").join("movie.ac3"),
+        );
+        fs::write(&video, b"video")?;
+        fs::write(&audio, b"audio")?;
+        let mut project = Project::default();
+        let asset = project.add_asset(&root.join("deleted-source.mp4"))?;
+        project.assets.get_mut(&asset).ok_or("asset")?.located_dvd =
+            Some(crate::LocatedTranscode {
+                video: video.to_string_lossy().into_owned(),
+                audio: Some(audio.to_string_lossy().into_owned()),
+            });
+        save(&project, &first.join("sample.dcproj"))?;
+        let text = fs::read_to_string(first.join("sample.dcproj"))?;
+        assert!(
+            text.contains("\"relativeVideo\": \"Transcodes/movie.m2v\""),
+            "{text}"
+        );
+        let moved = root.join("elsewhere");
+        fs::rename(&first, &moved)?;
+        let loaded = load(&moved.join("sample.dcproj"))?;
+        let located = loaded
+            .assets
+            .get(&asset)
+            .and_then(|asset| asset.located_dvd.clone())
+            .ok_or("located")?;
+        assert_eq!(
+            std::path::Path::new(&located.video),
+            moved.join("Transcodes").join("movie.m2v")
+        );
+        assert_eq!(
+            located.audio.as_deref().map(std::path::Path::new),
+            Some(moved.join("Transcodes").join("movie.ac3").as_path())
+        );
+        fs::remove_dir_all(&root)?;
+        Ok(())
+    }
+
+    /// A moved image script finds its pictures where they stood beside it.
+    #[test]
+    fn a_moved_image_script_finds_its_pictures() -> Result<(), Box<dyn Error>> {
+        let root = temp_folder("moved-pictures")?;
+        let first = root.join("sample");
+        fs::create_dir_all(first.join("subs").join("pics"))?;
+        let script = first.join("subs").join("script.txt");
+        let picture = first.join("subs").join("pics").join("001.png");
+        fs::write(&script, b"1 00;00;01;00 00;00;02;00 001.png\n")?;
+        fs::write(&picture, b"a picture")?;
+        let mut project = Project::default();
+        let asset = project.add_asset(&script)?;
+        let image = crate::CueImage {
+            path: picture.to_string_lossy().into_owned(),
+            area: [0, 0, 720, 480],
+            colors: crate::ImageCueColors {
+                background: [0, 0, 255],
+                fill: [255, 255, 255],
+                outline: [0, 0, 0],
+            },
+        };
+        project.assets.get_mut(&asset).ok_or("asset")?.cues = Some(vec![crate::SubtitleCue {
+            start: crate::Tick(0),
+            end: crate::Tick(10),
+            text: String::new(),
+            look: crate::CueLook::default(),
+            image: Some(image),
+        }]);
+        save(&project, &first.join("sample.dcproj"))?;
+        let moved = root.join("elsewhere");
+        fs::rename(&first, &moved)?;
+        let loaded = load(&moved.join("sample.dcproj"))?;
+        let path = loaded
+            .assets
+            .get(&asset)
+            .and_then(|asset| asset.cues.as_ref())
+            .and_then(|cues| cues.first())
+            .and_then(|cue| cue.image.as_ref())
+            .map(|image| image.path.clone())
+            .ok_or("picture")?;
+        assert_eq!(
+            std::path::Path::new(&path),
+            moved.join("subs").join("pics").join("001.png")
         );
         fs::remove_dir_all(&root)?;
         Ok(())

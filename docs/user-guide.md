@@ -50,7 +50,7 @@ What it does not do (for now):
 
 - Burning discs. It makes folders and ISO images; burning is left to other software
 - Copy protection (CSS, AACS and the like). Only the region code flags
-- BD-J menus (Blu-ray is HDMV only), encoding DTS / Dolby TrueHD / DTS-HD (a DTS file can go on a DVD as it is)
+- BD-J menus (Blu-ray is HDMV only), encoding DTS / Dolby TrueHD / DTS-HD (a DTS file can go on a disc as it is)
 - Editing video itself (edit in FilmCraft, make the disc in DiscCraft)
 - 4K (Ultra HD Blu-ray)
 
@@ -113,7 +113,7 @@ The workspace layout, the display language, the recent projects and the column w
 | Place | Contents |
 |---|---|
 | Windows: `%APPDATA%\disccraft\workspace.json`<br>Others: `~/.config/disccraft/workspace.json` | Workspaces, panel layout, display language, recent projects, default television standard |
-| `library.json` in the same folder | Your own menus and buttons added to the Library |
+| `library.json` in the same folder | Your own menus, buttons, backgrounds, text items, layer sets and replacement layers added to the Library |
 
 ## 3. The screen
 
@@ -130,7 +130,7 @@ Items and shortcuts follow Encore's defaults. The ones used most:
 - **File ▸ Import ▸** (Asset… / Menu… / Pop-up Menu… / Menu Page… / Timeline… / Slideshow…)
 - **File ▸ Preview / Check Project… / Build ▸ Folder… · Image…**
 - **Edit ▸ Preferences…**, **Edit ▸ History ▸** (step back through the list of operations that can be undone)
-- **Object ▸** (Convert to Button / Convert to Object, Specify Link…, Drop Shadow…, Flip, Rotate, Arrange, Align, Distribute)
+- **Object ▸** (Convert to Button / Convert to Replacement Layer / Convert to Object, Create Subpicture, Specify Link…, Drop Shadow…, Flip, Rotate, Arrange, Align, Distribute)
 - **Menu ▸** (New Menu, Create Chapter Index, Replace Menu…, Add New Page, Edit Menu Color Set…,
   Set Menu User Operations…, Save Menu as File…, Save Menu as Template…, Set End Action…)
 - **Timeline ▸** (New Timeline / New Slideshow / New Chapter Playlist, adding and removing tracks,
@@ -172,8 +172,13 @@ The default workspace is laid out as in Encore.
 - **Project**: the list of every item (assets, timelines, menus, slideshows, playlists, chapter playlists,
   folders). Columns can be sorted, shown or hidden and resized. The right-click menu has Open / Rename… /
   Set as First Play / Replace Asset… / Show in Explorer / Delete and more
-- **Menus**: the list of menus and the buttons of the selected menu
-- **Timelines**: the list of timelines
+- **Menus**: the list of menus and the buttons of the selected menu. A menu's right-click menu is Encore's: Set as
+  First Play / Copy / Clear / Rename… / Edit Menu in PhotoCraft / Open / Preview from Here; a button's is Clear /
+  Open in Menu Viewer / Open Link / Preview from Here (the menu with that button selected)
+- **Timelines**: the list of timelines and, below it, the chapters of the selected timeline (number, name, timeline,
+  chapter in, poster frame). A click selects a chapter, a double click opens it in the Timeline viewer. A timeline's
+  right-click menu is Set as First Play / Copy / Clear / Rename… / Open / Preview from Here; a chapter's is Clear /
+  Open / Preview from Here (the title from that chapter). The first chapter cannot be cleared
 - **Build**: the [Build panel](#13-building)
 - **Monitor**: playback of the built disc, and the preview of a timeline. The control bar below has the timecode
   and zoom, a scrub bar with chapter flags, play / stop / previous and next chapter / one frame back and forward /
@@ -184,7 +189,8 @@ The default workspace is laid out as in Encore.
 - **Disc**: the disc's name, description, aspect ratio, audio / subtitle, user operations
 - **Layers**: the menu's layers (eye and lock, `(+)` button sets, `(=1)`–`(=3)` highlights, T for text, % for shapes;
   the background is fixed)
-- **Library**: DiscCraft's own presets (menus / buttons / images / backgrounds / shapes) and your own items
+- **Library**: DiscCraft's own presets (menus / buttons / images / backgrounds / layer sets / shapes / replacement
+  layers) and your own items (also text items)
 - **Timeline Viewer**: a timeline in the same form as FilmCraft's (V1 / A1 / S1 headers, waveform, chapter flags)
 - **Slideshow Viewer**: the list of slides and their order, scaling and transitions
 
@@ -236,6 +242,10 @@ On a disc that has to convert it, such as a DVD, Check Project reports the error
 video cannot be converted for this disc." (so you know before a build starts).
 A video whose picture cannot be decoded still plays its sound on the timeline. The Monitor shows a black screen with the
 reason, and the time and the playhead move on, so chapter points can be placed by ear.
+Interlaced H.264 in a transport stream (`.m2ts` / `.mts` / `.ts`: AVCHD camcorders, recorders) imports too. Its length,
+size and frame rate are read from the file's time stamps and header, and its Dolby Digital sound goes on the disc as it is.
+Such a file cannot be opened for its sound alone, though, so the Monitor plays no sound for it, and sound other than Dolby
+Digital (LPCM, AAC) cannot be used in a build (put an audio file on an audio track instead).
 
 **H.264 that goes on an HD Blu-ray as it is**: H.264 in an `.m2ts` / `.ts` / `.mkv` / `.mp4` / `.m4v` / `.mov` goes on the disc without re-encoding
 (the picture quality is kept, and the build is fast) when all of these hold.
@@ -245,7 +255,18 @@ reason, and the time and the playhead move on, so chapter points can be placed b
   the 1440×1080 of camcorders (HDV / AVCHD)
 - High or Main profile, up to level 4.1, 4:2:0 at 8 bits, and no more than 40 Mbps averaged over the whole file
 - It starts with a key frame (IDR)
-- It is not trimmed on the timeline (for 1080i, it is the timeline's only clip)
+- For 1080i, it is the timeline's only clip
+
+A clip of such a file can be trimmed and still go on the disc as it is: its in point snaps to the nearest IDR
+picture and its out point to the nearest key picture (or the end of the file), and the file's own sound is cut to
+the same part. When the key pictures have leading B pictures (open GOPs), the clip ends a few frames early.
+
+**HD MPEG-2 that goes on an HD Blu-ray as it is**: the MPEG-2 video of a transport stream (`.m2ts` / `.mts` / `.m2t` /
+`.ts`: an HDV camcorder's 1440×1080i, a broadcast recording's 1920×1080i or 1440×1080i, 1280×720p) goes on the disc
+without re-encoding too, when its size, frame rate and scan are those of the disc's Blu-ray Video, it is Main profile
+at High or High-1440 level, no faster than 40 Mbps, coded as frame pictures, and it is the only clip of its timeline,
+used whole (a trimmed clip, or one joined with others, is encoded). A recording that starts in the middle of a GOP
+loses the two or so B pictures in front of its first I picture.
 
 Such a file shows "Don't Transcode" as its transcode status in the Project panel, and the size estimate counts the file's size.
 The sound is handled as before (anything but AC-3 and WAV is converted to Dolby Digital). Other files are converted.
@@ -254,14 +275,24 @@ The sound is handled as before (anything but AC-3 and WAV is converted to Dolby 
 
 | Kind | Extensions |
 |---|---|
-| Video | mp4, mov, m4v, avi, mkv, webm, mxf, m2v, mpg, mpeg, vob, m2ts, mts, m2t, ts |
+| Video | mp4, mov, m4v, avi, mkv, webm, mxf, m2v, m1v, mpg, mpeg, vob, m2ts, mts, m2t, ts |
 | Audio | wav, ac3, dts, mp3, aac, m4a, mka, mp2, ogg, oga, opus, flac, aif, aiff |
 | Images | png, jpg, jpeg, bmp, tif, tiff, psd, psb, pcraft, svg |
 | Subtitles | srt, vtt, txt, idx (VobSub), sup (PGS) |
 | Menu designs | psd, pcraft |
 | Craft documents | `.scraft` (a SoundCraft session → audio), `.ecproj` (an EffectCraft project → video), `.fcproj` (a FilmCraft sequence → a timeline) |
 
-A WAV goes on the disc as it is (LPCM) when it is 16-bit 48 kHz; any other (44.1 kHz, 24-bit and so on) is converted.
+A WAV goes on the disc as it is (LPCM) when it is 16-bit 48 kHz; any other (44.1 kHz and so on) is converted. On a DVD
+a 24-bit or 96 kHz WAV is LPCM as it is too (96 kHz 24-bit up to stereo; it takes 4.6 Mbps, which comes off the video's
+bit rate, and Check Project warns when it and a video used as it is pass the limit together). A 20-bit WAV goes on
+as 24-bit.
+On a Blu-ray a WAV of 16, 20 or 24 bits at 48, 96 or 192 kHz is LPCM as it is, up to eight channels and 27.648 Mbps
+(24-bit 192 kHz up to 5.1), on its speakers: mono, stereo, front left and right with a centre and/or surrounds (one
+back centre, or a pair of back or side ones), 5.1, 7.0 and 7.1. A WAV of other speakers (2.1, 4.1, 6.1), or of seven
+channels that names none, is converted. The more the sound takes, the lower the video's peak bit rate (the stream
+carries 48 Mbps).
+On a PAL DVD a 48 kHz MPEG-1 Layer II file (`.mp2`, `.mpa`) goes on the disc as it is too (on an NTSC DVD and on a
+Blu-ray it is converted: an NTSC player need not play MPEG audio).
 When a video file holds several audio streams, only the first is used.
 
 SVG is drawn at the size it is shown, so it does not blur. Subtitle text is read as UTF-8 / UTF-16 / Shift_JIS.
@@ -270,12 +301,15 @@ When an EffectCraft project (`.ecproj`) has several compositions, choose the one
 the asset's properties (without a choice, the composition that was open in EffectCraft). Import the same file once
 more and each asset can use a different composition.
 
-A DTS file (`.dts`) goes into a DVD's audio track as it is, without decoding (48 kHz, up to 1509.75 kbps).
-It cannot go on a Blu-ray yet, and it is silent in the Monitor and the preview.
+A DTS file (`.dts`) goes into a DVD's or a Blu-ray's audio track as it is, without decoding (48 kHz, up to
+1509.75 kbps). It is silent in the Monitor and the preview.
 
 ### 4.3 About media
 
 - The row in the Project panel shows the size, frame rate, length and whether a conversion is needed
+- A video's Properties also show its **Field type**, as Encore words it: **No Fields (Progressive Scan)**, **Odd
+  Field First** or **Even Field First** (read from the headers of MPEG-2 and H.264 video; interlaced H.264 is shown as
+  odd field first)
 - Media that does not fit the format is converted automatically at build time (audio to Dolby Digital (AC-3)
   192 kbps; the video bit rate is chosen to fit the disc, up to 9.8 Mbps by default)
 - MPEG-2 video that already fits a DVD is not converted: elementary streams (`.m2v`), program streams with
@@ -292,6 +326,99 @@ It cannot go on a Blu-ray yet, and it is silent in the Monitor and the preview.
   be decoded cannot be converted either). **Revert to Original** throws a finished conversion away, so the status is
   "Untranscoded" again (the next build, or Transcode Now, makes it anew). **File ▸ Transcode ▸ Transcode All**
   converts ahead everything the project's build would convert
+- **File ▸ Locate Transcoded File ▸ DVD… / Blu-ray…** (also in a video's right-click menu) points the video at the
+  files it was already converted to for that kind of disc: choose the video (for a DVD, MPEG-2 such as `.m2v`), then
+  its sound (`.ac3`, `.wav` …; Cancel for none). A build of that kind then uses those files as they are in place of
+  the original, so the original may even be gone (useful after deleting the source media, or for files converted with
+  another program). The transcode status becomes "Transcoded"; **Revert to Original** forgets the located files.
+  The located files are found again when the project is moved together with them
+- **Window ▸ Metadata** shows the XMP metadata of the selected asset's file (of a timeline: its video's), by schema
+  (Dublin Core, Basic, Rights Management, Media Management, Dynamic Media and so on; other schemas under their
+  namespace), with a search field and **Reload**. A sidecar file (`name.xmp` or `name.ext.xmp` beside the media) is
+  read before the file itself. It only shows: DiscCraft writes nothing into your media files, so the values cannot be
+  edited here
+- **Window ▸ Progress** (F10) shows what a build or Transcode Now is converting and how far it is, the list of the
+  files it still has to convert (each goes from the list when it is done), and the media files being read in the
+  background. **Stop** stops the conversions (each gives up at its next picture): the build or Transcode Now ends as
+  stopped, a conversion that had finished stays, and the one that was cut off is made anew next time. Converting
+  sound stops between its chunks, and a build also ends between its other steps: while a title is multiplexed (at its
+  next VOBU on a DVD, its next unit on a Blu-ray), between the files of the ROM content, before the image is written,
+  and while it is being written (what was written of it is deleted)
+- **Transcode Settings…**, in the same menus, is laid out as Encore's. On the left, **DVD Transcode** has the
+  **Quality Preset** for a DVD, and **Blu-ray Transcode** has the **Codec**, **Dimensions**, **Frame Rate** and **Field**
+  and the **Quality Preset** for a Blu-ray. On an HD Blu-ray the codec, dimensions and frame rate choose the format
+  this video's titles are made in, which can differ from the project's (a 720p59.94 video on a 1080p23.976 disc,
+  say): each choice offers what goes with the others (the dimensions of that codec, the frame rates of those
+  dimensions), the field follows from them, and the presets in the list are that format's. **Use Project Settings**
+  in the preset list puts the video back to the project's format at the automatic rate. A video that goes on the
+  disc in the chosen format as it is shows **Don't Transcode**. An SD Blu-ray's titles are all the project's format,
+  so the rows are greyed there (**Transcode Defaults…** on the right opens the project settings where it is
+  chosen). On the right are **OK**,
+  **Cancel**, **Edit Quality Presets…**, **Transcode Defaults…** and two checkboxes for how the video's conversions
+  (for either kind of disc) make their pictures. **Use Maximum Render Quality** scales with a filter: a picture made
+  smaller averages the pixels each new one covers, so fine detail (thin lines, a fine pattern) turns into its
+  average instead of shimmering, and a picture made larger blends between pixel centres; it is slower. **Use Frame
+  Blending**: when the disc's frame rate differs from the video's (24 fps on a 29.97 DVD, say), a picture that falls
+  between two of the video's frames mixes them by how near it is to each, instead of showing the one before it
+  again. Both are off at first, and changing one makes a new conversion. The same two preset lists are combos in
+  the Properties panel when a video asset is selected, with the two checkboxes under them, and the Transcode
+  Settings columns show the preset's name
+- A DVD's quality presets are Encore's for the TV standard: on an NTSC project first the film ones, **NTSC DV 23.976
+  High quality 4Mb VBR 2 Pass**, **7Mb VBR 2 Pass**, **8Mb CBR 1 Pass** and **NTSC DV 23.976 Low quality 4Mb CBR 1
+  Pass**, then **NTSC DV High quality 4Mb VBR 2 Pass**, **7Mb VBR 2 Pass**, **8Mb CBR 1 Pass**, **NTSC DV Low quality
+  4Mb CBR 1 Pass** and **NTSC Progressive High quality 7Mb VBR 2 Pass** (PAL ones for a PAL project, without the
+  23.976 ones), then your own presets, then **Automatic** (the default: the build gives the titles the rate that fits
+  them to the disc). A 23.976 preset makes film: the video's pictures at 23.976 a second, progressive, shown by 3:2
+  pulldown (soft pulldown: the player repeats fields as the pictures say, so the disc plays at 29.97 and holds a fifth
+  fewer pictures, each with more bits). "High" / "Low" quality is how hard the encoder looks for movement (Encore's
+  quality, 5 and 2): a "Low quality" preset searches a smaller range, to whole pixels only, so it converts faster
+  and the picture is a little worse at the same bit rate. A preset sets the video bit rate (used for that video whatever the others get; the others share what it
+  leaves of the disc, and the size estimate counts it), how it is kept and the sound:
+  **VBR, 1 Pass** (the rate averages the bit rate, up to the maximum), **VBR, 2 Pass** (the whole video is gone
+  through once to measure it, writing nothing, then converted giving hard scenes more of the bits and easy ones
+  fewer; it takes twice as long, and the progress bar runs once over both passes) or **CBR, 1 Pass** (the bit rate
+  is also the maximum); and **Dolby Digital** (192 kbit/s stereo) or **PCM** (the converted 48 kHz 16-bit stereo as
+  it is, 1.536 Mbit/s: it takes more of the disc and leaves that title's video less of the 9.8 Mbit/s; it covers the
+  video's own sound and an audio track made of it, also moved, trimmed or of several clips; the Properties panel
+  shows it). A video that goes on the disc as it is shows **Don't Transcode**; a preset picked for it converts it
+  all the same at the preset's settings (as in Encore; a DVD preset on a DVD, a Blu-ray one on a Blu-ray, also for
+  H.264 that a Blu-ray takes as it is), and **Don't Transcode** puts the file back on as it is. The DVD and Blu-ray
+  columns each tell whether the video would go on that kind of disc as it is. Changing the preset makes a new conversion (the old one's status goes
+  back to "Untranscoded")
+- A Blu-ray's quality presets are Encore's for the project's format: **High Quality** (25 Mbit/s, peak 30), **Long
+  Form** (9 Mbit/s, or 8 for a progressive format, peak 11) and **Maximum Quality** (35 Mbit/s, peak 35 for H.264, 40
+  for MPEG-2), named as Encore names them ("1920x1080i 29.97 High Quality MPEG-2", "1920x1080p 23.976 Long Form
+  H.264"), then **Automatic: <format>**. An MPEG-2 Long Form preset searches a little less for movement
+  (Encore's quality 3); H.264 has no such setting. A Blu-ray uses only this setting, a DVD only the DVD one
+- **File ▸ Transcode ▸ Edit Quality Presets…** keeps presets of your own (up to 32, for every project): a name, a
+  video bit rate, **DVD** or **Blu-ray**, an encoding (VBR 1 pass / VBR 2 pass / CBR), the sound (Dolby Digital /
+  PCM; a DVD preset's) and the quality (1 to 5, as above; 5 for a new one). A DVD preset is listed after the built-in
+  DVD presets. A Blu-ray preset has a **Peak** rate as well (the most a moment of the video may take) and is listed
+  after Encore's Blu-ray presets, for every Blu-ray format; its encoding works for H.264 and MPEG-2 alike (VBR 2
+  pass goes over the video twice, the first time only to measure it; CBR keeps the rate at the bit rate)
+- **Edit ▸ Update Markers from Source (Replace All Markers)** (Ctrl+F) takes the chapter points of the timeline in
+  the viewer away and puts the chapters of its video file (MKV, MP4) in their place; a file without chapters changes
+  nothing
+- **File ▸ Render ▸** makes things ahead of the build, into the cache the build uses: **Project** (every video and
+  slideshow that has to be converted, as Transcode All), **Motion Menu** (the selected motion menu's pictures) and
+  **Slideshow** (the selected slideshow). The build then takes them as they are. Any change to the project makes a
+  motion menu anew. An HD Blu-ray's motion menus are made only when the disc is built
+- **Interpret Footage…**, in the Project panel's right-click menu, says what shape a video's pixels are. **Use the
+  asset's pixel aspect ratio** (the default) takes what the file says; **Specify pixel aspect ratio** chooses one of
+  Square Pixels (1.0), D1/DV NTSC (0.9091), D1/DV NTSC Widescreen 16:9 (1.2121), D1/DV PAL (1.0940), D1/DV PAL
+  Widescreen 16:9 (1.4587), Anamorphic 2:1 (2.0), HD Anamorphic 1080 (1.333) and DVCPRO HD (1.5). Use it for a file
+  that is shown squeezed or stretched because it says the wrong thing (or nothing) about its pixels. The thumbnail,
+  the Monitor and the conversion all follow the choice (bars are added where the picture does not fill the frame),
+  and a conversion already made is made anew. A new timeline of the video is 16:9 or 4:3 by the chosen shape;
+  timelines made before keep theirs. A video that goes on the disc as it is (DVD-compliant MPEG-2) is not changed,
+  but goes on saying its timeline's shape: on a 16:9 timeline a file that says 4:3 is marked 16:9 on the disc (and
+  the reverse), only those few bits of its headers changed in a copy in the build's cache
+- For a picture, **Interpret Footage…** offers **Ignore alpha channel**: a picture with transparent parts (a PNG,
+  say) is drawn in its own colours without its transparency (in a menu the background does not show through it; as
+  a slide it is not laid over black). Use it for a picture whose alpha is broken or hides its colours. A picture's
+  pixel aspect ratio can be chosen too, as a video's. Of its own, a picture the size of a DVD frame (720×480, 720×486,
+  720×576) has SD pixels, as in Encore ("SD NTSC (0.9091)"): as a slide it fills a 4:3 DVD frame pixel for pixel; any
+  other picture has square pixels unless its file says otherwise. The preview shows slides in the same shape
 - Media in use cannot be deleted. Taking an item out of use sets the links to it back to Not Set
 - **Copy** and **Paste** (Ctrl+C / Ctrl+V) and **Duplicate** (Ctrl+D), in the Project panel's right-click menu or the
   **Edit** menu, make a copy of a menu (with its pages), a timeline, a
@@ -315,12 +442,20 @@ Drag another video onto the Timeline Viewer and it is butted on right after the 
 the join (up to 99 clips in one title). Drag a clip's edge to trim it; the cut snaps to the start of an MPEG-2 GOP.
 
 - MPEG-2 clips that need no conversion pass through as trimmed
-- Clips that need a conversion (H.264 and the like) can be joined and built too, but on a DVD they are not cut at
-  the trimmed place
-- An HD Blu-ray encodes each clip to H.264 and joins them at IDR pictures, so trims come out as set
+- Clips that need a conversion (H.264 and the like) can be joined and built too, but on a DVD (and an SD Blu-ray)
+  they cannot be trimmed
+- On an HD Blu-ray, H.264 that goes on the disc as it is (5.1) is trimmed at its key pictures; any other clip is
+  encoded to H.264 and joined at IDR pictures, so it is trimmed to the very frame
 - The first clip can be removed too (the second becomes the new first)
 - Drag a clip's body left or right to move it. The gap this leaves in front of it plays black on the disc
   (playback in the Monitor skips gaps). Clips cannot be put over their neighbours
+- Right-click a clip: **Clear Video Clip** removes it and leaves its place empty (the clips after it stay where they
+  are, and their chapters with them); **Ripple Delete** removes it and moves the clips after it up into its place. A
+  title's only clip stays
+- Click a clip (video or audio) to choose it: it is outlined in white. **Edit ▸ Clear** (Delete) then clears it (a video
+  clip as Clear Video Clip; an audio clip is taken off its track, the track itself when it was the only clip), and
+  **Edit ▸ Ripple Delete** (Shift+Delete) removes a chosen video clip and closes up its place. Without a chosen clip,
+  Ripple Delete takes the clip under the playhead. A click on no clip, or on a chapter point, lets go of the clip
 - Program stream clips (`.mpg` / `.vob`) snap chapters and trims to GOP starts as well
 
 Audio and subtitle media dropped on the Timeline Viewer go into A1 / S1.
@@ -348,9 +483,22 @@ with nothing selected) sets the audio track heard and the subtitle shown by defa
 button in a track's header chooses the track you hear.
 
 An audio track's clip can be dragged left and right to move where it starts (by frames). The track is silent up to
-there. A Dolby Digital (AC-3) file only gets silence of its own form in front and is not re-encoded; other sound gets
-the silence and is converted to Dolby Digital. A DTS track cannot be moved (the build reports an error; move it back to
+there. A Dolby Digital (AC-3) file only gets silence of its own form in front and is not re-encoded; a WAV stays PCM
+with the silence in front; other sound gets the silence and is converted to Dolby Digital. A DTS track cannot be moved (the build reports an error; move it back to
 the start).
+Drag a clip's left or right edge to trim it (by frames): the sound that stays keeps its place, so trimming the head
+moves the clip's start along with it; dragging an edge back out restores what was trimmed, up to the file's head and
+end. A trimmed Dolby Digital file is cut at its own frames (32 ms) and not re-encoded; a trimmed WAV stays PCM; other
+sound is cut and converted to Dolby Digital; a DTS track cannot be trimmed. The Monitor and the previews play the trimmed part.
+A track holds several clips (up to 99): right-click the track where the clip is to start and choose **Add Audio Clip
+Here ▸** and a sound file of the project, or drag a sound file from the Project panel onto the track's row (a
+line marks where the clip will start; dropped anywhere else it becomes a new track). Each clip shows its own
+file's waveform. Clips do not go over one another: a clip that would is refused, a clip
+dragged along the track stops at its neighbours, and an edge does not pass the clip next to it. **Clear Audio Clip**
+(right-click a clip of a track that has several) takes one off. On the disc the track is one stream: each clip's
+part of its file where the clip is, silence between; PCM when every clip is a WAV; Dolby Digital clips of one form
+(the same bit rate and channels) are joined by their own frames, not re-encoded (each placed to the nearest 32 ms);
+any other mix is decoded and made Dolby Digital (a DTS file cannot be one of several clips). The Monitor and the previews play the clips in their places too.
 
 The limits are 8 audio tracks and 32 subtitle tracks.
 
@@ -381,7 +529,7 @@ the first image, with the default slide length of 6 seconds).
 | Slide duration | 6 seconds by default. Entered as a timecode (00;00;06;00 for NTSC) |
 | Scale | Scale and Crop to Fit / fill / no scaling |
 | Transition | None / Cross Dissolve / Dip to Black / Wipe. 0.1 to 10 seconds long (2 seconds by default). Each slide can have its own |
-| Manual advance | When on, each slide waits until the viewer moves on with the remote control |
+| Manual advance | When on, each slide waits until the viewer moves on with the remote control. The same check box in a selected slide's sheet holds that slide only |
 | Pan & Zoom | With **Pan & Zoom** on in a slide's properties, the picture moves slowly while the slide is up (Pan: None / Pan Left / Pan Right / Pan Up / Pan Down; Zoom: Zoom In / Zoom Out / None). The slideshow's **Random Pan & Zoom** gives a motion to every slide that has no setting of its own |
 | Create Subtitle | Makes subtitles from each slide's name and description (**Include** also takes the next slide's name). Each slide can choose its highlight (group), stroke and alignment; the colours come from the slideshow's colour set |
 
@@ -412,6 +560,13 @@ order they are to play (so extras can be watched in any order).
   already linked (in this case at least one chapter button must be linked to a timeline)
 - Otherwise it makes a menu with a button for each chapter of the selected timeline (DiscCraft's own way)
 - **Create Multi-Page Chapter Index** splits them 6 buttons to a page and adds **Previous / Next** buttons
+- When the menu open in the viewer has chapter buttons, **Create Multi-Page Chapter Index** uses it as the template
+  for every page: the menu is filled as above and gets more pages for the chapters its buttons do not reach (pages
+  of the same menu, as Encore makes them: page 1, page 2, … after the menu itself, page 0), each page going on where
+  the page before stopped. A button of the type **Next** links to the page
+  after and a button of the type **Previous** to the page before. What a page has no use for is taken off it: the
+  chapter buttons past the last chapter, the Next button of the last page and the Previous button of the first (a
+  Previous or Next that already links somewhere else, such as back to the main menu, is kept)
 - A page holds up to 18 chapter buttons
 
 ## 8. Making menus
@@ -423,12 +578,25 @@ order they are to play (so extras can be watched in any order).
 | **File ▸ New ▸ Menu** (Ctrl+M) | An empty menu, with the same guides as Encore |
 | **File ▸ Import ▸ Menu…** (Shift+Ctrl+I) | Makes a menu from a PSD / `.pcraft`. Groups whose names start with `(+)` become buttons |
 | **New Menu** on a **Library** preset | Made from one of DiscCraft's own templates |
-| **Menu ▸ Add New Page** | The next page of the open menu (same background and settings) |
+| **Menu ▸ Add New Page** | The next page of the open menu (same background and settings). A page is an empty menu of its own: put its buttons on it. The pages are listed under their menu in the Menus panel (**Page 1**, **Page 2**…), the viewer's tab says which page is open, and the arrows under the viewer go from page to page. A link reaches a page through its menu's name ▸ **Page n** in the link lists |
 
 The first menu made becomes **First Play** and the **Title Button** automatically.
 
-The rules for PSD layer names: a group starting with `(+)` is a button; `(=1)` / `(=2)` / `(=3)` are the pictures
-of the normal / selected / activated highlights; `(%)` is a video thumbnail button; `(^)` is auto activate.
+The rules for PSD layer names: a group starting with `(+)` is a button; `(=1)` / `(=2)` / `(=3)` are the button's
+highlight (subpicture), drawn in colours 1 / 2 / 3 of the menu's colour set; `(%)` is a video thumbnail button; `(^)`
+is auto activate. With the colour set on **Automatic**, the colours come from the layers, as in Encore: the first
+button's layer colours (each layer's last opaque pixel) become highlight group 1 and the next button with different
+colours group 2; buttons with the same colours share that group, and any others use group 1. A colour a button has
+no layer for is a light tint at 47 %.
+
+Layer styles in the PSD (a stroke, glows, shadows and the rest) are in the menu's picture as they look in the PSD.
+
+With **Export Highlights in Rich Color** (the menu's **Basic** properties) on, a Blu-ray shows those layers in their
+own colours instead — gradients and soft edges as they are, as Encore does. A button with only a `(=1)` layer shows
+it when selected and when activated; a button with `(=2)` or `(=3)` layers shows `(=1)` in the normal state, `(=2)`
+when selected and `(=3)` when activated (nothing in a state whose layer it lacks). The Menu Viewer's **Normal** /
+**Selected** / **Activated** show them the same way; the Project Preview keeps the colour set's colours, as Encore's
+preview does. A DVD's highlights stay in the colour set's colours.
 
 ### 8.2 Buttons
 
@@ -443,6 +611,76 @@ of the normal / selected / activated highlights; `(%)` is a video thumbnail butt
 - Buttons may overlap while you edit, but **their highlights do not overlap on the disc** (overlapping buttons get a
   red frame and the check reports "Buttons overlap.")
 - **Object ▸ Convert to Object** turns a button back into text
+- **Object ▸ Convert to Replacement Layer** (Ctrl+J) makes the selected image or shape a replacement layer, shown
+  as **(!)** in the Layers panel. A still dragged from the Project panel onto it takes its place, scaled to fit the
+  layer with its own shape and centred, keeping the layer's opacity, shadow and turn (anywhere else a still becomes
+  a new layer). **Convert to Object** makes it an ordinary layer again
+- **Window ▸ Character** (F3) shows the character settings of the selected text or button on their own (the same rows
+  as in the Properties). With nothing selected it shows those of the next text you type (as in Encore): its size,
+  colour, font, style and format; a text then made with the Text tool gets them (in the one undo step that adds it).
+  **Reset** puts them back to the defaults. **Kerning** is **Metrics** (the font's own pairs) or, as in Encore, a
+  number from the list (−100 to 200) or typed (−1000 to 1000, in 1/1000 em) that changes the room between every two
+  characters. **Tsume** (0 to 100 %) takes that share of the blank around Japanese characters out, as each glyph
+  of the font has it (measured from its outline): between two kana or kanji the blank after the one and before the
+  other, and the blank side of a full-width punctuation mark. **Mojikumi** sets how
+  wide full-width punctuation (、。「」（） and the like) is: **None**, **Half-width punctuation** (all of it),
+  **Half-width punctuation at line ends** (only the mark that ends a line), and the two full-width sets (as the font
+  sets it). In vertical text tsume takes the usual blanks of a Japanese font (about a tenth of an em). **Kinsoku** sets where the
+  lines of a paragraph text may not break: **None**, **Strong kinsoku** (no line starts with a closing bracket, a
+  punctuation mark, a small kana or the long vowel mark; none ends with an opening bracket) or **Weak kinsoku** (the
+  same without the small kana and the long vowel mark). **Kinsoku method** sets how a character that may not start a
+  line is kept off it: **Push In First** (the default) takes it into the line above when it fits in the blank half
+  of a full-width punctuation mark (a full stop, a comma or a closing bracket reaches a little past the end), else
+  it takes the character before it down with it; **Push Out First** takes the character before it down, and takes
+  it in only when the line has no place to break; **Push Out Only** always takes the character before it down.
+  **Hanging punctuation** lets a full-width comma or full stop (、。，．) that does not fit hang past the end of the
+  line. DiscCraft does not squeeze the line to make room, and a hanging mark counts in the line's alignment
+- **Paragraph text**: drag with the Text tool (or the Vertical Text tool) instead of clicking, and the text gets a box
+  as wide as the drag (a vertical text: as tall) in which its lines wrap; a text's **Wrap: At a width** in the
+  Properties does the same and sets the width. Lines break at spaces and between Japanese characters, by the Kinsoku
+  setting; the lines you break yourself stay. The box is drawn as wide as it is set whatever is in it, and the
+  alignment is inside it. Select the text and drag the white handle on the right edge of its box (the bottom edge
+  for vertical text) to make the box wider or narrower; its width in the Properties does the same. **Box height**,
+  under it in the Properties, or the white handle in the middle of a horizontal box's bottom edge (of a vertical box's
+  right edge, where it is how wide the columns may reach), gives the box a height too: it is drawn that tall, and the
+  lines below it are left out, on the disc as well (a vertical text: the box is drawn that wide, its columns from its
+  right edge, and the columns past it are left out). When some are left out, the Properties
+  say "Some of the text does not fit in the box" and a red plus shows at the box's corner (Encore's overset text);
+  make the box taller or the text shorter
+- The fourth alignment button, **≡** (**Justify last left**), spreads every line of a paragraph text but the last of
+  each paragraph from one side of its box to the other: Japanese gets the room between every two characters, a line
+  of words without Japanese at its spaces. The last line, and a text without a box, start at the left. A vertical
+  text's columns are spread down to the box's height in the same way (the last column starts at the top)
+- **Window ▸ Styles** (Ctrl+F2) puts a predefined look on text: choose a set (**General**, built in, or **User**,
+  your own), select a text object or buttons in the Menu Viewer, and press **Apply** (or double-click the style). A
+  style is a font, size, colour, character formatting and drop shadow; on a button it changes the formatting and the
+  shadow of its text (the size, colour and font of button text are the menu's). **New** keeps the look of the
+  selected text or button as a style of the User set, **Delete** removes one. The **Image** / **Text** / **Shape**
+  buttons choose which styles are listed, as in Encore. An image or shape style is layer effects and a drop shadow
+  (DiscCraft's own: **No Effects**, **White Edge**, **Dark Edge**, **Soft Glow**, **Raised**, **Raised with Shadow**,
+  **Gold**, **Inner Light**); it goes on the selected image or shape, and **New** keeps those of the selected one
+- **Layer effects** of an image or a shape: **Layer Effects…** in its properties (the effects it has are named
+  beside it) turns on and sets a **Stroke** (a line round its outside), an **Outer Glow** and an **Inner Glow** (a
+  soft light round it, or along its edges inside), a **Bevel** (raised edges, lit from the angle given) and a
+  **Color Overlay**, with a live preview in the menu viewer. They are drawn into the menu on the disc and in a
+  written PSD as the layer looks. A text object has the same **Layer Effects…** in its properties, and a button's
+  text on the button's **Character** tab; the effects go with the text when it becomes a button (**Convert to
+  Button**) and back
+- **Object ▸ Create Subpicture** (Alt+Ctrl+B) gives the selected buttons a subpicture of their own (shown as **(=1)
+  Subpicture** in the Layers panel), drawn in colour 1 of the colour set instead of their text or frame highlight.
+  A button of a menu made from a PSD takes the shape of its artwork (what the button's `(+)` layer set shows),
+  found by its place, or by its name when it was moved or resized since, and stretched over the button as it is
+  now. Any other button (made in DiscCraft, or one without artwork) takes the shape of its own text and video
+  thumbnail, as Encore makes a `(=1)` layer of a text button; a button with neither is left as it is. When the menu
+  is opened in PhotoCraft (**Edit Menu in PhotoCraft**), the subpicture is in the PSD as a hidden `(=1)` layer of the
+  button's set, as Encore keeps it
+- **Edit ▸ Paste as Subpicture** (Shift+Ctrl+V) works on any button: select an image or shape layer and **Copy** (or
+  **Cut**) it, select one button, then paste. The layer's shape becomes colour 1 of the button's subpicture (shown
+  as **(=1) Subpicture** in the Layers panel), added to what it had; the button is then highlighted in that shape
+  instead of its text or frame. The layer's colour and opacity do not matter, only its shape. A layer that reaches
+  past the button widens the button to take it in, as in Encore (its text and video thumbnail stay where they were;
+  the part outside the frame is left out); the highlight and the remote use the wider button. On a turned button
+  only the part over the button is used. Taking the subpicture away fits the button to its content again
 
 Button properties:
 
@@ -454,7 +692,7 @@ Button properties:
 | Auto Activate | The button under the cursor is activated without Enter |
 | Audio / Subtitle | The audio and subtitle this button switches to |
 | Routing | Where the arrow keys move (automatic / manual) |
-| Transition | The motion that goes with the button in a motion menu |
+| Transition | A video played when the button is pressed, before where it links to (on the disc a title of its own, with the video's own sound) |
 
 **View ▸ Show Button Routing** (Ctrl+7) shows the cross of routes. The routing defaults (movement up, down, left and
 right, how to wrap, whether to leave out "Next" and "Previous" buttons) and the syncing of button names are set in
@@ -464,10 +702,29 @@ right, how to wrap, whether to leave out "Next" and "Previous" buttons) and the 
 ### 8.3 Text and shapes
 
 - Click with the **Text tool** (T) or the **Vertical Text tool** (Y) and type. Font, font style, size, leading,
-  tracking, baseline, superscript / subscript, colour and anti-aliasing can be set
+  tracking, baseline, superscript / subscript, colour and anti-aliasing can be set. **Leading** is Encore's:
+  **Automatic** sets the lines 120 % of the size apart; a number (typed, or picked from the **▾** list of 6 to 72) is
+  the distance between the lines' baselines (between the columns of a vertical text) in pixels
 - Put **Images** and **Shapes** (rectangle / rounded rectangle / ellipse) from the **Library** on the menu with
-  **Place**, or by dragging. The **Layers** panel handles their order and the eye / lock (the background cannot be
-  moved)
+  **Place**, or by dragging them from the Library into the menu viewer: a button lands centred where it is dropped,
+  an image or a shape with its corner there (moved in to stay in the frame), and a background becomes the menu's.
+  The **Layers** panel handles their order and the eye / lock (the background cannot be moved)
+- **Text items** (Encore's): select a text object in the menu viewer and press **Add Item** in the Library: it is
+  kept in the **User** set with its text, look and box, named by its first line, and shown under **Text Items**.
+  **Place** puts a copy where the text was; dragging it into the menu viewer puts its top left corner where it is
+  dropped
+- **Layer sets** and **replacement layers** (Encore's Library kinds, shown by their own toggles): a layer set is a
+  few image and shape layers placed together (DiscCraft's own: **Title Band**, **Bottom Band**, **Thin Frame**,
+  **Side Panel**), a replacement layer a placeholder that a still dropped on it replaces (**Photo 4:3**, **Photo
+  16:9**, **Round Photo**; shown as **(!)** in the Layers panel). **Place** puts them where they are drawn (in the
+  middle of an HD frame), dragging them puts their top left corner where they are dropped (kept in the frame), in
+  one step. To keep your own: select an image or shape in the menu viewer and press **Add Item** (a replacement
+  layer is kept as one, anything else as a layer set), or choose **Add the Menu's Layers as a Layer Set** under the
+  **≡** for all of the open menu's image and shape layers. An image keeps its file, so another project finds it, or
+  imports it when it has none
+- **Sets of your own**: the **≡** beside the Library's set list has **New Set…** (a name; it is then shown, and
+  **Add Item** puts items in it), **Rename Set…** and **Delete Set** (its items move to the **User** set, so none
+  are lost). The sets are kept in `library.json` with the items
 - **Object ▸ Drop Shadow…** (Shift+Ctrl+O), **Flip Horizontal / Flip Vertical** (Alt+Ctrl+H /
   Alt+Ctrl+V), **Rotate ▸** (180°, 90° clockwise / counter-clockwise). Any angle with the Rotate tool (R)
 - **Guides**: **View ▸ New Guide…** (Shift+Alt+Ctrl+:) sets one at a position you type; **Show Guides** (Ctrl+:),
@@ -477,6 +734,9 @@ right, how to wrap, whether to leave out "Next" and "Previous" buttons) and the 
 
 **Menu ▸ Edit Menu Color Set…** sets the normal / selected / activated colours
 (highlight frames, text and subpictures). **Highlight groups** let several buttons light up together.
+Type a **Name** and press **New** to keep the set in the project; it is then listed under **Color Set** for any
+menu, and **Delete** removes the chosen one (menus that took it keep their colours). **Export…** writes the set
+to a file (`.dcmenucolors`) and **Import…** reads one into the dialog, for another menu or project.
 **View ▸ Show Normal Subpicture / Show Selected Subpicture / Show Activated Subpicture** (Ctrl+3 / Ctrl+4 / Ctrl+5) compare them on the canvas.
 For choosing the groups button by button, and for invisible highlights, see
 [highlight colours, button by button](#145-highlight-colours-button-by-button).
@@ -543,8 +803,17 @@ For reading a whole disc off the page — First Play, menus that lead back up, w
 
 ### 10.1 Importing
 
-- **Timeline ▸ Import Subtitles…** (SRT / WebVTT / text with timecodes; UTF-8 / UTF-16 / Shift_JIS)
-  adds one subtitle track to the selected timeline
+- **Timeline ▸ Import Subtitles ▸ Text Script…** (SRT / WebVTT / text with timecodes; UTF-8 / UTF-16 /
+  Shift_JIS) adds one subtitle track to the selected timeline
+- **Timeline ▸ Import Subtitles ▸ FAB Image Script… / Image Script…** read subtitles that are pictures (JPG,
+  GIF, PNG, TIF or BMP), as Encore does. A FAB image script has one line per picture
+  (`file start end left top right bottom`) and asks for the folder of its pictures; an image script starts with
+  `Display_Area (left top right bottom)` and `Directory <folder>`, then `number start end file`. In **Map
+  Colors**, click the first picture to pick its **Background** (transparent), **Fill / Color 1** (drawn in the
+  colour group's fill) and **Outline / Color 2** (the group's stroke); any other colour is transparent, so pictures
+  with sharp edges and three colours look best. **Relative** moves every subtitle by the timecode given (`-` in
+  front for earlier). Picture subtitles show their file name on the timeline and cannot have their text edited;
+  they can be moved and trimmed like other subtitles
 - Or import a subtitle file as an asset and drop it on the Timeline Viewer to make the clips
 - Text scripts written by Encore (UTF-16 LE) can be read too. **Timeline ▸ Export Subtitles ▸
   Subtitle Track** writes SRT / text scripts
@@ -558,6 +827,12 @@ On the S1 track of the Timeline Viewer, drag a clip's edge to trim it and double
 The subtitle buttons of the Monitor work too (**Previous Subtitle / Next Subtitle / Trim Subtitle In-Point to
 Here / Trim Subtitle Out-Point to Here / Add Subtitle**). **Add Subtitle** puts a clip of 2 seconds at the playhead
 (it needs 2 free seconds before the next subtitle).
+
+In the timeline, drag a subtitle clip to move it along its track, or drag its left or right edge to trim it. It
+moves by whole frames, stops at the clips beside it and at the start, and stays at least 13 frames long (a clip
+already shorter keeps its length); an outline shows where it goes, and Ctrl+Z puts it back. With **Snap subtitle
+clips** (Preferences ▸ Timelines; off by default, as in Encore) the moved edge snaps to the edges of the subtitle
+clips, the chapter points and the playhead near it. A press on a chapter point's line still drags the chapter.
 
 ### 10.3 Appearance
 
@@ -610,6 +885,7 @@ Encore).
 | Timeline Bitrate Too High | On a DVD, timelines whose video (used as it is) and audio tracks together are over 9.8 Mbps |
 | Subtitle Text Overflow | Subtitles whose text does not fit the title-safe frame (11 lines or more at the standard NTSC size, or a long line that cannot be broken). The subtitle track and the in / out times are shown |
 | Subtitle Spacing | On a Blu-ray (HD or PAL), subtitles less than 5 frames after the one before on the same track. Not looked at for a DVD |
+| Playback Type | On a DVD, a chapter playlist set to **Random** or **Shuffle** with more than 64 entries: a DVD picks from the first 64 only. (Encore plays random and shuffle chapter playlists in order on a DVD; DiscCraft writes them as set) |
 | Track and title limits | 8 audio tracks, 32 subtitle tracks, 99 DVD titles and so on |
 | Media files | Media that is offline, missing or of a kind that cannot be used |
 | Other | Anything that fits none of the above |
@@ -631,6 +907,19 @@ the project as it is with DiscCraft's own VM.
   the window with × is the same
 - Titles play with picture and sound, and go on to their end action when they finish. The arrow keys and Enter
   are the remote control; Space pauses
+- A chapter playlist plays its entries one after another (each chapter of its timeline up to the next chapter
+  point), and a slideshow shows its slides for their durations with its audio clips. The chapter number follows
+  what is on screen, so previous / next chapter go on from there. A slide set to advance manually stays up until
+  next chapter (or Enter); while it waits its sound stops too, as on the disc, and next chapter goes on from where
+  it stopped. A slide moves with its pan and zoom as on the disc, Scale and Crop fills the frame,
+  and the transitions between slides (cross dissolve, dip to black, wipe) run across each cut as the build makes
+  them. With the subtitle stream on, a slide with **Create Subtitle** shows its name (and description) as the
+  disc does. A chapter playlist set to **Shuffle** plays every entry once in a random order, and one set to
+  **Random** a random entry each time (up to 99 here), as a player does
+- A motion menu that has been rendered (**File ▸ Render ▸ Motion Menu**) plays as on the disc — the background's
+  video and the motion buttons, looping from its loop point. Before that, or after a change to the project, it
+  shows the menu as it stands (the background's first frame), as Encore does. An HD Blu-ray's motion menus are
+  made only when the disc is built, so they stay still here
 
 ### 12.2 Monitor (playing the build result)
 
@@ -650,9 +939,9 @@ DTS tracks are silent.
 | Build | Starts the build. It saves the project and checks it first |
 | Source | The current project (the Build panel writes only the project that is open) |
 | Destination | When empty, the place shown in faint text (`<project name>_DVD` / `_BD` beside the project; `<project name>.iso` for an image). For a folder, naming an existing folder makes a `<disc name>` folder inside it (a place that already has `VIDEO_TS` / `BDMV` is built again in place). An image cannot be given a folder |
-| Disc Info | The usage bar (**Refresh Usage** calculates it), the disc's name (also the ISO's volume label), the size, **DVD-ROM content** / **BD-ROM content** (**Browse…** chooses a folder; its files and folders go in the disc's root, beside `VIDEO_TS` / `BDMV`: a manual or photos to read on a computer. A folder build copies them, an image holds them. They take that much of the capacity from the video, and the line under the bar shows their size. **Clear** takes them off. A file must be under 4 GB, folders at most 7 deep) |
+| Disc Info | The usage bar (**Refresh Usage** calculates it), the disc's name (also the ISO's volume label), the size (**Custom**, last in the list, takes a size of your own in GB beside it — 1 GB = 1,000,000,000 bytes — from 0.001 GB up to a single-layer DVD's 4.7 GB, or a BDXL's 128 GB on a Blu-ray; a larger DVD is DVD9. The usage bar and the project check then measure against it), **DVD-ROM content** / **BD-ROM content** (**Browse…** chooses a folder; its files and folders go in the disc's root, beside `VIDEO_TS` / `BDMV`: a manual or photos to read on a computer. A folder build copies them, an image holds them. They take that much of the capacity from the video, and the line under the bar shows their size. **Clear** takes them off. A file must be under 4 GB, folders at most 7 deep) |
 | Layer Break | DVD-9 only. Automatic / manual. Manual is set by timeline and position (timecode / frame / seconds, **Playhead**) |
-| Region Codes | DVD only. All regions / custom (ticks for 1 to 8) |
+| Region Codes | DVD only. All regions / custom (ticks for 1 to 8). **Parental level**: none, or 1 to 8 (8 is the most restricted). A player whose parental level is set lower asks for its password before the disc plays (at the start, and when a title is started from the remote) and stops when it is not given; a player with no level set plays as usual. Country-specific ratings are not written, and this has not been tried on a hardware player |
 | Project Check | The check results (the same rows as the check window) |
 | Result | Errors, the number of titles / chapters / the size, **Simulate** (runs the VM after building to a folder) |
 
@@ -870,15 +1159,16 @@ When the movie appears, DiscCraft reads it and sets it as the menu's background 
   the movie instead of being drawn twice,
 - set **Loop #** to **None**, so the movie plays when the menu opens and stops on its last frame instead
   of starting again,
-- watch it after building (**Window ▸ Monitor**, F9, **Open Build Output**). In the Menu Viewer and the
-  Project Preview a motion menu shows the background's first frame — the same as Encore before you press
-  Render.
+- watch it in the Project Preview after **File ▸ Render ▸ Motion Menu**, or after building (**Window ▸
+  Monitor**, F9, **Open Build Output**). Until it is rendered, and in the Menu Viewer always, a motion menu
+  shows the background's first frame — the same as Encore.
 
 **Movement in the buttons**
 
 **Motion Buttons** on the **Motion** tab makes the menu's thumbnail buttons play their video. It costs bit
 rate, and it is the kind of motion menu that older players mind most, so try it on a real player before a run
-of discs.
+of discs. After **File ▸ Render ▸ Motion Menu** the Project Preview plays the buttons' video; a button linked to a
+slideshow shows its first slide, still, as in Encore.
 
 ![The Motion tab of a menu](images/user-guide/motion-tab.png)
 
@@ -965,7 +1255,7 @@ So that you are not looking for it:
 | Burning to a disc, DDP export | Not there. DiscCraft writes a folder or an ISO |
 | Copy protection (CSS, AACS) | Not there. Only the region code flags |
 | BD-J menus | Not there. Blu-ray is HDMV |
-| Motion menus rendered inside the application | Not there. The Menu Viewer and the Project Preview show the background's first frame; render in EffectCraft, or build and watch the result |
+| An HD Blu-ray's motion menus rendered before the build | Not there. They are made when the disc is built, and the Project Preview shows their first frame; build and watch the result |
 | Highlight colour sets shared between projects as a file | Not there for menus (subtitle colour sets have `.dccolors`). Save the menu as a template instead |
 | GOP headers as marks on the ruler, and Alt-stepping between them | Not there. Chapter points and trims snap to GOP starts automatically |
 
@@ -975,9 +1265,13 @@ So that you are not looking for it:
 
 | Category | Contents |
 |---|---|
-| General | The default television standard (for new projects). Kept in `workspace.json` |
-| Timelines | Still duration (the slide duration of new slideshows; 6 seconds by default), Subtitle duration (the length of a subtitle added in the Monitor; 2 seconds by default), Audio language / Subtitle language (the language of new tracks; empty uses the disc's audio language). Kept in `workspace.json` |
+| General | The default television standard (for new projects). **Playback quality** (as in Encore: High, Draft, Automatic): how large the Monitor plays a title's pictures — High at the disc's frame size, Draft at half, Automatic (the default) at half only for HD larger than 1280 × 720, so 1080-line titles play smoothly. Kept in `workspace.json` |
+| Audio/Video Output | **Audio output device**: the system's default, or one of the output devices, for playback in the Monitor and the previews (from the next time playback starts; a device that is no longer there gives way to the default). **Video output**: Off, **A window of its own**, or (on Windows) one of the connected displays — the picture of the title the Monitor or a preview plays is then also shown there, full screen on that display or in a window you can put anywhere; Esc in that window turns it off. Menus are not sent out, only titles' pictures. **Disable video output when in the background** (on by default) takes the output window away while no DiscCraft window is in front. Kept in `workspace.json` |
+| Timelines | Still duration (the slide duration of new slideshows; 6 seconds by default), Subtitle duration (the length of a subtitle added in the Monitor; 2 seconds by default), Audio language / Subtitle language (the language of new tracks; empty uses the disc's audio language), Snap subtitle clips (off by default). Kept in `workspace.json` |
+| Preview | The player the Project Preview and the Monitor stand for. **TV mode**: 16:9 Widescreen, 4:3 Letterbox (a 16:9 title is shown with bars above and below, on a 4:3 screen), or 4:3 Pan & Scan (the middle of a 16:9 title fills the 4:3 screen, its sides cut). **Player region code**: All regions, or one of 1 to 8 — a DVD limited to other regions does not open in the preview (the status bar says why). **Audio language**: when the disc chooses no audio track itself, a title's first track in this language is heard. **Subtitle language**: when no subtitles are shown, a title's first subtitle track in this language is shown. **Player parental level**: None, or 1 to 8 — a disc whose parental level (Build panel) is higher does not play, as on a locked player (the preview has no password to give). The defaults (widescreen, all regions, no language, no level) play every disc as it is. **Preview playback quality**: the same choice for the Project Preview's titles (High by default). Kept in `workspace.json` |
+| Media | Where DiscCraft keeps its **Library Content** (your own library items) and its **Media Cache Database** (the lengths, sizes and thumbnails remembered of media files), each with **Browse…** (put it in another folder), **Default** (back beside the settings) and **Show in Explorer**. A library folder that already holds a library is opened as it is; an empty one gets the items you have now. A new cache folder is used from then on, and the old one is left as it is. **Clean** empties the media cache: the files are read again when next needed (a build's transcodes are in the build's destination and are not touched). Nothing is ever written into or beside your media files |
 | Menus | Button routing (movement up, down, left and right, how and by which rule to wrap, leaving out "Next" and "Previous" buttons), the default for syncing button names. **Kept in the project** (the routing is the same whichever computer builds it) |
+| Memory | **Installed RAM**, and **Transcodes at a time**: Automatic (one for every processor core), or a number. A build and Transcode Now convert several titles at once and each takes memory of its own, so choose fewer to leave more for other applications. Kept in `workspace.json` |
 | Appearance | Display language (日本語 / English). **Window ▸ Language** switches it too. Until you choose one, every start follows the operating system's display language (Japanese on a Japanese system; English on an English system and on one in any other language) |
 
 ## 16. Keyboard shortcuts
@@ -1008,6 +1302,12 @@ So that you are not looking for it:
 | Ctrl+A / Shift+Ctrl+A | Select All / Deselect All |
 | Alt+Ctrl+R | Rename… |
 | Ctrl+E | Edit Original |
+| Ctrl+W | Close (what the viewer of the selected menu, timeline, slideshow or chapter playlist shows; the item stays) |
+| Shift+Delete | Ripple Delete (the video clip under the playhead of the Timeline Viewer goes; the rest moves up) |
+| Alt+Shift+Ctrl+R / Alt+Shift+Ctrl+H | Replace Asset… / Locate Asset… (the asset selected in the Project panel) |
+| Shift+keypad * | Set Poster Frame (the chapter the playhead is in; the keypad's * alone, and the main keys' *, add a chapter point) |
+| Alt+Ctrl+T | Move Track to View (the timeline scrolls to the audio track that is heard) |
+| Shift+Ctrl+F | Save Frame as File… (the frame at the playhead of the Timeline Viewer, as a PNG in square pixels) |
 | Shift+Ctrl+M | Edit Menu in PhotoCraft |
 | Ctrl+K | Preferences… |
 
@@ -1042,9 +1342,10 @@ So that you are not looking for it:
 | Key | Operation |
 |---|---|
 | F1 | DiscCraft Help… (this manual) |
-| F2 / F4 / F5 | Build / Check Project / Flowchart |
-| F6 / F7 / F8 / F9 | Layers / Library / Menus / Monitor |
-| F11 / F12 / Ctrl+F3 | Project / Properties / Timelines |
+| F2 / F3 / F4 / F5 | Build / Character / Check Project / Flowchart |
+| F6 / F7 / F8 / F9 / F10 | Layers / Library / Menus / Monitor / Progress |
+| F11 / F12 / Ctrl+F2 / Ctrl+F3 | Project / Properties / Styles / Timelines |
+| Ctrl+F4 | Tools: show or hide the toolbar under the menu bar (kept for the next start) |
 
 ## 17. Command line and scripts
 
@@ -1097,7 +1398,7 @@ argument (connected over stdio).
 | Subtitle text | Up to 10 lines at the standard NTSC size inside the title-safe frame |
 | Gap between subtitles | 5 frames or more on a Blu-ray (HD / PAL); no limit on a DVD |
 | DVD bit rate | 9.8 Mbps for video, audio and subtitles together |
-| Sizes | DVD5 4.7 GB, DVD9 8.5 GB, BD25 / BD50 / BD100 / BD128 |
+| Sizes | DVD5 4.7 GB, DVD9 8.5 GB, BD25 / BD50 / BD100 / BD128, or a custom size |
 | Drop | 500 files at a time |
 | Recent projects | 10 |
 | Workspaces | 32 (names up to 64 characters) |
@@ -1109,10 +1410,13 @@ Other rules:
 - On a DVD, video clips that need a conversion are not cut at the trimmed place (they are cut at GOP starts)
 - A 16:9 menu also uses the same 720×480 frame in SD and is shown stretched sideways (an HD Blu-ray uses a
   1920×1080 frame). The aspect ratio of a DVD's menus is the same for the whole disc
-- Converted audio is Dolby Digital (AC-3) 192 kbps. AC-3 and WAV media are used as they are. DTS (`.dts`) is used
-  as it is on a DVD only
+- Converted audio is Dolby Digital (AC-3) 192 kbps. AC-3 and WAV media are used as they are, and so is DTS
+  (`.dts`)
 - MPEG-2 video that fits a DVD (720 / 704 / 352 wide) is not converted. The clips of one title must have the same
   width
+- MPEG-1 video (a VCD's `.mpg`, an `.m1v`) of 352x240 (NTSC) or 352x288 (PAL) whose stream says up to 1.856 Mbps goes
+  on a DVD as it is, 4:3; one marked as variable bit rate is converted. Its MPEG audio is converted to Dolby Digital.
+  MPEG-1 and MPEG-2 clips are not joined in one title. On a Blu-ray MPEG-1 is converted
 
 ## 20. When something does not work
 

@@ -12,8 +12,8 @@ use disccraft_transcode::hd::AccessUnit;
 
 use crate::DvdError;
 use crate::demux::{BdVideoFormat, sps_fits};
-use crate::h264_sps;
 use crate::prepare::{audio_cache_key, part_number};
+use disccraft_transcode::h264_sps;
 
 /// The most parameter-set bytes taken from a track's configuration record.
 const MAX_PARAMETER_SETS: usize = 64 * 1024;
@@ -359,6 +359,21 @@ impl H264Samples {
     #[must_use]
     pub fn units(&self) -> &[AccessUnit] {
         &self.units
+    }
+
+    /// The pictures `indices` alone, as the access units `units` (the same pictures, timed anew): a trimmed clip.
+    #[must_use]
+    pub(crate) fn keep(&self, indices: &[usize], units: Vec<AccessUnit>) -> Self {
+        Self {
+            path: self.path.clone(),
+            length_size: self.length_size,
+            parameter_sets: self.parameter_sets.clone(),
+            samples: indices
+                .iter()
+                .filter_map(|index| self.samples.get(*index).copied())
+                .collect(),
+            units,
+        }
     }
 
     /// Access unit `unit`, read from `file` (the opened [`Self::path`]).

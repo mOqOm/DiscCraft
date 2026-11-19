@@ -1,14 +1,14 @@
 use std::fs;
 use std::path::Path;
 
-use disccraft_project::{Project, Timeline, VideoStandard};
+use disccraft_project::{DiscKind, Project, Timeline, VideoStandard};
 use disccraft_psmux::es::{
     Ac3Stream, LpcmStream, VideoStream, parse_ac3, parse_video_reader, parse_wav,
 };
 
 use crate::prepare::{PreparedAudio, PreparedTitle};
 use crate::{DvdError, ticks_to_27m};
-use disccraft_menu::subtitle::{Cue, CueStyle, render_cue_styled};
+use disccraft_menu::subtitle::{Cue, CueStyle, cue_shows, render_any_cue};
 use disccraft_project::Tick;
 use disccraft_psmux::mux::{FileBytes, SubpictureUnit, VideoBytes};
 use disccraft_spu::{Bitmap, SpuParams, encode_spu, spu_delay_from_90k};
@@ -37,8 +37,9 @@ pub(crate) struct LoadedTitle {
     pub(crate) subtitle_languages: Vec<Option<[u8; 2]>>,
     /// The title's palette (`00 Y Cr Cb`): the colours its subtitles draw with.
     pub(crate) palette: [u32; 16],
-    /// Still time of every cell (`0xFF` holds each slide of a manual-advance slideshow until the viewer goes on).
-    pub(crate) cell_still: u8,
+    /// Still time of each cell (`0xFF` holds a slide of a slideshow until the viewer goes on: every slide of a
+    /// manual-advance show, or the slides that have their own Manual Advance). Cells past its end have none.
+    pub(crate) cell_stills: Vec<u8>,
 }
 
 /// One loaded audio stream.
@@ -65,6 +66,15 @@ pub(crate) enum LoadedAudio {
     Lpcm {
         /// Parsed LPCM stream.
         stream: LpcmStream,
+        /// Optional ISO 639-1 language.
+        language: Option<[u8; 2]>,
+    },
+    /// MPEG-1 Layer II stream and its elementary bytes.
+    Mp2 {
+        /// Parsed MPEG audio stream.
+        stream: disccraft_psmux::es::MpaStream,
+        /// MPEG audio elementary bytes.
+        data: Vec<u8>,
         /// Optional ISO 639-1 language.
         language: Option<[u8; 2]>,
     },
@@ -100,7 +110,13 @@ pub(crate) fn load_title(
     let (cell_starts, program_cells, layer_break_cell) =
         with_layer_break(&chapter_starts, layer_break, standard)?;
     let disc_language = audio_language(project);
-    let mut audio = load_audio(timeline, first_pts, &prepared.audio_tracks, disc_language)?;
+    let mut audio = load_audio(
+        timeline,
+        first_pts,
+        &prepared.audio_tracks,
+        disc_language,
+        project.settings.kind,
+    )?;
     let subtitles = load_subtitles(project, timeline, first_pts, standard)?;
 
     // A transcoded asset brings its own soundtrack (AC-3) when the timeline has no explicit audio tracks.
@@ -135,7 +151,7 @@ pub(crate) fn load_title(
         subpictures: subtitles.streams,
         subtitle_languages: subtitles.languages,
         palette: subtitles.palette,
-        cell_still: 0,
+        cell_stills: Vec::new(),
     })
 }
 
@@ -152,7 +168,13 @@ pub(crate) fn load_title_without_video(
     let (cell_starts, program_cells, _) =
         with_layer_break(&cell_starts(timeline)?, None, standard)?;
     let disc_language = audio_language(project);
-    let mut audio = load_audio(timeline, first_pts, &prepared.audio_tracks, disc_language)?;
+    let mut audio = load_audio(
+        timeline,
+        first_pts,
+        &prepared.audio_tracks,
+        disc_language,
+        project.settings.kind,
+    )?;
     if audio.is_empty()
         && let Some(path) = &prepared.transcoded_audio
     {
@@ -188,7 +210,7 @@ pub(crate) fn load_title_without_video(
         subpictures: Vec::new(),
         subtitle_languages: Vec::new(),
         palette: text_palette(),
-        cell_still: 0,
+        cell_stills: Vec::new(),
     })
 }
 
@@ -272,8 +294,9 @@ fn load_subtitles(
                 let cues = disccraft_menu::subtitle_file::asset_cues(asset, &project.settings)
                     .map_err(|e| DvdError::Invalid(e.to_string()))?;
                 let mut units = Vec::with_capacity(cues.len());
-                // A subtitle added in the Monitor and not typed yet has nothing to show.
-                for cue in cues.into_iter().filter(|cue| !cue.text.trim().is_empty()) {
+                // A subtitle added in the Monitor and not typed yet has nothing to show; a picture subtitle (an
+                // image script's) is its picture.
+                for cue in cues.into_iter().filter(cue_shows) {
                     // The subtitle's own group, stroke and place where it has them, else the track's.
                     units.push(subtitle_unit_styled(
                         &cue,
@@ -380,7 +403,7 @@ pub(crate) fn subtitle_unit_styled(
     style: CueStyle,
     (colors, alpha): ([u8; 4], [u8; 4]),
 ) -> Result<SubpictureUnit, DvdError> {
-    let bitmap = render_cue_styled(&cue.text, 720, height, style)
+    let bitmap = render_any_cue(cue, 720, height, style)
         .map_err(|e| DvdError::Invalid(format!("subtitle: {e}")))?;
     let duration_90k = ticks_to_27m(Tick(cue.end.0.saturating_sub(cue.start.0))) / 300;
     let params = SpuParams {
@@ -459,6 +482,9 @@ fn read_path(path: &Path) -> Result<Vec<u8>, DvdError> {
     fs::read(path).map_err(|err| crate::io_error(path, err))
 }
 
+/// The fastest MPEG-1 video a DVD carries, bit/s.
+pub(crate) const MPEG1_MAX_BITRATE: u64 = 1_856_000;
+
 fn validate_video(video: &VideoStream, standard: VideoStandard) -> Result<(), DvdError> {
     let sequence = &video.sequence;
     let (ifo_standard, want_rate) = match standard {
@@ -479,6 +505,27 @@ fn validate_video(video: &VideoStream, standard: VideoStandard) -> Result<(), Dv
         resolution,
         disccraft_ifo::Resolution::Half | disccraft_ifo::Resolution::Quarter
     );
+    // MPEG-1 video (M6.350): 352x240 / 352x288 at the standard's rate, up to 1.856 Mbit/s; its aspect code is a
+    // pixel aspect ratio, and the title is 4:3.
+    if sequence.is_mpeg1() {
+        let bit_rate = u64::from(sequence.bit_rate_400).saturating_mul(400);
+        if resolution != disccraft_ifo::Resolution::Quarter
+            || sequence.frame_rate_code != want_rate
+            || bit_rate > MPEG1_MAX_BITRATE
+        {
+            return Err(DvdError::Unsupported(format!(
+                "MPEG-1 video goes on a DVD at 352x{} and up to 1.856 Mbit/s ({}x{} at {bit_rate} bit/s)",
+                if standard == VideoStandard::Ntsc {
+                    240
+                } else {
+                    288
+                },
+                sequence.width,
+                sequence.height
+            )));
+        }
+        return Ok(());
+    }
     if small && sequence.aspect_code == 3 {
         return Err(DvdError::Unsupported(
             "a 352-wide DVD video must be 4:3".to_string(),
@@ -613,6 +660,7 @@ fn end_audio_at(audio: &mut LoadedAudio, start: i64, end: i64) {
     match audio {
         LoadedAudio::Ac3 { stream, .. } => stream.frames.retain(|frame| frame.pts < end),
         LoadedAudio::Dts { stream, .. } => stream.frames.retain(|frame| frame.pts < end),
+        LoadedAudio::Mp2 { stream, .. } => stream.frames.retain(|frame| frame.pts < end),
         LoadedAudio::Lpcm { stream, .. } => {
             let bytes_per_second = u128::from(stream.sample_rate)
                 * u128::from(stream.channels)
@@ -630,12 +678,14 @@ fn end_audio_at(audio: &mut LoadedAudio, start: i64, end: i64) {
     }
 }
 
-/// The timeline's audio tracks; one without a language of its own takes `disc_language`.
+/// The timeline's audio tracks; one without a language of its own takes `disc_language`. A WAV is read for the
+/// LPCM of a disc of `kind`.
 fn load_audio(
     timeline: &Timeline,
     first_pts: i64,
     prepared: &[PreparedAudio],
     disc_language: Option<[u8; 2]>,
+    kind: DiscKind,
 ) -> Result<Vec<LoadedAudio>, DvdError> {
     if timeline.audio.len() != prepared.len() {
         return Err(DvdError::Invalid(
@@ -680,10 +730,30 @@ fn load_audio(
             }
             PreparedAudio::Wav(path) => {
                 let data = read_path(path)?;
-                let stream = parse_wav(&data)
-                    .map_err(|err| DvdError::Invalid(format!("WAV parse error: {err}")))?;
+                // A Blu-ray's LPCM is also 192 kHz and more than 6.144 Mbit/s (M6.347).
+                let stream = match kind {
+                    DiscKind::Dvd => parse_wav(&data),
+                    DiscKind::BluRay => disccraft_psmux::es::parse_wav_for_bd(&data),
+                }
+                .map_err(|err| DvdError::Invalid(format!("WAV parse error: {err}")))?;
                 validate_lpcm(&stream)?;
                 LoadedAudio::Lpcm { stream, language }
+            }
+            PreparedAudio::Mp2(path) => {
+                let data = read_path(path)?;
+                let stream = disccraft_psmux::es::parse_mpa(&data, first_pts)
+                    .map_err(|err| DvdError::Invalid(format!("MPEG audio parse error: {err}")))?;
+                if stream.sample_rate != 48_000 {
+                    return Err(DvdError::Unsupported(format!(
+                        "MPEG audio sample rate {} is not 48 kHz",
+                        stream.sample_rate
+                    )));
+                }
+                LoadedAudio::Mp2 {
+                    stream,
+                    data,
+                    language,
+                }
             }
         };
 
@@ -778,15 +848,16 @@ fn validate_dts(stream: &disccraft_psmux::es::DtsStream) -> Result<(), DvdError>
 }
 
 fn validate_lpcm(stream: &LpcmStream) -> Result<(), DvdError> {
-    if stream.sample_rate != 48_000 {
+    // 192 kHz is a Blu-ray's only (its WAVs are read so).
+    if !matches!(stream.sample_rate, 48_000 | 96_000 | 192_000) {
         return Err(DvdError::Unsupported(format!(
-            "LPCM sample rate {} is not 48 kHz",
+            "LPCM sample rate {} is not 48, 96 or 192 kHz",
             stream.sample_rate
         )));
     }
-    if stream.bits != 16 {
+    if stream.bits != 16 && stream.bits != 24 {
         return Err(DvdError::Unsupported(
-            "M2 supports only 16-bit LPCM".to_string(),
+            "LPCM is 16 or 24 bits a sample".to_string(),
         ));
     }
 
@@ -827,6 +898,7 @@ mod subtitle_tests {
             end: Tick((start + 1) * 254_016_000_000),
             text: text.to_owned(),
             look: disccraft_project::CueLook::default(),
+            image: None,
         };
         let asset = project.assets.get_mut(&subs).ok_or("asset")?;
         assert_eq!(asset.kind, AssetKind::Subtitle);
@@ -847,6 +919,75 @@ mod subtitle_tests {
             asset.cues = None;
         }
         assert!(load_subtitles(&project, &timeline, 0, VideoStandard::Ntsc).is_err());
+        Ok(())
+    }
+
+    /// A picture subtitle (an image script's) goes on the disc at its place in the frame, its fill colour in the
+    /// fill.
+    #[test]
+    fn a_picture_subtitle_is_built_at_its_place() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = std::env::temp_dir().join(format!(
+            "disccraft-dvd-picture-subtitle-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir)?;
+        // 30 x 10: blue, with a white box at columns 5..=24 and rows 2..=7.
+        let picture = dir.join("001.png");
+        let mut rgba = Vec::new();
+        for y in 0..10 {
+            for x in 0..30 {
+                let white = (5..=24).contains(&x) && (2..=7).contains(&y);
+                rgba.extend_from_slice(if white {
+                    &[255, 255, 255, 255]
+                } else {
+                    &[0, 0, 255, 255]
+                });
+            }
+        }
+        {
+            let file = std::fs::File::create(&picture)?;
+            let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), 30, 10);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.write_header()?.write_image_data(&rgba)?;
+        }
+        let mut project = Project::default();
+        let video = project.add_asset(Path::new("movie.mp4"))?;
+        let subs = project.add_asset(&dir.join("script.txt"))?;
+        let timeline = project.add_timeline(video, None)?;
+        project.assets.get_mut(&subs).ok_or("asset")?.cues = Some(vec![SubtitleCue {
+            start: Tick(254_016_000_000),
+            end: Tick(2 * 254_016_000_000),
+            text: String::new(),
+            look: disccraft_project::CueLook::default(),
+            image: Some(disccraft_project::CueImage {
+                path: picture.to_string_lossy().into_owned(),
+                area: [100, 400, 700, 470],
+                colors: disccraft_project::ImageCueColors {
+                    background: [0, 0, 255],
+                    fill: [255, 255, 255],
+                    outline: [0, 0, 0],
+                },
+            }),
+        }]);
+        let timeline = project.timeline_mut(timeline).ok_or("timeline")?;
+        timeline.subtitles.push(SubtitleTrack {
+            asset: subs,
+            language: "en".to_owned(),
+            group: 0,
+        });
+        let timeline = timeline.clone();
+        let loaded = load_subtitles(&project, &timeline, 0, VideoStandard::Ntsc)?;
+        let unit = loaded
+            .streams
+            .first()
+            .and_then(|units| units.first())
+            .ok_or("no subpicture")?;
+        let decoded = disccraft_spu::decode_spu(&unit.data)?;
+        assert_eq!((decoded.params.x, decoded.params.y), (105, 402));
+        assert_eq!((decoded.bitmap.width, decoded.bitmap.height), (20, 6));
+        assert!(decoded.bitmap.pixels.iter().all(|value| *value == 1));
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 }
@@ -891,6 +1032,7 @@ mod audio_end_tests {
                 bits: 16,
                 data: vec![0; 192_000],
                 frame_bytes: 320,
+                channel_mask: 0,
             },
             language: None,
         };

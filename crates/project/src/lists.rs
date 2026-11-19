@@ -329,6 +329,16 @@ pub struct SlideTransition {
 }
 
 impl Slideshow {
+    /// Which slides stay up until the viewer moves on: all of them with the show's Manual Advance, else the
+    /// slides that have their own.
+    #[must_use]
+    pub fn held_slides(&self) -> Vec<bool> {
+        self.slides
+            .iter()
+            .map(|slide| self.manual_advance || slide.manual_advance)
+            .collect()
+    }
+
     /// The pan and zoom the slide at `index` plays with: its own, else a random one when the show asks for them.
     #[must_use]
     pub fn slide_effect(&self, index: usize) -> Option<SlideEffect> {
@@ -389,6 +399,10 @@ pub struct Slide {
     /// Encore's "Pan & Zoom" on the slide: the picture moves while the slide is up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effect: Option<SlideEffect>,
+    /// Encore's "Manual Advance" on the slide: it stays up until the viewer moves on (the show's own Manual
+    /// Advance holds every slide).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub manual_advance: bool,
 }
 
 /// Slideshow document object.
@@ -662,6 +676,7 @@ impl Project {
             subtitle_align: 100,
             subtitle_group: 0,
             effect: None,
+            manual_advance: false,
         });
         Ok(index)
     }
@@ -877,6 +892,25 @@ impl Project {
         }
         let _ = slideshow.audio_clips.remove(index);
         slideshow.audio = slideshow.audio_clips.first().copied();
+        Ok(())
+    }
+
+    /// Turns one slide's manual advance on or off.
+    pub fn set_slide_manual_advance(
+        &mut self,
+        id: u64,
+        slide: usize,
+        manual: bool,
+    ) -> Result<(), ProjectError> {
+        let slideshow = self
+            .slideshows
+            .get_mut(&id)
+            .ok_or_else(|| ProjectError::Invalid("slideshow does not exist".to_string()))?;
+        let slide = slideshow
+            .slides
+            .get_mut(slide)
+            .ok_or_else(|| ProjectError::Invalid("slide does not exist".to_string()))?;
+        slide.manual_advance = manual;
         Ok(())
     }
 

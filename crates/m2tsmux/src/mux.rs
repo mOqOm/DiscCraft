@@ -162,6 +162,21 @@ pub fn mux_m2ts_with(
     config: &MuxConfig,
     out: &mut dyn std::io::Write,
 ) -> Result<M2tsLayout, M2tsError> {
+    mux_m2ts_stoppable(streams, readers, config, || false, out)
+}
+
+/// The message of the error [`mux_m2ts_stoppable`] ends with when `stop` asks it to.
+pub const STOPPED: &str = "multiplexing stopped";
+
+/// [`mux_m2ts_with`] that asks `stop` before each unit it writes (a build's Stop): `true` ends the multiplexing
+/// with [`STOPPED`] (M6.340).
+pub fn mux_m2ts_stoppable(
+    streams: &[EsInput],
+    readers: &[Option<&dyn UnitData>],
+    config: &MuxConfig,
+    stop: fn() -> bool,
+    out: &mut dyn std::io::Write,
+) -> Result<M2tsLayout, M2tsError> {
     validate(streams, config)?;
     let reader = |stream: usize| readers.get(stream).copied().flatten();
 
@@ -196,6 +211,9 @@ pub fn mux_m2ts_with(
     let mut ep_map = Vec::new();
 
     while let Some(stream_index) = next_stream(&queues) {
+        if stop() {
+            return Err(M2tsError(STOPPED.to_string()));
+        }
         let queue = queues
             .get_mut(stream_index)
             .ok_or_else(|| M2tsError("missing stream queue".to_string()))?;
@@ -407,7 +425,7 @@ fn plan_video_ahead(queue: &mut VecDeque<PesItem>, packet_time: u64) {
 fn window_ticks(kind: StreamKind) -> u64 {
     match kind {
         StreamKind::Mpeg2Video | StreamKind::H264Video => VIDEO_WINDOW,
-        StreamKind::Lpcm | StreamKind::Ac3 => AUDIO_WINDOW,
+        StreamKind::Lpcm | StreamKind::Ac3 | StreamKind::Dts => AUDIO_WINDOW,
         StreamKind::Pgs | StreamKind::Igs => GRAPHICS_WINDOW,
     }
 }
@@ -485,13 +503,43 @@ fn write_pes_item(
 
 #[cfg(test)]
 mod tests {
-    use super::mux_m2ts;
+    use super::{STOPPED, mux_m2ts, mux_m2ts_stoppable};
     use crate::{
         AUDIO_PID, EsInput, EsUnit, M2tsError, MuxConfig, PCR_PID, PMT_PID, SOURCE_PACKET_SIZE,
         StreamKind, VIDEO_PID,
     };
 
     use std::collections::{HashMap, HashSet};
+
+    /// M6.340: a stop asked for ends the multiplexing before the next unit.
+    #[test]
+    fn a_stop_ends_the_multiplexing() {
+        let units: Vec<EsUnit> = (0..10)
+            .map(|index| EsUnit {
+                pts: 45_000 + 3_003 * index,
+                dts: 45_000 + 3_003 * index,
+                data: vec![0_u8; 100],
+                random_access: index == 0,
+            })
+            .collect();
+        let streams = vec![EsInput {
+            pid: VIDEO_PID,
+            kind: StreamKind::Mpeg2Video,
+            units,
+        }];
+        let mut out = Vec::new();
+        let stopped = mux_m2ts_stoppable(&streams, &[], &MuxConfig::default(), || true, &mut out);
+        assert_eq!(stopped, Err(M2tsError(STOPPED.to_string())));
+        assert!(out.is_empty());
+        let going = mux_m2ts_stoppable(
+            &streams,
+            &[],
+            &MuxConfig::default(),
+            || false,
+            &mut Vec::new(),
+        );
+        assert!(going.is_ok());
+    }
 
     #[test]
     fn mux_basic_clip() -> Result<(), M2tsError> {

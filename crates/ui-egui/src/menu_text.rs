@@ -12,6 +12,9 @@ use disccraft_project::{
 use egui::Ui;
 use serde_json::json;
 
+/// The numbers Encore's カーニング list offers (1/1000 em).
+const KERNING_CHOICES: [i16; 14] = [-100, -75, -50, -25, -10, -5, 0, 5, 10, 25, 50, 75, 100, 200];
+
 /// The tool used on the menu viewer (the toolbar's tool buttons).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Tool {
@@ -94,6 +97,57 @@ pub(crate) struct TextDrag {
     pub(crate) origin: egui::Pos2,
     /// Where the text is now (frame pixels).
     pub(crate) now: (u16, u16),
+    /// A paragraph text's box being resized by its handle instead (Encore: dragging a text box's handle): its
+    /// width when the drag started (the height for vertical text), and now.
+    pub(crate) resize: Option<(u16, u16)>,
+    /// The box's height (a vertical box's width: how far its columns reach) is being resized instead (the handle
+    /// at the middle of a horizontal box's bottom edge, of a vertical box's right edge).
+    pub(crate) height: bool,
+}
+
+/// The handle of a paragraph text's box height on the canvas: the middle of its bottom edge, or for vertical text
+/// (whose "height" is how wide its columns reach) of its right edge.
+pub(crate) fn height_handle(outline: egui::Rect, vertical: bool) -> egui::Rect {
+    let at = if vertical {
+        outline.right_center()
+    } else {
+        outline.center_bottom()
+    };
+    egui::Rect::from_center_size(at, egui::vec2(9.0, 9.0))
+}
+
+/// A paragraph text's box width (its height for vertical text) after its handle moved from `origin` to `point`:
+/// grown or shrunk by the pointer's travel across (down, for vertical text), within the box's limits.
+pub(crate) fn resized_box(
+    start: u16,
+    (origin, point): (egui::Pos2, egui::Pos2),
+    vertical: bool,
+    frame: (u16, u16),
+    canvas: egui::Rect,
+) -> u16 {
+    let (x0, y0) = to_frame_point(origin, frame, canvas);
+    let (x1, y1) = to_frame_point(point, frame, canvas);
+    let delta = if vertical {
+        y1.saturating_sub(y0)
+    } else {
+        x1.saturating_sub(x0)
+    };
+    let width = i32::from(start).saturating_add(delta).clamp(
+        i32::from(disccraft_project::MIN_TEXT_BOX),
+        i32::from(disccraft_project::MAX_TEXT_BOX),
+    );
+    u16::try_from(width).unwrap_or(start)
+}
+
+/// The handle of a paragraph text's box on the canvas (`outline`: the selected text's outline): the middle of its
+/// right edge, or of its bottom edge for vertical text.
+pub(crate) fn box_handle(outline: egui::Rect, vertical: bool) -> egui::Rect {
+    let at = if vertical {
+        outline.center_bottom()
+    } else {
+        outline.right_center()
+    };
+    egui::Rect::from_center_size(at, egui::vec2(9.0, 9.0))
 }
 
 /// Moves `start` by the pointer's travel from `origin` to `point`, kept inside the frame.
@@ -138,24 +192,138 @@ impl DiscCraftApp {
 
     /// The text tools: add "Text" at the clicked point (the vertical one writes top to bottom, with the click at
     /// the top of the column's middle, as Encore places it), select it and put the cursor in its text field.
-    pub(crate) fn add_menu_text(&mut self, menu: MenuId, x: u16, y: u16, vertical: bool) {
+    ///
+    /// `box_width`: the tool was dragged (Encore: a text box), so the text wraps at that width (a vertical
+    /// text's columns at that height) and `x`, `y` is the box's corner.
+    pub(crate) fn add_menu_text(
+        &mut self,
+        menu: MenuId,
+        x: u16,
+        y: u16,
+        vertical: bool,
+        box_width: Option<u16>,
+    ) {
         // Half a column (the default size × 1.2) to the left of the click.
         let half_column = u16::try_from(u32::from(DEFAULT_TEXT_SIZE) * 3 / 5).unwrap_or(0);
-        let x = if vertical {
+        let x = if vertical && box_width.is_none() {
             x.saturating_sub(half_column)
         } else {
             x
         };
-        let added = self.run_command(
-            "menu.addText",
-            json!({"menu": menu.0, "text": tl!("Text"), "x": x, "y": y, "vertical": vertical}),
-        );
+        let mut params =
+            json!({"menu": menu.0, "text": tl!("Text"), "x": x, "y": y, "vertical": vertical});
+        if let Some(fields) = params.as_object_mut() {
+            if let Some(width) = box_width {
+                let _ = fields.insert("boxWidth".to_owned(), json!(width));
+            }
+            // The characters set for the next text (the Character panel with nothing selected).
+            for (key, value) in &self.next_text {
+                let _ = fields.insert(key.clone(), value.clone());
+            }
+        }
+        let added = self.run_command("menu.addText", params);
         if let Some(index) = added
             .and_then(|value| value.get("index").and_then(serde_json::Value::as_u64))
             .and_then(|index| usize::try_from(index).ok())
         {
             self.select_menu_text(menu, index);
             self.focus_rename = true;
+        }
+    }
+
+    /// The format of the next text typed: the defaults with what was set for it.
+    pub(crate) fn next_text_format(&self) -> disccraft_project::TextFormat {
+        let mut value =
+            serde_json::to_value(disccraft_project::TextFormat::default()).unwrap_or_default();
+        if let Some(fields) = value.as_object_mut() {
+            for (key, set) in &self.next_text {
+                if fields.contains_key(key) {
+                    let _ = fields.insert(key.clone(), set.clone());
+                }
+            }
+        }
+        serde_json::from_value(value).unwrap_or_default()
+    }
+
+    /// The Character panel with nothing selected (Encore: its values are the next text's): size, colour, font,
+    /// style and format of the next text typed, and Reset.
+    pub(crate) fn next_text_rows(&mut self, ui: &mut Ui) {
+        ui.weak(tl!(
+            "Nothing is selected: these are the characters of the next text typed"
+        ));
+        ui.add_space(4.0);
+        let text = |key: &str| {
+            self.next_text
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        // Read before the rows that change them.
+        let font = text("font");
+        let font_style = text("fontStyle");
+        let color = text("color").and_then(|hex| crate::app::hex_to_rgb(&hex));
+        let mut changes: Vec<(String, serde_json::Value)> = Vec::new();
+        let mut size = self
+            .next_text
+            .get("size")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|size| u16::try_from(size).ok())
+            .unwrap_or(DEFAULT_TEXT_SIZE);
+        ui.horizontal(|ui| {
+            crate::properties::prop_label(ui, tl!("Size:"));
+            let response = ui.add(
+                egui::DragValue::new(&mut size)
+                    .range(MIN_TEXT_SIZE..=MAX_TEXT_SIZE)
+                    .suffix(" px"),
+            );
+            if response.drag_stopped() || (response.changed() && !response.dragged()) {
+                changes.push(("size".to_owned(), json!(size)));
+            }
+        });
+        let mut own = color.is_some();
+        let mut rgb = crate::app::rgb_to_f32(color.unwrap_or([255, 255, 255]));
+        ui.horizontal(|ui| {
+            crate::properties::prop_label(ui, tl!("Color:"));
+            let toggled = ui.checkbox(&mut own, tl!("Own color")).changed();
+            let picked = own && ui.color_edit_button_rgb(&mut rgb).changed();
+            if toggled || picked {
+                let value = own.then(|| {
+                    let [r, g, b] = crate::app::rgb_from_f32(rgb);
+                    format!("#{r:02X}{g:02X}{b:02X}")
+                });
+                changes.push(("color".to_owned(), json!(value)));
+            }
+        });
+        if let Some(chosen) = self.font_row(ui, "next_text_font", font.as_deref()) {
+            changes.push(("font".to_owned(), json!(chosen)));
+            changes.push(("fontStyle".to_owned(), serde_json::Value::Null));
+        }
+        if let Some(style) = font_style_row(
+            ui,
+            "next_text_font_style",
+            font.as_deref(),
+            font_style.as_deref(),
+        ) {
+            changes.push(("fontStyle".to_owned(), json!(style)));
+        }
+        let format = self.next_text_format();
+        if let Some(serde_json::Value::Object(fields)) = self.format_rows(ui, format) {
+            changes.extend(fields);
+        }
+        for (key, value) in changes {
+            if value.is_null() {
+                let _ = self.next_text.remove(&key);
+            } else {
+                let _ = self.next_text.insert(key, value);
+            }
+        }
+        ui.add_space(4.0);
+        if ui
+            .add_enabled(!self.next_text.is_empty(), egui::Button::new(tl!("Reset")))
+            .on_hover_text(tl!("The next text typed gets the default characters"))
+            .clicked()
+        {
+            self.next_text.clear();
         }
     }
 
@@ -178,12 +346,23 @@ impl DiscCraftApp {
             .iter()
             .enumerate()
             .map(|(index, text)| {
-                // As drawn (turned by its free angle), moved by the drag.
-                let mut rect = disccraft_menu::text_bounds(menu, text);
-                if let Some(drag) = self
+                // As drawn (turned by its free angle), moved by the drag; a box being resized at its new size.
+                let drag = self
                     .text_drag
-                    .filter(|drag| drag.menu == menu.id && drag.index == index)
-                {
+                    .filter(|drag| drag.menu == menu.id && drag.index == index);
+                let mut rect = match drag.and_then(|drag| Some((drag.resize?, drag.height))) {
+                    Some(((_, now), height)) => {
+                        let mut resized = text.clone();
+                        if height {
+                            resized.box_height = Some(now);
+                        } else {
+                            resized.box_width = Some(now);
+                        }
+                        disccraft_menu::text_bounds(menu, &resized)
+                    }
+                    None => disccraft_menu::text_bounds(menu, text),
+                };
+                if let Some(drag) = drag {
                     let shift = |at: u16, now: u16, start: u16| {
                         let moved = i32::from(at) + i32::from(now) - i32::from(start);
                         u16::try_from(moved.max(0)).unwrap_or(at)
@@ -231,6 +410,126 @@ impl DiscCraftApp {
                 egui::Color32::from_rgb(120, 200, 255),
             );
         }
+        // A paragraph text's box: a handle to drag its width (its height for vertical text).
+        if let Some(text) = menu
+            .texts
+            .get(selected)
+            .filter(|text| text.box_width.is_some())
+        {
+            // And one to drag its height (lines past it are not drawn), a vertical box's width (columns past it).
+            let handles = [
+                box_handle(outline, text.vertical),
+                height_handle(outline, text.vertical),
+            ];
+            for handle in handles {
+                painter.rect_filled(handle, 0.0, egui::Color32::WHITE);
+                painter.rect_stroke(
+                    handle,
+                    0.0,
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 200, 255)),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            // Encore's overset mark: a red plus at the box's corner when lines are left out.
+            if disccraft_menu::text_overset(menu, text) {
+                let mark = egui::Rect::from_center_size(
+                    outline.right_bottom() - egui::vec2(6.0, 6.0),
+                    egui::vec2(9.0, 9.0),
+                );
+                let red = egui::Color32::from_rgb(230, 60, 50);
+                painter.rect_filled(mark, 0.0, egui::Color32::WHITE);
+                painter.rect_stroke(
+                    mark,
+                    0.0,
+                    egui::Stroke::new(1.0, red),
+                    egui::StrokeKind::Inside,
+                );
+                let stroke = egui::Stroke::new(1.5, red);
+                painter.line_segment(
+                    [
+                        mark.center() - egui::vec2(3.0, 0.0),
+                        mark.center() + egui::vec2(3.0, 0.0),
+                    ],
+                    stroke,
+                );
+                painter.line_segment(
+                    [
+                        mark.center() - egui::vec2(0.0, 3.0),
+                        mark.center() + egui::vec2(0.0, 3.0),
+                    ],
+                    stroke,
+                );
+            }
+        }
+    }
+
+    /// The selected paragraph text whose box handle is under `point` (it is pressed to resize the box), and
+    /// whether it is the handle of the box's height.
+    pub(crate) fn hit_text_box_handle(
+        &self,
+        menu: &Menu,
+        frame: (u16, u16),
+        canvas: egui::Rect,
+        point: egui::Pos2,
+    ) -> Option<(usize, bool)> {
+        let selected = self.selected_menu_text(menu.id)?;
+        let text = menu
+            .texts
+            .get(selected)
+            .filter(|text| text.box_width.is_some() && !text.hidden && !text.locked)?;
+        let rect = self.text_rects(menu).get(selected).copied()?;
+        let outline = to_canvas(rect, frame, canvas).expand(2.0);
+        if box_handle(outline, text.vertical)
+            .expand(2.0)
+            .contains(point)
+        {
+            return Some((selected, false));
+        }
+        height_handle(outline, text.vertical)
+            .expand(2.0)
+            .contains(point)
+            .then_some((selected, true))
+    }
+
+    /// Presses on a paragraph text's box handle (`height`: the handle of the box's height): starts resizing the
+    /// box (unless it was a click). A box without a height starts from the height its lines take.
+    pub(crate) fn press_text_box_handle(
+        &mut self,
+        menu: &Menu,
+        (index, height): (usize, bool),
+        point: egui::Pos2,
+        released: bool,
+    ) {
+        if released {
+            return;
+        }
+        let Some(text) = menu.texts.get(index) else {
+            return;
+        };
+        let side = if height {
+            // Without one, from what its lines take (a vertical text's columns: their width).
+            Some(text.box_height.unwrap_or_else(|| {
+                let rect = disccraft_menu::text_rect(menu, text);
+                let taken = if text.vertical { rect.w } else { rect.h };
+                taken.clamp(
+                    disccraft_project::MIN_TEXT_BOX,
+                    disccraft_project::MAX_TEXT_BOX,
+                )
+            }))
+        } else {
+            text.box_width
+        };
+        if let Some(side) = side {
+            self.text_drag = Some(TextDrag {
+                menu: menu.id,
+                index,
+                start: (text.x, text.y),
+                origin: point,
+                now: (text.x, text.y),
+                resize: Some((side, side)),
+                height,
+            });
+        }
     }
 
     /// The text under `point`, topmost first.
@@ -274,6 +573,8 @@ impl DiscCraftApp {
                 start: (text.x, text.y),
                 origin: point,
                 now: (text.x, text.y),
+                resize: None,
+                height: false,
             });
         }
     }
@@ -294,13 +595,35 @@ impl DiscCraftApp {
             return;
         }
         if let Some(point) = ui.input(|i| i.pointer.interact_pos()) {
-            drag.now = dragged_position(&drag, point, frame, canvas);
+            match drag.resize {
+                Some((start, _)) => {
+                    // A box's height grows downwards, as a vertical box's column length does; a vertical box's
+                    // width (its "height") rightwards, as a horizontal box's width.
+                    let vertical = menu.texts.get(drag.index).is_some_and(|text| text.vertical);
+                    let down = drag.height != vertical;
+                    let side = resized_box(start, (drag.origin, point), down, frame, canvas);
+                    drag.resize = Some((start, side));
+                }
+                None => drag.now = dragged_position(&drag, point, frame, canvas),
+            }
         }
         if !ui.input(|i| i.pointer.any_released()) {
             self.text_drag = Some(drag);
             return;
         }
         self.text_drag = None;
+        if let Some((start, side)) = drag.resize {
+            let had_height = menu
+                .texts
+                .get(drag.index)
+                .is_some_and(|text| text.box_height.is_some());
+            if drag.height && (side != start || !had_height) {
+                self.set_text_field(menu.id, drag.index, json!({ "boxHeight": side }));
+            } else if !drag.height && side != start {
+                self.set_text_field(menu.id, drag.index, json!({ "boxWidth": side }));
+            }
+            return;
+        }
         if drag.now != drag.start {
             let _ = self.run_command(
                 "menu.setText",
@@ -320,12 +643,6 @@ impl DiscCraftApp {
         let Some(text) = self.menu_text(menu, index) else {
             return;
         };
-        let menu_color = self
-            .session
-            .project
-            .menu(menu)
-            .map_or([255, 255, 255], |menu| menu.text_color);
-
         let mut changed = None;
         ui.horizontal_top(|ui| {
             crate::properties::prop_label(ui, tl!("Text:"));
@@ -340,6 +657,24 @@ impl DiscCraftApp {
         if let Some(value) = changed {
             self.set_text_field(menu, index, json!({ "text": value }));
         }
+
+        self.text_character_rows(ui, menu, index);
+        crate::properties::text_row(ui, tl!("Position:"), &format!("{}, {}", text.x, text.y));
+        // M6.342: its layer effects, as an image's.
+        self.effects_row(ui, menu, crate::effects_dialog::EffectsTarget::Text(index));
+    }
+
+    /// The character rows of text `index` of `menu` (Encore's Character panel): size, direction, colour, font,
+    /// font style and formatting. In the text's property sheet and in the Character panel.
+    pub(crate) fn text_character_rows(&mut self, ui: &mut Ui, menu: MenuId, index: usize) {
+        let Some(text) = self.menu_text(menu, index) else {
+            return;
+        };
+        let menu_color = self
+            .session
+            .project
+            .menu(menu)
+            .map_or([255, 255, 255], |menu| menu.text_color);
 
         let mut size = text.size;
         let mut size_changed = false;
@@ -371,6 +706,84 @@ impl DiscCraftApp {
         });
         if orientation_changed && vertical != text.vertical {
             self.set_text_field(menu, index, json!({ "vertical": vertical }));
+        }
+
+        // Paragraph text (Encore: a box drawn with the text tool): the width the lines wrap at.
+        let mut boxed = text.box_width.is_some();
+        let mut box_width = text.box_width.unwrap_or(320);
+        let mut box_changed = false;
+        ui.horizontal(|ui| {
+            crate::properties::prop_label(ui, tl!("Wrap:"));
+            box_changed |= ui
+                .checkbox(&mut boxed, tl!("At a width"))
+                .on_hover_text(tl!(
+                    "Paragraph text: the lines wrap at this width (a vertical text's columns at this height). Dragging with a text tool draws such a box"
+                ))
+                .changed();
+            let response = ui.add_enabled(
+                boxed,
+                egui::DragValue::new(&mut box_width)
+                    .range(disccraft_project::MIN_TEXT_BOX..=disccraft_project::MAX_TEXT_BOX)
+                    .suffix(" px"),
+            );
+            box_changed |= (response.drag_stopped() || (response.changed() && !response.dragged()))
+                && Some(box_width) != text.box_width;
+        });
+        if box_changed {
+            let value = if boxed {
+                json!(box_width)
+            } else {
+                serde_json::Value::Null
+            };
+            if boxed != text.box_width.is_some() || boxed {
+                self.set_text_field(menu, index, json!({ "boxWidth": value }));
+            }
+        }
+        // The box's height (Encore: an area text's height): the lines past it are not drawn.
+        let mut limited = text.box_height.is_some();
+        let mut box_height = text.box_height.unwrap_or(120);
+        let mut height_changed = false;
+        let overset = self
+            .session
+            .project
+            .menu(menu)
+            .is_some_and(|found| disccraft_menu::text_overset(found, &text));
+        ui.horizontal(|ui| {
+            crate::properties::prop_label(ui, "");
+            ui.add_enabled_ui(boxed, |ui| {
+                height_changed |= ui
+                    .checkbox(&mut limited, tl!("Box height"))
+                    .on_hover_text(tl!(
+                        "The lines past this height are not drawn (a vertical text: the columns past this width)"
+                    ))
+                    .changed();
+                let response = ui.add_enabled(
+                    limited,
+                    egui::DragValue::new(&mut box_height)
+                        .range(disccraft_project::MIN_TEXT_BOX..=disccraft_project::MAX_TEXT_BOX)
+                        .suffix(" px"),
+                );
+                height_changed |= (response.drag_stopped()
+                    || (response.changed() && !response.dragged()))
+                    && Some(box_height) != text.box_height;
+            });
+        });
+        if overset {
+            ui.horizontal(|ui| {
+                crate::properties::prop_label(ui, "");
+                ui.colored_label(
+                    egui::Color32::from_rgb(230, 80, 60),
+                    tl!("Some of the text does not fit in the box"),
+                );
+            });
+        }
+        if height_changed {
+            let value = if limited {
+                json!(box_height)
+            } else {
+                serde_json::Value::Null
+            };
+            self.set_text_field(menu, index, json!({ "boxHeight": value }));
         }
 
         let mut own = text.color.is_some();
@@ -419,8 +832,6 @@ impl DiscCraftApp {
         if let Some(fields) = change {
             self.set_text_field(menu, index, fields);
         }
-
-        crate::properties::text_row(ui, tl!("Position:"), &format!("{}, {}", text.x, text.y));
     }
 
     /// Encore の文字パネルのうち DiscCraft が描けるもの（テキストとボタンの文字で共通）: スタイル、行揃えと
@@ -490,6 +901,7 @@ impl DiscCraftApp {
                 ("⇤", TextAlign::Left, tl!("Align left")),
                 ("↔", TextAlign::Center, tl!("Align center")),
                 ("⇥", TextAlign::Right, tl!("Align right")),
+                ("≡", TextAlign::Justify, tl!("Justify last left")),
             ] {
                 if ui
                     .selectable_label(format.align == align, glyph)
@@ -527,7 +939,6 @@ impl DiscCraftApp {
                 });
         });
         let mut tracking = format.tracking;
-        let mut leading = format.leading;
         ui.horizontal(|ui| {
             crate::properties::prop_label(ui, tl!("Tracking:"));
             let response = ui.add(
@@ -541,24 +952,218 @@ impl DiscCraftApp {
                 change = Some(json!({ "tracking": tracking }));
             }
         });
+        // Encore の 行送り: 自動（サイズの 120 %）か、行のベースラインの間隔（px）。▾ は Encore の一覧（6〜72）。
+        // 前の版の「行送りに足すピクセル」は、行送りを選ぶと 0 に戻す。
+        let mut pitch = format.line_pitch.unwrap_or(0);
         ui.horizontal(|ui| {
             crate::properties::prop_label(ui, tl!("Leading:"));
-            let response = ui.add(
-                egui::DragValue::new(&mut leading)
-                    .range(disccraft_project::MIN_LEADING..=disccraft_project::MAX_LEADING)
-                    .suffix(" px"),
-            );
+            let auto = tl!("Automatic");
+            let response = ui
+                .add(
+                    egui::DragValue::new(&mut pitch)
+                        .range(0..=disccraft_project::MAX_LINE_PITCH)
+                        .custom_formatter(move |value, _| {
+                            if value < 0.5 {
+                                auto.to_owned()
+                            } else {
+                                format!("{value:.0} px")
+                            }
+                        })
+                        .custom_parser(move |text| {
+                            let text = text.trim().trim_end_matches("px").trim();
+                            if text.is_empty() || text == auto || text.eq_ignore_ascii_case("auto")
+                            {
+                                Some(0.0)
+                            } else {
+                                text.parse::<f64>().ok()
+                            }
+                        }),
+                )
+                .on_hover_text(tl!(
+                    "How far apart the baselines of the lines are; Automatic: 120 % of the size"
+                ));
+            let picked = |pitch: Option<u16>| json!({ "linePitch": pitch, "leading": 0 });
             if (response.drag_stopped() || (response.changed() && !response.dragged()))
-                && leading != format.leading
+                && pitch != format.line_pitch.unwrap_or(0)
             {
-                change = Some(json!({ "leading": leading }));
+                change = Some(picked((pitch > 0).then_some(pitch)));
+            }
+            let _ = ui.menu_button("▾", |ui| {
+                if ui
+                    .selectable_label(format.line_pitch.is_none(), auto)
+                    .clicked()
+                {
+                    change = Some(picked(None));
+                    ui.close();
+                }
+                for px in disccraft_project::LINE_PITCHES {
+                    if ui
+                        .selectable_label(format.line_pitch == Some(px), format!("{px} px"))
+                        .clicked()
+                    {
+                        change = Some(picked(Some(px)));
+                        ui.close();
+                    }
+                }
+            });
+            if format.leading != 0 {
+                let _ = ui
+                    .weak(format!("{:+} px", format.leading))
+                    .on_hover_text(tl!(
+                        "Extra leading from an older project: choosing a leading takes it away"
+                    ));
             }
         });
-        let mut kerning = format.kerning;
+        // Encore の 詰め（日本語の文字のまわりの空きを詰める割合）と 文字組み（約物の幅）。
+        let mut tsume = format.tsume;
+        ui.horizontal(|ui| {
+            crate::properties::prop_label(ui, tl!("Tsume:"));
+            let response = ui
+                .add(
+                    egui::DragValue::new(&mut tsume)
+                        .range(0..=disccraft_project::MAX_TSUME)
+                        .suffix(" %"),
+                )
+                .on_hover_text(tl!(
+                    "Takes this much of the blank around Japanese characters out"
+                ));
+            if (response.drag_stopped() || (response.changed() && !response.dragged()))
+                && tsume != format.tsume
+            {
+                change = Some(json!({ "tsume": tsume }));
+            }
+        });
+        ui.horizontal(|ui| {
+            crate::properties::prop_label(ui, tl!("Mojikumi:"));
+            use disccraft_project::TextMojikumi;
+            let name = |mode: TextMojikumi| match mode {
+                TextMojikumi::None => tl!("None"),
+                TextMojikumi::PunctuationHalf => tl!("Half-width punctuation"),
+                TextMojikumi::LineEndHalf => tl!("Half-width punctuation at line ends"),
+                TextMojikumi::LineEndFull => tl!("Full-width punctuation at line ends"),
+                TextMojikumi::PunctuationFull => tl!("Full-width punctuation"),
+            };
+            egui::ComboBox::from_id_salt("menu_text_mojikumi")
+                .width(170.0)
+                .selected_text(name(format.mojikumi))
+                .show_ui(ui, |ui| {
+                    for mode in TextMojikumi::ALL {
+                        if ui
+                            .selectable_label(format.mojikumi == mode, name(mode))
+                            .clicked()
+                            && format.mojikumi != mode
+                        {
+                            change = Some(json!({ "mojikumi": mode.as_str() }));
+                        }
+                    }
+                });
+        });
+        // Encore の 禁則処理（段落テキストの行頭・行末に置かない文字）。
+        ui.horizontal(|ui| {
+            crate::properties::prop_label(ui, tl!("Kinsoku:"));
+            use disccraft_project::TextKinsoku;
+            let name = |mode: TextKinsoku| match mode {
+                TextKinsoku::None => tl!("None"),
+                TextKinsoku::Strong => tl!("Strong kinsoku"),
+                TextKinsoku::Weak => tl!("Weak kinsoku"),
+            };
+            egui::ComboBox::from_id_salt("menu_text_kinsoku")
+                .width(170.0)
+                .selected_text(name(format.kinsoku))
+                .show_ui(ui, |ui| {
+                    for mode in TextKinsoku::ALL {
+                        if ui
+                            .selectable_label(format.kinsoku == mode, name(mode))
+                            .on_hover_text(tl!(
+                                "Where the lines of a text that wraps at a width may not break"
+                            ))
+                            .clicked()
+                            && format.kinsoku != mode
+                        {
+                            change = Some(json!({ "kinsoku": mode.as_str() }));
+                        }
+                    }
+                });
+        });
+        // Encore の 禁則方法（追い込み優先 / 追い出し優先 / 追い出しのみ）と ぶら下がり。
+        ui.horizontal(|ui| {
+            crate::properties::prop_label(ui, tl!("Kinsoku method:"));
+            use disccraft_project::TextKinsokuMethod;
+            let name = |mode: TextKinsokuMethod| match mode {
+                TextKinsokuMethod::PushInFirst => tl!("Push In First"),
+                TextKinsokuMethod::PushOutFirst => tl!("Push Out First"),
+                TextKinsokuMethod::PushOutOnly => tl!("Push Out Only"),
+            };
+            ui.add_enabled_ui(format.kinsoku != disccraft_project::TextKinsoku::None, |ui| {
+                egui::ComboBox::from_id_salt("menu_text_kinsoku_method")
+                    .width(170.0)
+                    .selected_text(name(format.kinsoku_method))
+                    .show_ui(ui, |ui| {
+                        for mode in TextKinsokuMethod::ALL {
+                            if ui
+                                .selectable_label(format.kinsoku_method == mode, name(mode))
+                                .clicked()
+                                && format.kinsoku_method != mode
+                            {
+                                change = Some(json!({ "kinsokuMethod": mode.as_str() }));
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text(tl!(
+                        "How a character that may not start a line is kept off it: taken into the line above, or the character before it taken down"
+                    ));
+            });
+        });
+        ui.horizontal(|ui| {
+            crate::properties::prop_label(ui, "");
+            let mut hanging = format.hanging_punctuation;
+            if ui
+                .checkbox(&mut hanging, tl!("Hanging punctuation"))
+                .on_hover_text(tl!(
+                    "A full-width comma or full stop that does not fit hangs past the end of the line"
+                ))
+                .changed()
+            {
+                change = Some(json!({ "hangingPunctuation": hanging }));
+            }
+        });
+        // Encore's カーニング (M6.344): メトリクス, or a number between every two characters (1/1000 em).
         ui.horizontal(|ui| {
             crate::properties::prop_label(ui, tl!("Kerning:"));
-            if ui.checkbox(&mut kerning, tl!("Metrics")).changed() {
-                change = Some(json!({ "kerning": kerning }));
+            let shown = if format.kerning {
+                tl!("Metrics").to_owned()
+            } else {
+                format.manual_kerning.to_string()
+            };
+            egui::ComboBox::from_id_salt("text_kerning")
+                .width(90.0)
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(format.kerning, tl!("Metrics"))
+                        .clicked()
+                    {
+                        change = Some(json!({ "kerning": true }));
+                    }
+                    for value in KERNING_CHOICES {
+                        let chosen = !format.kerning && format.manual_kerning == value;
+                        if ui.selectable_label(chosen, value.to_string()).clicked() {
+                            change = Some(json!({ "kerning": value }));
+                        }
+                    }
+                });
+            if !format.kerning {
+                let mut value = format.manual_kerning;
+                let dragged = ui.add(
+                    egui::DragValue::new(&mut value)
+                        .range(disccraft_project::MIN_TRACKING..=disccraft_project::MAX_TRACKING),
+                );
+                if (dragged.drag_stopped() || dragged.lost_focus())
+                    && value != format.manual_kerning
+                {
+                    change = Some(json!({ "kerning": value }));
+                }
             }
         });
         // Encore の 垂直比率 / 水平比率。
@@ -855,8 +1460,48 @@ mod tests {
         assert!(super::decode_rgba_png(b"not a png").is_none());
     }
 
-    use super::{TextDrag, dragged_position};
+    use super::{TextDrag, box_handle, dragged_position, height_handle, resized_box};
     use disccraft_project::MenuId;
+
+    /// A paragraph text's box handle: at the middle of the right edge (the bottom for vertical text); dragging it
+    /// widens or narrows the box by the pointer's travel, within the box's limits.
+    #[test]
+    fn a_text_box_is_resized_by_its_handle() {
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(720.0, 480.0));
+        let outline = egui::Rect::from_min_max(egui::pos2(100.0, 50.0), egui::pos2(300.0, 90.0));
+        assert_eq!(box_handle(outline, false).center(), egui::pos2(300.0, 70.0));
+        assert_eq!(box_handle(outline, true).center(), egui::pos2(200.0, 90.0));
+        // M6.303: a horizontal box's height has its handle at the middle of the bottom edge; M6.317: a vertical
+        // box's width (how far its columns reach) at the middle of the right edge.
+        assert_eq!(
+            height_handle(outline, false).center(),
+            egui::pos2(200.0, 90.0)
+        );
+        assert_eq!(
+            height_handle(outline, true).center(),
+            egui::pos2(300.0, 70.0)
+        );
+        let from = egui::pos2(300.0, 70.0);
+        let frame = (720, 480);
+        assert_eq!(
+            resized_box(200, (from, egui::pos2(360.0, 90.0)), false, frame, canvas),
+            260
+        );
+        assert_eq!(
+            resized_box(200, (from, egui::pos2(250.0, 70.0)), false, frame, canvas),
+            150
+        );
+        // Down for vertical text.
+        assert_eq!(
+            resized_box(200, (from, egui::pos2(300.0, 100.0)), true, frame, canvas),
+            230
+        );
+        // Never narrower than the smallest box.
+        assert_eq!(
+            resized_box(200, (from, egui::pos2(-400.0, 70.0)), false, frame, canvas),
+            disccraft_project::MIN_TEXT_BOX
+        );
+    }
 
     #[test]
     fn a_dragged_text_moves_with_the_pointer_and_stays_in_the_frame() {
@@ -867,6 +1512,8 @@ mod tests {
             start: (100, 50),
             origin: egui::pos2(110.0, 60.0),
             now: (100, 50),
+            resize: None,
+            height: false,
         };
         assert_eq!(
             dragged_position(&drag, egui::pos2(130.0, 50.0), (720, 480), canvas),

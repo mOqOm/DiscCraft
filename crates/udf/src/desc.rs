@@ -499,8 +499,10 @@ pub fn file_identifier_descriptors(first_lbn: u32, fids: &[Fid]) -> Vec<u8> {
 
         let mut buf = vec![0u8; fid_len];
 
+        // The parent entry names a directory: Parent and Directory (ECMA-167 4/14.4.3), as the UDF 2.50 writer has
+        // it. With Parent alone PowerDVD did not take the image for a DVD-Video (M6.352).
         let characteristics = if fid.name.is_none() {
-            0x08
+            0x0A
         } else if fid.is_dir {
             0x02
         } else {
@@ -1163,7 +1165,7 @@ mod tests {
             assert_eq!(le16(&data, off + 16), 1);
 
             let expected_char: u8 = if count == 0 {
-                0x08
+                0x0A
             } else if count == 2 {
                 0x02
             } else {

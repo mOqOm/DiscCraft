@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use disccraft_project::{
-    AssetId, AssetKind, Capacity, DiscKind, Project, Slideshow, Tick, Timeline, TimelineId,
-    VideoStandard,
+    AssetId, AssetKind, BdVideo, Capacity, DiscKind, Project, Slideshow, Tick, Timeline,
+    TimelineId, VideoStandard,
 };
 use disccraft_transcode::slideshow::{
     Motion, SlideFit, SlideInput, SlideTransition, Transition, render_slideshow,
@@ -32,13 +32,16 @@ pub(crate) const MAX_MUX_VIDEO_BITRATE: u32 = 9_800_000;
 
 const MIN_VIDEO_BITRATE: u32 = 2_000_000;
 const MAX_LPCM_AUDIO_BITRATE: u32 = 5 * LPCM_STEREO_BITRATE;
+/// What a Blu-ray's transport stream carries of its elementary streams, bits a second: its 48 Mbit/s less the
+/// packets' overhead (M6.347).
+pub(crate) const BD_STREAMS_BITRATE: u32 = 46_000_000;
 
 const HEAD_BYTES: usize = 65_536;
 const SEQUENCE_HEADER_BYTES: usize = 11;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 const CACHE_VERSION: &str = "disccraft-mpeg2venc-2";
-const SLIDE_RENDER_VERSION: &str = "slides-2";
+const SLIDE_RENDER_VERSION: &str = "slides-3";
 const TICKS_PER_SECOND: i64 = 254_016_000_000;
 
 /// Bitrate budget for transcoded titles.
@@ -61,6 +64,8 @@ pub(crate) enum PreparedAudio {
     Ac3(PathBuf),
     /// DTS elementary stream passed through.
     Dts(PathBuf),
+    /// MPEG-1 Layer II elementary stream passed through (a PAL DVD).
+    Mp2(PathBuf),
     /// AC-3 demuxed from a program or transport stream, starting `delay` (27 MHz) after the title's first picture
     /// as it did there.
     DelayedAc3 { path: PathBuf, delay: i64 },
@@ -241,7 +246,28 @@ fn own_sound(input: &Path, cache_dir: &Path) -> Result<Option<PathBuf>, DvdError
     }
     fs::create_dir_all(cache_dir).map_err(|err| crate::io_error(cache_dir, err))?;
     let part = cache_dir.join(format!("{seed:016x}.sound.{}.wav.part", part_number()));
-    match transcode_audio(input, &part, None) {
+    // A program stream the media readers cannot open (a VCD's MPEG-1 system stream, M6.350): its MPEG audio taken
+    // out by our own demultiplexer, and that converted.
+    let decoded = transcode_audio(input, &part, None).or_else(|error| {
+        if !is_program_stream_file(input) {
+            return Err(error);
+        }
+        let mp2 = cache_dir.join(format!("{seed:016x}.sound.{}.mp2", part_number()));
+        let taken = (|| -> std::io::Result<u64> {
+            let mut reader = std::io::BufReader::new(fs::File::open(input)?);
+            let mut writer = std::io::BufWriter::new(fs::File::create(&mp2)?);
+            let written = disccraft_psmux::demux::demux_mpeg_audio(&mut reader, &mut writer)?;
+            std::io::Write::flush(&mut writer)?;
+            Ok(written)
+        })();
+        let converted = match taken {
+            Ok(written) if written > 0 => transcode_audio(&mp2, &part, None),
+            _ => Err(error),
+        };
+        let _ = fs::remove_file(&mp2);
+        converted
+    });
+    match decoded {
         Ok(_) => {
             fs::rename(&part, &wav).map_err(|err| crate::io_error(&wav, err))?;
             Ok(Some(ac3_soundtrack(&wav)?))
@@ -364,6 +390,62 @@ pub(crate) fn prepare_all_of(
     Ok(())
 }
 
+/// File ▸ Render ▸ Slideshow: transcodes the slideshows (`only`: one of them) into `cache_dir` at the rate the
+/// whole project gives them, as a build would. Returns how many.
+///
+/// # Errors
+///
+/// As [`prepare_slideshow`].
+pub(crate) fn prepare_slideshows(
+    project: &Project,
+    cache_dir: &Path,
+    budget: &Budget,
+    progress: &mut dyn FnMut(&str, f32),
+    only: Option<u64>,
+) -> Result<usize, DvdError> {
+    let shows: Vec<&Slideshow> = crate::slideshow_ids(project)
+        .into_iter()
+        .filter(|id| only.is_none_or(|wanted| *id == wanted))
+        .filter_map(|id| project.slideshows.get(&id))
+        .collect();
+    let results = crate::parallel::run(&shows, progress, |slideshow, report| {
+        prepare_slideshow(project, slideshow, cache_dir, budget, report)
+    });
+    for result in results {
+        let _ = result?;
+    }
+    Ok(shows.len())
+}
+
+/// How a slide's pan and zoom (Encore's slide Effect) moves its picture in the build, and in the preview.
+#[must_use]
+pub fn slide_motion(effect: disccraft_project::SlideEffect) -> Motion {
+    Motion {
+        pan: match effect.pan {
+            disccraft_project::SlidePan::None => (0, 0),
+            disccraft_project::SlidePan::Left => (-1, 0),
+            disccraft_project::SlidePan::Right => (1, 0),
+            disccraft_project::SlidePan::Up => (0, -1),
+            disccraft_project::SlidePan::Down => (0, 1),
+        },
+        zoom: match effect.zoom {
+            disccraft_project::SlideZoom::In => 1,
+            disccraft_project::SlideZoom::Out => -1,
+            disccraft_project::SlideZoom::None => 0,
+        },
+    }
+}
+
+/// Stops a rendering step that is not a transcode when the build or Transcode Now was asked to stop.
+pub(crate) fn check_stop() -> Result<(), DvdError> {
+    if disccraft_transcode::stop_requested() {
+        return Err(DvdError::Unsupported(
+            disccraft_transcode::STOPPED.to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// A number for a transcode's part files, so two transcodes running at once never write the same file (the one
 /// that finishes last publishes its result; both are the same).
 pub(crate) fn part_number() -> u64 {
@@ -456,10 +538,132 @@ pub(crate) fn prepare_title(
     budget: &Budget,
     progress: &mut dyn FnMut(&str, f32),
 ) -> Result<PreparedTitle, DvdError> {
+    let mut prepared = prepare_title_as_made(project, timeline, cache_dir, budget, progress)?;
+    // Video used as it is says the title's shape (M6.323): the title is 16:9 or 4:3 (the timeline's, as Interpret
+    // Footage makes a new one), so its sequence headers say so too.
+    if !prepared.transcoded {
+        prepared.video_path = with_display_aspect(
+            &prepared.video_path,
+            timeline.wide(&project.settings),
+            cache_dir,
+        )?;
+    }
+    Ok(prepared)
+}
+
+/// The aspect_ratio_information (ISO/IEC 13818-2 6.2.2.1: 2 is 4:3, 3 is 16:9) and the width of the first sequence
+/// header of the MPEG-2 video `path`, when one is in its first megabyte.
+fn first_display_aspect(path: &Path) -> Result<Option<(u8, u16)>, DvdError> {
+    use std::io::Read;
+    let file = fs::File::open(path).map_err(|err| crate::io_error(path, err))?;
+    let mut head = Vec::new();
+    let _ = file
+        .take(1 << 20)
+        .read_to_end(&mut head)
+        .map_err(|err| crate::io_error(path, err))?;
+    Ok(head
+        .windows(8)
+        .find(|bytes| bytes.starts_with(&[0, 0, 1, 0xB3]))
+        .and_then(|bytes| {
+            let width = (u16::from(*bytes.get(4)?) << 4) | u16::from(*bytes.get(5)? >> 4);
+            Some((*bytes.get(7)? >> 4, width))
+        }))
+}
+
+/// The MPEG-2 video `path` with every sequence header saying the title's display aspect (`wide`: 16:9, else 4:3):
+/// the file itself when it already does (or says neither, or is narrower than a 16:9 DVD picture may be), else a copy
+/// in `cache_dir` with those four bits of each sequence header changed, named after the file and the aspect.
+fn with_display_aspect(path: &Path, wide: bool, cache_dir: &Path) -> Result<PathBuf, DvdError> {
+    let wanted: u8 = if wide { 3 } else { 2 };
+    let Some((said, width)) = first_display_aspect(path)? else {
+        return Ok(path.to_path_buf());
+    };
+    // Only 4:3 and 16:9 are a DVD's; a 352-wide picture cannot be 16:9.
+    if said == wanted || !matches!(said, 2 | 3) || (wide && width < 704) {
+        return Ok(path.to_path_buf());
+    }
+    let metadata = fs::metadata(path).map_err(|err| crate::io_error(path, err))?;
+    let (secs, nanos) = modified_time(&metadata)?;
+    let mut seed = fnv1a64(absolute_path_string(path).as_bytes(), FNV_OFFSET);
+    seed = fnv1a64(metadata.len().to_string().as_bytes(), seed);
+    seed = fnv1a64(secs.to_string().as_bytes(), seed);
+    seed = fnv1a64(nanos.to_string().as_bytes(), seed);
+    seed = fnv1a64(format!("display aspect {wanted}").as_bytes(), seed);
+    let out = cache_dir.join(format!("{seed:016x}.aspect.m2v"));
+    if out.is_file() {
+        return Ok(out);
+    }
+    fs::create_dir_all(cache_dir).map_err(|err| crate::io_error(cache_dir, err))?;
+    let part = cache_dir.join(format!("{seed:016x}.{}.aspect.part", part_number()));
+    let written = rewrite_display_aspect(path, &part, wanted);
+    if let Err(error) = written {
+        let _ = fs::remove_file(&part);
+        return Err(error);
+    }
+    fs::rename(&part, &out).map_err(|err| crate::io_error(&out, err))?;
+    Ok(out)
+}
+
+/// Copies the MPEG-2 video `from` to `to` with the aspect_ratio_information of every sequence header set to
+/// `aspect`, a megabyte at a time (a header split between two reads is carried over).
+fn rewrite_display_aspect(from: &Path, to: &Path, aspect: u8) -> Result<(), DvdError> {
+    use std::io::{Read, Write};
+    // A sequence header's start code and the three bytes before its aspect: the fourth byte after them has it.
+    const REACH: usize = 7;
+    let mut input = fs::File::open(from).map_err(|err| crate::io_error(from, err))?;
+    let mut output =
+        std::io::BufWriter::new(fs::File::create(to).map_err(|err| crate::io_error(to, err))?);
+    let mut window: Vec<u8> = Vec::new();
+    let mut chunk = vec![0u8; 1 << 20];
+    loop {
+        let read = input
+            .read(&mut chunk)
+            .map_err(|err| crate::io_error(from, err))?;
+        window.extend_from_slice(chunk.get(..read).unwrap_or_default());
+        let done = read == 0;
+        let mut at = 0;
+        while at + REACH < window.len() {
+            if window.get(at..at + 4) == Some(&[0, 0, 1, 0xB3])
+                && let Some(byte) = window.get_mut(at + REACH)
+            {
+                *byte = (aspect << 4) | (*byte & 0x0F);
+            }
+            at += 1;
+        }
+        // Everything but the last few bytes (a header may begin there) is done.
+        let keep = if done { 0 } else { REACH.min(window.len()) };
+        let ready = window.len() - keep;
+        output
+            .write_all(window.get(..ready).unwrap_or_default())
+            .map_err(|err| crate::io_error(to, err))?;
+        let _ = window.drain(..ready);
+        if done {
+            break;
+        }
+    }
+    output.flush().map_err(|err| crate::io_error(to, err))
+}
+
+/// [`prepare_title`] as the video is made: transcoded, joined or taken as it is.
+fn prepare_title_as_made(
+    project: &Project,
+    timeline: &Timeline,
+    cache_dir: &Path,
+    budget: &Budget,
+    progress: &mut dyn FnMut(&str, f32),
+) -> Result<PreparedTitle, DvdError> {
     let asset = project
         .assets
         .get(&timeline.video)
         .ok_or_else(|| DvdError::Invalid("referenced asset does not exist".to_string()))?;
+    // The asset's own transcode setting (M6.251) takes the place of the rate that fits the disc.
+    let budget = &match fixed_video_bitrate(project, timeline.video) {
+        Some(fixed) => Budget {
+            video_bitrate: fixed.min(budget.max_bitrate),
+            ..*budget
+        },
+        None => *budget,
+    };
     let media = asset.media_file();
     let input: &Path = &media;
 
@@ -478,10 +682,12 @@ pub(crate) fn prepare_title(
         });
     }
 
-    // A program or transport stream (a DVD's own VOB, an .mpg) whose MPEG-2 fits the disc: demuxed, not transcoded.
-    // Its soundtrack (for a timeline without audio tracks) is its AC-3 as it is when a DVD can carry it, else
-    // transcoded alone.
-    if container_video(input, project.settings.standard).is_some() {
+    // A program or transport stream (a DVD's own VOB, an .mpg) whose MPEG-2 fits the disc: demuxed, not transcoded
+    // (unless a DVD preset of its own transcodes it all the same, M6.322). Its soundtrack (for a timeline without
+    // audio tracks) is its AC-3 as it is when a DVD can carry it, else transcoded alone.
+    if container_video(input, project.settings.standard).is_some()
+        && !transcode_forced(project, input)
+    {
         let video_path = crate::demux::demux_to_cache(input, cache_dir, crate::demux::Part::Video)?;
         let (transcoded_audio, soundtrack_delay) = match (
             timeline.audio.is_empty(),
@@ -536,7 +742,7 @@ pub(crate) fn prepare_title(
     if marker.is_file() && video_out.is_file() {
         let audio_out = cache_dir.join(format!("{key}.wav"));
         let transcoded_audio = match audio_out.is_file() {
-            true => Some(ac3_soundtrack(&audio_out)?),
+            true => Some(soundtrack_of(project, timeline.video, &audio_out)?),
             false => None,
         };
         return Ok(PreparedTitle {
@@ -554,6 +760,10 @@ pub(crate) fn prepare_title(
         max_bitrate: budget.max_bitrate,
         wide,
         gop_starts,
+        mode: rate_mode(project, input),
+        film: film_of(project, input),
+        quality: quality_of(project, input),
+        rendering: rendering_of(project, input),
     };
     let (video_path, transcoded_audio) = transcode_to_cache(
         asset.name.as_str(),
@@ -564,7 +774,7 @@ pub(crate) fn prepare_title(
         progress,
     )?;
     let transcoded_audio = transcoded_audio
-        .map(|wav| ac3_soundtrack(&wav))
+        .map(|wav| soundtrack_of(project, timeline.video, &wav))
         .transpose()?;
 
     Ok(PreparedTitle {
@@ -574,6 +784,176 @@ pub(crate) fn prepare_title(
         soundtrack_delay: 0,
         audio_tracks,
     })
+}
+
+/// Whether asset `asset`'s converted sound goes on the disc as PCM (its transcode setting; a DVD's).
+fn wants_pcm(project: &Project, asset: disccraft_project::AssetId) -> bool {
+    project.settings.kind == DiscKind::Dvd
+        && project
+            .assets
+            .get(&asset)
+            .is_some_and(|asset| asset.transcode_audio == disccraft_project::TranscodeAudio::Pcm)
+}
+
+/// The clips of `track` joined as Dolby Digital without decoding them, when they are all AC-3 files of one form
+/// (48 kHz, one bit rate and channel layout): each clip's part of its file cut at its frames (as a trimmed clip is),
+/// placed where the clip starts by silent frames of the same form in between (to the nearest frame, 32 ms).
+/// `None` when they are not (they are decoded and joined then). Kept in `cache_dir`, named by the clips.
+///
+/// # Errors
+///
+/// [`DvdError::Unsupported`] when a file cannot be read as AC-3, and I/O errors.
+fn ac3_clip_sequence(
+    project: &Project,
+    track: &disccraft_project::AudioTrack,
+    cache_dir: &Path,
+) -> Result<Option<PathBuf>, DvdError> {
+    use std::hash::{Hash, Hasher};
+    use std::io::Write;
+    const SAMPLES_PER_FRAME: u64 = 1536;
+    let clips = track.clips();
+    let mut files = Vec::with_capacity(clips.len());
+    let mut form = None;
+    for (_, clip) in &clips {
+        let Some(asset) = project.assets.get(&clip.asset) else {
+            return Ok(None);
+        };
+        let path = asset.media_file().to_path_buf();
+        if audio_kind(&path) != AudioKind::Ac3 {
+            return Ok(None);
+        }
+        let Some(own) =
+            read_head(&path).and_then(|head| disccraft_psmux::es::ac3::first_frame_format(&head))
+        else {
+            return Ok(None);
+        };
+        if own.0 != 48_000 || form.is_some_and(|form| form != own) {
+            return Ok(None);
+        }
+        form = Some(own);
+        files.push((*clip, path));
+    }
+    let Some((_, kbps, acmod, lfe)) = form else {
+        return Ok(None);
+    };
+    let frame = if project.settings.standard == VideoStandard::Ntsc {
+        1001.0 / 30_000.0
+    } else {
+        1.0 / 25.0
+    };
+    fs::create_dir_all(cache_dir).map_err(|err| crate::io_error(cache_dir, err))?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for (clip, path) in &files {
+        (
+            audio_cache_key(path)?,
+            clip.start,
+            clip.trim_start,
+            clip.trim_end,
+        )
+            .hash(&mut hasher);
+    }
+    let out = cache_dir.join(format!("ac3seq{:016x}.ac3", hasher.finish()));
+    if out.is_file() {
+        return Ok(Some(out));
+    }
+    let silent = disccraft_ac3enc::silent_frame(acmod, lfe, kbps)
+        .map_err(|err| DvdError::Unsupported(err.to_string()))?;
+    let part = cache_dir.join(format!("ac3seq.{}.ac3.part", part_number()));
+    let mut writer = std::io::BufWriter::with_capacity(
+        1 << 20,
+        fs::File::create(&part).map_err(|err| crate::io_error(&part, err))?,
+    );
+    // Where the stream has got to, in samples.
+    let mut at = 0u64;
+    let mut write = |writer: &mut std::io::BufWriter<fs::File>| -> Result<(), DvdError> {
+        for (clip, path) in &files {
+            let trimmed = clip.trim_start > 0 || clip.trim_end.is_some();
+            let (cut, late) = if trimmed {
+                trimmed_ac3(
+                    path,
+                    cache_dir,
+                    &audio_cache_key(path)?,
+                    0,
+                    (
+                        f64::from(clip.trim_start) * frame,
+                        clip.trim_end.map(|end| f64::from(end) * frame),
+                    ),
+                )?
+            } else {
+                (path.clone(), 0)
+            };
+            let data = fs::read(&cut).map_err(|err| crate::io_error(&cut, err))?;
+            let frames = disccraft_psmux::es::parse_ac3(&data, 0)
+                .map_err(|err| DvdError::Unsupported(format!("{}: {err}", cut.display())))?
+                .frames
+                .len();
+            // The first frame kept starts a little after the in point (less than a frame).
+            let late = u64::try_from(late.max(0))
+                .unwrap_or(0)
+                .saturating_mul(48_000)
+                / 27_000_000;
+            let start = delay_samples(clip.start, project.settings.standard).saturating_add(late);
+            let gap = start.saturating_sub(at);
+            let silence = (gap + SAMPLES_PER_FRAME / 2) / SAMPLES_PER_FRAME;
+            for _ in 0..silence {
+                writer
+                    .write_all(&silent)
+                    .map_err(|err| crate::io_error(&part, err))?;
+            }
+            writer
+                .write_all(&data)
+                .map_err(|err| crate::io_error(&part, err))?;
+            let written = silence.saturating_add(u64::try_from(frames).unwrap_or(0));
+            at = at.saturating_add(written.saturating_mul(SAMPLES_PER_FRAME));
+        }
+        writer.flush().map_err(|err| crate::io_error(&part, err))
+    };
+    if let Err(err) = write(&mut writer) {
+        drop(writer);
+        fs::remove_file(&part).unwrap_or(());
+        return Err(err);
+    }
+    drop(writer);
+    fs::rename(&part, &out).map_err(|err| crate::io_error(&part, err))?;
+    Ok(Some(out))
+}
+
+/// Whether every clip of `track` is a WAV file: its sound then stays LPCM when it is moved, trimmed or joined.
+fn all_wav(project: &Project, track: &disccraft_project::AudioTrack) -> bool {
+    track.clips().iter().all(|(_, clip)| {
+        project
+            .assets
+            .get(&clip.asset)
+            .is_some_and(|asset| audio_kind(&asset.media_file()) == AudioKind::Wav)
+    })
+}
+
+/// An audio track made of the converted sound `wav` of asset `asset`: LPCM as it is when the asset asks for PCM
+/// (and it is 48 kHz 16-bit), else Dolby Digital made from it.
+fn converted_sound(
+    project: &Project,
+    asset: disccraft_project::AssetId,
+    wav: PathBuf,
+) -> Result<PreparedAudio, DvdError> {
+    if wants_pcm(project, asset) && wav_is_disc_lpcm(&wav) {
+        Ok(PreparedAudio::Wav(wav))
+    } else {
+        Ok(PreparedAudio::Ac3(ac3_soundtrack(&wav)?))
+    }
+}
+
+/// The soundtrack a title takes from the converted sound `wav` of video asset `video`: the WAV itself as LPCM when
+/// the asset asks for PCM (and it is 48 kHz 16-bit), else Dolby Digital made from it.
+fn soundtrack_of(
+    project: &Project,
+    video: disccraft_project::AssetId,
+    wav: &Path,
+) -> Result<PathBuf, DvdError> {
+    if wants_pcm(project, video) && wav_is_disc_lpcm(wav) {
+        Ok(wav.to_path_buf())
+    } else {
+        ac3_soundtrack(wav)
+    }
 }
 
 /// Prepare one timeline's sound only, for a Blu-ray title whose video is encoded in HD on its own: its audio tracks
@@ -599,6 +979,45 @@ pub(crate) fn prepare_title_sound(
         timeline.more_video.is_empty()
             && disccraft_transcode::probe_video(input).is_ok_and(|probe| probe.has_audio)
     };
+    // A trimmed clip's sound is the same part of the file's (M10.21): a program or transport stream's AC-3 by
+    // its frames (M12.22), any other decoded, cut and made AC-3.
+    let trim = timeline.video_trim(0);
+    let trimmed = timeline.audio.is_empty()
+        && timeline.more_video.is_empty()
+        && trim != disccraft_project::ClipTrim::default();
+    let frame = if project.settings.standard == VideoStandard::Ntsc {
+        1001.0 / 30_000.0
+    } else {
+        1.0 / 25.0
+    };
+    let part = (
+        f64::from(trim.start) * frame,
+        trim.end.map(|end| f64::from(end) * frame),
+    );
+    if trimmed && let Some((_, delay)) = container_ac3(input, project.settings.kind) {
+        let ac3 = crate::demux::demux_to_cache(input, cache_dir, crate::demux::Part::Ac3)?;
+        let key = audio_cache_key(input)?;
+        let (cut, delay) = trimmed_ac3(&ac3, cache_dir, &key, delay, part)?;
+        return Ok(PreparedTitle {
+            video_path: input.to_path_buf(),
+            transcoded_audio: Some(cut),
+            transcoded: false,
+            soundtrack_delay: delay,
+            audio_tracks,
+        });
+    }
+    if trimmed && has_sound() {
+        let key = format!("{}-soundtrack", audio_cache_key(input)?);
+        let wav = transcode_audio_to_cache(input, cache_dir, &key)?;
+        let cut = trimmed_wav(&wav, cache_dir, &key, part.0, part.1)?;
+        return Ok(PreparedTitle {
+            video_path: input.to_path_buf(),
+            transcoded_audio: Some(soundtrack_of(project, timeline.video, &cut)?),
+            transcoded: false,
+            soundtrack_delay: 0,
+            audio_tracks,
+        });
+    }
     // A program or transport stream's AC-3 the disc can carry goes on it as it is, keeping its delay.
     let container = container_ac3(input, project.settings.kind);
     let (transcoded_audio, soundtrack_delay) = match (timeline.audio.is_empty(), container) {
@@ -613,9 +1032,11 @@ pub(crate) fn prepare_title_sound(
         (true, None) if has_sound() => {
             let key = format!("{}-soundtrack", audio_cache_key(input)?);
             (
-                Some(ac3_soundtrack(&transcode_audio_to_cache(
-                    input, cache_dir, &key,
-                )?)?),
+                Some(soundtrack_of(
+                    project,
+                    timeline.video,
+                    &transcode_audio_to_cache(input, cache_dir, &key)?,
+                )?),
                 0,
             )
         }
@@ -687,7 +1108,7 @@ fn budget_with_probe(
         scan.largest_audio_bitrate
     };
 
-    let max_bitrate = max_bitrate_for_audio_bitrate(audio_bitrate)?;
+    let max_bitrate = max_bitrate_for_audio_bitrate(audio_bitrate, project.settings.kind)?;
 
     if scan.transcode_count == 0 {
         return Ok(Budget {
@@ -698,7 +1119,12 @@ fn budget_with_probe(
         });
     }
 
-    let video_bitrate = allocate_video_bitrate(capacity_bits, &scan, max_bitrate)?;
+    // Every transcoded title has a bit rate of its own: nothing is left to share out.
+    let video_bitrate = if scan.transcode_seconds > 0.0 {
+        allocate_video_bitrate(capacity_bits, &scan, max_bitrate)?
+    } else {
+        0
+    };
 
     Ok(Budget {
         video_bitrate,
@@ -706,6 +1132,95 @@ fn budget_with_probe(
         wide: project.settings.widescreen,
         audio_bitrate,
     })
+}
+
+/// The video bit rate (bit/s) asset `video` is transcoded at by its own transcode setting for the disc's kind (the
+/// DVD setting on a DVD, the Blu-ray one on a Blu-ray); `None`: the rate that fits the disc.
+pub(crate) fn fixed_video_bitrate(
+    project: &Project,
+    video: disccraft_project::AssetId,
+) -> Option<u32> {
+    let asset = project.assets.get(&video)?;
+    let kbps = match project.settings.kind {
+        DiscKind::Dvd => asset.transcode_kbps?,
+        DiscKind::BluRay => asset.bluray_transcode.as_ref()?.kbps,
+    };
+    kbps.clamp(
+        disccraft_project::MIN_TRANSCODE_KBPS,
+        disccraft_project::MAX_TRANSCODE_KBPS,
+    )
+    .checked_mul(1000)
+}
+
+/// How the video of `input` is transcoded: its asset's own setting (Encore's quality presets), one-pass VBR for
+/// anything else.
+pub(crate) fn rate_mode(project: &Project, input: &Path) -> disccraft_transcode::RateMode {
+    use disccraft_project::TranscodeMode;
+    use disccraft_transcode::RateMode;
+    let asset = project
+        .assets
+        .values()
+        .find(|asset| asset.media_file().as_ref() == input);
+    // A Blu-ray's: its own Blu-ray setting's (Encore's presets are one-pass VBR; a preset of the user's may take
+    // two passes or keep the rate constant, M6.328).
+    let mode = if project.settings.kind == DiscKind::BluRay {
+        asset
+            .and_then(|asset| asset.bluray_transcode.as_ref())
+            .map(|setting| setting.mode)
+    } else {
+        asset.map(|asset| asset.transcode_mode)
+    };
+    match mode.unwrap_or_default() {
+        TranscodeMode::Vbr => RateMode::Vbr,
+        TranscodeMode::Vbr2Pass => RateMode::Vbr2Pass,
+        TranscodeMode::Cbr => RateMode::Cbr,
+    }
+}
+
+/// Whether the video of `input` is transcoded as film (Encore's NTSC DV 23.976 presets: 23.976 progressive pictures
+/// shown by 3:2 pulldown): its asset's own setting, on an NTSC DVD.
+pub(crate) fn film_of(project: &Project, input: &Path) -> bool {
+    project.settings.kind == DiscKind::Dvd
+        && project.settings.standard == VideoStandard::Ntsc
+        && project
+            .assets
+            .values()
+            .find(|asset| asset.media_file().as_ref() == input)
+            .is_some_and(|asset| asset.transcode_film && asset.transcode_kbps.is_some())
+}
+
+/// How hard the transcode of `input` searches for motion (M6.326, Encore's quality): its asset's DVD preset's on a
+/// DVD (with a rate of its own), its Blu-ray preset's on a Blu-ray (an SD one's MPEG-2); else the best.
+pub(crate) fn quality_of(project: &Project, input: &Path) -> u8 {
+    use disccraft_project::{BEST_QUALITY, MIN_QUALITY};
+    let asset = project
+        .assets
+        .values()
+        .find(|asset| asset.media_file().as_ref() == input);
+    let quality = match project.settings.kind {
+        DiscKind::Dvd => asset
+            .filter(|asset| asset.transcode_kbps.is_some())
+            .map(|asset| asset.transcode_quality),
+        DiscKind::BluRay => asset
+            .and_then(|asset| asset.bluray_transcode.as_ref())
+            .map(|setting| setting.quality),
+    };
+    quality
+        .unwrap_or(BEST_QUALITY)
+        .clamp(MIN_QUALITY, BEST_QUALITY)
+}
+
+/// How the transcode of `input` makes its pictures (M6.327): its asset's Encore rendering checkboxes, for either
+/// kind of disc.
+pub(crate) fn rendering_of(project: &Project, input: &Path) -> disccraft_transcode::Rendering {
+    project
+        .assets
+        .values()
+        .find(|asset| asset.media_file().as_ref() == input)
+        .map_or_else(Default::default, |asset| disccraft_transcode::Rendering {
+            max_quality: asset.max_render_quality,
+            frame_blend: asset.frame_blend,
+        })
 }
 
 /// The bits of the disc the titles may take: its capacity less a 4 percent reserve and the ROM content (the files
@@ -731,8 +1246,20 @@ fn rom_bytes(project: &Project) -> Result<u64, DvdError> {
     Ok(disccraft_project::rom_disc_bytes(&files))
 }
 
-/// Return the muxer video bitrate ceiling after an audio bitrate.
-fn max_bitrate_for_audio_bitrate(audio_bitrate: u32) -> Result<u32, DvdError> {
+/// Return the muxer video bitrate ceiling after an audio bitrate: a DVD's 10.08 Mbit/s, or on a Blu-ray (M6.347)
+/// what its transport stream leaves, at most the SD video's 9.8 Mbit/s.
+fn max_bitrate_for_audio_bitrate(audio_bitrate: u32, kind: DiscKind) -> Result<u32, DvdError> {
+    if kind == DiscKind::BluRay {
+        return BD_STREAMS_BITRATE
+            .checked_sub(audio_bitrate)
+            .filter(|room| *room >= MIN_VIDEO_BITRATE)
+            .map(|room| room.min(MAX_MUX_VIDEO_BITRATE))
+            .ok_or_else(|| {
+                DvdError::Invalid(format!(
+                    "the sound ({audio_bitrate} bit/s) takes too much of the Blu-ray's stream"
+                ))
+            });
+    }
     let max_bitrate = MAX_MUX_VIDEO_BITRATE
         .checked_sub(audio_bitrate)
         .ok_or_else(|| {
@@ -866,7 +1393,6 @@ fn scan_transcode(
     scan: &mut Scan,
 ) -> Result<(), DvdError> {
     let seconds = positive_seconds(probe(video_path)?)?;
-    scan.transcode_seconds += seconds;
     scan.transcode_count = scan
         .transcode_count
         .checked_add(1)
@@ -874,6 +1400,14 @@ fn scan_transcode(
 
     let audio_bitrate = audio_bitrate_for_title(project, timeline, seconds)?;
     scan.largest_audio_bitrate = scan.largest_audio_bitrate.max(audio_bitrate);
+    // A video with a bit rate of its own (M6.251) takes that much of the disc, whatever is left for the others.
+    if let Some(fixed) = fixed_video_bitrate(project, timeline.video) {
+        // `as` saturates; bits of a title.
+        let bits = (seconds * (f64::from(fixed) + f64::from(audio_bitrate))).ceil() as u64;
+        scan.passthrough_bits = scan.passthrough_bits.saturating_add(bits);
+        return Ok(());
+    }
+    scan.transcode_seconds += seconds;
     scan.audio_bits += f64::from(audio_bitrate) * seconds;
     Ok(())
 }
@@ -948,9 +1482,13 @@ fn audio_bitrate_for_title(
     timeline: &Timeline,
     seconds: f64,
 ) -> Result<u32, DvdError> {
-    // The video's own soundtrack, transcoded to AC-3.
+    // The video's own soundtrack, transcoded to AC-3 (or kept as PCM, as its asset asks).
     if timeline.audio.is_empty() {
-        return Ok(AC3_STEREO_BITRATE);
+        return Ok(if wants_pcm(project, timeline.video) {
+            LPCM_STEREO_BITRATE
+        } else {
+            AC3_STEREO_BITRATE
+        });
     }
 
     let mut total = 0u64;
@@ -958,7 +1496,24 @@ fn audio_bitrate_for_title(
     for track in &timeline.audio {
         let path = asset_path(project, track.asset)?;
         let path: &Path = &path;
-        let bitrate = track_audio_bitrate(path, seconds)?;
+        // A moved clip is made Dolby Digital; 24-bit / 96 kHz PCM goes on a DVD as it is, at its own rate. A sound
+        // that is converted is LPCM when its asset asks for PCM.
+        let converted = !track.is_whole()
+            || !track.more.is_empty()
+            || (audio_kind(path) == AudioKind::Transcode
+                && container_ac3(path, project.settings.kind).is_none()
+                && wav_is_fine_lpcm(path, project.settings.kind).is_none());
+        // A track of several clips that are not all WAV is joined as Dolby Digital (M6.308): it counts so
+        // (M6.346), not as the LPCM of its first clip's WAV.
+        let mixed = !track.more.is_empty() && !all_wav(project, track);
+        let bitrate = match wav_is_fine_lpcm(path, project.settings.kind)
+            .or_else(|| dvd_mp2(path, project))
+        {
+            _ if converted && wants_pcm(project, track.asset) => LPCM_STEREO_BITRATE,
+            _ if mixed => AC3_STEREO_BITRATE,
+            Some(bitrate) if track.is_whole() => bitrate,
+            _ => track_audio_bitrate(path, seconds)?,
+        };
         total = total
             .checked_add(u64::from(bitrate))
             .ok_or_else(|| DvdError::Invalid("audio bitrate overflow".to_string()))?;
@@ -1077,7 +1632,7 @@ fn joined_clips(
 ) -> Result<PathBuf, DvdError> {
     let mut seed = fnv1a64(b"joined clips", FNV_OFFSET);
     let mut clips = Vec::new();
-    let mut joined_size: Option<u16> = None;
+    let mut joined_size: Option<(u16, bool)> = None;
     for (index, video) in timeline.videos().into_iter().enumerate() {
         let source = asset_path(project, video)?;
         let source: &Path = &source;
@@ -1111,17 +1666,21 @@ fn joined_clips(
             format!("trim:{}:{:?}", trim.start, trim.end).as_bytes(),
             seed,
         );
-        // The clips of one title share a picture size (a title has one); a gap's black is made at full size.
-        let size = if passes_through(project, source) {
-            dvd_picture_size(source, project.settings.standard).unwrap_or((720, 0))
+        // The clips of one title share a picture size and coding (a title has one: MPEG-1 video is joined only to
+        // MPEG-1, M6.350); a gap's black is made at full size.
+        let (size, mpeg1) = if passes_through(project, source) {
+            (
+                dvd_picture_size(source, project.settings.standard).unwrap_or((720, 0)),
+                is_mpeg1_video(source),
+            )
         } else {
-            (720, 0)
+            ((720, 0), false)
         };
-        let first_size = *joined_size.get_or_insert(size.0);
-        if first_size != size.0 || (timeline.has_video_gaps() && size.0 != 720) {
+        let first_size = *joined_size.get_or_insert((size.0, mpeg1));
+        if first_size != (size.0, mpeg1) || (timeline.has_video_gaps() && size.0 != 720) {
             return Err(DvdError::Unsupported(format!(
-                "timeline \"{}\": its video clips must have the same picture width (and 720 when there are \
-                 gaps between them)",
+                "timeline \"{}\": its video clips must have the same picture width and coding (MPEG-1 or \
+                 MPEG-2; 720 wide when there are gaps between them)",
                 timeline.name
             )));
         }
@@ -1194,6 +1753,7 @@ fn black_video(frames: u32, standard: VideoStandard, wide: bool) -> Result<Vec<u
         max_bitrate: 8_000_000,
         wide,
         format: disccraft_mpeg2venc::encoder::Format::Sd,
+        pulldown: false,
     })
     .map_err(encode)?;
     let (width, luma) = (720_u16, usize::from(height) * 720);
@@ -1369,38 +1929,111 @@ fn prepare_audio_tracks(
         let media = asset.media_file();
         let path: &Path = &media;
 
-        // A Blu-ray's LPCM is mono or stereo here: a WAV of more channels is converted like other sound files.
+        // Several clips on the track (M6.269): each is decoded and cut, and they are written one after the
+        // other with silence between, as one Dolby Digital stream.
+        if !track.more.is_empty() {
+            // Clips that are all Dolby Digital of one form are joined by their frames, not decoded (M6.309).
+            if let Some(ac3) = ac3_clip_sequence(project, track, cache_dir)? {
+                out.push(PreparedAudio::Ac3(ac3));
+                continue;
+            }
+            let wav = audio_clip_sequence(project, track, cache_dir)?;
+            // Clips that are all PCM stay PCM, joined (M6.308).
+            out.push(if all_wav(project, track) && wav_is_disc_lpcm(&wav) {
+                PreparedAudio::Wav(wav)
+            } else {
+                converted_sound(project, track.asset, wav)?
+            });
+            continue;
+        }
+
+        // A Blu-ray's LPCM takes more than two channels on the speakers of a channel assignment (M6.347): a WAV
+        // of others is converted like other sound files.
         let kind = match audio_kind(path) {
+            // A disc also carries 24-bit and 96 kHz PCM (a Blu-ray 192 kHz) as LPCM, as it is.
+            AudioKind::Transcode if wav_is_fine_lpcm(path, project.settings.kind).is_some() => {
+                AudioKind::Wav
+            }
             AudioKind::Wav
                 if project.settings.kind != DiscKind::Dvd
-                    && read_head(path)
+                    && !read_head(path)
                         .and_then(|head| wav_format(&head))
-                        .is_some_and(|(_, channels, _, _)| channels > 2) =>
+                        .is_some_and(|(_, channels, _, _, mask)| bd_layout(channels, mask)) =>
             {
                 AudioKind::Transcode
             }
             kind => kind,
         };
-        // A clip moved along its track starts with silence: its sound is decoded, the silence put in front, and
-        // the whole made Dolby Digital (whatever it was: a stream used as it is cannot start late by minutes).
-        if track.start > 0 {
+        // MPEG-1 Layer II is a PAL DVD's own audio: the file goes on the disc as it is.
+        if track.is_whole() && dvd_mp2(path, project).is_some() {
+            out.push(PreparedAudio::Mp2(path.to_path_buf()));
+            continue;
+        }
+        // A clip moved along its track starts with silence, and a trimmed one (M6.254) is a part of its file:
+        // the sound is decoded, cut, the silence put in front, and the whole made Dolby Digital (whatever it was:
+        // a stream used as it is cannot start late by minutes).
+        if !track.is_whole() {
             let key = audio_cache_key(path)?;
-            let samples = delay_samples(track.start, project.settings.standard);
+            let mut samples = delay_samples(track.start, project.settings.standard);
+            let frame = if project.settings.standard == VideoStandard::Ntsc {
+                1001.0 / 30_000.0
+            } else {
+                1.0 / 25.0
+            };
+            let part = (
+                f64::from(track.trim_start) * frame,
+                track.trim_end.map(|end| f64::from(end) * frame),
+            );
+            // The trim names the files made of the part.
+            let part_key = match (track.is_trimmed(), track.trim_end) {
+                (false, _) => key.clone(),
+                (true, Some(end)) => format!("{key}.t{}-{end}", track.trim_start),
+                (true, None) => format!("{key}.t{}-", track.trim_start),
+            };
             let delayed = match kind {
-                // Dolby Digital stays as it is: silent frames of its own form go in front.
-                AudioKind::Ac3 => delayed_ac3(path, cache_dir, &key, samples)?,
+                // Dolby Digital stays as it is: its frames of the part, and silent frames of its own form in
+                // front.
+                AudioKind::Ac3 => PreparedAudio::Ac3({
+                    let cut = if track.is_trimmed() {
+                        let (cut, late) = trimmed_ac3(path, cache_dir, &key, 0, part)?;
+                        // The first frame kept starts a little after the in point (less than a frame).
+                        let late = u64::try_from(late.max(0)).unwrap_or(0);
+                        samples = samples.saturating_add(late.saturating_mul(48_000) / 27_000_000);
+                        cut
+                    } else {
+                        path.to_path_buf()
+                    };
+                    if track.start > 0 {
+                        delayed_ac3(&cut, cache_dir, &part_key, samples)?
+                    } else {
+                        cut
+                    }
+                }),
                 AudioKind::Dts => {
                     return Err(DvdError::Unsupported(format!(
-                        "{}: a DTS track cannot start later than its timeline (move it back to the start)",
+                        "{}: a DTS track cannot be moved or trimmed (it goes on the disc whole, from the start \
+                         of its timeline)",
                         path.display()
                     )));
                 }
                 AudioKind::Wav | AudioKind::Transcode => {
-                    let wav = transcode_audio_to_cache(path, cache_dir, &key)?;
-                    ac3_soundtrack(&delayed_wav(&wav, cache_dir, &key, samples)?)?
+                    let mut wav = transcode_audio_to_cache(path, cache_dir, &key)?;
+                    if track.is_trimmed() {
+                        wav = trimmed_wav(&wav, cache_dir, &key, part.0, part.1)?;
+                    }
+                    if track.start > 0 {
+                        wav = delayed_wav(&wav, cache_dir, &part_key, samples)?;
+                    }
+                    // A WAV stays PCM, cut and with its silence in front (M6.308); other sound is made Dolby
+                    // Digital (or PCM, as its asset asks).
+                    if kind == AudioKind::Wav && wav_is_disc_lpcm(&wav) {
+                        PreparedAudio::Wav(wav)
+                    } else {
+                        converted_sound(project, track.asset, wav)?
+                    }
                 }
             };
-            out.push(PreparedAudio::Ac3(delayed));
+            out.push(delayed);
             continue;
         }
         let prepared = match kind {
@@ -1422,7 +2055,7 @@ fn prepare_audio_tracks(
                 None => {
                     let key = audio_cache_key(path)?;
                     let wav = transcode_audio_to_cache(path, cache_dir, &key)?;
-                    PreparedAudio::Ac3(ac3_soundtrack(&wav)?)
+                    converted_sound(project, track.asset, wav)?
                 }
             },
         };
@@ -1430,6 +2063,154 @@ fn prepare_audio_tracks(
         out.push(prepared);
     }
 
+    Ok(out)
+}
+
+/// The clips of `track` as one WAV file in `cache_dir`: each clip's part of its file where the clip is on the
+/// timeline, silence where there is none. Where two clips overlap (the commands do not let them), the earlier
+/// one sounds to its end.
+fn audio_clip_sequence(
+    project: &Project,
+    track: &disccraft_project::AudioTrack,
+    cache_dir: &Path,
+) -> Result<PathBuf, DvdError> {
+    use std::hash::{Hash, Hasher};
+    let frame = if project.settings.standard == VideoStandard::Ntsc {
+        1001.0 / 30_000.0
+    } else {
+        1.0 / 25.0
+    };
+    let mut parts = Vec::new();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut first_key = String::new();
+    for (_, clip) in track.clips() {
+        let asset = project
+            .assets
+            .get(&clip.asset)
+            .ok_or_else(|| DvdError::Invalid("referenced asset does not exist".to_string()))?;
+        let media = asset.media_file();
+        let path: &Path = &media;
+        if audio_kind(path) == AudioKind::Dts {
+            return Err(DvdError::Unsupported(format!(
+                "{}: a DTS file cannot be one of several clips on a track (it goes on the disc whole)",
+                path.display()
+            )));
+        }
+        let key = audio_cache_key(path)?;
+        let mut wav = transcode_audio_to_cache(path, cache_dir, &key)?;
+        let trimmed = clip.trim_start > 0 || clip.trim_end.is_some();
+        if trimmed {
+            wav = trimmed_wav(
+                &wav,
+                cache_dir,
+                &key,
+                f64::from(clip.trim_start) * frame,
+                clip.trim_end.map(|end| f64::from(end) * frame),
+            )?;
+        }
+        let part_key = match (trimmed, clip.trim_end) {
+            (false, _) => key.clone(),
+            (true, Some(end)) => format!("{key}.t{}-{end}", clip.trim_start),
+            (true, None) => format!("{key}.t{}-", clip.trim_start),
+        };
+        // With its silence in front (none for a clip at the start: the file is then only written in the
+        // plain form the joining reads).
+        let samples = delay_samples(clip.start, project.settings.standard);
+        parts.push(delayed_wav(&wav, cache_dir, &part_key, samples)?);
+        (part_key.as_str(), samples).hash(&mut hasher);
+        if first_key.is_empty() {
+            first_key = key;
+        }
+    }
+    joined_wav(
+        &parts,
+        cache_dir,
+        &format!("{first_key}.seq{:016x}", hasher.finish()),
+    )
+}
+
+/// The bytes in front of the samples of a WAV file as [`reshaped_wav`] writes it.
+const PLAIN_WAV_HEAD: u64 = 44;
+
+/// WAV files that all start at the same moment (as [`delayed_wav`] makes them), laid over one another as
+/// `{name}.wav` in `cache_dir`: each sounds from where the ones before it have ended.
+fn joined_wav(parts: &[PathBuf], cache_dir: &Path, name: &str) -> Result<PathBuf, DvdError> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let out = cache_dir.join(format!("{name}.wav"));
+    if out.is_file() {
+        return Ok(out);
+    }
+    let mut format: Option<[u8; 16]> = None;
+    // Each part's file and how many bytes of samples it holds.
+    let mut inputs = Vec::with_capacity(parts.len());
+    for part in parts {
+        let unsupported = |what: &str| DvdError::Unsupported(format!("{}: {what}", part.display()));
+        let mut input = fs::File::open(part).map_err(|err| crate::io_error(part, err))?;
+        let mut head = [0u8; 44];
+        input
+            .read_exact(&mut head)
+            .map_err(|err| crate::io_error(part, err))?;
+        let own: [u8; 16] = head
+            .get(20..36)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| unsupported("no format"))?;
+        if head.get(0..4) != Some(b"RIFF")
+            || head.get(12..16) != Some(b"fmt ")
+            || head.get(36..40) != Some(b"data")
+        {
+            return Err(unsupported("not a plain WAV file"));
+        }
+        if *format.get_or_insert(own) != own {
+            return Err(unsupported(
+                "its samples are stored another way than the other clips'",
+            ));
+        }
+        let block = u64::from(u16::from_le_bytes([own[12], own[13]])).max(1);
+        let size = input
+            .metadata()
+            .map_err(|err| crate::io_error(part, err))?
+            .len()
+            .saturating_sub(PLAIN_WAV_HEAD);
+        inputs.push((part, input, size - size % block));
+    }
+    let format =
+        format.ok_or_else(|| DvdError::Invalid("an audio track without clips".to_string()))?;
+    let total = inputs.iter().map(|(_, _, size)| *size).max().unwrap_or(0);
+    if total > u64::from(u32::MAX) - 36 {
+        return Err(DvdError::Unsupported(
+            "the track's sound is longer than a WAV file holds".to_string(),
+        ));
+    }
+    let partial = cache_dir.join(format!("{name}.{}.wav.part", part_number()));
+    let mut write = || -> std::io::Result<()> {
+        let mut writer = std::io::BufWriter::with_capacity(1 << 20, fs::File::create(&partial)?);
+        writer.write_all(b"RIFF")?;
+        writer.write_all(&(36 + total as u32).to_le_bytes())?;
+        writer.write_all(b"WAVEfmt ")?;
+        writer.write_all(&16u32.to_le_bytes())?;
+        writer.write_all(&format)?;
+        writer.write_all(b"data")?;
+        writer.write_all(&(total as u32).to_le_bytes())?;
+        let mut written = 0u64;
+        for (_, input, size) in &mut inputs {
+            if *size <= written {
+                continue;
+            }
+            input.seek(SeekFrom::Start(PLAIN_WAV_HEAD + written))?;
+            let more = *size - written;
+            let copied = std::io::copy(&mut input.take(more), &mut writer)?;
+            if copied != more {
+                return Err(std::io::Error::other("the sound ended early"));
+            }
+            written = *size;
+        }
+        writer.flush()
+    };
+    if let Err(err) = write() {
+        fs::remove_file(&partial).unwrap_or(());
+        return Err(crate::io_error(&partial, err));
+    }
+    fs::rename(&partial, &out).map_err(|err| crate::io_error(&partial, err))?;
     Ok(out)
 }
 
@@ -1501,8 +2282,109 @@ pub(crate) fn delayed_wav(
     key: &str,
     samples: u64,
 ) -> Result<PathBuf, DvdError> {
+    reshaped_wav(
+        wav,
+        cache_dir,
+        &format!("{key}.delay{samples}"),
+        WavShape::Delay(samples),
+    )
+}
+
+/// The part of `wav` (a cached transcode: 16-bit PCM) from `start` seconds up to `end` seconds (`None`: its end),
+/// kept next to it in `cache_dir`: the sound of a video clip trimmed to that part.
+///
+/// # Errors
+///
+/// As [`delayed_wav`].
+pub(crate) fn trimmed_wav(
+    wav: &Path,
+    cache_dir: &Path,
+    key: &str,
+    start: f64,
+    end: Option<f64>,
+) -> Result<PathBuf, DvdError> {
+    // The times in milliseconds name the file.
+    let ms = |seconds: f64| (seconds * 1000.0).round() as u64;
+    let name = match end {
+        Some(end) => format!("{key}.cut{}-{}", ms(start), ms(end)),
+        None => format!("{key}.cut{}-", ms(start)),
+    };
+    reshaped_wav(wav, cache_dir, &name, WavShape::Cut(start, end))
+}
+
+/// The frames of the AC-3 stream `ac3`, whose first frame sounds `delay` (27 MHz) after the file's first
+/// picture, that start from `start` seconds up to `end` seconds of the file (`None`: to its end): kept in
+/// `cache_dir`, with how long after the trimmed clip's first picture the first of them starts (less than a
+/// frame: 32 ms).
+///
+/// # Errors
+///
+/// [`DvdError::Unsupported`] when the stream is not AC-3 or no frame is left, and I/O errors.
+fn trimmed_ac3(
+    ac3: &Path,
+    cache_dir: &Path,
+    key: &str,
+    delay: i64,
+    (start, end): (f64, Option<f64>),
+) -> Result<(PathBuf, i64), DvdError> {
+    const CLOCK: f64 = 27_000_000.0;
+    let data = fs::read(ac3).map_err(|err| crate::io_error(ac3, err))?;
+    let stream = disccraft_psmux::es::parse_ac3(&data, 0)
+        .map_err(|err| DvdError::Unsupported(format!("{}: {err}", ac3.display())))?;
+    // `as` saturates; times are far inside the range.
+    let from = (start.max(0.0) * CLOCK).round() as i64;
+    let to = end.map(|end| (end.max(0.0) * CLOCK).round() as i64);
+    let at = |frame: &disccraft_psmux::es::Ac3Frame| frame.pts.saturating_add(delay);
+    let kept: Vec<&disccraft_psmux::es::Ac3Frame> = stream
+        .frames
+        .iter()
+        .filter(|frame| at(frame) >= from && to.is_none_or(|to| at(frame) < to))
+        .collect();
+    let first = kept.first().ok_or_else(|| {
+        DvdError::Unsupported(format!(
+            "{}: the trimmed clip has no sound left",
+            ac3.display()
+        ))
+    })?;
+    let new_delay = at(first).saturating_sub(from);
+    // The times in milliseconds name the file.
+    let ms = |ticks: i64| ticks / 27_000;
+    let out = cache_dir.join(match to {
+        Some(to) => format!("{key}.cut{}-{}.ac3", ms(from), ms(to)),
+        None => format!("{key}.cut{}-.ac3", ms(from)),
+    });
+    if out.is_file() {
+        return Ok((out, new_delay));
+    }
+    let mut bytes = Vec::new();
+    for frame in kept {
+        let end = frame.offset.saturating_add(frame.len);
+        bytes.extend_from_slice(data.get(frame.offset..end).unwrap_or_default());
+    }
+    let part = cache_dir.join(format!("{key}.cut.{}.ac3.part", part_number()));
+    fs::write(&part, &bytes).map_err(|err| crate::io_error(&part, err))?;
+    fs::rename(&part, &out).map_err(|err| crate::io_error(&part, err))?;
+    Ok((out, new_delay))
+}
+
+/// What [`reshaped_wav`] makes of a WAV file.
+#[derive(Clone, Copy)]
+enum WavShape {
+    /// Sample frames of silence in front.
+    Delay(u64),
+    /// Only the part between these seconds (to the end when `None`).
+    Cut(f64, Option<f64>),
+}
+
+/// `wav` reshaped ([`WavShape`]), kept in `cache_dir` as `{name}.wav`.
+fn reshaped_wav(
+    wav: &Path,
+    cache_dir: &Path,
+    name: &str,
+    shape: WavShape,
+) -> Result<PathBuf, DvdError> {
     use std::io::{Read, Seek, SeekFrom, Write};
-    let out = cache_dir.join(format!("{key}.delay{samples}.wav"));
+    let out = cache_dir.join(format!("{name}.wav"));
     if out.is_file() {
         return Ok(out);
     }
@@ -1559,6 +2441,23 @@ pub(crate) fn delayed_wav(
     let size = input.metadata().map_err(io)?.len();
     let data_len = data_len.min(size.saturating_sub(data_start));
     let data_len = data_len - data_len % block;
+    let sample_rate = f64::from(u32::from_le_bytes([
+        format[4], format[5], format[6], format[7],
+    ]));
+    // Sample frames of silence in front, sample frames left out at the head, and how many are kept.
+    let whole = data_len / block;
+    // `as` saturates; times are far inside the range.
+    let at = |seconds: f64| ((seconds.max(0.0) * sample_rate).round() as u64).min(whole);
+    let (samples, skip, keep) = match shape {
+        WavShape::Delay(samples) => (samples, 0, whole),
+        WavShape::Cut(start, end) => {
+            let skip = at(start);
+            let keep = end.map_or(whole, at).saturating_sub(skip);
+            (0, skip, keep)
+        }
+    };
+    let data_start = data_start.saturating_add(skip.saturating_mul(block));
+    let data_len = keep.saturating_mul(block);
     let silence = samples
         .checked_mul(block)
         .ok_or_else(|| unsupported("the clip is too far along"))?;
@@ -1567,7 +2466,7 @@ pub(crate) fn delayed_wav(
         .filter(|total| *total <= u64::from(u32::MAX) - 36)
         .ok_or_else(|| unsupported("the sound with its silence is longer than a WAV file holds"))?;
 
-    let part = cache_dir.join(format!("{key}.delay{samples}.{}.wav.part", part_number()));
+    let part = cache_dir.join(format!("{name}.{}.wav.part", part_number()));
     let mut write = || -> std::io::Result<()> {
         let mut writer = std::io::BufWriter::with_capacity(1 << 20, fs::File::create(&part)?);
         writer.write_all(b"RIFF")?;
@@ -1617,20 +2516,94 @@ fn audio_kind(path: &Path) -> AudioKind {
     }
 }
 
+/// The bitrate of a WAV file a disc carries as LPCM as it is although it is not 16-bit 48 kHz: integer PCM of 20
+/// or 24 bits (20 carried as 24) or at 96 kHz (or both), with no more channels than a DVD stream's 6.144 Mbit/s
+/// allow (96 kHz 24-bit is stereo). A Blu-ray's (M6.347) is also 192 kHz, up to 27.648 Mbit/s, on the speakers
+/// of a channel assignment, an odd count of channels stored with one more. `None` for any other file.
+pub(crate) fn wav_is_fine_lpcm(path: &Path, kind: DiscKind) -> Option<u32> {
+    if !path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
+    {
+        return None;
+    }
+    let head = read_head(path)?;
+    let (tag, channels, rate, bits, mask) = wav_format(&head)?;
+    let bits = if bits == 20 { 24 } else { bits };
+    let rates: &[u32] = match kind {
+        DiscKind::Dvd => &[48_000, 96_000],
+        DiscKind::BluRay => &[48_000, 96_000, 192_000],
+    };
+    let hi_res = tag == 1
+        && rates.contains(&rate)
+        && matches!(bits, 16 | 24)
+        && !(rate == 48_000 && bits == 16);
+    let bitrate = match kind {
+        DiscKind::Dvd => {
+            let bitrate = u64::from(rate) * u64::from(bits) * u64::from(channels);
+            ((1..=8).contains(&channels) && bitrate <= 6_144_000).then_some(bitrate)?
+        }
+        DiscKind::BluRay => {
+            let bitrate = bd_lpcm_bitrate(channels, rate, bits);
+            (bd_layout(channels, mask) && bitrate <= disccraft_psmux::es::BD_LPCM_MAX_BITRATE)
+                .then_some(bitrate)?
+        }
+    };
+    hi_res.then(|| u32::try_from(bitrate).ok()).flatten()
+}
+
+/// Whether a Blu-ray's LPCM has a channel assignment for a WAV's `channels` on speakers `mask` (M6.347).
+fn bd_layout(channels: u16, mask: u32) -> bool {
+    u8::try_from(channels)
+        .ok()
+        .and_then(|channels| disccraft_m2tsmux::bd_lpcm_layout(channels, mask))
+        .is_some()
+}
+
+/// The bits a second of a Blu-ray's LPCM stream of `channels` (an odd count stored with one more, mono as two).
+fn bd_lpcm_bitrate(channels: u16, rate: u32, bits: u16) -> u64 {
+    u64::from(rate) * u64::from(bits) * u64::from(channels.max(2).next_multiple_of(2))
+}
+
+/// The bit rate of an MPEG-1 Layer II file (`.mp2`, `.mpa`) that goes on the disc as it is: on a PAL DVD (whose
+/// players all decode MPEG audio; an NTSC disc's need not), at 48 kHz. `None` for any other file or disc: the
+/// file is then converted like other sound.
+pub(crate) fn dvd_mp2(path: &Path, project: &Project) -> Option<u32> {
+    if project.settings.kind != DiscKind::Dvd
+        || project.settings.standard != VideoStandard::Pal
+        || !path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("mp2") || ext.eq_ignore_ascii_case("mpa"))
+    {
+        return None;
+    }
+    let (rate, kbps, _) = disccraft_psmux::es::mpa::first_frame_format(&read_head(path)?)?;
+    (rate == 48_000).then(|| kbps.checked_mul(1000)).flatten()
+}
+
+/// The bitrate of a WAV file's PCM (sampling frequency x word length x channels), from its `fmt ` chunk.
+fn wav_bitrate(path: &Path) -> Option<u32> {
+    let (_, channels, rate, bits, _) = wav_format(&read_head(path)?)?;
+    u32::try_from(u64::from(rate) * u64::from(bits) * u64::from(channels)).ok()
+}
+
 /// Whether a WAV file holds what a disc carries as LPCM without conversion: integer PCM, 16 bits, 48 kHz, up to
 /// 8 channels (read from its `fmt ` chunk).
 fn wav_is_disc_lpcm(path: &Path) -> bool {
     let Some(head) = read_head(path) else {
         return false;
     };
-    wav_format(&head).is_some_and(|(tag, channels, rate, bits)| {
+    wav_format(&head).is_some_and(|(tag, channels, rate, bits, _)| {
         tag == 1 && (1..=8).contains(&channels) && rate == 48_000 && bits == 16
     })
 }
 
 /// The format tag (1 = integer PCM; the PCM sub-format of an extensible header counts as 1), channel count,
-/// sample rate and bits per sample of a RIFF WAVE file's `fmt ` chunk.
-fn wav_format(data: &[u8]) -> Option<(u16, u16, u32, u16)> {
+/// sample rate, bits per sample and speakers (an extensible header's channel mask, else 0) of a RIFF WAVE file's
+/// `fmt ` chunk.
+fn wav_format(data: &[u8]) -> Option<(u16, u16, u32, u16, u32)> {
     if data.get(..4)? != b"RIFF" || data.get(8..12)? != b"WAVE" {
         return None;
     }
@@ -1651,15 +2624,18 @@ fn wav_format(data: &[u8]) -> Option<(u16, u16, u32, u16)> {
         let body = at.checked_add(8)?;
         if id == b"fmt " {
             let mut tag = u16_at(body)?;
+            let mut mask = 0;
             // WAVE_FORMAT_EXTENSIBLE: the real format is the first two bytes of the sub-format.
             if tag == 0xFFFE && size >= 26 {
                 tag = u16_at(body.checked_add(24)?)?;
+                mask = u32_at(body.checked_add(20)?)?;
             }
             return Some((
                 tag,
                 u16_at(body.checked_add(2)?)?,
                 u32_at(body.checked_add(4)?)?,
                 u16_at(body.checked_add(14)?)?,
+                mask,
             ));
         }
         // Chunks are padded to an even size.
@@ -1671,7 +2647,11 @@ fn wav_format(data: &[u8]) -> Option<(u16, u16, u32, u16)> {
 fn has_passthrough_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("m2v") || ext.eq_ignore_ascii_case("mpv"))
+        .is_some_and(|ext| {
+            ["m2v", "mpv", "m1v"]
+                .iter()
+                .any(|known| ext.eq_ignore_ascii_case(known))
+        })
 }
 
 /// Read at most the first 64 KiB of a file.
@@ -1747,16 +2727,74 @@ fn sequence_header_size(slice: &[u8], standard: VideoStandard) -> Option<(u16, u
     fits.then_some((width, height))
 }
 
-/// The picture size in the first sequence header of `data`, when it goes on a DVD as it is.
+/// The picture size in the first sequence header of `data`, when it goes on a DVD as it is (MPEG-1 video too,
+/// M6.350).
 fn first_sequence_header_size(data: &[u8], standard: VideoStandard) -> Option<(u16, u16)> {
-    let mut pos = 0usize;
-    while let Some(slice) = data.get(pos..pos.saturating_add(SEQUENCE_HEADER_BYTES)) {
-        if slice.starts_with(&[0x00, 0x00, 0x01, 0xB3]) {
-            return sequence_header_size(slice, standard);
-        }
-        pos = pos.saturating_add(1);
+    let pos = data
+        .windows(4)
+        .position(|window| window == [0x00, 0x00, 0x01, 0xB3])?;
+    let slice = data.get(pos..pos.saturating_add(SEQUENCE_HEADER_BYTES))?;
+    if is_mpeg1_at(data, pos) {
+        return mpeg1_header_size(slice, standard);
     }
-    None
+    sequence_header_size(slice, standard)
+}
+
+/// Whether the sequence header at `pos` of `data` is MPEG-1's: MPEG-2's is followed at once by its sequence
+/// extension (start code `00 00 01 B5`), MPEG-1's by anything else (ISO/IEC 13818-2 §6.2.2: a sequence header
+/// without its extension is ISO/IEC 11172-2). Its quantiser matrices hold no zero byte, so the next start code is
+/// the next `00 00 01`.
+fn is_mpeg1_at(data: &[u8], pos: usize) -> bool {
+    let after = pos.saturating_add(SEQUENCE_HEADER_BYTES + 1);
+    data.get(after..)
+        .and_then(|rest| {
+            rest.windows(4)
+                .find(|window| window.starts_with(&[0, 0, 1]))
+        })
+        .is_some_and(|code| code.get(3) != Some(&0xB5))
+}
+
+/// The picture size of an MPEG-1 sequence header that goes on a DVD of `standard` as it is (M6.350): 352x240 at
+/// 29.97 or 352x288 at 25 frames a second, up to 1.856 Mbit/s (any pixel aspect ratio: the title is 4:3).
+fn mpeg1_header_size(slice: &[u8], standard: VideoStandard) -> Option<(u16, u16)> {
+    let (height, want_rate) = match standard {
+        VideoStandard::Ntsc => (240, 4u8),
+        VideoStandard::Pal => (288, 3u8),
+    };
+    let byte = |index: usize| slice.get(index).copied();
+    let (b0, b1, b2, b3) = (byte(4)?, byte(5)?, byte(6)?, byte(7)?);
+    let (b4, b5, b6) = (byte(8)?, byte(9)?, byte(10)?);
+    let size = (
+        (u16::from(b0) << 4) | (u16::from(b1) >> 4),
+        (u16::from(b1 & 0x0F) << 8) | u16::from(b2),
+    );
+    let bit_rate = (u32::from(b4) << 10) | (u32::from(b5) << 2) | (u32::from(b6) >> 6);
+    let fits = size == (352, height)
+        && b3 & 0x0F == want_rate
+        && b3 >> 4 != 0
+        && u64::from(bit_rate) * 400 <= crate::source::MPEG1_MAX_BITRATE;
+    fits.then_some(size)
+}
+
+/// Whether the video at `path` (an elementary stream, or the video of a program stream) is MPEG-1 (M6.350).
+fn is_mpeg1_video(path: &Path) -> bool {
+    let Some(mut data) = read_head(path) else {
+        return false;
+    };
+    if disccraft_psmux::demux::is_program_stream(&data) {
+        let Ok(mut file) = fs::File::open(path) else {
+            return false;
+        };
+        let mut head = Vec::new();
+        let limit = u64::try_from(HEAD_BYTES).unwrap_or(u64::MAX);
+        if disccraft_psmux::demux::demux(&mut file, Some(&mut head), None, Some(limit)).is_err() {
+            return false;
+        }
+        data = head;
+    }
+    data.windows(4)
+        .position(|window| window == [0x00, 0x00, 0x01, 0xB3])
+        .is_some_and(|pos| is_mpeg1_at(&data, pos))
 }
 
 /// The bit rate (bit/s) in the first sequence header of the video at `path` (an elementary stream, or the video of
@@ -1843,8 +2881,11 @@ pub fn timeline_rates(project: &Project) -> Vec<TimelineRate> {
                             })
                             .and_then(|kbps| kbps.checked_mul(1000))
                             .unwrap_or(1_509_750),
-                        AudioKind::Wav => LPCM_STEREO_BITRATE,
-                        AudioKind::Transcode => AC3_STEREO_BITRATE,
+                        // LPCM at its own rate (its channels, word length and sampling frequency).
+                        AudioKind::Wav => wav_bitrate(&path).unwrap_or(LPCM_STEREO_BITRATE),
+                        AudioKind::Transcode => wav_is_fine_lpcm(&path, project.settings.kind)
+                            .or_else(|| dvd_mp2(&path, project))
+                            .unwrap_or(AC3_STEREO_BITRATE),
                     })
                     .fold(0u32, u32::saturating_add)
             };
@@ -1874,9 +2915,76 @@ fn dvd_picture_size(path: &Path, standard: VideoStandard) -> Option<(u16, u16)> 
     first_sequence_header_size(&data, standard)
 }
 
-/// Whether the video at `path` goes on the project's disc as it is. A DVD takes the smaller DVD picture sizes too
-/// (704x480, 352x480, 352x240 and their 576 / 288 line counterparts); a Blu-ray's SD video is 720 wide only.
+/// Whether the video at `path` goes on the project's disc as it is: it fits ([`fits_as_is`]) and is not transcoded
+/// all the same (a DVD quality preset of its own, as Encore transcodes a DVD-compliant asset a preset is picked for).
 pub(crate) fn passes_through(project: &Project, path: &Path) -> bool {
+    fits_as_is(project, path) && !transcode_forced(project, path)
+}
+
+/// Whether the video at `path` would go on the disc transcoded although it fits as it is: its asset has a setting
+/// of its own for the disc's kind (a DVD or a Blu-ray quality preset; Encore's "Don't Transcode" is no setting).
+pub(crate) fn transcode_forced(project: &Project, path: &Path) -> bool {
+    project.assets.values().any(|asset| {
+        asset.media_file().as_ref() == path
+            && match project.settings.kind {
+                DiscKind::Dvd => asset.transcode_kbps.is_some(),
+                DiscKind::BluRay => asset.bluray_transcode.is_some(),
+            }
+    })
+}
+
+/// Whether video asset `asset` fits the project's disc as it is (so its setting may be "Don't Transcode", or a
+/// preset that transcodes it all the same): an SD stream, or on an HD Blu-ray video of the disc's format.
+#[must_use]
+pub fn video_fits_as_is(project: &Project, asset: AssetId) -> bool {
+    video_fits_disc(project, asset, project.settings.kind)
+}
+
+/// Whether video asset `asset` would fit a disc of `kind` as it is, with the project's TV standard and Blu-ray
+/// format: on a DVD an MPEG-2 stream of a DVD picture size; on an HD Blu-ray video of its format; on an SD
+/// Blu-ray a 720-wide MPEG-2 stream.
+#[must_use]
+pub fn video_fits_disc(project: &Project, asset: AssetId, kind: DiscKind) -> bool {
+    let Some(found) = project
+        .assets
+        .get(&asset)
+        .filter(|found| found.kind == AssetKind::Video)
+    else {
+        return false;
+    };
+    let media = found.media_file();
+    let path: &Path = &media;
+    let standard = project.settings.standard;
+    match kind {
+        DiscKind::Dvd => {
+            video_passes_through(path, standard) || dvd_picture_size(path, standard).is_some()
+        }
+        // In the asset's own HD format (M6.325), else the project's.
+        DiscKind::BluRay => video_fits_bluray_as(project, asset, project.asset_bd_video(asset)),
+    }
+}
+
+/// Whether video asset `asset` would fit a Blu-ray title in `video` as it is (the Transcode Settings dialog asks
+/// for a format being chosen, M6.325): an SD format takes a 720-wide MPEG-2 stream of the TV standard.
+#[must_use]
+pub fn video_fits_bluray_as(project: &Project, asset: AssetId, video: BdVideo) -> bool {
+    let Some(found) = project
+        .assets
+        .get(&asset)
+        .filter(|found| found.kind == AssetKind::Video)
+    else {
+        return false;
+    };
+    let media = found.media_file();
+    match crate::BdVideoFormat::of_video(video) {
+        Some(format) => crate::video_fits_bd(&media, format),
+        None => video_passes_through(&media, project.settings.standard),
+    }
+}
+
+/// Whether the video at `path` fits the project's disc as it is. A DVD takes the smaller DVD picture sizes too
+/// (704x480, 352x480, 352x240 and their 576 / 288 line counterparts); a Blu-ray's SD video is 720 wide only.
+pub(crate) fn fits_as_is(project: &Project, path: &Path) -> bool {
     let standard = project.settings.standard;
     // An elementary stream, or the MPEG-2 of a program or transport stream that fits the standard.
     if video_passes_through(path, standard) {
@@ -1896,6 +3004,18 @@ fn cache_key(
     budget: &Budget,
     (wide, gop_starts): (bool, &[u64]),
 ) -> Result<String, DvdError> {
+    // At the asset's own bit rate (M6.251), also when asked for the file alone (its transcode status).
+    let budget = &project
+        .assets
+        .iter()
+        .find(|(id, asset)| {
+            asset.media_file().as_ref() == input && fixed_video_bitrate(project, **id).is_some()
+        })
+        .and_then(|(id, _)| fixed_video_bitrate(project, *id))
+        .map_or(*budget, |fixed| Budget {
+            video_bitrate: fixed.min(budget.max_bitrate),
+            ..*budget
+        });
     let metadata =
         disccraft_transcode::document_metadata(input).map_err(|err| crate::io_error(input, err))?;
     let (secs, nanos) = modified_time(&metadata)?;
@@ -1909,6 +3029,33 @@ fn cache_key(
     seed = fnv1a64(budget.video_bitrate.to_string().as_bytes(), seed);
     seed = fnv1a64(budget.max_bitrate.to_string().as_bytes(), seed);
     seed = fnv1a64(if wide { b"16:9" } else { b"4:3" }, seed);
+    // Two passes or a constant rate make another stream (one-pass VBR leaves the older keys as they were).
+    match rate_mode(project, input) {
+        disccraft_transcode::RateMode::Vbr => {}
+        disccraft_transcode::RateMode::Vbr2Pass => seed = fnv1a64(b"vbr2pass", seed),
+        disccraft_transcode::RateMode::Cbr => seed = fnv1a64(b"cbr", seed),
+    }
+    // Film (23.976 by 3:2 pulldown) makes another stream (the keys of the others stay as they were).
+    if film_of(project, input) {
+        seed = fnv1a64(b"film", seed);
+    }
+    // A lower quality (Encore's "Low quality" presets) makes another stream (the best leaves the keys as they were).
+    let quality = quality_of(project, input);
+    if quality != disccraft_transcode::BEST_QUALITY {
+        seed = fnv1a64(format!("quality:{quality}").as_bytes(), seed);
+    }
+    // So do Encore's rendering checkboxes (both off leaves the keys as they were).
+    let rendering = rendering_of(project, input);
+    if rendering.max_quality {
+        seed = fnv1a64(b"max-render-quality", seed);
+    }
+    if rendering.frame_blend {
+        seed = fnv1a64(b"frame-blend", seed);
+    }
+    // Interpret Footage: pixels of another shape make another picture (the keys of the others stay as they were).
+    if let Some((width, height)) = disccraft_transcode::chosen_pixel_aspect(input) {
+        seed = fnv1a64(format!("par:{width}:{height}").as_bytes(), seed);
+    }
     // Only a video with chapters past its start has GOP starts: the keys of the others stay as they were.
     if !gop_starts.is_empty() {
         let frames: Vec<String> = gop_starts.iter().map(u64::to_string).collect();
@@ -1929,8 +3076,17 @@ fn frame_ticks(standard: VideoStandard) -> u64 {
 
 /// The frame (at the disc's rate) nearest to `ticks` from the start of a title.
 pub(crate) fn frame_at(ticks: i64, standard: VideoStandard) -> u64 {
-    let per_frame = frame_ticks(standard);
-    u64::try_from(ticks).map_or(0, |ticks| ticks.saturating_add(per_frame / 2) / per_frame)
+    nearest_frame(ticks, frame_ticks(standard))
+}
+
+/// Ticks of one film picture (1001/24000 s), as a film transcode makes them.
+const FILM_FRAME_TICKS: u64 = 10_594_584_000;
+
+/// The frame `per_frame` ticks long nearest to `ticks`.
+fn nearest_frame(ticks: i64, per_frame: u64) -> u64 {
+    u64::try_from(ticks).map_or(0, |ticks| {
+        ticks.saturating_add(per_frame / 2) / per_frame.max(1)
+    })
 }
 
 /// The manual layer break's time in `timeline`, when the disc is a dual-layer DVD (DVD9) and the break is in it.
@@ -1947,6 +3103,12 @@ pub(crate) fn layer_break_time(project: &Project, timeline: &Timeline) -> Option
 /// timeline that plays it, so each chapter's cell begins exactly at its frame (the GOPs otherwise fall every 15 or 12
 /// frames, and a cell would start at the nearest of them).
 fn asset_gop_starts(project: &Project, path: &Path) -> Vec<u64> {
+    // A film transcode's pictures are 23.976 a second.
+    let per_frame = if film_of(project, path) {
+        FILM_FRAME_TICKS
+    } else {
+        frame_ticks(project.settings.standard)
+    };
     let mut frames: Vec<u64> = project
         .timelines
         .values()
@@ -1965,7 +3127,7 @@ fn asset_gop_starts(project: &Project, path: &Path) -> Vec<u64> {
                 .map(|chapter| chapter.time)
                 .chain(layer_break)
         })
-        .map(|time| frame_at(time.0, project.settings.standard))
+        .map(|time| nearest_frame(time.0, per_frame))
         .filter(|frame| *frame > 0)
         .collect();
     frames.sort_unstable();
@@ -2014,7 +3176,8 @@ fn slideshow_cache_key(
 ) -> Result<String, DvdError> {
     let mut seed = fnv1a64(b"slideshow", FNV_OFFSET);
     seed = fnv1a64(CACHE_VERSION.as_bytes(), seed);
-    // The slide renderer's version (2: M10.6 gave tall slides their right width).
+    // The slide renderer's version (2: M10.6 gave tall slides their right width; 3: M6.320 a DVD-sized still has SD
+    // pixels).
     seed = fnv1a64(SLIDE_RENDER_VERSION.as_bytes(), seed);
     seed = fnv1a64(standard_tag(project.settings.standard).as_bytes(), seed);
     seed = fnv1a64(budget.video_bitrate.to_string().as_bytes(), seed);
@@ -2051,6 +3214,19 @@ fn slideshow_seed(project: &Project, slideshow: &Slideshow, seed: u64) -> Result
         seed = fnv1a64(nanos.to_string().as_bytes(), seed);
         seed = fnv1a64(slide.duration.0.to_string().as_bytes(), seed);
         seed = fnv1a64(slide.scale.as_str().as_bytes(), seed);
+        // A picture whose alpha is ignored is another picture (none ignored leaves older keys as they were).
+        if project
+            .assets
+            .get(&slide.asset)
+            .is_some_and(|asset| asset.ignore_alpha)
+        {
+            seed = fnv1a64(b"opaque", seed);
+        }
+        // Interpret Footage: pixels of another shape make another picture (as a video's transcode key has it; the
+        // keys of the others stay as they were).
+        if let Some((width, height)) = disccraft_transcode::chosen_pixel_aspect(path) {
+            seed = fnv1a64(format!("par:{width}:{height}").as_bytes(), seed);
+        }
         match slide.transition {
             Some(own) => {
                 seed = fnv1a64(own.kind.as_str().as_bytes(), seed);
@@ -2209,6 +3385,10 @@ fn transcode_slideshow_to_cache(
         max_bitrate: budget.max_bitrate,
         wide: budget.wide,
         gop_starts: Vec::new(),
+        mode: disccraft_transcode::RateMode::Vbr,
+        film: false,
+        quality: disccraft_transcode::BEST_QUALITY,
+        rendering: disccraft_transcode::Rendering::default(),
     };
 
     let slide_inputs = slideshow_inputs(project, slideshow)?;
@@ -2366,20 +3546,11 @@ fn slideshow_inputs(project: &Project, slideshow: &Slideshow) -> Result<Vec<Slid
                 None => None,
             },
             // The slide's own pan and zoom, or a random one when the show asks for them.
-            motion: slideshow.slide_effect(index).map(|effect| Motion {
-                pan: match effect.pan {
-                    disccraft_project::SlidePan::None => (0, 0),
-                    disccraft_project::SlidePan::Left => (-1, 0),
-                    disccraft_project::SlidePan::Right => (1, 0),
-                    disccraft_project::SlidePan::Up => (0, -1),
-                    disccraft_project::SlidePan::Down => (0, 1),
-                },
-                zoom: match effect.zoom {
-                    disccraft_project::SlideZoom::In => 1,
-                    disccraft_project::SlideZoom::Out => -1,
-                    disccraft_project::SlideZoom::None => 0,
-                },
-            }),
+            motion: slideshow.slide_effect(index).map(slide_motion),
+            opaque: project
+                .assets
+                .get(&slide.asset)
+                .is_some_and(|asset| asset.ignore_alpha),
         });
     }
 
@@ -2594,10 +3765,11 @@ mod tests {
         AC3_STEREO_BITRATE, AudioKind, Budget, LPCM_STEREO_BITRATE, MAX_MUX_VIDEO_BITRATE,
         TICKS_PER_SECOND, TranscodeStatus, VideoStandard, audio_cache_key, audio_kind,
         budget_with_probe, estimate_with_probe, fnv1a64, is_passthrough,
-        max_bitrate_for_audio_bitrate, slideshow_cache_key, transcode_status,
+        max_bitrate_for_audio_bitrate, passes_through, slideshow_cache_key, transcode_status,
+        video_fits_as_is,
     };
     use crate::DvdError;
-    use disccraft_project::{Capacity, Project, Tick};
+    use disccraft_project::{Capacity, DiscKind, Project, Tick};
     use std::error::Error;
     use std::fs;
     use std::io::Write;
@@ -2710,6 +3882,55 @@ mod tests {
         assert_eq!(status.get(&music), Some(&TranscodeStatus::Untranscoded));
         assert_eq!(status.get(&still), Some(&TranscodeStatus::NotApplicable));
 
+        // M6.315: a DVD quality preset of its own transcodes a video that fits all the same (Encore's preset picked
+        // for a DVD-compliant asset); it still fits, so "Don't Transcode" (no setting) puts it back.
+        assert!(video_fits_as_is(&project, compliant));
+        assert!(!video_fits_as_is(&project, other_video));
+        assert!(!video_fits_as_is(&project, still));
+        // M6.324: asked for each kind of disc, whatever the project's.
+        assert!(super::video_fits_disc(
+            &project,
+            compliant,
+            disccraft_project::DiscKind::Dvd
+        ));
+        assert!(!super::video_fits_disc(
+            &project,
+            other_video,
+            disccraft_project::DiscKind::BluRay
+        ));
+        assert!(!super::video_fits_disc(
+            &project,
+            still,
+            disccraft_project::DiscKind::Dvd
+        ));
+        // M6.325: and for a Blu-ray format being chosen: the SD MPEG-2 fits an SD title, not an HD one.
+        assert!(super::video_fits_bluray_as(
+            &project,
+            compliant,
+            super::BdVideo::Sd
+        ));
+        assert!(!super::video_fits_bluray_as(
+            &project,
+            compliant,
+            super::BdVideo::Hd1080p23
+        ));
+        assert!(!super::video_fits_bluray_as(
+            &project,
+            still,
+            super::BdVideo::Sd
+        ));
+        project.set_asset_transcode(compliant, Some(4_000))?;
+        let status = transcode_status(&project, None);
+        assert_eq!(status.get(&compliant), Some(&TranscodeStatus::Untranscoded));
+        assert!(video_fits_as_is(&project, compliant));
+        assert!(!passes_through(&project, &m2v));
+        // On a Blu-ray the DVD setting does not count.
+        project.settings.kind = disccraft_project::DiscKind::BluRay;
+        assert!(passes_through(&project, &m2v));
+        project.settings.kind = disccraft_project::DiscKind::Dvd;
+        project.set_asset_transcode(compliant, None)?;
+        assert!(passes_through(&project, &m2v));
+
         // A finished audio transcode (the file and its marker) in the cache.
         let key = audio_cache_key(&mp3)?;
         fs::write(cache.join(format!("{key}.wav")), b"")?;
@@ -2742,6 +3963,113 @@ mod tests {
         Ok(())
     }
 
+    /// M6.251: a video with a bit rate of its own is transcoded at it, and the others share what it leaves.
+    #[test]
+    fn an_assets_own_bit_rate_is_taken_off_the_budget() -> Result<(), Box<dyn Error>> {
+        let mut project = Project::default();
+        project.settings.capacity = Capacity::Dvd5;
+        let first = project.add_asset(Path::new("first.mp4"))?;
+        let second = project.add_asset(Path::new("second.mp4"))?;
+        let one = project.add_timeline(first, None)?;
+        let two = project.add_timeline(second, None)?;
+        // Two titles of 80 minutes: 3.5 Mbit/s each fits.
+        let probe = |_path: &Path| Ok::<f64, DvdError>(4800.0);
+        let shared = budget_with_probe(&project, &probe)?.video_bitrate;
+        assert!((3_400_000..3_700_000).contains(&shared), "{shared}");
+        let even = estimate_with_probe(&project, &probe)?;
+
+        // The first at 2 Mbit/s: the second gets what that leaves.
+        project.set_asset_transcode(first, Some(2_000))?;
+        assert_eq!(super::fixed_video_bitrate(&project, first), Some(2_000_000));
+        assert_eq!(super::fixed_video_bitrate(&project, second), None);
+        let budget = budget_with_probe(&project, &probe)?;
+        assert!(
+            (4_900_000..5_300_000).contains(&budget.video_bitrate),
+            "{budget:?}"
+        );
+        let estimate = estimate_with_probe(&project, &probe)?;
+        let bytes = |estimate: &super::Estimate, id| {
+            estimate
+                .timelines
+                .iter()
+                .find(|(timeline, _)| *timeline == id)
+                .map_or(0, |(_, bytes)| *bytes)
+        };
+        // 80 minutes at 2 Mbit/s and 192 kbit/s of sound.
+        let expected = 4800 * (2_000_000 + u64::from(AC3_STEREO_BITRATE)) / 8;
+        assert!(bytes(&estimate, one).abs_diff(expected) < 1_000);
+        assert!(bytes(&estimate, one) < bytes(&even, one));
+        assert!(bytes(&estimate, two) > bytes(&even, two));
+        assert!(estimate.estimated_bytes.abs_diff(even.estimated_bytes) < 10_000_000);
+
+        // Both with a rate of their own: nothing is left to share out, and the disc may overflow.
+        project.set_asset_transcode(second, Some(8_000))?;
+        let budget = budget_with_probe(&project, &probe)?;
+        assert_eq!(budget.video_bitrate, 0);
+        let estimate = estimate_with_probe(&project, &probe)?;
+        assert!(estimate.estimated_bytes > Capacity::Dvd5.bytes());
+        // A rate outside what a disc carries is refused.
+        assert!(project.set_asset_transcode(first, Some(500)).is_err());
+        assert!(project.set_asset_transcode(first, Some(50_000)).is_err());
+        project.set_asset_transcode(first, None)?;
+        assert_eq!(super::fixed_video_bitrate(&project, first), None);
+        Ok(())
+    }
+
+    /// M6.350: an MPEG-1 sequence header (no sequence extension after it) fits a DVD at 352x240 / 352x288, the
+    /// standard's rate and up to 1.856 Mbit/s; MPEG-2's is checked as before.
+    #[test]
+    fn mpeg1_video_fits_a_dvd_at_its_own_size() {
+        // 352x240, pixel aspect 12, 29.97, 1150 kbit/s (2875 x 400), then a GOP header.
+        let header = |width: u16, height: u16, rate: u8, bits_400: u32, next: u8| -> Vec<u8> {
+            let mut data = vec![0, 0, 1, 0xB3];
+            data.push((width >> 4) as u8);
+            data.push((((width & 0x0F) << 4) as u8) | ((height >> 8) as u8));
+            data.push((height & 0xFF) as u8);
+            data.push(0xC0 | rate);
+            data.push((bits_400 >> 10) as u8);
+            data.push((bits_400 >> 2) as u8);
+            data.push((((bits_400 & 0x03) << 6) as u8) | 0x20);
+            data.extend_from_slice(&[0x10, 0x00]);
+            data.extend_from_slice(&[0, 0, 1, next, 0, 0, 0, 0]);
+            data
+        };
+        let ntsc = VideoStandard::Ntsc;
+        let vcd = header(352, 240, 4, 2875, 0xB8);
+        assert!(super::is_mpeg1_at(&vcd, 0));
+        assert_eq!(
+            super::first_sequence_header_size(&vcd, ntsc),
+            Some((352, 240))
+        );
+        // On a PAL disc it is 352x288 at 25.
+        assert_eq!(
+            super::first_sequence_header_size(&vcd, VideoStandard::Pal),
+            None
+        );
+        let pal = header(352, 288, 3, 2875, 0x00);
+        assert_eq!(
+            super::first_sequence_header_size(&pal, VideoStandard::Pal),
+            Some((352, 288))
+        );
+        // Too fast (2 Mbit/s), marked variable (0x3FFFF), or full size: not as it is.
+        assert_eq!(
+            super::first_sequence_header_size(&header(352, 240, 4, 5000, 0xB8), ntsc),
+            None
+        );
+        assert_eq!(
+            super::first_sequence_header_size(&header(352, 240, 4, 0x3FFFF, 0xB8), ntsc),
+            None
+        );
+        assert_eq!(
+            super::first_sequence_header_size(&header(720, 480, 4, 2875, 0xB8), ntsc),
+            None
+        );
+        // With its sequence extension it is MPEG-2 (whose 352x240 needs a 4:3 aspect code, which 12 is not).
+        let mpeg2 = header(352, 240, 4, 2875, 0xB5);
+        assert!(!super::is_mpeg1_at(&mpeg2, 0));
+        assert_eq!(super::first_sequence_header_size(&mpeg2, ntsc), None);
+    }
+
     /// A WAV is taken as LPCM only as 16-bit 48 kHz integer PCM; the header is read, also an extensible one.
     #[test]
     fn a_wav_header_tells_whether_it_is_disc_lpcm() {
@@ -2753,7 +4081,8 @@ mod tests {
             fmt.extend_from_slice(&[0; 6]);
             fmt.extend_from_slice(&bits.to_le_bytes());
             if extensible {
-                fmt.extend_from_slice(&[22, 0, 0, 0, 0, 0, 0, 0]);
+                // 5.1 with side surrounds.
+                fmt.extend_from_slice(&[22, 0, 0, 0, 0x0F, 0x06, 0, 0]);
                 fmt.extend_from_slice(&tag.to_le_bytes());
                 fmt.extend_from_slice(&[0; 14]);
             }
@@ -2767,15 +4096,15 @@ mod tests {
         }
         assert_eq!(
             super::wav_format(&wav(1, 2, 48_000, 16, false)),
-            Some((1, 2, 48_000, 16))
+            Some((1, 2, 48_000, 16, 0))
         );
         assert_eq!(
             super::wav_format(&wav(1, 6, 48_000, 24, true)),
-            Some((1, 6, 48_000, 24))
+            Some((1, 6, 48_000, 24, 0x60F))
         );
         assert_eq!(
             super::wav_format(&wav(3, 2, 44_100, 32, false)),
-            Some((3, 2, 44_100, 32))
+            Some((3, 2, 44_100, 32, 0))
         );
         assert_eq!(super::wav_format(b"RIFF....AVI "), None);
         assert_eq!(super::wav_format(&[]), None);
@@ -2794,14 +4123,93 @@ mod tests {
     #[test]
     fn max_bitrate_two_lpcm_tracks() -> Result<(), Box<dyn Error>> {
         let audio_bitrate = 2 * LPCM_STEREO_BITRATE;
-        assert_eq!(max_bitrate_for_audio_bitrate(audio_bitrate)?, 6_728_000);
+        assert_eq!(
+            max_bitrate_for_audio_bitrate(audio_bitrate, DiscKind::Dvd)?,
+            6_728_000
+        );
         Ok(())
     }
 
     #[test]
     fn max_bitrate_five_lpcm_tracks_errors() {
         let audio_bitrate = 5 * LPCM_STEREO_BITRATE;
-        assert!(max_bitrate_for_audio_bitrate(audio_bitrate).is_err());
+        assert!(max_bitrate_for_audio_bitrate(audio_bitrate, DiscKind::Dvd).is_err());
+    }
+
+    /// M6.347: a Blu-ray keeps as LPCM a WAV of 192 kHz, of 20 bits (as 24) and of more than two channels on the
+    /// speakers of a channel assignment, up to 27.648 Mbit/s as stored; a DVD none of these past its 6.144.
+    #[test]
+    fn a_blu_ray_keeps_more_wavs_as_lpcm() -> Result<(), Box<dyn Error>> {
+        let wav =
+            |channels: u16, rate: u32, bits: u16, mask: Option<u32>| -> Result<_, Box<dyn Error>> {
+                let mut fmt = Vec::new();
+                fmt.extend_from_slice(&(if mask.is_some() { 0xFFFE_u16 } else { 1 }).to_le_bytes());
+                fmt.extend_from_slice(&channels.to_le_bytes());
+                fmt.extend_from_slice(&rate.to_le_bytes());
+                fmt.extend_from_slice(&[0; 6]);
+                fmt.extend_from_slice(&bits.to_le_bytes());
+                if let Some(mask) = mask {
+                    fmt.extend_from_slice(&22_u16.to_le_bytes());
+                    fmt.extend_from_slice(&bits.to_le_bytes());
+                    fmt.extend_from_slice(&mask.to_le_bytes());
+                    fmt.extend_from_slice(&1_u16.to_le_bytes());
+                    fmt.extend_from_slice(&[0; 14]);
+                }
+                let mut out = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
+                out.extend_from_slice(&u32::try_from(fmt.len())?.to_le_bytes());
+                out.extend_from_slice(&fmt);
+                let path = temp_path("wav");
+                fs::write(&path, out)?;
+                Ok(path)
+            };
+        let bd = |path: &Path| super::wav_is_fine_lpcm(path, DiscKind::BluRay);
+        let dvd = |path: &Path| super::wav_is_fine_lpcm(path, DiscKind::Dvd);
+        // 5.1 at 192 kHz, 24 bits: the Blu-ray's most.
+        let most = wav(6, 192_000, 24, Some(0x60F))?;
+        assert_eq!(bd(&most), Some(27_648_000));
+        assert_eq!(dvd(&most), None);
+        // Five channels are stored as six; seven of 24 bits at 192 kHz as eight, too many.
+        let five = wav(5, 96_000, 24, None)?;
+        assert_eq!(bd(&five), Some(13_824_000));
+        let seven = wav(7, 192_000, 24, Some(0x637))?;
+        assert_eq!(bd(&seven), None);
+        // 20 bits count as 24.
+        let twenty = wav(2, 48_000, 20, None)?;
+        assert_eq!(bd(&twenty), Some(2_304_000));
+        assert_eq!(dvd(&twenty), Some(2_304_000));
+        // 2.1 has no channel assignment; seven channels that name no speakers neither.
+        let two_one = wav(3, 96_000, 24, Some(0b1011))?;
+        assert_eq!(bd(&two_one), None);
+        let unnamed = wav(7, 96_000, 16, None)?;
+        assert_eq!(bd(&unnamed), None);
+        // The 16-bit 48 kHz ones are the disc's plain LPCM (not "fine"): 5.1 stays LPCM on a Blu-ray, 2.1 is
+        // converted.
+        let plain = wav(6, 48_000, 16, None)?;
+        assert_eq!(bd(&plain), None);
+        assert!(super::bd_layout(6, 0));
+        assert!(!super::bd_layout(3, 0b1011));
+        for path in [most, five, seven, twenty, two_one, unnamed, plain] {
+            fs::remove_file(&path).unwrap_or(());
+        }
+        Ok(())
+    }
+
+    /// M6.347: a Blu-ray's stream leaves the SD video its 9.8 Mbit/s beside much more sound (six channels of 24-bit
+    /// 192 kHz LPCM), and refuses only sound that leaves it too little.
+    #[test]
+    fn a_blu_ray_leaves_the_video_its_rate_beside_more_sound() -> Result<(), Box<dyn Error>> {
+        let audio_bitrate = 27_648_000;
+        assert!(max_bitrate_for_audio_bitrate(audio_bitrate, DiscKind::Dvd).is_err());
+        assert_eq!(
+            max_bitrate_for_audio_bitrate(audio_bitrate, DiscKind::BluRay)?,
+            MAX_MUX_VIDEO_BITRATE
+        );
+        assert_eq!(
+            max_bitrate_for_audio_bitrate(40_000_000, DiscKind::BluRay)?,
+            6_000_000
+        );
+        assert!(max_bitrate_for_audio_bitrate(45_000_000, DiscKind::BluRay).is_err());
+        Ok(())
     }
 
     #[test]
@@ -2840,6 +4248,350 @@ mod tests {
         assert_ne!(key1, key2);
         fs::remove_file(&path).unwrap_or(());
 
+        Ok(())
+    }
+
+    /// M6.300: a video transcoded in two passes or at a constant rate is another stream: its cache key changes, and
+    /// one-pass VBR keeps the key it had.
+    #[test]
+    fn the_cache_key_follows_the_encoding() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::TranscodeMode;
+        let path = temp_path("mpg");
+        fs::write(&path, b"video")?;
+        let mut project = Project::default();
+        let asset = project.add_asset(&path)?;
+        let budget = Budget {
+            video_bitrate: 6_000_000,
+            max_bitrate: 9_800_000,
+            wide: false,
+            audio_bitrate: LPCM_STEREO_BITRATE,
+        };
+        let key = |project: &Project| super::cache_key(project, &path, &budget, (false, &[]));
+        let vbr = key(&project)?;
+        let mut keys = vec![vbr.clone()];
+        for mode in [TranscodeMode::Vbr2Pass, TranscodeMode::Cbr] {
+            if let Some(found) = project.assets.get_mut(&asset) {
+                found.transcode_mode = mode;
+            }
+            assert_eq!(
+                super::rate_mode(&project, &path),
+                match mode {
+                    TranscodeMode::Vbr2Pass => disccraft_transcode::RateMode::Vbr2Pass,
+                    _ => disccraft_transcode::RateMode::Cbr,
+                }
+            );
+            keys.push(key(&project)?);
+        }
+        if let Some(found) = project.assets.get_mut(&asset) {
+            found.transcode_mode = TranscodeMode::Vbr;
+        }
+        assert_eq!(key(&project)?, vbr);
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), 3);
+        fs::remove_file(&path).unwrap_or(());
+        Ok(())
+    }
+
+    /// M6.326: the quality is the DVD preset's (with a rate of its own) on a DVD, the Blu-ray preset's on a Blu-ray,
+    /// else the best; a lower one is another stream (another cache key), the best keeps the key it had.
+    #[test]
+    fn the_cache_key_follows_the_quality() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::BEST_QUALITY;
+        let path = temp_path("mpg");
+        fs::write(&path, b"video")?;
+        let mut project = Project::default();
+        let asset = project.add_asset(&path)?;
+        let budget = Budget {
+            video_bitrate: 6_000_000,
+            max_bitrate: 9_800_000,
+            wide: false,
+            audio_bitrate: LPCM_STEREO_BITRATE,
+        };
+        let key = |project: &Project| super::cache_key(project, &path, &budget, (false, &[]));
+        let best = key(&project)?;
+        let set = |project: &mut Project, kbps: Option<u32>, quality: u8| {
+            if let Some(found) = project.assets.get_mut(&asset) {
+                found.transcode_kbps = kbps;
+                found.transcode_quality = quality;
+            }
+        };
+        // Automatic has no quality of its own.
+        set(&mut project, None, 2);
+        assert_eq!(super::quality_of(&project, &path), BEST_QUALITY);
+        set(&mut project, Some(4_000), 2);
+        assert_eq!(super::quality_of(&project, &path), 2);
+        let low = key(&project)?;
+        set(&mut project, Some(4_000), BEST_QUALITY);
+        let own = key(&project)?;
+        assert_ne!(low, own);
+        set(&mut project, None, BEST_QUALITY);
+        assert_eq!(key(&project)?, best);
+        // On a Blu-ray, the Blu-ray preset's (an SD Blu-ray's MPEG-2).
+        project.settings.kind = disccraft_project::DiscKind::BluRay;
+        if let Some(found) = project.assets.get_mut(&asset) {
+            found.transcode_kbps = Some(4_000);
+            found.transcode_quality = 2;
+            found.bluray_transcode = Some(disccraft_project::BlurayTranscode {
+                kbps: 9_000,
+                max_kbps: 11_000,
+                preset: String::new(),
+                quality: 3,
+                mode: disccraft_project::TranscodeMode::Vbr,
+            });
+        }
+        assert_eq!(super::quality_of(&project, &path), 3);
+        fs::remove_file(&path).unwrap_or(());
+        Ok(())
+    }
+
+    /// M6.328: on a Blu-ray the rate is kept as its Blu-ray setting says (one-pass VBR without one), not as the
+    /// DVD setting does; another way is another cache key.
+    #[test]
+    fn a_blu_ray_keeps_its_rate_as_its_setting_says() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::TranscodeMode;
+        use disccraft_transcode::RateMode;
+        let path = temp_path("mpg");
+        fs::write(&path, b"video")?;
+        let mut project = Project::default();
+        project.settings.kind = disccraft_project::DiscKind::BluRay;
+        let asset = project.add_asset(&path)?;
+        let budget = Budget {
+            video_bitrate: 6_000_000,
+            max_bitrate: 9_800_000,
+            wide: false,
+            audio_bitrate: LPCM_STEREO_BITRATE,
+        };
+        if let Some(found) = project.assets.get_mut(&asset) {
+            found.transcode_mode = TranscodeMode::Cbr;
+        }
+        assert_eq!(super::rate_mode(&project, &path), RateMode::Vbr);
+        let one = super::cache_key(&project, &path, &budget, (false, &[]))?;
+        if let Some(found) = project.assets.get_mut(&asset) {
+            found.bluray_transcode = Some(disccraft_project::BlurayTranscode {
+                kbps: 6_000,
+                max_kbps: 9_000,
+                preset: String::new(),
+                quality: disccraft_project::BEST_QUALITY,
+                mode: TranscodeMode::Vbr2Pass,
+            });
+        }
+        assert_eq!(super::rate_mode(&project, &path), RateMode::Vbr2Pass);
+        assert_ne!(
+            super::cache_key(&project, &path, &budget, (false, &[]))?,
+            one
+        );
+        fs::remove_file(&path).unwrap_or(());
+        Ok(())
+    }
+
+    /// M6.327: Encore's rendering checkboxes make another stream each (another cache key); both off keeps the key
+    /// it had.
+    #[test]
+    fn the_cache_key_follows_the_rendering() -> Result<(), Box<dyn Error>> {
+        let path = temp_path("mpg");
+        fs::write(&path, b"video")?;
+        let mut project = Project::default();
+        let asset = project.add_asset(&path)?;
+        let budget = Budget {
+            video_bitrate: 6_000_000,
+            max_bitrate: 9_800_000,
+            wide: false,
+            audio_bitrate: LPCM_STEREO_BITRATE,
+        };
+        let mut keys = Vec::new();
+        for flags in [(false, false), (true, false), (false, true), (true, true)] {
+            if let Some(found) = project.assets.get_mut(&asset) {
+                (found.max_render_quality, found.frame_blend) = flags;
+            }
+            let rendering = super::rendering_of(&project, &path);
+            assert_eq!((rendering.max_quality, rendering.frame_blend), flags);
+            keys.push(super::cache_key(&project, &path, &budget, (false, &[]))?);
+        }
+        let plain = keys.first().cloned();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), 4);
+        if let Some(found) = project.assets.get_mut(&asset) {
+            (found.max_render_quality, found.frame_blend) = (false, false);
+        }
+        assert_eq!(
+            Some(super::cache_key(&project, &path, &budget, (false, &[]))?),
+            plain
+        );
+        fs::remove_file(&path).unwrap_or(());
+        Ok(())
+    }
+
+    /// M6.306: a DVD title whose video asks for PCM keeps its converted sound as LPCM (counted at 1.536 Mbit/s),
+    /// Dolby Digital otherwise; a Blu-ray's stays Dolby Digital.
+    #[test]
+    fn a_pcm_soundtrack_is_counted_as_lpcm() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::TranscodeAudio;
+        let path = temp_path("mp4");
+        fs::write(&path, b"video")?;
+        let mut project = Project::default();
+        let video = project.add_asset(&path)?;
+        let timeline_id = project.add_timeline(video, None)?;
+        let rate = |project: &Project| -> Result<u32, crate::DvdError> {
+            let timeline = project
+                .timeline(timeline_id)
+                .ok_or_else(|| crate::DvdError::Invalid("no timeline".to_string()))?;
+            super::audio_bitrate_for_title(project, timeline, 60.0)
+        };
+        assert_eq!(rate(&project)?, AC3_STEREO_BITRATE);
+        if let Some(asset) = project.assets.get_mut(&video) {
+            asset.transcode_audio = TranscodeAudio::Pcm;
+        }
+        assert_eq!(rate(&project)?, LPCM_STEREO_BITRATE);
+        assert!(super::wants_pcm(&project, video));
+        project.settings.kind = disccraft_project::DiscKind::BluRay;
+        assert!(!super::wants_pcm(&project, video));
+        fs::remove_file(&path).unwrap_or(());
+        Ok(())
+    }
+
+    /// M6.346: a track of WAV clips stays LPCM and counts so; one that mixes a WAV with a Dolby Digital clip is
+    /// joined as Dolby Digital and counts as that.
+    #[test]
+    fn a_track_mixing_wav_and_dolby_digital_counts_as_dolby_digital() -> Result<(), Box<dyn Error>>
+    {
+        use disccraft_project::AudioClip;
+        let video_path = temp_path("mp4");
+        fs::write(&video_path, b"video")?;
+        let wav_path = temp_path("wav");
+        // A second of 48 kHz 16-bit stereo silence: a WAV that goes on the disc as LPCM.
+        let samples = 48_000u32;
+        let mut wav_bytes = Vec::new();
+        wav_bytes.extend_from_slice(b"RIFF");
+        wav_bytes.extend_from_slice(&(36 + samples * 4).to_le_bytes());
+        wav_bytes.extend_from_slice(b"WAVEfmt ");
+        wav_bytes.extend_from_slice(&16u32.to_le_bytes());
+        wav_bytes.extend_from_slice(&1u16.to_le_bytes());
+        wav_bytes.extend_from_slice(&2u16.to_le_bytes());
+        wav_bytes.extend_from_slice(&48_000u32.to_le_bytes());
+        wav_bytes.extend_from_slice(&(48_000u32 * 4).to_le_bytes());
+        wav_bytes.extend_from_slice(&4u16.to_le_bytes());
+        wav_bytes.extend_from_slice(&16u16.to_le_bytes());
+        wav_bytes.extend_from_slice(b"data");
+        wav_bytes.extend_from_slice(&(samples * 4).to_le_bytes());
+        wav_bytes.resize(wav_bytes.len() + (samples * 4) as usize, 0);
+        fs::write(&wav_path, &wav_bytes)?;
+        let ac3_path = temp_path("ac3");
+        fs::write(&ac3_path, b"ac3")?;
+        let mut project = Project::default();
+        let video = project.add_asset(&video_path)?;
+        let wav = project.add_asset(&wav_path)?;
+        let ac3 = project.add_asset(&ac3_path)?;
+        let timeline_id = project.add_timeline(video, None)?;
+        let rate = |project: &Project| -> Result<u32, crate::DvdError> {
+            let timeline = project
+                .timeline(timeline_id)
+                .ok_or_else(|| crate::DvdError::Invalid("no timeline".to_string()))?;
+            super::audio_bitrate_for_title(project, timeline, 60.0)
+        };
+        let set_track = |project: &mut Project, more: Vec<AudioClip>| {
+            if let Some(timeline) = project.timeline_mut(timeline_id) {
+                let mut track = disccraft_project::AudioTrack::of(wav);
+                track.more = more;
+                timeline.audio = vec![track];
+            }
+        };
+        let clip = |asset| AudioClip {
+            asset,
+            start: 3000,
+            trim_start: 0,
+            trim_end: None,
+        };
+        // Two WAV clips: LPCM.
+        set_track(&mut project, vec![clip(wav)]);
+        assert_eq!(rate(&project)?, LPCM_STEREO_BITRATE);
+        // A WAV and a Dolby Digital clip: Dolby Digital.
+        set_track(&mut project, vec![clip(ac3)]);
+        assert_eq!(rate(&project)?, AC3_STEREO_BITRATE);
+        for path in [video_path, wav_path, ac3_path] {
+            fs::remove_file(&path).unwrap_or(());
+        }
+        Ok(())
+    }
+
+    /// M6.309: Dolby Digital clips of one form on a track are joined by their frames: the first clip's frames as
+    /// they are, silent frames of the same form up to where the second starts, then its frames as they are.
+    #[test]
+    fn dolby_digital_clips_are_joined_without_decoding() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::{AudioClip, AudioTrack};
+        let dir = temp_path("ac3join");
+        fs::create_dir_all(&dir)?;
+        // A second of a 440 Hz tone, encoded as AC-3.
+        let wav = dir.join("tone.wav");
+        let samples = 48_000u32;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + samples * 4).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&48_000u32.to_le_bytes());
+        bytes.extend_from_slice(&(48_000u32 * 4).to_le_bytes());
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&(samples * 4).to_le_bytes());
+        for n in 0..samples {
+            let value =
+                ((f64::from(n) * 440.0 * std::f64::consts::TAU / 48_000.0).sin() * 8_000.0) as i16;
+            for _ in 0..2 {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        fs::write(&wav, &bytes)?;
+        let ac3 = dir.join("tone.ac3");
+        disccraft_ac3enc::encode_wav(&wav, &ac3).map_err(|err| err.to_string())?;
+        let source = fs::read(&ac3)?;
+        let source_frames = disccraft_psmux::es::parse_ac3(&source, 0)
+            .map_err(|err| err.to_string())?
+            .frames
+            .len();
+
+        let mut project = Project::default();
+        let sound = project.add_asset(&ac3)?;
+        // The whole file at the start, and again 2 seconds (60 NTSC frames) in.
+        let track = AudioTrack {
+            more: vec![AudioClip {
+                asset: sound,
+                start: 60,
+                trim_start: 0,
+                trim_end: None,
+            }],
+            ..AudioTrack::of(sound)
+        };
+        let joined =
+            super::ac3_clip_sequence(&project, &track, &dir.join("cache"))?.ok_or("not joined")?;
+        let data = fs::read(&joined)?;
+        let stream = disccraft_psmux::es::parse_ac3(&data, 0).map_err(|err| err.to_string())?;
+        // 2.002 s = 62.56 frames of 1536 samples: 63 frames before the second clip.
+        let gap = 63usize.saturating_sub(source_frames);
+        assert_eq!(stream.frames.len(), source_frames * 2 + gap);
+        // The clips' frames are the file's own bytes.
+        assert_eq!(data.get(..source.len()), Some(source.as_slice()));
+        assert_eq!(
+            data.get(data.len() - source.len()..),
+            Some(source.as_slice())
+        );
+        // A WAV among them: not joined this way.
+        let other = project.add_asset(&wav)?;
+        let mixed = AudioTrack {
+            more: vec![AudioClip {
+                asset: other,
+                start: 60,
+                trim_start: 0,
+                trim_end: None,
+            }],
+            ..AudioTrack::of(sound)
+        };
+        assert!(super::ac3_clip_sequence(&project, &mixed, &dir.join("cache"))?.is_none());
+        fs::remove_dir_all(&dir).unwrap_or(());
         Ok(())
     }
 
@@ -3003,6 +4755,13 @@ pub fn transcode_status(
             let path: &Path = &media;
             let status = match asset.kind {
                 AssetKind::Video => video_status(project, path, cache_dir, budget.as_ref()),
+                // 24-bit / 96 kHz PCM is a DVD's LPCM as it is.
+                AssetKind::Audio
+                    if wav_is_fine_lpcm(path, project.settings.kind).is_some()
+                        || dvd_mp2(path, project).is_some() =>
+                {
+                    TranscodeStatus::Unneeded
+                }
                 AssetKind::Audio => audio_status(path, cache_dir),
                 AssetKind::Image | AssetKind::Subtitle | AssetKind::Other => {
                     TranscodeStatus::NotApplicable
@@ -3023,8 +4782,12 @@ fn video_status(
     if passes_through(project, path) {
         return TranscodeStatus::Unneeded;
     }
-    // On an HD Blu-ray, H.264 the disc carries goes on it as it is.
-    if crate::BdVideoFormat::of(project).is_some_and(|format| crate::h264_fits_bd(path, format)) {
+    // On an HD Blu-ray, H.264 the disc carries goes on it as it is (unless a Blu-ray preset of its own transcodes
+    // it all the same, M6.324).
+    if !transcode_forced(project, path)
+        && crate::BdVideoFormat::of_path(project, path)
+            .is_some_and(|format| crate::video_fits_bd(path, format))
+    {
         return TranscodeStatus::Unneeded;
     }
     let cached = cache_dir

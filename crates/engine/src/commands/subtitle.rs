@@ -8,8 +8,13 @@ use std::path::Path;
 
 use crate::params::{opt_str, opt_value, req_str, req_u64, req_usize};
 use crate::{CommandResult, CommandSpec, Session};
-use disccraft_menu::subtitle_file::{asset_cues, read_subtitles, write_srt, write_text_script};
-use disccraft_project::{Asset, AssetId, AssetKind, MAX_SUBTITLE_CUES, SubtitleCue, Tick};
+use disccraft_menu::subtitle::guess_image_colors;
+use disccraft_menu::subtitle_file::{
+    ImageScriptCue, asset_cues, read_image_script, read_subtitles, write_srt, write_text_script,
+};
+use disccraft_project::{
+    Asset, AssetId, AssetKind, CueImage, ImageCueColors, MAX_SUBTITLE_CUES, SubtitleCue, Tick,
+};
 use serde_json::{Value, json};
 
 use super::always_enabled;
@@ -57,6 +62,26 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         params: r#"{"asset": id, "cue": index}"#,
         enabled: always_enabled,
         run: run_remove_cue,
+        journal: true,
+    },
+    CommandSpec {
+        id: "subtitle.readImageScript",
+        label: "画像スクリプトを読む",
+        menu: &["タイムライン"],
+        shortcut: None,
+        params: r#"{"path": string, "fab"?: bool (a FAB image script), "folder"?: string (a FAB script's pictures; default: the script's folder)}"#,
+        enabled: always_enabled,
+        run: run_read_image_script,
+        journal: false,
+    },
+    CommandSpec {
+        id: "subtitle.importImageScript",
+        label: "字幕の読み込み（画像スクリプト）",
+        menu: &["タイムライン"],
+        shortcut: None,
+        params: r##"{"path": string, "fab"?: bool, "folder"?: string, "background"?: "#rrggbb", "fill"?: "#rrggbb", "outline"?: "#rrggbb" (default: guessed from the first picture), "offset"?: ticks (Relative: added to every timecode)}"##,
+        enabled: always_enabled,
+        run: run_import_image_script,
         journal: true,
     },
     CommandSpec {
@@ -134,6 +159,7 @@ fn editable_cues<'a>(
                     end: cue.end,
                     text: cue.text,
                     look: cue.look,
+                    image: cue.image,
                 })
                 .collect(),
         ),
@@ -195,6 +221,7 @@ fn run_add_cue(session: &mut Session, params: &Value) -> CommandResult {
             end,
             text,
             look: disccraft_project::CueLook::default(),
+            image: None,
         },
     );
     Ok(json!({ "cue": index, "start": start.0, "end": end.0 }))
@@ -285,6 +312,10 @@ fn run_set_cue(session: &mut Session, params: &Value) -> CommandResult {
     let cue = cues
         .get_mut(index)
         .ok_or_else(|| format!("no subtitle {index} (the track has {count})"))?;
+    // As in Encore, a picture subtitle is shown as it is drawn: it has no text to change.
+    if text.is_some() && cue.image.is_some() {
+        return Err("a picture subtitle has no text to change".to_string());
+    }
     let new_start = start.unwrap_or(cue.start);
     let new_end = end.unwrap_or(cue.end);
     if new_start.0 < 0 {
@@ -352,10 +383,147 @@ fn run_cues(session: &mut Session, params: &Value) -> CommandResult {
                 "stroke": cue.look.stroke.map(disccraft_project::SlideStroke::as_str),
                 "align": cue.look.align,
                 "justify": cue.look.justify.map(disccraft_project::SubtitleJustify::as_str),
+                "image": cue.image.as_ref().and_then(|image| serde_json::to_value(image).ok()),
             })
         })
         .collect();
     Ok(json!({ "cues": cues, "edited": edited }))
+}
+
+/// `#rrggbb`.
+fn hex(color: [u8; 3]) -> String {
+    format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2])
+}
+
+/// Map Colors as parameters and results: `{"background", "fill", "outline"}` as `#rrggbb`.
+fn colors_json(colors: ImageCueColors) -> Value {
+    json!({
+        "background": hex(colors.background),
+        "fill": hex(colors.fill),
+        "outline": hex(colors.outline),
+    })
+}
+
+/// The subtitles of the image script `params` names (`"fab"`: a FAB image script, whose pictures are in
+/// `"folder"`, else beside it).
+fn image_script_cues(
+    session: &Session,
+    params: &Value,
+) -> Result<(String, Vec<ImageScriptCue>), String> {
+    let path = req_str(params, "path")?;
+    let fab = match opt_value(params, "fab") {
+        None => false,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "parameter \"fab\" must be true or false".to_string())?,
+    };
+    let folder = opt_str(params, "folder")?;
+    let cues = read_image_script(
+        Path::new(&path),
+        fab,
+        folder.as_deref().map(Path::new),
+        &session.project.settings,
+    )
+    .map_err(|error| error.to_string())?;
+    if cues.is_empty() {
+        return Err(format!("{path}: no subtitles"));
+    }
+    Ok((path, cues))
+}
+
+/// The colours guessed from the first of `cues`' pictures that can be found.
+fn guessed_colors(cues: &[ImageScriptCue]) -> Result<ImageCueColors, String> {
+    let picture = cues
+        .iter()
+        .map(|cue| &cue.picture)
+        .find(|picture| picture.is_file())
+        .ok_or_else(|| "none of the script's pictures is found".to_string())?;
+    guess_image_colors(picture).map_err(|error| error.to_string())
+}
+
+/// Reads an image script ahead of importing it (Encore shows Map Colors over its first picture):
+/// `{"cues": count, "first": the first picture, "missing": [pictures not found, the first 20], "missingCount": n,
+/// "colors": the colours guessed from the first picture found}`.
+fn run_read_image_script(session: &mut Session, params: &Value) -> CommandResult {
+    let (_, cues) = image_script_cues(session, params)?;
+    let missing: Vec<String> = cues
+        .iter()
+        .filter(|cue| !cue.picture.is_file())
+        .map(|cue| cue.picture.to_string_lossy().into_owned())
+        .collect();
+    let first = cues
+        .iter()
+        .find(|cue| cue.picture.is_file())
+        .map(|cue| cue.picture.to_string_lossy().into_owned());
+    Ok(json!({
+        "cues": cues.len(),
+        "first": first,
+        "missing": missing.iter().take(20).collect::<Vec<_>>(),
+        "missingCount": missing.len(),
+        "colors": colors_json(guessed_colors(&cues)?),
+    }))
+}
+
+/// Timeline ▸ Import Subtitles ▸ Image Script / FAB Image Script: the script becomes a subtitle asset whose
+/// subtitles are its pictures, with the colours mapped as given (else guessed from the first picture). Every
+/// picture must be found. `"offset"` (Encore's Relative) moves every subtitle; those that then end before zero are
+/// left out. `{"asset": id, "cues": count, "colors": {...}}`.
+fn run_import_image_script(session: &mut Session, params: &Value) -> CommandResult {
+    let (path, cues) = image_script_cues(session, params)?;
+    if let Some(missing) = cues.iter().find(|cue| !cue.picture.is_file()) {
+        return Err(format!("picture not found: {}", missing.picture.display()));
+    }
+    let guessed = guessed_colors(&cues)?;
+    let color = |name: &str, guess: [u8; 3]| -> Result<[u8; 3], String> {
+        match opt_str(params, name)? {
+            Some(text) => super::menu::parse_color(&text),
+            None => Ok(guess),
+        }
+    };
+    let colors = ImageCueColors {
+        background: color("background", guessed.background)?,
+        fill: color("fill", guessed.fill)?,
+        outline: color("outline", guessed.outline)?,
+    };
+    let offset = opt_ticks(params, "offset")?.unwrap_or(Tick(0)).0;
+    let subtitles: Vec<SubtitleCue> = cues
+        .into_iter()
+        .filter_map(|cue| {
+            let end = cue.end.0.saturating_add(offset);
+            (end > 0).then(|| SubtitleCue {
+                start: Tick(cue.start.0.saturating_add(offset).max(0)),
+                end: Tick(end),
+                text: String::new(),
+                look: disccraft_project::CueLook::default(),
+                image: Some(CueImage {
+                    path: cue.picture.to_string_lossy().into_owned(),
+                    area: cue.area,
+                    colors,
+                }),
+            })
+        })
+        .collect();
+    if subtitles.is_empty() {
+        return Err("every subtitle ends before the start".to_string());
+    }
+    if subtitles.len() > MAX_SUBTITLE_CUES {
+        return Err(format!(
+            "a track holds at most {MAX_SUBTITLE_CUES} subtitles"
+        ));
+    }
+    let count = subtitles.len();
+    let id = session
+        .project
+        .add_asset(Path::new(&path))
+        .map_err(|error| error.to_string())?;
+    let asset = session
+        .project
+        .assets
+        .get_mut(&id)
+        .ok_or_else(|| format!("unknown asset: {}", id.0))?;
+    asset.kind = AssetKind::Subtitle;
+    asset.cues = Some(subtitles);
+    Ok(json!({ "asset": id.0, "cues": count, "colors": colors_json(colors) }))
 }
 
 /// Writes the asset's cues (as edited, or its file's in any supported format) to `path` as SRT in UTF-8.
@@ -459,6 +627,114 @@ Hello
         assert_eq!(cue.get("group"), Some(&Value::Null));
         assert_eq!(cue.get("stroke"), Some(&Value::Null));
         let _ = std::fs::remove_file(&file);
+        Ok(())
+    }
+
+    /// Timeline ▸ Import Subtitles ▸ FAB Image Script / Image Script: the script is read ahead (count, first
+    /// picture, guessed colours), then imported as a subtitle asset whose subtitles are pictures; the Relative
+    /// offset moves them, given colours win over the guess, a missing picture is refused, and a picture subtitle
+    /// has no text to change.
+    #[test]
+    fn image_scripts_are_imported_as_picture_subtitles() -> Result<(), Box<dyn Error>> {
+        let dir = std::env::temp_dir().join(format!(
+            "disccraft-engine-image-script-{}",
+            std::process::id()
+        ));
+        let pictures = dir.join("pictures");
+        std::fs::create_dir_all(&pictures)?;
+        // 4 x 2: three white pixels on blue... and one black.
+        for name in ["one.png", "two.png"] {
+            let file = std::fs::File::create(pictures.join(name))?;
+            let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), 4, 2);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.write_header()?.write_image_data(&[
+                0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, //
+                0, 0, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0,
+            ])?;
+        }
+        let fab = dir.join("fab.txt");
+        std::fs::write(
+            &fab,
+            "one.png 00;00;01;00 00;00;02;00 0 400 720 470\r\ntwo.png 00;00;03;00 00;00;04;00 0 0 720 480\r\n",
+        )?;
+        let script = dir.join("script.txt");
+        std::fs::write(
+            &script,
+            "Display_Area (0 0 720 480)\nDirectory pictures\n1 00;00;01;00 00;00;02;00 one.png\n2 00;00;05;00 00;00;06;00 two.png\n",
+        )?;
+        let mut session = Session::new();
+
+        let read = session.execute(
+            "subtitle.readImageScript",
+            &json!({ "path": fab, "fab": true, "folder": pictures }),
+        )?;
+        assert_eq!(read.get("cues").and_then(Value::as_u64), Some(2));
+        assert_eq!(read.get("missingCount").and_then(Value::as_u64), Some(0));
+        assert_eq!(
+            read.get("colors"),
+            Some(&json!({ "background": "#0000ff", "fill": "#ffffff", "outline": "#000000" }))
+        );
+
+        // Imported with a Relative offset of one second back.
+        let second = 254_016_000_000_i64;
+        let imported = session.execute(
+            "subtitle.importImageScript",
+            &json!({ "path": fab, "fab": true, "folder": pictures, "offset": -second, "outline": "#ff0000" }),
+        )?;
+        let asset = imported
+            .get("asset")
+            .and_then(Value::as_u64)
+            .ok_or("asset")?;
+        assert_eq!(imported.get("cues").and_then(Value::as_u64), Some(2));
+        let cues = session.execute("subtitle.cues", &json!({ "asset": asset }))?;
+        let first = cues.pointer("/cues/0").ok_or("cue")?;
+        // 00;00;01;00 is 30 frames at 29.97 fps (1.001 s), one second before that is 0.001 s.
+        let start = first.get("start").and_then(Value::as_f64).ok_or("start")?;
+        assert!((start - 0.001).abs() < 1e-6, "{start}");
+        assert_eq!(
+            first.pointer("/image/area"),
+            Some(&json!([0, 400, 720, 470]))
+        );
+        assert_eq!(
+            first.pointer("/image/colors"),
+            Some(
+                &json!({ "background": [0, 0, 255], "fill": [255, 255, 255], "outline": [255, 0, 0] })
+            )
+        );
+        assert!(
+            first
+                .pointer("/image/path")
+                .and_then(Value::as_str)
+                .is_some_and(|path| path.ends_with("one.png"))
+        );
+        assert!(
+            session
+                .execute(
+                    "subtitle.setCue",
+                    &json!({ "asset": asset, "cue": 0, "text": "x" })
+                )
+                .is_err()
+        );
+        // Its times can still change.
+        session.execute(
+            "subtitle.setCue",
+            &json!({ "asset": asset, "cue": 0, "end": second / 2 }),
+        )?;
+
+        // An image script: the folder from its Directory line, beside the script.
+        let imported = session.execute("subtitle.importImageScript", &json!({ "path": script }))?;
+        assert_eq!(imported.get("cues").and_then(Value::as_u64), Some(2));
+        // A picture that is not there is refused.
+        std::fs::remove_file(pictures.join("two.png"))?;
+        assert!(
+            session
+                .execute("subtitle.importImageScript", &json!({ "path": script }))
+                .is_err()
+        );
+        let read = session.execute("subtitle.readImageScript", &json!({ "path": script }))?;
+        assert_eq!(read.get("missingCount").and_then(Value::as_u64), Some(1));
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 

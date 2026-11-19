@@ -38,6 +38,9 @@ pub struct SlideInput {
     pub transition: Option<Transition>,
     /// Pan and zoom while the slide is up (Encore's slide effect); `None` holds the picture still.
     pub motion: Option<Motion>,
+    /// The picture's alpha channel is ignored (Encore's Interpret Footage ▸ Ignore Alpha Channel): every pixel is
+    /// opaque, not composited over black.
+    pub opaque: bool,
 }
 
 /// A slide's pan and zoom: the picture is scaled by up to [`MOTION_SCALE`] and travels across the room that
@@ -57,8 +60,10 @@ const MOTION_SCALE: f32 = 1.12;
 
 impl Motion {
     /// The scale of the picture and where its centre sits (in frame widths and heights from the frame's centre)
-    /// at `t` from 0 (the slide's first frame) to 1 (its last).
-    fn at(self, t: f32) -> (f32, f32, f32) {
+    /// at `t` from 0 (the slide's first frame) to 1 (its last). The frame shows the part of the slide (as fitted
+    /// into the frame) of `1 / scale` its size around that point.
+    #[must_use]
+    pub fn at(self, t: f32) -> (f32, f32, f32) {
         let t = t.clamp(0.0, 1.0);
         let scale = match self.zoom.signum() {
             1 => 1.0 + (MOTION_SCALE - 1.0) * t,
@@ -289,7 +294,7 @@ pub fn render_slideshow_hd(
         encoder.push_rgb(rgb)?;
         written = written.saturating_add(1);
         report_progress(progress, written, total_frames);
-        Ok(())
+        crate::check_stop()
     })?;
     let (data, units) = encoder.finish()?;
     std::fs::write(es_out, &data).map_err(|error| io_error(es_out, error))?;
@@ -414,7 +419,7 @@ fn encode_slideshow_video(
                 .checked_add(1)
                 .ok_or_else(|| unsupported("frame count overflow"))?;
             report_progress(progress, written_frames, total_frames);
-            Ok(())
+            crate::check_stop()
         },
     )?;
 
@@ -472,7 +477,7 @@ fn for_each_frame(
     for (index, (slide, frames)) in slides.iter().zip(frame_counts).enumerate() {
         let rgb = match next_rgb.take() {
             Some(rgb) => rgb,
-            None => slide_rgb(&slide.image, size, canvas.target, slide.fit)?,
+            None => slide_rgb(&slide.image, size, canvas.target, (slide.fit, slide.opaque))?,
         };
         let half_in = halves.get(index).copied().unwrap_or(0);
         let half_out = halves.get(index.saturating_add(1)).copied().unwrap_or(0);
@@ -481,7 +486,7 @@ fn for_each_frame(
         if half_out > 0
             && let Some(next) = slides.get(index.saturating_add(1))
         {
-            let base = slide_rgb(&next.image, size, canvas.target, next.fit)?;
+            let base = slide_rgb(&next.image, size, canvas.target, (next.fit, next.opaque))?;
             next_first = shown(next, &base, 0.0);
             next_rgb = Some(base);
         }
@@ -538,7 +543,7 @@ fn slide_rgb(
     path: &Path,
     output: (u32, u32),
     target: Target,
-    fit: SlideFit,
+    (fit, opaque): (SlideFit, bool),
 ) -> Result<Vec<u8>, TranscodeError> {
     let (output_width, output_height) = output;
     let still = if disccraft_photo::is_svg(path) {
@@ -553,16 +558,47 @@ fn slide_rgb(
     } else {
         None
     };
+    let chosen = crate::pixel_aspect::chosen_pixel_aspect(path);
     let Some(still) = still else {
         let source = Source::open(path)?;
         let frame = source.video_frame(Tick(0))?;
-        return render_source_frame(&frame, output, target, fit);
+        // A pixel shape the project chose is the frame's already; else the file's, else Encore's for its size (a
+        // DVD-sized still has SD pixels).
+        let aspect = chosen.unwrap_or_else(|| {
+            crate::pixel_aspect::still_own_aspect((frame.width, frame.height), frame.par)
+        });
+        let frame = if aspect == frame.par {
+            frame
+        } else {
+            let mut shaped = (*frame).clone();
+            shaped.par = aspect;
+            std::sync::Arc::new(shaped)
+        };
+        return render_source_frame(&frame, output, target, (fit, opaque));
     };
-    let image = still.map_err(|error| TranscodeError::Decode(error.to_string()))?;
-    let placement = placement(image.width, image.height, (1, 1), output, target, fit)
+    let mut image = still.map_err(|error| TranscodeError::Decode(error.to_string()))?;
+    if opaque {
+        make_opaque(&mut image.rgba);
+    }
+    // A document's pixels as chosen, else Encore's for its size; a drawing (rendered at the frame's size) square.
+    let aspect = chosen.unwrap_or_else(|| {
+        if disccraft_photo::is_svg(path) {
+            (1, 1)
+        } else {
+            crate::pixel_aspect::still_default_aspect(image.width, image.height)
+        }
+    });
+    let placement = placement(image.width, image.height, aspect, output, target, fit)
         .ok_or_else(|| unsupported("invalid image geometry"))?;
     render_rgb(&image.rgba, image.width, image.height, placement, output)
         .ok_or_else(|| unsupported("failed to render slide"))
+}
+
+/// Every pixel of RGBA `rgba` opaque (Interpret Footage ▸ Ignore Alpha Channel).
+fn make_opaque(rgba: &mut [u8]) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        pixel[3] = 255;
+    }
 }
 
 /// Frames on each side of a cut for `transition` (half its length), 0 for a hard cut.
@@ -716,6 +752,7 @@ fn encoder_config(options: &TranscodeOptions, max_bitrate: u32) -> EncoderConfig
         max_bitrate,
         wide: options.wide,
         format: disccraft_mpeg2venc::encoder::Format::Sd,
+        pulldown: false,
     }
 }
 
@@ -737,11 +774,14 @@ fn render_source_frame(
     frame: &VideoFrame,
     output: (u32, u32),
     target: Target,
-    fit: SlideFit,
+    (fit, opaque): (SlideFit, bool),
 ) -> Result<Vec<u8>, TranscodeError> {
     let placement = placement(frame.width, frame.height, frame.par, output, target, fit)
         .ok_or_else(|| unsupported("invalid frame geometry"))?;
-    let rgba = frame.to_rgba8();
+    let mut rgba = frame.to_rgba8();
+    if opaque {
+        make_opaque(&mut rgba);
+    }
 
     render_rgb(&rgba, frame.width, frame.height, placement, output)
         .ok_or_else(|| unsupported("failed to render frame"))
@@ -1154,6 +1194,14 @@ fn write_u16_le<W: Write>(path: &Path, writer: &mut W, value: u16) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::{FOUR_THREE, Placement, SIXTEEN_NINE, SlideFit, placement, slide_rgb};
+
+    /// M6.294: a slide whose alpha channel is ignored keeps its colours, every pixel opaque.
+    #[test]
+    fn an_ignored_alpha_channel_is_opaque() {
+        let mut rgba = vec![200, 100, 50, 128, 10, 20, 30, 0];
+        super::make_opaque(&mut rgba);
+        assert_eq!(rgba, vec![200, 100, 50, 255, 10, 20, 30, 255]);
+    }
     use super::{
         SlideTransition, Transition, cut_halves, transition_alpha, transition_frame,
         transition_half_frames,
@@ -1397,7 +1445,12 @@ mod tests {
             &svg,
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="20" height="10" fill="#0f0"/></svg>"##,
         )?;
-        let rgb = slide_rgb(&svg, (720, 480), FOUR_THREE, SlideFit::ScaleAndMatte)?;
+        let rgb = slide_rgb(
+            &svg,
+            (720, 480),
+            FOUR_THREE,
+            (SlideFit::ScaleAndMatte, false),
+        )?;
         assert_eq!(rgb.len(), 720 * 480 * 3);
         let at = |x: usize, y: usize| {
             rgb.get((y * 720 + x) * 3..(y * 720 + x) * 3 + 3)

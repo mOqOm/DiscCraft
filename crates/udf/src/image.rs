@@ -1001,6 +1001,9 @@ fn copy_file<W: Write>(
     let mut buf = vec![0u8; 65536];
 
     while remaining > 0 {
+        if crate::cancelled() {
+            return Err(invalid(crate::CANCELLED));
+        }
         let want = remaining.min(buf.len() as u64) as usize;
         let n = file
             .read(&mut buf[..want])

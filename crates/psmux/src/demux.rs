@@ -4,7 +4,10 @@
 //!
 //! Written from ISO/IEC 13818-1 (MPEG-2 Systems: pack header §2.5.3.3, system header §2.5.3.5, PES packet §2.4.3.6)
 //! and the DVD-Video use of private stream 1 (substream ids 0x80–0x87 for AC-3, each packet's payload starting with
-//! the substream id, a frame count and a two-byte pointer to the first access unit).
+//! the substream id, a frame count and a two-byte pointer to the first access unit). An MPEG-1 system stream (a VCD
+//! or other MPEG-1 `.mpg`, M6.350) is read too, from ISO/IEC 11172-1 (pack header §2.4.3.2: `0010`, then the system
+//! clock reference and mux rate, eight bytes in all; packet §2.4.3.3: stuffing bytes, an optional STD buffer field,
+//! then the time stamps or `0000 1111`).
 
 use std::io::{self, Read, Write};
 
@@ -30,11 +33,14 @@ pub struct Demuxed {
     pub other_audio: bool,
 }
 
-/// Whether `head` (the start of a file) is an MPEG-2 program stream: a pack start code whose next bits are `01`
-/// (an MPEG-1 system stream has `0010` there and is not taken apart).
+/// Whether `head` (the start of a file) is a program stream: a pack start code whose next bits are `01` (MPEG-2)
+/// or `0010` (an MPEG-1 system stream, M6.350).
 #[must_use]
 pub fn is_program_stream(head: &[u8]) -> bool {
-    head.starts_with(&[0, 0, 1, PACK]) && head.get(4).is_some_and(|byte| byte & 0xC0 == 0x40)
+    head.starts_with(&[0, 0, 1, PACK])
+        && head
+            .get(4)
+            .is_some_and(|byte| byte & 0xC0 == 0x40 || byte & 0xF0 == 0x20)
 }
 
 /// Reads the program stream `input` and writes the payload of its first video stream to `video` and of its first
@@ -46,13 +52,61 @@ pub fn is_program_stream(head: &[u8]) -> bool {
 /// When reading or writing fails, or the stream is too damaged to follow.
 pub fn demux(
     input: &mut dyn Read,
+    video: Option<&mut dyn Write>,
+    ac3: Option<&mut dyn Write>,
+    video_limit: Option<u64>,
+) -> io::Result<Demuxed> {
+    demux_with(input, video, ac3, None, video_limit)
+}
+
+/// Reads the program stream `input` and writes the payload of its first MPEG audio stream (stream ids 0xC0–0xDF:
+/// a VCD's MPEG-1 Layer II, M6.350) to `audio`; how many bytes.
+///
+/// # Errors
+///
+/// When reading or writing fails, or the stream is too damaged to follow.
+pub fn demux_mpeg_audio(input: &mut dyn Read, audio: &mut dyn Write) -> io::Result<u64> {
+    let mut written = 0_u64;
+    let mut counting = CountingWriter {
+        inner: audio,
+        written: &mut written,
+    };
+    demux_with(input, None, None, Some(&mut counting), None)?;
+    Ok(written)
+}
+
+/// A writer that counts what goes through it.
+struct CountingWriter<'a> {
+    inner: &'a mut dyn Write,
+    written: &'a mut u64,
+}
+
+impl Write for CountingWriter<'_> {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        let count = self.inner.write(data)?;
+        *self.written = self
+            .written
+            .saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// [`demux`], also writing the first MPEG audio stream to `mpeg_audio`.
+fn demux_with(
+    input: &mut dyn Read,
     mut video: Option<&mut dyn Write>,
     mut ac3: Option<&mut dyn Write>,
+    mut mpeg_audio: Option<&mut dyn Write>,
     video_limit: Option<u64>,
 ) -> io::Result<Demuxed> {
     let mut found = Demuxed::default();
     let mut video_id: Option<u8> = None;
     let mut ac3_id: Option<u8> = None;
+    let mut mpeg_audio_id: Option<u8> = None;
     let mut window = [0xFF_u8; 3];
     let mut skipped = 0_u64;
     let mut packet = Vec::new();
@@ -79,12 +133,24 @@ pub fn demux(
         match id {
             PROGRAM_END => break,
             PACK => {
-                // Ten more bytes, the last one's low three bits counting the stuffing bytes after it.
-                let mut header = [0_u8; 10];
+                let mut first = [0_u8; 1];
+                if !read_or_end(input, &mut first)? {
+                    break;
+                }
+                // MPEG-1: seven more bytes (clock reference and mux rate).
+                if first[0] & 0xF0 == 0x20 {
+                    let mut rest = [0_u8; 7];
+                    if !read_or_end(input, &mut rest)? {
+                        break;
+                    }
+                    continue;
+                }
+                // MPEG-2: nine more bytes, the last one's low three bits counting the stuffing bytes after it.
+                let mut header = [0_u8; 9];
                 if !read_or_end(input, &mut header)? {
                     break;
                 }
-                let stuffing = usize::from(header[9] & 0x07);
+                let stuffing = usize::from(header[8] & 0x07);
                 let mut stuffed = [0_u8; 7];
                 if let Some(buffer) = stuffed.get_mut(..stuffing)
                     && !read_or_end(input, buffer)?
@@ -141,7 +207,14 @@ pub fn demux(
                         }
                     }
                     // MPEG audio.
-                    0xC0..=0xDF => found.other_audio = true,
+                    0xC0..=0xDF => {
+                        found.other_audio = true;
+                        if *mpeg_audio_id.get_or_insert(id) == id
+                            && let Some(out) = mpeg_audio.as_mut()
+                        {
+                            out.write_all(pes_payload(&packet))?;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -152,17 +225,38 @@ pub fn demux(
     Ok(found)
 }
 
-/// The elementary stream bytes of an MPEG-2 PES packet's body (what follows the packet length): past the two flag
-/// bytes and the header data whose length the third byte gives. Empty when the body is not an MPEG-2 PES header.
+/// The elementary stream bytes of a PES packet's body (what follows the packet length). MPEG-2: past the two flag
+/// bytes and the header data whose length the third byte gives. MPEG-1 (M6.350): past the stuffing bytes, the STD
+/// buffer field (`01`) and the time stamps (`0010`: PTS, `0011`: PTS and DTS, `0000 1111`: none). Empty when the
+/// body is neither.
 fn pes_payload(body: &[u8]) -> &[u8] {
-    let (Some(first), Some(header_length)) = (body.first(), body.get(2)) else {
+    let Some(first) = body.first() else {
         return &[];
     };
-    if first & 0xC0 != 0x80 {
-        return &[];
+    if first & 0xC0 == 0x80 {
+        let Some(header_length) = body.get(2) else {
+            return &[];
+        };
+        return body
+            .get(usize::from(*header_length).saturating_add(3)..)
+            .unwrap_or_default();
     }
-    body.get(usize::from(*header_length).saturating_add(3)..)
-        .unwrap_or_default()
+    // MPEG-1: at most 16 stuffing bytes.
+    let mut at = body
+        .iter()
+        .take(16)
+        .take_while(|byte| **byte == 0xFF)
+        .count();
+    if body.get(at).is_some_and(|byte| byte & 0xC0 == 0x40) {
+        at += 2;
+    }
+    let stamps = match body.get(at) {
+        Some(byte) if byte & 0xF0 == 0x20 => 5,
+        Some(byte) if byte & 0xF0 == 0x30 => 10,
+        Some(0x0F) => 1,
+        _ => return &[],
+    };
+    body.get(at + stamps..).unwrap_or_default()
 }
 
 /// Fills `buffer` from `input`; `false` when the input ends first.
@@ -265,13 +359,46 @@ mod tests {
             let _ = demux(&mut &bytes[..cut], Some(&mut video), None, None)?;
             assert!(video.len() <= 8);
         }
-        // Not a program stream: an elementary stream, an MPEG-1 pack, nothing.
+        // Not a program stream: an elementary stream, a pack of neither MPEG, nothing.
         assert!(!is_program_stream(&[0, 0, 1, 0xB3, 0x2D]));
-        assert!(!is_program_stream(&[0, 0, 1, 0xBA, 0x21]));
+        assert!(!is_program_stream(&[0, 0, 1, 0xBA, 0x11]));
         assert!(!is_program_stream(&[]));
         let mut video = Vec::new();
         let found = demux(&mut [9_u8; 64].as_slice(), Some(&mut video), None, None)?;
         assert_eq!(found, Demuxed::default());
+        Ok(())
+    }
+
+    /// M6.350: an MPEG-1 system stream (a VCD's) gives its video too: eight-byte packs, packets with stuffing, an STD
+    /// buffer field and time stamps (or none).
+    #[test]
+    fn an_mpeg1_system_stream_gives_its_video() -> Result<(), std::io::Error> {
+        let mut bytes = vec![0, 0, 1, 0xBA, 0x21, 0, 1, 0, 1, 0x80, 0x1C, 0x61];
+        // System header.
+        bytes.extend_from_slice(&[0, 0, 1, 0xBB, 0, 3, 9, 9, 9]);
+        // Video: two stuffing bytes, the STD buffer, a PTS and DTS.
+        let header = [0xFF, 0xFF, 0x60, 0x2E, 0x31, 0, 1, 0, 1, 0x11, 0, 1, 0, 1];
+        let payload = [0, 0, 1, 0xB3, 0x16, 0];
+        let length = u16::try_from(header.len() + payload.len()).unwrap_or(0);
+        bytes.extend_from_slice(&[0, 0, 1, 0xE0]);
+        bytes.extend_from_slice(&length.to_be_bytes());
+        bytes.extend_from_slice(&header);
+        bytes.extend_from_slice(&payload);
+        bytes.extend_from_slice(&[0, 0, 1, 0xBA, 0x21, 0, 1, 0, 1, 0x80, 0x1C, 0x61]);
+        // MPEG audio, then video with a PTS only, then with no time stamp.
+        bytes.extend_from_slice(&[0, 0, 1, 0xC0, 0, 3, 0x0F, 0xFF, 0xFD]);
+        bytes.extend_from_slice(&[0, 0, 1, 0xE0, 0, 7, 0x21, 0, 1, 0, 1, 7, 8]);
+        bytes.extend_from_slice(&[0, 0, 1, 0xE0, 0, 2, 0x0F, 9]);
+        bytes.extend_from_slice(&[0, 0, 1, 0xB9]);
+        assert!(is_program_stream(&bytes));
+        let mut video = Vec::new();
+        let found = demux(&mut bytes.as_slice(), Some(&mut video), None, None)?;
+        assert_eq!(video, [0, 0, 1, 0xB3, 0x16, 0, 7, 8, 9]);
+        assert!(found.other_audio);
+        // Its MPEG audio, for the sound to be converted from.
+        let mut audio = Vec::new();
+        let written = super::demux_mpeg_audio(&mut bytes.as_slice(), &mut audio)?;
+        assert_eq!((written, audio), (2, vec![0xFF, 0xFD]));
         Ok(())
     }
 }

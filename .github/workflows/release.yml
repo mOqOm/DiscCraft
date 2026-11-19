@@ -1,18 +1,25 @@
 name: Release builds
 
-# Builds DiscCraft for Linux and macOS on GitHub's runners and adds the packages to a release. The Windows
-# executables of a release are built and checked by hand; these packages are built here only and have not been
-# run by anyone (the README says so).
+# Builds and packages DiscCraft for Windows, macOS and Linux on GitHub's standard runners (free for a public
+# repository) and adds the packages to a release. The scripts that package each system are in packaging/.
 #
 # - Run it by hand (Actions ▸ Release builds ▸ Run workflow) with the release's tag: the tag is checked out, built,
 #   and the packages are uploaded to that release.
 # - A push to a branch named release-test/... is a dry run: the branch is built and the packages are kept as the
 #   run's artifacts, and no release is touched.
+# - Nothing is signed with a developer certificate (Windows and macOS ask before the first start). Only GitHub's
+#   own actions are used, each pinned by commit, so a moved tag cannot change what runs here.
+#
+# Packages (VERSION is the tag without its "v"):
+#   disccraft-VERSION-windows-x64.msi / -portable.zip, windows-arm64 the same
+#   disccraft-VERSION-macos-universal.dmg, disccraft-cli-VERSION-macos-universal.zip
+#   disccraft-VERSION-linux-{x86_64,aarch64}.{tar.gz,deb,rpm,pkg.tar.zst,AppImage,AppImage.zsync,flatpak}
+#   disccraft-VERSION-linux-riscv64.{tar.gz,deb,rpm}
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build and upload to, e.g. v0.1.0-alpha.5"
+        description: "Release tag to build and upload to, e.g. v0.1.0-alpha.6"
         required: true
         type: string
   push:
@@ -25,9 +32,139 @@ concurrency:
   group: release-builds-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
 
+env:
+  TAG: ${{ inputs.tag }}
+  CARGO_TERM_COLOR: always
+  # The tools the packages are made with, pinned.
+  NFPM_VERSION: "2.49.0"
+  APPIMAGETOOL_VERSION: "1.9.1"
+  APPIMAGE_RUNTIME_VERSION: "20251108"
+  WIX_VERSION: "5.0.2"
+
 jobs:
-  build:
-    name: ${{ matrix.name }}
+  windows:
+    name: windows-${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: windows-latest
+          - arch: arm64
+            os: windows-11-arm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Names
+        shell: bash
+        run: |
+          version="${TAG#v}"
+          echo "VERSION=${version:-test}" >> "$GITHUB_ENV"
+          # What the programs say they are (Help ▸ Check for Updates…, About).
+          echo "DISCCRAFT_RELEASE=${TAG}" >> "$GITHUB_ENV"
+
+      - name: Rust
+        shell: pwsh
+        run: |
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            # The Arm runner may come without Rust.
+            $init = Join-Path $env:RUNNER_TEMP 'rustup-init.exe'
+            Invoke-WebRequest -Uri 'https://win.rustup.rs/aarch64' -OutFile $init
+            & $init -y --profile minimal --default-toolchain none
+            "$env:USERPROFILE\.cargo\bin" >> $env:GITHUB_PATH
+            $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+          }
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked -p disccraft -p disccraft-cli
+
+      - name: Check that the command line starts
+        shell: bash
+        run: target/release/disccraft-cli.exe commands > /dev/null
+
+      - name: WiX
+        shell: pwsh
+        run: |
+          $tools = Join-Path $env:RUNNER_TEMP 'wix'
+          dotnet tool install --tool-path $tools wix --version $env:WIX_VERSION
+          $tools >> $env:GITHUB_PATH
+
+      - name: Package
+        shell: pwsh
+        run: ./packaging/windows/package.ps1 -Version $env:VERSION -Arch ${{ matrix.arch }} -BinDir target/release -Out dist
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-${{ matrix.arch }}
+          path: dist/*
+          retention-days: 7
+
+      - name: Add to the release
+        if: inputs.tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/* --clobber --repo "${{ github.repository }}"
+
+  macos:
+    name: macos-universal
+    runs-on: macos-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Names
+        run: |
+          version="${TAG#v}"
+          echo "VERSION=${version:-test}" >> "$GITHUB_ENV"
+          echo "DISCCRAFT_RELEASE=${TAG}" >> "$GITHUB_ENV"
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Build (Apple silicon and Intel in one)
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked --target "$target" -p disccraft -p disccraft-cli
+          done
+          mkdir -p bin
+          for program in disccraft disccraft-cli; do
+            lipo -create -output "bin/$program" \
+              "target/aarch64-apple-darwin/release/$program" "target/x86_64-apple-darwin/release/$program"
+            lipo -info "bin/$program"
+          done
+          bin/disccraft-cli commands > /dev/null
+
+      - name: Package
+        run: VERSION="$VERSION" BIN_DIR=bin OUT=dist bash packaging/macos/package.sh
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-universal
+          path: dist/*
+          retention-days: 7
+
+      - name: Add to the release
+        if: inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/* --clobber --repo "${{ github.repository }}"
+
+  linux:
+    name: linux-${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
@@ -35,90 +172,199 @@ jobs:
       matrix:
         include:
           # The oldest Ubuntu the runners have, so the programs start on systems with an older C library too.
-          - name: linux-x86_64
+          - arch: x86_64
             os: ubuntu-22.04
-          - name: linux-aarch64
+            nfpm: x86_64
+          - arch: aarch64
             os: ubuntu-22.04-arm
-          - name: macos-universal
-            os: macos-latest
-    env:
-      TAG: ${{ inputs.tag }}
-      CARGO_TERM_COLOR: always
+            nfpm: arm64
     steps:
-      # Actions are named by commit, so a moved tag cannot change what runs here.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
 
-      - name: Linux packages
-        if: runner.os == 'Linux'
+      - name: Names
+        run: |
+          version="${TAG#v}"
+          echo "VERSION=${version:-test}" >> "$GITHUB_ENV"
+          echo "DISCCRAFT_RELEASE=${TAG}" >> "$GITHUB_ENV"
+
+      - name: Libraries and packaging tools
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev libxkbcommon-dev \
             libwayland-dev libx11-dev libxcb1-dev libxcursor-dev libxrandr-dev libxi-dev libfontconfig1-dev \
-            libfreetype-dev
+            libfreetype-dev zsync
+          tools="$RUNNER_TEMP/tools"
+          mkdir -p "$tools"
+          cd "$tools"
+          # nfpm (deb, rpm, Arch), checked against its release's checksums.
+          nfpm="nfpm_${NFPM_VERSION}_Linux_${{ matrix.nfpm }}.tar.gz"
+          curl -fsSLO "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/$nfpm"
+          curl -fsSLO "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/checksums.txt"
+          grep " $nfpm\$" checksums.txt | sha256sum -c -
+          tar -xzf "$nfpm" nfpm
+          # appimagetool and the AppImage runtime it puts in front of the image.
+          curl -fsSL -o appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_VERSION}/appimagetool-${{ matrix.arch }}.AppImage"
+          curl -fsSL -o runtime \
+            "https://github.com/AppImage/type2-runtime/releases/download/${APPIMAGE_RUNTIME_VERSION}/runtime-${{ matrix.arch }}"
+          chmod +x nfpm appimagetool
+          sha256sum appimagetool runtime
+          echo "$tools" >> "$GITHUB_PATH"
+          echo "APPIMAGETOOL=$tools/appimagetool" >> "$GITHUB_ENV"
+          echo "APPIMAGE_RUNTIME=$tools/runtime" >> "$GITHUB_ENV"
 
       - name: Rust
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-          rustc --version
 
-      - name: Names
-        shell: bash
-        run: |
-          # The version in the package names: the tag without its "v" (a dry run has none).
-          version="${TAG#v}"
-          echo "VERSION=${version:-test}" >> "$GITHUB_ENV"
-          # What the programs say they are (Help ▸ Check for Updates…, About).
-          echo "DISCCRAFT_RELEASE=${TAG}" >> "$GITHUB_ENV"
-
-      - name: Build (Linux)
-        if: runner.os == 'Linux'
+      - name: Build
         run: |
           cargo build --release --locked -p disccraft -p disccraft-cli
-          mkdir -p dist
-          cp target/release/disccraft target/release/disccraft-cli dist/
-
-      - name: Build (macOS, Apple silicon and Intel in one)
-        if: runner.os == 'macOS'
-        run: |
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
-          for target in aarch64-apple-darwin x86_64-apple-darwin; do
-            cargo build --release --locked --target "$target" -p disccraft -p disccraft-cli
-          done
-          mkdir -p dist
-          for program in disccraft disccraft-cli; do
-            lipo -create -output "dist/$program" \
-              "target/aarch64-apple-darwin/release/$program" "target/x86_64-apple-darwin/release/$program"
-            lipo -info "dist/$program"
-          done
+          target/release/disccraft-cli commands > /dev/null
 
       - name: Package
-        shell: bash
         run: |
-          folder="disccraft-${VERSION}-${{ matrix.name }}"
-          mkdir "$folder"
-          cp dist/disccraft dist/disccraft-cli "$folder/"
-          cp README.md README.ja.md LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md "$folder/"
-          # The program starts on the machine that built it.
-          "$folder/disccraft-cli" commands > /dev/null
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            zip -r -y "$folder.zip" "$folder"
-            echo "PACKAGE=$folder.zip" >> "$GITHUB_ENV"
-          else
-            tar -czf "$folder.tar.gz" "$folder"
-            echo "PACKAGE=$folder.tar.gz" >> "$GITHUB_ENV"
-          fi
+          VERSION="$VERSION" ARCH=${{ matrix.arch }} BIN_DIR=target/release OUT=dist \
+            FORMATS="tar deb rpm arch appimage" bash packaging/linux/package.sh
+          mkdir stage
+          mv dist/*-stage.tar.gz stage/
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ${{ matrix.name }}
-          path: ${{ env.PACKAGE }}
+          name: linux-${{ matrix.arch }}
+          path: dist/*
+          retention-days: 7
+
+      # The installed tree for the Flatpak job.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: stage-${{ matrix.arch }}
+          path: stage/*
+          retention-days: 1
+
+      - name: Add to the release
+        if: inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/* --clobber --repo "${{ github.repository }}"
+
+  flatpak:
+    name: flatpak-${{ matrix.arch }}
+    needs: linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-24.04
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: stage-${{ matrix.arch }}
+          path: stage
+
+      - name: Flatpak tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils
+
+      - name: Package
+        run: bash packaging/linux/flatpak.sh stage/*-stage.tar.gz dist
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: flatpak-${{ matrix.arch }}
+          path: dist/*
           retention-days: 7
 
       - name: Add to the release
         if: inputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" "$PACKAGE" --clobber --repo "${{ github.repository }}"
+        run: gh release upload "$TAG" dist/* --clobber --repo "${{ github.repository }}"
+
+  linux-riscv64:
+    name: linux-riscv64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
+      CC_riscv64gc_unknown_linux_gnu: riscv64-linux-gnu-gcc
+      CXX_riscv64gc_unknown_linux_gnu: riscv64-linux-gnu-g++
+      AR_riscv64gc_unknown_linux_gnu: riscv64-linux-gnu-ar
+      PKG_CONFIG_ALLOW_CROSS: "1"
+      PKG_CONFIG_PATH: /usr/lib/riscv64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Names
+        run: |
+          version="${TAG#v}"
+          echo "VERSION=${version:-test}" >> "$GITHUB_ENV"
+          echo "DISCCRAFT_RELEASE=${TAG}" >> "$GITHUB_ENV"
+
+      - name: Cross compiler and riscv64 libraries
+        run: |
+          # The runner's mirror has no riscv64: its sources are for amd64 only, riscv64 comes from the ports.
+          sudo sed -i '/^Types:/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources
+          printf 'Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports\nSuites: noble noble-updates noble-security\nComponents: main universe\nArchitectures: riscv64\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' \
+            | sudo tee /etc/apt/sources.list.d/ubuntu-ports.sources
+          sudo dpkg --add-architecture riscv64
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config gcc-riscv64-linux-gnu g++-riscv64-linux-gnu \
+            libc6-dev-riscv64-cross qemu-user binutils \
+            libasound2-dev:riscv64 libxkbcommon-dev:riscv64 libwayland-dev:riscv64 libx11-dev:riscv64 \
+            libxcb1-dev:riscv64 libxcursor-dev:riscv64 libxrandr-dev:riscv64 libxi-dev:riscv64 \
+            libfontconfig1-dev:riscv64 libfreetype-dev:riscv64
+          tools="$RUNNER_TEMP/tools"
+          mkdir -p "$tools"
+          cd "$tools"
+          nfpm="nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSLO "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/$nfpm"
+          curl -fsSLO "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/checksums.txt"
+          grep " $nfpm\$" checksums.txt | sha256sum -c -
+          tar -xzf "$nfpm" nfpm
+          echo "$tools" >> "$GITHUB_PATH"
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add riscv64gc-unknown-linux-gnu
+
+      - name: Build
+        run: |
+          cargo build --release --locked --target riscv64gc-unknown-linux-gnu -p disccraft -p disccraft-cli
+          # The command line starts under emulation.
+          qemu-riscv64 -L /usr/riscv64-linux-gnu target/riscv64gc-unknown-linux-gnu/release/disccraft-cli commands > /dev/null
+
+      - name: Package
+        run: |
+          VERSION="$VERSION" ARCH=riscv64 BIN_DIR=target/riscv64gc-unknown-linux-gnu/release OUT=dist \
+            FORMATS="tar deb rpm" bash packaging/linux/package.sh
+          rm dist/*-stage.tar.gz
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-riscv64
+          path: dist/*
+          retention-days: 7
+
+      - name: Add to the release
+        if: inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/* --clobber --repo "${{ github.repository }}"

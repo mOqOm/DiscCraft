@@ -34,13 +34,28 @@ pub(crate) fn paint_graphic(
     height: u16,
     sink: &mut Sink<'_>,
 ) {
-    if let Some(shadow) = &graphic.shadow
-        && let Some((mask, x, y)) = graphic_mask(project, graphic, width, height)
-        && let Some((shade, sx, sy)) = crate::shadow::shadow_mask(&mask, x, y, shadow)
+    let needs_mask = graphic.shadow.is_some() || !graphic.effects.is_empty();
+    let mask = needs_mask
+        .then(|| graphic_mask(project, graphic, width, height))
+        .flatten();
+    if let (Some(shadow), Some((mask, x, y))) = (&graphic.shadow, &mask)
+        && let Some((shade, sx, sy)) = crate::shadow::shadow_mask(mask, *x, *y, shadow)
     {
         crate::shadow::paint_mask(&shade, sx, sy, shadow.color, width, height, sink);
     }
+    // Layer effects (M6.332): the outer glow under the layer, the rest over it.
+    let effects = |painted: Vec<crate::effects::Painted>, sink: &mut Sink<'_>| {
+        for (effect, ex, ey, color) in painted {
+            crate::shadow::paint_mask(&effect, ex, ey, color, width, height, sink);
+        }
+    };
+    if let Some((mask, x, y)) = &mask {
+        effects(crate::effects::under(mask, *x, *y, &graphic.effects), sink);
+    }
     paint_body(project, graphic, width, height, sink);
+    if let Some((mask, x, y)) = &mask {
+        effects(crate::effects::over(mask, *x, *y, &graphic.effects), sink);
+    }
 }
 
 /// The coverage of a graphic inside the frame (for its shadow), with the frame position of the mask's corner.
@@ -102,6 +117,46 @@ fn paint_body(
             paint_shape(shape, color, &place, area, opacity, sink);
         }
     }
+}
+
+/// Which pixels of `area` (frame pixels, row by row) a graphic covers at least half: the shape a layer gives when
+/// it is pasted as a button's subpicture (Encore's Edit ▸ Paste as Subpicture). Its opacity and shadow do not
+/// count. `None` when the area or the frame is empty.
+pub fn graphic_coverage(
+    project: &Project,
+    graphic: &MenuGraphic,
+    area: Rect,
+    (width, height): (u16, u16),
+) -> Option<Vec<bool>> {
+    let (w, h) = (usize::from(area.w), usize::from(area.h));
+    if w == 0 || h == 0 || width == 0 || height == 0 {
+        return None;
+    }
+    let mut covered = vec![false; w.checked_mul(h)?];
+    let solid = MenuGraphic {
+        opacity: 100,
+        shadow: None,
+        ..graphic.clone()
+    };
+    let (left, top) = (usize::from(area.x), usize::from(area.y));
+    {
+        let mut sink = |x: usize, y: usize, _color: [u8; 3], coverage: f32| {
+            if coverage < 0.5 {
+                return;
+            }
+            let (Some(dx), Some(dy)) = (x.checked_sub(left), y.checked_sub(top)) else {
+                return;
+            };
+            if dx < w
+                && dy < h
+                && let Some(slot) = dy.checked_mul(w).and_then(|row| covered.get_mut(row + dx))
+            {
+                *slot = true;
+            }
+        };
+        paint_body(project, &solid, width, height, &mut sink);
+    }
+    Some(covered)
 }
 
 /// The frame rectangle a graphic covers: its box, turned by its free angle about its centre.

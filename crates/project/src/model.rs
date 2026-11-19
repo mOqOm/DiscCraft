@@ -79,6 +79,15 @@ impl Capacity {
             ],
         }
     }
+
+    /// The sizes a custom capacity can be on a disc kind, in bytes (Encore's Size ▸ Custom): from 1 MB to a
+    /// single-layer DVD (a larger DVD is DVD9, whose layer break is set) or a four-layer BDXL.
+    pub fn custom_range(kind: DiscKind) -> std::ops::RangeInclusive<u64> {
+        match kind {
+            DiscKind::Dvd => 1_000_000..=Capacity::Dvd5.bytes(),
+            DiscKind::BluRay => 1_000_000..=Capacity::Bd128.bytes(),
+        }
+    }
 }
 
 /// Global disc settings.
@@ -133,6 +142,10 @@ pub struct DiscSettings {
     /// choose (自動: the first cell boundary past the middle of the image).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layer_break: Option<LayerBreakPoint>,
+    /// The parental level of a DVD (1 to 8; 0: none). A player set to a lower level asks for its password before
+    /// the disc plays, and stops when it is not given.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub parental_level: u8,
     /// The subtitle the disc selects when it starts (Encore's "Set Subtitle").
     #[serde(default, skip_serializing_if = "SubtitleDefault::is_no_change")]
     pub subtitle_default: SubtitleDefault,
@@ -358,12 +371,13 @@ impl AssetKind {
         match ext.as_deref() {
             Some("mp4") | Some("mov") | Some("mkv") | Some("mxf") | Some("m2v") | Some("mpg")
             | Some("mpeg") | Some("vob") | Some("m2ts") | Some("ts") | Some("avi") | Some("m4v")
-            | Some("webm") | Some("mts") | Some("m2t")
+            | Some("webm") | Some("mts") | Some("m2t") | Some("m1v") | Some("mpv")
             // EffectCraft compositions are rendered to video.
             | Some("ecproj") => {
                 AssetKind::Video
             }
-            Some("wav") | Some("ac3") | Some("dts") | Some("aif") | Some("aiff") | Some("mp3") | Some("m4a")
+            Some("wav") | Some("ac3") | Some("dts") | Some("aif") | Some("aiff") | Some("mp3") | Some("mpa")
+            | Some("m4a")
             // SoundCraft sessions are mixed down to audio.
             | Some("flac") | Some("scraft")
             // More sound files a tester may have: all go through the same decoders.
@@ -405,7 +419,214 @@ pub struct Asset {
     /// active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub composition: Option<String>,
+    /// The video bit rate (kbit/s) this asset is transcoded at (Encore's Transcode Settings: a quality preset of
+    /// the asset); `None` is Automatic: the rate that fits the disc. It means nothing for an asset that goes on
+    /// the disc as it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcode_kbps: Option<u32>,
+    /// The pixel aspect ratio (width over height of a pixel) this asset's pictures are taken to have (Encore's
+    /// Interpret Footage ▸ Specify pixel aspect ratio); `None` uses the file's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pixel_aspect: Option<(u32, u32)>,
+    /// The files this video was transcoded to for a DVD (Encore's Locate Transcoded File ▸ DVD…): a DVD build
+    /// takes them in place of the asset's own file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub located_dvd: Option<LocatedTranscode>,
+    /// The same for a Blu-ray disc (Locate Transcoded File ▸ Blu-ray…).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub located_bluray: Option<LocatedTranscode>,
+    /// A picture's alpha channel is ignored (Encore's Interpret Footage ▸ Ignore Alpha Channel): every pixel is
+    /// opaque, in menus and slides.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_alpha: bool,
+    /// How a video asset's bit rate is kept when it is transcoded (Encore's quality presets: VBR 1 pass, VBR 2
+    /// pass, CBR).
+    #[serde(default, skip_serializing_if = "TranscodeMode::is_default")]
+    pub transcode_mode: TranscodeMode,
+    /// What a video asset's sound is made when it is transcoded for a DVD (Encore's transcode settings: Dolby
+    /// Digital or PCM).
+    #[serde(default, skip_serializing_if = "TranscodeAudio::is_default")]
+    pub transcode_audio: TranscodeAudio,
+    /// The name of the DVD quality preset the DVD setting above was chosen as (Encore's Transcode Settings ▸ DVD
+    /// ▸ Quality Preset), for showing it; `None`: set otherwise or automatic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcode_preset: Option<String>,
+    /// A Blu-ray transcode setting of the asset's own (Encore's Transcode Settings ▸ Blu-ray ▸ Quality Preset);
+    /// `None`: automatic (the rate that fits the disc).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bluray_transcode: Option<BlurayTranscode>,
+    /// The DVD setting is film (Encore's NTSC DV 23.976 presets): the video is made 23.976 progressive pictures a
+    /// second, shown by 3:2 pulldown (an NTSC DVD only; with a rate of its own only).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transcode_film: bool,
+    /// The HD format this video's titles are made in on an HD Blu-ray (Encore's Transcode Settings ▸ Blu-ray ▸
+    /// Codec / Dimensions / Frame Rate); `None`: the project's ("Use Project Settings"). Never SD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bluray_video: Option<BdVideo>,
+    /// How hard the DVD transcode searches for motion: the quality of the DVD quality preset it was chosen as
+    /// (Encore's "High quality" presets' 5, "Low quality" ones' 2), [`MIN_QUALITY`] to [`BEST_QUALITY`].
+    #[serde(default = "best_quality", skip_serializing_if = "is_best_quality")]
+    pub transcode_quality: u8,
+    /// Encore's "Use Maximum Render Quality": its transcodes scale the pictures with the filtered scaler (fine
+    /// detail averages out instead of aliasing).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub max_render_quality: bool,
+    /// Encore's "Use Frame Blending": where its transcodes' pictures fall between two of its frames (another frame
+    /// rate), the two are mixed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub frame_blend: bool,
 }
+
+/// The best transcode quality (Encore's presets' 5): the encoder's whole motion search.
+pub const BEST_QUALITY: u8 = 5;
+
+/// The lowest transcode quality (Encore's quality slider's 1).
+pub const MIN_QUALITY: u8 = 1;
+
+fn best_quality() -> u8 {
+    BEST_QUALITY
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip_serializing_if takes a reference
+fn is_best_quality(quality: &u8) -> bool {
+    *quality == BEST_QUALITY
+}
+
+/// A Blu-ray transcode setting of an asset's own: its video bit rates and the preset it was chosen as.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlurayTranscode {
+    /// The target video bit rate, kbit/s ([`MIN_TRANSCODE_KBPS`] to [`MAX_TRANSCODE_KBPS`]).
+    pub kbps: u32,
+    /// The peak video bit rate, kbit/s (at least [`BlurayTranscode::kbps`]).
+    pub max_kbps: u32,
+    /// The name of the quality preset it was chosen as (empty: none).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub preset: String,
+    /// How hard an MPEG-2 encode searches for motion: the preset's quality (Encore's "Long Form" MPEG-2 presets'
+    /// 3, the others' 5).
+    #[serde(default = "best_quality", skip_serializing_if = "is_best_quality")]
+    pub quality: u8,
+    /// How the rate is kept: one-pass VBR (Encore's Blu-ray presets), two-pass VBR or CBR (a preset of the user's).
+    #[serde(default, skip_serializing_if = "TranscodeMode::is_default")]
+    pub mode: TranscodeMode,
+}
+
+/// What a video's sound is made when it is transcoded for a DVD (Encore's transcode settings name it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TranscodeAudio {
+    /// Dolby Digital (AC-3), stereo at 192 kbit/s.
+    #[default]
+    DolbyDigital,
+    /// Linear PCM, 48 kHz 16-bit stereo, as converted (1.536 Mbit/s: it takes more of the disc and leaves the
+    /// video less).
+    Pcm,
+}
+
+impl TranscodeAudio {
+    /// Every choice.
+    pub const ALL: [TranscodeAudio; 2] = [TranscodeAudio::DolbyDigital, TranscodeAudio::Pcm];
+
+    /// The name in command parameters.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TranscodeAudio::DolbyDigital => "dolbyDigital",
+            TranscodeAudio::Pcm => "pcm",
+        }
+    }
+
+    /// Parses a command parameter.
+    pub fn parse(text: &str) -> Option<TranscodeAudio> {
+        Self::ALL.into_iter().find(|audio| audio.as_str() == text)
+    }
+
+    /// Dolby Digital (nothing to save).
+    pub fn is_default(&self) -> bool {
+        *self == TranscodeAudio::DolbyDigital
+    }
+}
+
+/// How a video's bit rate is kept when it is transcoded (Encore's quality presets name it: "VBR 2 Pass", "CBR 1
+/// Pass").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TranscodeMode {
+    /// Variable, in one pass: the rate averages the target, up to the maximum.
+    #[default]
+    Vbr,
+    /// Variable, in two passes: a first pass measures the pictures, the second shares the bits by what it measured
+    /// (a hard scene gets more, an easy one fewer; it takes twice as long).
+    Vbr2Pass,
+    /// Constant: the target is also the maximum.
+    Cbr,
+}
+
+impl TranscodeMode {
+    /// Every choice.
+    pub const ALL: [TranscodeMode; 3] = [
+        TranscodeMode::Vbr,
+        TranscodeMode::Vbr2Pass,
+        TranscodeMode::Cbr,
+    ];
+
+    /// The name in command parameters.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TranscodeMode::Vbr => "vbr",
+            TranscodeMode::Vbr2Pass => "vbr2Pass",
+            TranscodeMode::Cbr => "cbr",
+        }
+    }
+
+    /// Parses a command parameter.
+    pub fn parse(text: &str) -> Option<TranscodeMode> {
+        Self::ALL.into_iter().find(|mode| mode.as_str() == text)
+    }
+
+    /// One-pass VBR (nothing to save).
+    pub fn is_default(&self) -> bool {
+        *self == TranscodeMode::Vbr
+    }
+}
+
+/// Files a video was transcoded to elsewhere (or by an earlier build whose source is gone), pointed at with
+/// Encore's Locate Transcoded File.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocatedTranscode {
+    /// The video (for a DVD, MPEG-2 the disc takes as it is).
+    pub video: String,
+    /// Its sound (AC-3, WAV …), which the timelines that play the video without audio tracks of their own take as
+    /// their soundtrack. `None`: the video's own sound, if it has any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<String>,
+}
+
+impl Asset {
+    /// The transcoded files located for a disc of `kind`.
+    #[must_use]
+    pub fn located(&self, kind: DiscKind) -> Option<&LocatedTranscode> {
+        match kind {
+            DiscKind::Dvd => self.located_dvd.as_ref(),
+            DiscKind::BluRay => self.located_bluray.as_ref(),
+        }
+    }
+
+    /// The transcoded files located for a disc of `kind`, to change.
+    pub fn located_mut(&mut self, kind: DiscKind) -> &mut Option<LocatedTranscode> {
+        match kind {
+            DiscKind::Dvd => &mut self.located_dvd,
+            DiscKind::BluRay => &mut self.located_bluray,
+        }
+    }
+}
+
+/// The lowest video bit rate an asset's transcode setting takes, kbit/s.
+pub const MIN_TRANSCODE_KBPS: u32 = 1_000;
+/// The highest video bit rate an asset's transcode setting takes, kbit/s (a Blu-ray's video; a DVD's stops at
+/// what its multiplex leaves the video).
+pub const MAX_TRANSCODE_KBPS: u32 = 40_000;
 
 /// One subtitle (a cue) edited in the project: shown from `start` until `end`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -420,6 +641,37 @@ pub struct SubtitleCue {
     /// The subtitle's own colour group, stroke and place (Encore's subtitle clip properties).
     #[serde(default, flatten)]
     pub look: CueLook,
+    /// The picture this subtitle shows instead of text (one read from an image script or a FAB image script);
+    /// `None` for a text subtitle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<CueImage>,
+}
+
+/// A subtitle that is a picture (Encore's Timeline ▸ Import Subtitles ▸ Image Script / FAB Image Script): shown as
+/// it is drawn, in the subtitle colours its own colours are mapped to. Its text cannot be edited, as in Encore.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CueImage {
+    /// The picture file (JPG, GIF, PNG, TIF or BMP).
+    pub path: String,
+    /// Where it stands: left, top, right and bottom in the frame's pixels. The picture's top left corner is put
+    /// at the left top; what runs past the right or the bottom is cut.
+    pub area: [u16; 4],
+    /// Which of its colours are the background, the fill and the outline.
+    pub colors: ImageCueColors,
+}
+
+/// Encore's Map Colors for picture subtitles: the picture's colour taken as the background (transparent), as the
+/// fill (Color 1) and as the outline (Color 2). Any other colour of the picture is transparent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageCueColors {
+    /// The colour shown transparent.
+    pub background: [u8; 3],
+    /// The colour drawn in the colour group's fill.
+    pub fill: [u8; 3],
+    /// The colour drawn in the colour group's stroke.
+    pub outline: [u8; 3],
 }
 
 /// How one subtitle is drawn where it differs from its track: Encore's Highlight (colour group), Stroke and
@@ -531,6 +783,144 @@ pub struct AudioTrack {
     /// along its track). The track is silent before it.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub start: u32,
+    /// How much of the file's head the clip leaves out, in frames of the disc's standard rate (Encore: an audio
+    /// clip's in point trimmed).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub trim_start: u32,
+    /// The frame of the file (of the disc's standard rate) the clip ends in front of (its out point trimmed);
+    /// `None` plays to the end of the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_end: Option<u32>,
+    /// The clips after the first on this track (Encore: several audio clips on one track), in any order; the
+    /// fields above are the first clip's. The clips of a track do not overlap ([`AudioTrack::clips`] gives them
+    /// in the order they sound).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub more: Vec<AudioClip>,
+}
+
+/// One clip of an audio track: a part of a sound file at a place on the timeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioClip {
+    /// The sound file.
+    pub asset: AssetId,
+    /// Where the clip starts on the timeline, in frames of the disc's standard rate.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub start: u32,
+    /// How much of the file's head the clip leaves out, frames.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub trim_start: u32,
+    /// The frame of the file the clip ends in front of; `None` plays to the end of the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_end: Option<u32>,
+}
+
+/// The most clips on one audio track.
+pub const MAX_AUDIO_CLIPS: usize = 99;
+
+impl AudioTrack {
+    /// A track of `asset`: the whole file from the start of the timeline, with no language.
+    #[must_use]
+    pub fn of(asset: AssetId) -> Self {
+        Self {
+            asset,
+            language: String::new(),
+            start: 0,
+            trim_start: 0,
+            trim_end: None,
+            more: Vec::new(),
+        }
+    }
+
+    /// Whether the track is one clip, the whole file from the start of the timeline: neither moved nor trimmed
+    /// (a file that a disc carries as it is can then go on it so).
+    #[must_use]
+    pub fn is_whole(&self) -> bool {
+        self.start == 0 && self.trim_start == 0 && self.trim_end.is_none() && self.more.is_empty()
+    }
+
+    /// The first clip: the track's own fields.
+    #[must_use]
+    pub fn first_clip(&self) -> AudioClip {
+        AudioClip {
+            asset: self.asset,
+            start: self.start,
+            trim_start: self.trim_start,
+            trim_end: self.trim_end,
+        }
+    }
+
+    /// Every clip of the track with its number (0 the first clip, `n` the clip `more[n - 1]`), in the order
+    /// they start on the timeline.
+    #[must_use]
+    pub fn clips(&self) -> Vec<(usize, AudioClip)> {
+        let mut clips: Vec<(usize, AudioClip)> = std::iter::once(self.first_clip())
+            .chain(self.more.iter().copied())
+            .enumerate()
+            .collect();
+        clips.sort_by_key(|(number, clip)| (clip.start, *number));
+        clips
+    }
+
+    /// Clip `number` (see [`AudioTrack::clips`]).
+    #[must_use]
+    pub fn clip(&self, number: usize) -> Option<AudioClip> {
+        match number.checked_sub(1) {
+            None => Some(self.first_clip()),
+            Some(index) => self.more.get(index).copied(),
+        }
+    }
+
+    /// Puts `clip` in the place of clip `number`; `false` when there is no such clip.
+    pub fn set_clip(&mut self, number: usize, clip: AudioClip) -> bool {
+        match number.checked_sub(1) {
+            None => {
+                self.asset = clip.asset;
+                self.start = clip.start;
+                self.trim_start = clip.trim_start;
+                self.trim_end = clip.trim_end;
+                true
+            }
+            Some(index) => match self.more.get_mut(index) {
+                Some(slot) => {
+                    *slot = clip;
+                    true
+                }
+                None => false,
+            },
+        }
+    }
+
+    /// Takes clip `number` off the track; the second clip becomes the first when the first goes. `false` when
+    /// there is no such clip or it is the track's only one.
+    pub fn remove_clip(&mut self, number: usize) -> bool {
+        match number.checked_sub(1) {
+            None => {
+                if self.more.is_empty() {
+                    return false;
+                }
+                let next = self.more.remove(0);
+                let _ = self.set_clip(0, next);
+                true
+            }
+            Some(index) if index < self.more.len() => {
+                let _ = self.more.remove(index);
+                true
+            }
+            Some(_) => false,
+        }
+    }
+
+    /// Every sound file the track uses.
+    pub fn assets(&self) -> impl Iterator<Item = AssetId> + '_ {
+        std::iter::once(self.asset).chain(self.more.iter().map(|clip| clip.asset))
+    }
+
+    /// Whether the clip's in or out point is trimmed.
+    #[must_use]
+    pub fn is_trimmed(&self) -> bool {
+        self.trim_start > 0 || self.trim_end.is_some()
+    }
 }
 
 /// For `skip_serializing_if`: a field left out of the file at its default of 0.
@@ -646,6 +1036,90 @@ fn is_zero_u8(value: &u8) -> bool {
 }
 
 impl Project {
+    /// Sets the pixel aspect ratio an asset's pictures are taken to have; `None`: the file's own.
+    ///
+    /// # Errors
+    ///
+    /// When the asset does not exist, or the ratio is not between 1:10 and 10:1 in numbers up to 10000.
+    pub fn set_asset_pixel_aspect(
+        &mut self,
+        id: AssetId,
+        aspect: Option<(u32, u32)>,
+    ) -> Result<(), ProjectError> {
+        if let Some((width, height)) = aspect {
+            let sane = (1..=10_000).contains(&width)
+                && (1..=10_000).contains(&height)
+                && width <= height.saturating_mul(10)
+                && height <= width.saturating_mul(10);
+            if !sane {
+                return Err(ProjectError::Invalid(
+                    "the pixel aspect ratio must be between 1:10 and 10:1".to_string(),
+                ));
+            }
+        }
+        let asset = self
+            .assets
+            .get_mut(&id)
+            .ok_or_else(|| ProjectError::Invalid("asset does not exist".to_string()))?;
+        asset.pixel_aspect = aspect;
+        Ok(())
+    }
+
+    /// The files whose pictures have a pixel aspect ratio of the project's choosing, for the media reader
+    /// (`disccraft_transcode::set_pixel_aspects`).
+    #[must_use]
+    pub fn pixel_aspects(&self) -> Vec<(std::path::PathBuf, (u32, u32))> {
+        self.assets
+            .values()
+            .filter_map(|asset| Some((asset.media_file().into_owned(), asset.pixel_aspect?)))
+            .collect()
+    }
+
+    /// The Blu-ray format the titles of video asset `asset` are made in: on an HD Blu-ray its own HD format
+    /// (Encore's Transcode Settings ▸ Blu-ray ▸ Codec / Dimensions / Frame Rate), else the project's ("Use Project
+    /// Settings"); on an SD Blu-ray (or a DVD) the project's.
+    #[must_use]
+    pub fn asset_bd_video(&self, asset: AssetId) -> BdVideo {
+        let project = self.settings.bd_video;
+        if project.hd().is_none() {
+            return project;
+        }
+        self.assets
+            .get(&asset)
+            .and_then(|found| found.bluray_video)
+            .filter(|video| video.hd().is_some())
+            .unwrap_or(project)
+    }
+
+    /// The Blu-ray format timeline `timeline`'s title is made in: its video's ([`Project::asset_bd_video`]).
+    #[must_use]
+    pub fn title_bd_video(&self, timeline: &Timeline) -> BdVideo {
+        self.asset_bd_video(timeline.video)
+    }
+
+    /// Sets the video bit rate (kbit/s) an asset is transcoded at; `None`: automatic.
+    ///
+    /// # Errors
+    ///
+    /// When the asset does not exist, or the rate is outside [`MIN_TRANSCODE_KBPS`]..=[`MAX_TRANSCODE_KBPS`].
+    pub fn set_asset_transcode(
+        &mut self,
+        id: AssetId,
+        kbps: Option<u32>,
+    ) -> Result<(), ProjectError> {
+        if kbps.is_some_and(|kbps| !(MIN_TRANSCODE_KBPS..=MAX_TRANSCODE_KBPS).contains(&kbps)) {
+            return Err(ProjectError::Invalid(format!(
+                "the bit rate must be between {MIN_TRANSCODE_KBPS} and {MAX_TRANSCODE_KBPS} kbit/s"
+            )));
+        }
+        let asset = self
+            .assets
+            .get_mut(&id)
+            .ok_or_else(|| ProjectError::Invalid("asset does not exist".to_string()))?;
+        asset.transcode_kbps = kbps;
+        Ok(())
+    }
+
     /// Chooses the composition an EffectCraft project asset shows (`None`: the project's active one).
     pub fn set_asset_composition(
         &mut self,
@@ -860,6 +1334,10 @@ pub struct Project {
     /// dialog), by name. A timeline or a slideshow takes a copy of one.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub subtitle_color_sets: BTreeMap<String, SubtitleColorSet>,
+    /// The project's named menu colour sets (Encore: the sets made with New in the Menu Color Set dialog), by
+    /// name. A menu takes a copy of one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub menu_color_sets: BTreeMap<String, crate::ColorSet>,
     #[serde(default = "default_next_id")]
     pub next_id: u64,
 }
@@ -893,6 +1371,41 @@ impl Project {
         Ok(())
     }
 
+    /// Keeps the menu colour set `set` in the project under `name` (replacing a set of that name).
+    pub fn save_menu_color_set(
+        &mut self,
+        name: &str,
+        set: crate::ColorSet,
+    ) -> Result<(), ProjectError> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > MAX_COLOR_SET_NAME {
+            return Err(ProjectError::Invalid(
+                "a colour set needs a name of at most 64 characters".to_string(),
+            ));
+        }
+        if !set.is_valid() {
+            return Err(ProjectError::Invalid(
+                "every opacity must be 0 to 100".to_string(),
+            ));
+        }
+        if !self.menu_color_sets.contains_key(name) && self.menu_color_sets.len() >= MAX_COLOR_SETS
+        {
+            return Err(ProjectError::Invalid(
+                "the project has too many colour sets".to_string(),
+            ));
+        }
+        let _ = self.menu_color_sets.insert(name.to_owned(), set);
+        Ok(())
+    }
+
+    /// Takes the named menu colour set out of the project (the menus that took a copy keep their colours).
+    pub fn remove_menu_color_set(&mut self, name: &str) -> Result<(), ProjectError> {
+        self.menu_color_sets
+            .remove(name.trim())
+            .map(|_| ())
+            .ok_or_else(|| ProjectError::Invalid(format!("there is no colour set \"{name}\"")))
+    }
+
     /// Takes the named colour set out of the project (the timelines that took a copy keep their colours).
     pub fn remove_subtitle_color_set(&mut self, name: &str) -> Result<(), ProjectError> {
         self.subtitle_color_sets
@@ -915,6 +1428,7 @@ impl Default for Project {
             folders: BTreeMap::new(),
             placements: BTreeMap::new(),
             subtitle_color_sets: BTreeMap::new(),
+            menu_color_sets: BTreeMap::new(),
             flowchart: BTreeMap::new(),
             next_id: 1,
         }
@@ -1019,6 +1533,20 @@ impl Project {
                 cues: None,
                 composition: None,
                 description: String::new(),
+                transcode_kbps: None,
+                pixel_aspect: None,
+                located_dvd: None,
+                located_bluray: None,
+                ignore_alpha: false,
+                transcode_mode: Default::default(),
+                transcode_audio: Default::default(),
+                transcode_preset: None,
+                bluray_transcode: None,
+                transcode_film: false,
+                bluray_video: None,
+                transcode_quality: BEST_QUALITY,
+                max_render_quality: false,
+                frame_blend: false,
             },
         );
         Ok(id)
@@ -1213,6 +1741,51 @@ impl Project {
             let _ = timeline.video_gaps.remove(clip);
         }
         self.cut_timeline_range(tl, (start, duration), false)
+    }
+
+    /// Removes clip `clip` and leaves its place empty (Encore: Clear on a clip, as against Ripple Delete): the
+    /// clips after it stay where they are, the one that followed getting `frames` more of empty track in front of
+    /// it (the clip's length and the gap that was in front of it). The chapters inside `(start, duration)`, the
+    /// time the clip and its gap took, go; the others stay. The last clip just goes: nothing follows it.
+    pub fn clear_timeline_video(
+        &mut self,
+        tl: TimelineId,
+        clip: usize,
+        (start, duration): (Tick, Tick),
+        frames: u32,
+    ) -> Result<(), ProjectError> {
+        let timeline = self
+            .timelines
+            .get(&tl)
+            .ok_or_else(|| ProjectError::Invalid("timeline does not exist".to_string()))?;
+        if clip >= timeline.more_video.len() {
+            // The last clip (or none such): as a plain removal.
+            return self.remove_timeline_video(tl, clip, (start, duration));
+        }
+        // Nothing moves: the range taken out is empty, so only the clip's own entries go.
+        let end = Tick(start.0.saturating_add(duration.0));
+        let inside: Vec<usize> = timeline
+            .chapters
+            .iter()
+            .enumerate()
+            .filter(|(at, chapter)| *at > 0 && chapter.time >= start && chapter.time < end)
+            .map(|(at, _)| at)
+            .collect();
+        self.remove_timeline_video(tl, clip, (start, Tick(0)))?;
+        for at in inside.into_iter().rev() {
+            self.remove_chapter(tl, at)?;
+        }
+        let Some(timeline) = self.timelines.get_mut(&tl) else {
+            return Ok(());
+        };
+        // The clip that followed is now clip `clip`.
+        if timeline.video_gaps.len() <= clip {
+            timeline.video_gaps.resize(clip.saturating_add(1), 0);
+        }
+        if let Some(gap) = timeline.video_gaps.get_mut(clip) {
+            *gap = gap.saturating_add(frames);
+        }
+        Ok(())
     }
 
     /// Moves clip `clip` along the track (Encore: a clip dragged to another place): `gap` frames of empty track are

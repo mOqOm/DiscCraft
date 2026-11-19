@@ -6,7 +6,9 @@ use disccraft_project::{
     Menu, MenuBackground, MenuText, Orientation, Project, Rect, TextAntialias, TextFormat,
     TextScript,
 };
-use filmcraft_text::{Caps, Layout, Mask, ParagraphStyle, TextStyle, families, layout, render};
+use filmcraft_text::{
+    Caps, Layout, Mask, ParagraphStyle, StyleRun, TextStyle, families, layout, layout_rich, render,
+};
 use png::{BitDepth, ColorType, Decoder, Transformations};
 use std::fs::File;
 use std::path::Path;
@@ -216,7 +218,7 @@ pub(crate) fn draw_texts(menu: &Menu, width: u16, height: u16, rgb: &mut [u8]) {
     let sx = squeeze(menu);
     for text in menu.texts.iter().filter(|text| !text.hidden) {
         let family = family_for(text.font.as_deref());
-        let Some((pieces, _)) = text_layout(text, &family, sx) else {
+        let Some((pieces, _, _)) = text_layout(text, &family, sx) else {
             continue;
         };
         let (mask, mask_x, mask_y) = crate::text_block::rasterize_pieces(&pieces);
@@ -234,7 +236,29 @@ pub(crate) fn draw_texts(menu: &Menu, width: u16, height: u16, rgb: &mut [u8]) {
             width,
             height,
         );
+        // Layer effects (M6.342), as an image's: the outer glow under the text, the rest over it.
+        blend_effects(
+            crate::effects::under(&mask, mask_x, mask_y, &text.effects),
+            rgb,
+            (width, height),
+        );
         blend_mask(&mask, mask_x, mask_y, color, rgb, width, height);
+        blend_effects(
+            crate::effects::over(&mask, mask_x, mask_y, &text.effects),
+            rgb,
+            (width, height),
+        );
+    }
+}
+
+/// Draws layer effects (each a coverage mask in its colour) over the frame.
+fn blend_effects(
+    painted: Vec<crate::effects::Painted>,
+    rgb: &mut [u8],
+    (width, height): (u16, u16),
+) {
+    for (effect, x, y, color) in painted {
+        blend_mask(&effect, x, y, color, rgb, width, height);
     }
 }
 
@@ -261,7 +285,7 @@ pub(crate) fn text_rect(menu: &Menu, text: &MenuText) -> Rect {
     let family = family_for(text.font.as_deref());
     let sx = squeeze(menu);
     let (w, h) = match text_layout(text, &family, sx) {
-        Some((_, (w, h))) => (to_side(w), to_side(h)),
+        Some((_, (w, h), _)) => (to_side(w), to_side(h)),
         None => (size, size),
     };
     // A text standing up (turned on its side, or vertical) is at least its size wide.
@@ -297,26 +321,156 @@ fn to_side(length: f32) -> u16 {
 /// Lays out a text object: the pieces to draw (each a layout and its transform into the frame; one for a horizontal
 /// text) and the drawn size of its box, whose top-left corner is the text's x, y before a free turn (`sx`: the
 /// horizontal squeeze the text is drawn with).
+#[allow(clippy::type_complexity)]
 fn text_layout(
     text: &MenuText,
     family: &str,
     sx: f32,
-) -> Option<(Vec<crate::text_block::Piece>, (f32, f32))> {
+) -> Option<(Vec<crate::text_block::Piece>, (f32, f32), bool)> {
     if text.text.trim().is_empty() {
         return None;
     }
     let size = f32::from(text.size.clamp(MIN_TEXT_SIZE, MAX_TEXT_SIZE));
     let format = text.format;
     let face = text.font_style.as_deref();
+    let scale = text_scale(&format);
+    // Paragraph text: the box's width (a vertical text's height) in the layout's own units, before the text is
+    // scaled and squeezed.
+    let limit = |along: f32| {
+        text.box_width
+            .map(|side| {
+                f32::from(side.clamp(
+                    disccraft_project::MIN_TEXT_BOX,
+                    disccraft_project::MAX_TEXT_BOX,
+                )) / along
+            })
+            .filter(|limit| limit.is_finite() && *limit > 0.0)
+    };
+    // The box's height (a vertical text's reach across its columns), in the layout's own units.
+    let tall = |across: f32| {
+        text.box_width
+            .and(text.box_height)
+            .map(|side| {
+                f32::from(side.clamp(
+                    disccraft_project::MIN_TEXT_BOX,
+                    disccraft_project::MAX_TEXT_BOX,
+                )) / across
+            })
+            .filter(|tall| tall.is_finite() && *tall > 0.0)
+    };
+    let mut overset = false;
+    let em = room_em(size, &format);
     let (pieces, bounds) = if text.vertical {
-        crate::text_block::vertical_block(&text.text, family, size, face, &format)
+        let rules = crate::wrap::Rules::of(&format);
+        let column_length = |line: &str| {
+            let [_, y0, _, y1] =
+                crate::text_block::vertical_block(line, family, size, face, &format).1;
+            y1 - y0
+        };
+        let (mut columns, mut room) = match (limit(scale.1), format.align) {
+            // Justified: each column but a paragraph's last spread down to the box.
+            (Some(limit), disccraft_project::TextAlign::Justify) => {
+                crate::wrap::justify(&text.text, limit, rules, &column_length, em)
+            }
+            (limit, _) => (
+                limit.map_or_else(
+                    || text.text.clone(),
+                    |limit| crate::wrap::wrap(&text.text, limit, rules, &column_length),
+                ),
+                Vec::new(),
+            ),
+        };
+        // Columns past the box's reach are left out.
+        if let Some(reach) = tall(scale.0 * sx) {
+            let wide = |columns: &str| {
+                let [x0, _, x1, _] =
+                    crate::text_block::vertical_block(columns, family, size, face, &format).1;
+                x1 - x0
+            };
+            let kept = fitting_lines(&columns, reach, &wide);
+            if kept < columns.len() {
+                overset = true;
+                columns.truncate(kept);
+                room.retain(|(range, _)| range.end <= kept);
+            }
+        }
+        let (pieces, [x0, y0, x1, y1]) =
+            crate::text_block::vertical_block_with(&columns, family, size, face, &format, &room);
+        // The box keeps the size it was drawn, whatever the columns in it (as a horizontal box does): as long as
+        // its columns may be, the columns placed in it by the alignment (top, middle, bottom), and as wide as its
+        // reach, the columns from its right edge.
+        let (top, bottom) = match limit(scale.1) {
+            Some(limit) => {
+                let spare = (limit - (y1 - y0)).max(0.0);
+                let before = match format.align {
+                    disccraft_project::TextAlign::Left | disccraft_project::TextAlign::Justify => {
+                        0.0
+                    }
+                    disccraft_project::TextAlign::Center => spare * 0.5,
+                    disccraft_project::TextAlign::Right => spare,
+                };
+                (y0 - before, y0 - before + limit.max(y1 - y0))
+            }
+            None => (y0, y1),
+        };
+        let left = tall(scale.0 * sx).map_or(x0, |reach| x1 - reach.max(x1 - x0));
+        (pieces, [left, top, x1, bottom])
     } else {
-        let laid = formatted_layout(&text.text, family, size, face, &format);
+        let limit = limit(scale.0 * sx);
+        let measure = |line: &str| {
+            let [x0, _, x1, _] = formatted_layout(line, family, size, face, &format).bounds;
+            x1 - x0
+        };
+        let rules = crate::wrap::Rules::of(&format);
+        let (mut lines, mut room) = match (limit, format.align) {
+            // Justified: each line but a paragraph's last spread to the box.
+            (Some(limit), disccraft_project::TextAlign::Justify) => {
+                crate::wrap::justify(&text.text, limit, rules, &measure, em)
+            }
+            _ => (
+                limit.map_or_else(
+                    || text.text.clone(),
+                    |limit| crate::wrap::wrap(&text.text, limit, rules, &measure),
+                ),
+                Vec::new(),
+            ),
+        };
+        // Lines below the box's height are left out (Encore's overset text).
+        let tall = tall(scale.1);
+        if let Some(tall) = tall {
+            let high = |lines: &str| {
+                let [_, y0, _, y1] =
+                    formatted_layout_with(lines, family, size, face, &format, (false, &room))
+                        .bounds;
+                y1 - y0
+            };
+            let kept = fitting_lines(&lines, tall, &high);
+            if kept < lines.len() {
+                overset = true;
+                lines.truncate(kept);
+                room.retain(|(range, _)| range.end <= kept);
+            }
+        }
+        let mut laid = formatted_layout_with(&lines, family, size, face, &format, (false, &room));
+        // The box is as wide as it was drawn, whatever the lines in it: they are aligned inside it.
+        if let Some(limit) = limit {
+            let [x0, y0, x1, y1] = laid.bounds;
+            let spare = (limit - (x1 - x0)).max(0.0);
+            let before = match format.align {
+                disccraft_project::TextAlign::Left | disccraft_project::TextAlign::Justify => 0.0,
+                disccraft_project::TextAlign::Center => spare * 0.5,
+                disccraft_project::TextAlign::Right => spare,
+            };
+            // As tall as its box when it has a height, whatever the lines in it.
+            let bottom = tall.map_or(y1, |tall| y0 + tall);
+            let mut owned = (*laid).clone();
+            owned.bounds = [x0 - before, y0, x0 - before + limit.max(x1 - x0), bottom];
+            laid = Arc::new(owned);
+        }
         let bounds = laid.bounds;
         (vec![(laid, crate::text_block::IDENTITY)], bounds)
     };
     // The drawn (scaled, turned, squeezed) box starts at the text's x, y.
-    let scale = text_scale(&format);
     let (w, h) = oriented_size_of(bounds, sx, text.orientation, scale);
     let center = (f32::from(text.x) + w * 0.5, f32::from(text.y) + h * 0.5);
     let pen = oriented_pen_of(bounds, sx, text.orientation, scale, center);
@@ -327,7 +481,199 @@ fn text_layout(
     let finite = pieces
         .iter()
         .all(|(_, xf)| xf.iter().all(|value| value.is_finite()));
-    (finite && w.is_finite() && h.is_finite()).then_some((pieces, (w, h)))
+    (finite && w.is_finite() && h.is_finite()).then_some((pieces, (w, h), overset))
+}
+
+/// How much of `lines` (whole lines, a byte length) fits in `room`, by `extent` (the size of some lines): all of
+/// it when it fits, else the most lines that do (none at all when even the first does not).
+fn fitting_lines(lines: &str, room: f32, extent: &dyn Fn(&str) -> f32) -> usize {
+    if extent(lines) <= room {
+        return lines.len();
+    }
+    // The ends of the first 1, 2, … lines (not the last: all of them do not fit).
+    let ends: Vec<usize> = lines.match_indices('\n').map(|(at, _)| at).collect();
+    let (mut fits, mut over) = (0_usize, ends.len().saturating_add(1));
+    while fits + 1 < over {
+        let middle = fits + (over - fits) / 2;
+        let end = ends.get(middle - 1).copied().unwrap_or(lines.len());
+        if lines.get(..end).is_some_and(|head| extent(head) <= room) {
+            fits = middle;
+        } else {
+            over = middle;
+        }
+    }
+    match fits.checked_sub(1) {
+        Some(last) => ends.get(last).copied().unwrap_or(0),
+        None => 0,
+    }
+}
+
+/// The em a justified line's room is counted in (as tracking is): the size the text is set in (smaller for
+/// superscript and subscript).
+pub(crate) fn room_em(size: f32, format: &TextFormat) -> f32 {
+    if format.script == TextScript::Normal {
+        size
+    } else {
+        size * SCRIPT_SIZE
+    }
+}
+
+/// Whether a paragraph text has lines (columns) its box's height leaves out (Encore's overset text).
+pub(crate) fn text_overset(menu: &Menu, text: &MenuText) -> bool {
+    let family = family_for(text.font.as_deref());
+    text_layout(text, &family, squeeze(menu)).is_some_and(|(_, _, overset)| overset)
+}
+
+/// How much of an em (in 1/1000) tsume at 100 per cent takes off the room after a kana or a kanji: about the
+/// blank a Japanese font leaves at the two sides of such a character.
+const TSUME_BODY: f32 = 100.0;
+/// The blank half of a full-width punctuation mark, 1/1000 em.
+const PUNCTUATION_BLANK: f32 = 500.0;
+
+/// A full-width punctuation mark whose blank half is at its right (it closes, or ends a clause).
+fn closes(c: char) -> bool {
+    matches!(
+        c,
+        '、' | '。' | '，' | '．' | '」' | '』' | '）' | '】' | '〕' | '｝' | '〉' | '》'
+    )
+}
+
+/// A full-width bracket whose blank half is at its left (it opens).
+fn opens(c: char) -> bool {
+    matches!(c, '「' | '『' | '（' | '【' | '〔' | '｛' | '〈' | '《')
+}
+
+/// A kana, a kanji or a full-width form: a character set in a full square.
+fn full_width(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x3041..=0x309F | 0x30A0..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xFF01..=0xFF60
+    )
+}
+
+/// The blanks the font of `style` leaves at the left and the right of `c` (1/1000 em), measured from its glyph
+/// (M6.345): from the origin to where its outline starts, and from where it ends to the advance. `None` when the
+/// font has no glyph with an outline for it. Kept per font and character.
+pub(crate) fn side_blanks(style: &TextStyle, c: char) -> Option<(f32, f32)> {
+    type Key = (String, String, bool, char);
+    static MEASURED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<Key, Option<(f32, f32)>>>,
+    > = std::sync::OnceLock::new();
+    let cache = MEASURED.get_or_init(Default::default);
+    let key = (
+        style.family.clone(),
+        style.style.clone(),
+        style.faux_bold,
+        c,
+    );
+    if let Some(found) = cache.lock().ok().and_then(|cache| cache.get(&key).copied()) {
+        return found;
+    }
+    // At 1000 pixels an em, a pixel is 1/1000 em.
+    let probe = TextStyle {
+        size: 1000.0,
+        tracking: 0.0,
+        kerning: false,
+        baseline_shift: 0.0,
+        faux_italic: false,
+        underline: false,
+        strikethrough: false,
+        caps: Caps::Normal,
+        ..style.clone()
+    };
+    let laid = layout(&c.to_string(), &probe, &ParagraphStyle::default());
+    let measured = (|| {
+        let glyph = laid.glyphs.first()?;
+        let line = laid.lines.first()?;
+        let advance = line.carets.last()?.1 - line.carets.first()?.1;
+        let (x0, _, x1, _) =
+            filmcraft_text::render::glyph_path(glyph, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]).bounds()?;
+        (advance > 0.0).then(|| (x0.clamp(0.0, advance), (advance - x1).clamp(0.0, advance)))
+    })();
+    if let Ok(mut cache) = cache.lock()
+        && cache.len() < MAX_MEASURED_GLYPHS
+    {
+        let _ = cache.insert(key, measured);
+    }
+    measured
+}
+
+/// The most glyphs [`side_blanks`] keeps measured.
+const MAX_MEASURED_GLYPHS: usize = 20_000;
+
+/// The characters of `text` that are set closer to what follows them, and by how much (1/1000 em), for
+/// `format`'s tsume and mojikumi. Empty when neither asks for anything.
+///
+/// Mojikumi: a punctuation mark at half width gives up its blank half ([`PUNCTUATION_BLANK`]): a closing one the
+/// room after it, an opening one the room after the character before it (none at the head of a line). Tsume:
+/// its percentage of the blank of a full-width character: for a kana or kanji the blank after it and the blank
+/// before the kana or kanji that follows; for a punctuation mark that mojikumi left at full width its blank side.
+/// `blanks` measures them glyph by glyph (M6.345, [`side_blanks`]); without a measure (`None`) a kana or kanji
+/// has [`TSUME_BODY`] and a punctuation mark [`PUNCTUATION_BLANK`], a Japanese font's usual ones.
+pub(crate) fn japanese_spacing(
+    text: &str,
+    format: &TextFormat,
+    blanks: &dyn Fn(char) -> Option<(f32, f32)>,
+) -> Vec<(std::ops::Range<usize>, f32)> {
+    use disccraft_project::TextMojikumi;
+    let tsume = f32::from(format.tsume.min(disccraft_project::MAX_TSUME)) / 100.0;
+    let (every, line_end) = match format.mojikumi {
+        TextMojikumi::PunctuationHalf => (true, true),
+        TextMojikumi::LineEndHalf => (false, true),
+        TextMojikumi::None | TextMojikumi::LineEndFull | TextMojikumi::PunctuationFull => {
+            (false, false)
+        }
+    };
+    if tsume <= 0.0 && !line_end {
+        return Vec::new();
+    }
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    // What each character gives up of the room after it.
+    let mut less = vec![0.0_f32; chars.len()];
+    for (at, (_, c)) in chars.iter().enumerate() {
+        let next = chars.get(at + 1).map(|(_, next)| *next);
+        let ends_line = next.is_none_or(|next| next == '\n');
+        if closes(*c) {
+            let half = every || (line_end && ends_line);
+            if let Some(slot) = less.get_mut(at) {
+                *slot = if half {
+                    PUNCTUATION_BLANK
+                } else {
+                    blanks(*c).map_or(PUNCTUATION_BLANK, |(_, right)| right) * tsume
+                };
+            }
+        } else if opens(*c) {
+            // Its blank is before it: the character before gives the room up.
+            let before = at
+                .checked_sub(1)
+                .filter(|before| chars.get(*before).is_some_and(|(_, c)| *c != '\n'));
+            if let Some(slot) = before.and_then(|before| less.get_mut(before)) {
+                *slot += if every {
+                    PUNCTUATION_BLANK
+                } else {
+                    blanks(*c).map_or(PUNCTUATION_BLANK, |(left, _)| left) * tsume
+                };
+            }
+        } else if full_width(*c)
+            && let Some(slot) = less.get_mut(at)
+        {
+            // The blank after it, and the one before a kana or kanji that follows it on the line.
+            let measured = blanks(*c).map(|(_, right)| {
+                let following = next
+                    .filter(|next| full_width(*next) && !closes(*next) && !opens(*next))
+                    .and_then(blanks)
+                    .map_or(0.0, |(left, _)| left);
+                right + following
+            });
+            *slot += measured.unwrap_or(TSUME_BODY) * tsume;
+        }
+    }
+    chars
+        .iter()
+        .zip(less)
+        .filter(|(_, less)| *less > 0.0)
+        .map(|((offset, c), less)| (*offset..offset + c.len_utf8(), less))
+        .collect()
 }
 
 /// Lays out `text` at `size` in `family` (and `face`, a style of it) with the Character panel's `format`: faux bold
@@ -352,6 +698,19 @@ pub(crate) fn formatted_layout_in(
     format: &TextFormat,
     vertical: bool,
 ) -> Arc<Layout> {
+    formatted_layout_with(text, family, size, face, format, (vertical, &[]))
+}
+
+/// [`formatted_layout_in`] with `room` put after some characters (byte ranges of `text`, 1/1000 em, as tracking
+/// is): a justified paragraph text's lines.
+pub(crate) fn formatted_layout_with(
+    text: &str,
+    family: &str,
+    size: f32,
+    face: Option<&str>,
+    format: &TextFormat,
+    (vertical, room): (bool, &[(std::ops::Range<usize>, f32)]),
+) -> Arc<Layout> {
     let mut style = text_style(family, size);
     if let Some(face) = face.map(str::trim).filter(|face| !face.is_empty()) {
         style.style = face.to_owned();
@@ -365,7 +724,14 @@ pub(crate) fn formatted_layout_in(
         disccraft_project::TextCaps::All => Caps::All,
         disccraft_project::TextCaps::Small => Caps::Small,
     };
-    style.tracking = f32::from(format.tracking);
+    // Encore's カーニング as a number (M6.344): with metric kerning off, the same change between every two
+    // characters, on top of the tracking.
+    let manual = if format.kerning {
+        0.0
+    } else {
+        f32::from(format.manual_kerning)
+    };
+    style.tracking = f32::from(format.tracking) + manual;
     style.kerning = format.kerning;
     style.baseline_shift = f32::from(format.baseline);
     let script_shift = match format.script {
@@ -380,17 +746,55 @@ pub(crate) fn formatted_layout_in(
     }
     let paragraph = ParagraphStyle {
         align: match format.align {
-            disccraft_project::TextAlign::Left => filmcraft_text::Align::Left,
+            disccraft_project::TextAlign::Left | disccraft_project::TextAlign::Justify => {
+                filmcraft_text::Align::Left
+            }
             disccraft_project::TextAlign::Center => filmcraft_text::Align::Center,
             disccraft_project::TextAlign::Right => filmcraft_text::Align::Right,
         },
-        leading: f32::from(format.leading),
         vertical,
         ..ParagraphStyle::default()
     };
-    let mut laid = layout(text, &style, &paragraph);
+    // Encore's 行送り: the baselines `pitch` apart, whatever the font's own line height (set per style below).
+    let pitch = format.line_pitch_at(size);
+    // Tsume and mojikumi: Japanese characters set closer than the font sets them (tsume by each glyph's own
+    // blanks across a line, M6.345); a justified line's room spreads them again.
+    let measure = |c: char| side_blanks(&style, c);
+    let fixed = |_: char| None;
+    let blanks: &dyn Fn(char) -> Option<(f32, f32)> = if vertical { &fixed } else { &measure };
+    let mut spacing = japanese_spacing(text, format, blanks);
+    for (range, more) in room {
+        match spacing.iter_mut().find(|(at, _)| at.start == range.start) {
+            Some((_, less)) => *less -= *more,
+            None => spacing.push((range.clone(), -*more)),
+        }
+    }
+    spacing.retain(|(_, less)| *less != 0.0);
+    let lay = |style: &TextStyle| {
+        let mut paragraph = paragraph.clone();
+        // (A column of a vertical text is one line: its columns are placed by the caller.)
+        if !vertical {
+            paragraph.leading = pitch - own_line_height(style);
+        }
+        if spacing.is_empty() {
+            return layout(text, style, &paragraph);
+        }
+        let runs: Vec<StyleRun> = spacing
+            .iter()
+            .map(|(range, less)| {
+                let mut tighter = style.clone();
+                tighter.tracking -= *less;
+                StyleRun {
+                    range: range.clone(),
+                    style: tighter,
+                }
+            })
+            .collect();
+        layout_rich(text, style, &runs, &paragraph)
+    };
+    let mut laid = lay(&style);
     if let (Some(full_style), Some(shift)) = (full_style, script_shift) {
-        let full = layout(text, &full_style, &paragraph);
+        let full = lay(&full_style);
         let mut bounds = laid.bounds;
         // The moved small text and the full-size line boxes together.
         bounds[1] = (bounds[1] - shift).min(full.bounds[1]);
@@ -400,6 +804,15 @@ pub(crate) fn formatted_layout_in(
         laid = Arc::new(owned);
     }
     laid
+}
+
+/// How far apart the layout puts two lines of `style` with no leading: the font's own line height.
+fn own_line_height(style: &TextStyle) -> f32 {
+    let probe = layout("X\nX", style, &ParagraphStyle::default());
+    match (probe.lines.first(), probe.lines.get(1)) {
+        (Some(first), Some(second)) => second.baseline - first.baseline,
+        _ => style.size * disccraft_project::AUTO_LEADING,
+    }
 }
 
 /// Stretches each picture over its button's video thumbnail area (Encore's `(%)` layer), clipped to the frame.
@@ -538,16 +951,25 @@ pub(crate) fn load_image(
         .ok_or_else(|| MenuError::Invalid("background asset does not exist".to_string()))?;
 
     let path = Path::new(&asset.path);
-    if is_png(path) {
-        return decode_png(path);
-    }
-    let image = if disccraft_photo::is_svg(path) {
-        disccraft_photo::render_svg_fill(path, u32::from(width), u32::from(height))
+    let mut image = if is_png(path) {
+        decode_png(path)?
     } else {
-        disccraft_photo::load_menu_background(path)
+        rgba_source(
+            if disccraft_photo::is_svg(path) {
+                disccraft_photo::render_svg_fill(path, u32::from(width), u32::from(height))
+            } else {
+                disccraft_photo::load_menu_background(path)
+            }
+            .map_err(|error| MenuError::Invalid(error.to_string()))?,
+        )?
+    };
+    // Interpret Footage ▸ Ignore Alpha Channel: every pixel opaque.
+    if asset.ignore_alpha && image.channels == 4 {
+        for pixel in image.data.as_chunks_mut::<4>().0 {
+            pixel[3] = 255;
+        }
     }
-    .map_err(|error| MenuError::Invalid(error.to_string()))?;
-    rgba_source(image)
+    Ok(image)
 }
 
 /// Wraps a decoded RGBA image, checking its size.
@@ -854,7 +1276,18 @@ fn draw_label(
         width,
         height,
     );
+    // Layer effects of the button's text (M6.342).
+    blend_effects(
+        crate::effects::under(&mask, mask_x, mask_y, &button.effects),
+        rgb,
+        (width, height),
+    );
     blend_mask(&mask, mask_x, mask_y, color, rgb, width, height);
+    blend_effects(
+        crate::effects::over(&mask, mask_x, mask_y, &button.effects),
+        rgb,
+        (width, height),
+    );
 }
 
 /// Lays out a button's text, centred in the button (in the part its video thumbnail leaves; `sx`: the horizontal
@@ -986,6 +1419,20 @@ pub(crate) fn button_extent(menu: &Menu, button: &Button, frame: (u16, u16)) -> 
             .thumbnail_placed()
             .map(|area| disccraft_project::rotated_bounds_about(area, pivot, angle)),
     );
+    // A subpicture that reaches past the content box (a pasted layer, M6.329) widens the button.
+    parts.extend(
+        button
+            .subpicture
+            .as_ref()
+            .filter(|sub| sub.area.is_some())
+            .map(|sub| {
+                disccraft_project::rotated_bounds_about(
+                    sub.rect_in(button.content_box()),
+                    pivot,
+                    angle,
+                )
+            }),
+    );
     let x0 = parts.iter().map(|r| u32::from(r.x)).min().unwrap_or(0);
     let y0 = parts.iter().map(|r| u32::from(r.y)).min().unwrap_or(0);
     let x1 = parts
@@ -1009,6 +1456,85 @@ pub(crate) fn button_extent(menu: &Menu, button: &Button, frame: (u16, u16)) -> 
     }
 }
 
+/// What Encore's Create Subpicture makes of a button that has no artwork in a PSD (M6.330): its content as it is
+/// drawn before it is turned — the text where it covers a pixel by half or more, and the video thumbnail — over the
+/// smallest frame rectangle holding them and its content box (the text may be moved out of the box). `None` when
+/// the button shows neither.
+pub(crate) fn own_subpicture(menu: &Menu, button: &Button) -> Option<(Rect, Vec<u8>)> {
+    // Upright: the subpicture turns with the content when it is drawn (a mirror stays, as the text has it).
+    let mut upright = button.clone();
+    upright.orientation.angle = 0;
+    let content = upright.content_box();
+    let text = label_mask(menu, &upright);
+    let thumbnail = upright.thumbnail_placed();
+    if text.is_none() && thumbnail.is_none() {
+        return None;
+    }
+    // The area: the content box, the text's mask and the thumbnail, inside the frame's coordinates.
+    let mut x0 = i64::from(content.x);
+    let mut y0 = i64::from(content.y);
+    let mut x1 = x0 + i64::from(content.w);
+    let mut y1 = y0 + i64::from(content.h);
+    if let Some((mask, mx, my)) = &text {
+        x0 = x0.min(i64::from(*mx));
+        y0 = y0.min(i64::from(*my));
+        x1 = x1.max(i64::from(*mx) + i64::try_from(mask.w).ok()?);
+        y1 = y1.max(i64::from(*my) + i64::try_from(mask.h).ok()?);
+    }
+    if let Some(area) = thumbnail {
+        x0 = x0.min(i64::from(area.x));
+        y0 = y0.min(i64::from(area.y));
+        x1 = x1.max(i64::from(area.x) + i64::from(area.w));
+        y1 = y1.max(i64::from(area.y) + i64::from(area.h));
+    }
+    let (x0, y0) = (x0.max(0), y0.max(0));
+    let rect = Rect {
+        x: u16::try_from(x0).ok()?,
+        y: u16::try_from(y0).ok()?,
+        w: u16::try_from(x1 - x0).ok()?,
+        h: u16::try_from(y1 - y0).ok()?,
+    };
+    let (w, h) = (usize::from(rect.w), usize::from(rect.h));
+    let mut values = vec![0_u8; w.checked_mul(h)?];
+    let mut set = |fx: i64, fy: i64| {
+        let (Ok(col), Ok(row)) = (usize::try_from(fx - x0), usize::try_from(fy - y0)) else {
+            return;
+        };
+        if col < w
+            && let Some(value) = values.get_mut(row * w + col)
+        {
+            *value = 1;
+        }
+    };
+    if let Some((mask, mx, my)) = &text {
+        for row in 0..mask.h {
+            for col in 0..mask.w {
+                if mask
+                    .a
+                    .get(row * mask.w + col)
+                    .is_some_and(|cover| *cover >= 0.5)
+                {
+                    set(
+                        i64::from(*mx) + i64::try_from(col).ok()?,
+                        i64::from(*my) + i64::try_from(row).ok()?,
+                    );
+                }
+            }
+        }
+    }
+    if let Some(area) = thumbnail {
+        for fy in i64::from(area.y)..i64::from(area.y) + i64::from(area.h) {
+            for fx in i64::from(area.x)..i64::from(area.x) + i64::from(area.w) {
+                set(fx, fy);
+            }
+        }
+    }
+    values
+        .iter()
+        .any(|value| *value != 0)
+        .then_some((rect, values))
+}
+
 /// A button's text as a coverage mask in frame pixels (for a text subpicture), with where its corner lands.
 pub(crate) fn label_mask(menu: &Menu, button: &Button) -> Option<(Mask, i32, i32)> {
     let family = family_for(menu.label_font.as_deref());
@@ -1024,7 +1550,7 @@ pub(crate) fn text_rgba(menu: &Menu, text: &MenuText, width: u16, height: u16) -
     let mut rgba = vec![0u8; usize::from(width) * usize::from(height) * 4];
     let family = family_for(text.font.as_deref());
     let sx = squeeze(menu);
-    if let Some((pieces, _)) = text_layout(text, &family, sx) {
+    if let Some((pieces, _, _)) = text_layout(text, &family, sx) {
         let (mask, mask_x, mask_y) = crate::text_block::rasterize_pieces(&pieces);
         let mask = antialiased(mask, text.format.antialias);
         let color = text.color.unwrap_or(menu.text_color);
@@ -1034,7 +1560,20 @@ pub(crate) fn text_rgba(menu: &Menu, text: &MenuText, width: u16, height: u16) -
         {
             mask_into_rgba(&shade, sx2, sy2, shadow.color, width, height, &mut rgba);
         }
-        mask_into_rgba(&mask, mask_x, mask_y, color, width, height, &mut rgba);
+        let under = crate::effects::under(&mask, mask_x, mask_y, &text.effects);
+        let over = crate::effects::over(&mask, mask_x, mask_y, &text.effects);
+        if under.is_empty() && over.is_empty() {
+            mask_into_rgba(&mask, mask_x, mask_y, color, width, height, &mut rgba);
+        } else {
+            // With layer effects (M6.342) each is laid over what is below it.
+            for (effect, ex, ey, effect_color) in under {
+                mask_over_rgba(&effect, (ex, ey), effect_color, (width, height), &mut rgba);
+            }
+            mask_over_rgba(&mask, (mask_x, mask_y), color, (width, height), &mut rgba);
+            for (effect, ex, ey, effect_color) in over {
+                mask_over_rgba(&effect, (ex, ey), effect_color, (width, height), &mut rgba);
+            }
+        }
     }
     rgba
 }
@@ -1058,6 +1597,52 @@ pub(crate) fn label_rgba(menu: &Menu, button: &Button, width: u16, height: u16) 
         );
     }
     rgba
+}
+
+/// Lays a coverage mask over an RGBA canvas as `color` (straight alpha, source over), as one layer of a text over
+/// another (its layer effects, M6.342).
+fn mask_over_rgba(
+    mask: &Mask,
+    (mask_x, mask_y): (i32, i32),
+    color: [u8; 3],
+    (width, height): (u16, u16),
+    rgba: &mut [u8],
+) {
+    let (width, height) = (i64::from(width), i64::from(height));
+    for (index, coverage) in mask.a.iter().enumerate() {
+        let top = u32::from(to_u8(coverage.clamp(0.0, 1.0) * 255.0));
+        if top == 0 || mask.w == 0 {
+            continue;
+        }
+        let (Ok(col), Ok(row)) = (i64::try_from(index % mask.w), i64::try_from(index / mask.w))
+        else {
+            continue;
+        };
+        let x = i64::from(mask_x).saturating_add(col);
+        let y = i64::from(mask_y).saturating_add(row);
+        if x < 0 || y < 0 || x >= width || y >= height {
+            continue;
+        }
+        let Some(at) = y
+            .checked_mul(width)
+            .and_then(|n| n.checked_add(x))
+            .and_then(|n| usize::try_from(n).ok())
+            .and_then(|n| n.checked_mul(4))
+        else {
+            continue;
+        };
+        let Some(pixel) = rgba.get_mut(at..at + 4) else {
+            continue;
+        };
+        let under = u32::from(pixel[3]);
+        // Both alphas times 255.
+        let alpha = top * 255 + under * (255 - top);
+        for (channel, value) in pixel.iter_mut().take(3).zip(color) {
+            let mixed = u32::from(value) * top * 255 + u32::from(*channel) * under * (255 - top);
+            *channel = u8::try_from((mixed + alpha / 2) / alpha.max(1)).unwrap_or(u8::MAX);
+        }
+        pixel[3] = u8::try_from((alpha + 127) / 255).unwrap_or(u8::MAX);
+    }
 }
 
 /// Writes a coverage mask into an RGBA canvas as `color` with the coverage as alpha (the larger alpha wins).
@@ -1284,5 +1869,300 @@ fn blend_channel(old: u8, color: u8, alpha: f32) -> u8 {
     {
         let _ = old;
         value.round().clamp(0.0, 255.0) as u8
+    }
+}
+
+#[cfg(test)]
+mod spacing_tests {
+    use super::{formatted_layout, japanese_spacing, side_blanks, text_style};
+    use disccraft_project::{TextFormat, TextMojikumi, TextScript};
+
+    fn format(tsume: u8, mojikumi: TextMojikumi) -> TextFormat {
+        TextFormat {
+            tsume,
+            mojikumi,
+            ..TextFormat::default()
+        }
+    }
+
+    /// The characters that give room up, by their place in the text (in characters), and how much.
+    fn less(text: &str, format: &TextFormat) -> Vec<(usize, f32)> {
+        japanese_spacing(text, format, &|_| None)
+            .into_iter()
+            .map(|(range, less)| (text[..range.start].chars().count(), less))
+            .collect()
+    }
+
+    #[test]
+    fn tsume_and_mojikumi_close_up_japanese_characters() {
+        // Nothing asked: nothing changes, whatever the text.
+        assert!(japanese_spacing("あ。「い」ABC", &TextFormat::default(), &|_| None).is_empty());
+        assert!(
+            japanese_spacing("あ。", &format(0, TextMojikumi::PunctuationFull), &|_| {
+                None
+            })
+            .is_empty()
+        );
+        // Tsume: its share of a kana's or kanji's blank, and of a punctuation mark's blank half; Latin letters
+        // are left alone.
+        assert_eq!(
+            less("あA漢。", &format(50, TextMojikumi::None)),
+            [(0, 50.0), (2, 50.0), (3, 250.0)]
+        );
+        // Half-width punctuation: a closing mark gives up the room after it, an opening one the room after the
+        // character before it; at the head of a line there is none before it.
+        assert_eq!(
+            less(
+                "「あ」い（う）。",
+                &format(0, TextMojikumi::PunctuationHalf)
+            ),
+            [(2, 500.0), (3, 500.0), (6, 500.0), (7, 500.0)]
+        );
+        // At line ends only: the mark that ends a line, not one inside it.
+        assert_eq!(
+            less(
+                "あ、い。
+う。え",
+                &format(0, TextMojikumi::LineEndHalf)
+            ),
+            [(3, 500.0)]
+        );
+        assert_eq!(
+            less("あ。", &format(0, TextMojikumi::LineEndHalf)),
+            [(1, 500.0)]
+        );
+    }
+
+    /// M6.344: Encore's カーニング as a number changes the room between the characters: 200 (1/1000 em) makes a line
+    /// wider, -100 narrower; with metric kerning on the number is not used.
+    #[test]
+    fn a_kerning_number_spaces_the_characters() {
+        let width = |kerning: bool, manual_kerning: i16| {
+            let format = TextFormat {
+                kerning,
+                manual_kerning,
+                ..TextFormat::default()
+            };
+            let [x0, _, x1, _] = formatted_layout("ABCD", "", 40.0, None, &format).bounds;
+            x1 - x0
+        };
+        let none = width(false, 0);
+        assert!(
+            width(false, 200) > none + 20.0,
+            "{} {none}",
+            width(false, 200)
+        );
+        assert!(
+            width(false, -100) < none - 10.0,
+            "{} {none}",
+            width(false, -100)
+        );
+        assert!((width(true, 200) - width(true, 0)).abs() < 0.5);
+    }
+
+    /// M6.297: a justified line laid out with the room it was given reaches the box (a full line, so the
+    /// characters are spread by tracking alone).
+    #[test]
+    fn a_justified_line_reaches_the_box() {
+        let format = TextFormat {
+            align: disccraft_project::TextAlign::Justify,
+            ..TextFormat::default()
+        };
+        let measure = |line: &str| {
+            let [x0, _, x1, _] = formatted_layout(line, "", 40.0, None, &format).bounds;
+            x1 - x0
+        };
+        // Room for five characters and most of a sixth.
+        let five = measure("あいうえお");
+        let limit = five + (measure("あいうえおか") - five) * 0.6;
+        let rules = crate::wrap::Rules::of(&format);
+        let (lines, room) =
+            crate::wrap::justify("あいうえおかきくけこさ", limit, rules, &measure, 40.0);
+        let first = lines.split('\n').next().unwrap_or_default();
+        assert_eq!(first, "あいうえお");
+        let mine: Vec<_> = room
+            .into_iter()
+            .filter(|(range, _)| range.end <= first.len())
+            .collect();
+        assert_eq!(mine.len(), 4);
+        let [x0, _, x1, _] =
+            super::formatted_layout_with(first, "", 40.0, None, &format, (false, &mine)).bounds;
+        assert!(((x1 - x0) - limit).abs() < 0.5, "{} {limit}", x1 - x0);
+    }
+
+    /// M6.302: a justified column of vertical text laid out with its room reaches the box's height.
+    #[test]
+    fn a_justified_column_reaches_the_box() {
+        let format = TextFormat {
+            align: disccraft_project::TextAlign::Justify,
+            ..TextFormat::default()
+        };
+        let tall = |line: &str| {
+            let [_, y0, _, y1] = crate::text_block::vertical_block(line, "", 40.0, None, &format).1;
+            y1 - y0
+        };
+        let five = tall("あいうえお");
+        let limit = five + (tall("あいうえおか") - five) * 0.6;
+        let rules = crate::wrap::Rules::of(&format);
+        let (lines, room) =
+            crate::wrap::justify("あいうえおかきくけこさ", limit, rules, &tall, 40.0);
+        let first = lines.split('\n').next().unwrap_or_default();
+        assert_eq!(first, "あいうえお");
+        let mine: Vec<_> = room
+            .into_iter()
+            .filter(|(range, _)| range.end <= first.len())
+            .collect();
+        let [_, y0, _, y1] =
+            crate::text_block::vertical_block_with(first, "", 40.0, None, &format, &mine).1;
+        assert!(((y1 - y0) - limit).abs() < 0.5, "{} {limit}", y1 - y0);
+    }
+
+    #[test]
+    fn a_line_set_closer_is_narrower() {
+        let width = |format: &TextFormat| {
+            let laid = formatted_layout("あいう。", "", 40.0, None, format);
+            laid.bounds[2] - laid.bounds[0]
+        };
+        let plain = width(&TextFormat::default());
+        let tsume = width(&format(100, TextMojikumi::None));
+        let half = width(&format(0, TextMojikumi::LineEndHalf));
+        // M6.345: tsume takes each glyph's own blanks out: after あ and い theirs and the next one's, after う its
+        // own (a punctuation mark follows), and the full stop's right blank (1/1000 em; 40 px an em).
+        let style = text_style("", 40.0);
+        let blank = |c: char| side_blanks(&style, c).unwrap_or((0.0, 0.0));
+        let blanks = blank('あ').1
+            + blank('い').0
+            + blank('い').1
+            + blank('う').0
+            + blank('う').1
+            + blank('。').1;
+        let expected = blanks * 40.0 / 1000.0;
+        assert!(expected > 10.0, "{expected}");
+        assert!(
+            (plain - tsume - expected).abs() < 1.0,
+            "{plain} {tsume} {expected}"
+        );
+        // The half-width full stop gives up half an em, 20 px.
+        assert!((plain - half - 20.0).abs() < 1.0, "{plain} {half}");
+    }
+
+    /// M6.345: a glyph's blanks are measured from its outline (each inside its advance; which side a punctuation
+    /// mark's blank is on depends on the font, so it is not asked here); a space has no outline.
+    #[test]
+    fn blanks_are_measured_glyph_by_glyph() {
+        let style = text_style("", 40.0);
+        for c in ['あ', '漢', '。', '「'] {
+            let (left, right) = side_blanks(&style, c).unwrap_or((-1.0, -1.0));
+            assert!(
+                left >= 0.0 && right >= 0.0 && left + right < 1000.0,
+                "{c} {left} {right}"
+            );
+        }
+        assert_eq!(side_blanks(&style, ' '), None);
+    }
+
+    /// M6.313: Encore's 行送り. 自動 sets the lines 120 % of the size apart whatever the font's own line height
+    /// (Encore CS6: 100 px text, baselines 120 px apart); a pitch puts the baselines that far apart (150 px: 150)
+    /// and leaves the first line where it is. The extra leading of older projects adds to it. A vertical text's
+    /// columns are as far apart.
+    #[test]
+    fn lines_are_the_line_pitch_apart() {
+        let baselines = |format: &TextFormat| -> Vec<f32> {
+            formatted_layout("Hg\nHg\nHg", "", 100.0, None, format)
+                .lines
+                .iter()
+                .map(|line| line.baseline)
+                .collect()
+        };
+        let gaps = |format: &TextFormat| -> Vec<f32> {
+            baselines(format)
+                .windows(2)
+                .filter_map(|pair| Some(pair.get(1)? - pair.first()?))
+                .collect()
+        };
+        let near = |gaps: Vec<f32>, want: f32| {
+            gaps.len() == 2 && gaps.iter().all(|gap| (gap - want).abs() < 0.01)
+        };
+        let auto = TextFormat::default();
+        assert!(near(gaps(&auto), 120.0), "{:?}", gaps(&auto));
+        let fixed = TextFormat {
+            line_pitch: Some(150),
+            ..TextFormat::default()
+        };
+        assert!(near(gaps(&fixed), 150.0), "{:?}", gaps(&fixed));
+        assert_eq!(
+            baselines(&fixed).first().copied(),
+            baselines(&auto).first().copied()
+        );
+        let older = TextFormat {
+            leading: 10,
+            ..TextFormat::default()
+        };
+        assert!(near(gaps(&older), 130.0), "{:?}", gaps(&older));
+        // Superscript: the full size's pitch.
+        let small = TextFormat {
+            script: TextScript::Superscript,
+            ..TextFormat::default()
+        };
+        assert!(near(gaps(&small), 120.0), "{:?}", gaps(&small));
+
+        let width = |format: &TextFormat| {
+            let [x0, _, x1, _] =
+                crate::text_block::vertical_block("あ\nい", "", 40.0, None, format).1;
+            x1 - x0
+        };
+        let tall = TextFormat {
+            line_pitch: Some(80),
+            ..TextFormat::default()
+        };
+        // Each column as wide as the pitch: 自動 2 x 48 px, then 2 x 80.
+        let (auto, tall) = (width(&TextFormat::default()), width(&tall));
+        assert!((auto - 96.0).abs() < 0.5, "{auto}");
+        assert!((tall - 160.0).abs() < 0.5, "{tall}");
+    }
+}
+
+#[cfg(test)]
+mod alpha_tests {
+    use super::load_image;
+    use disccraft_project::Project;
+
+    /// M6.294: a picture whose alpha channel is ignored (Interpret Footage) is drawn opaque, its colours as they
+    /// are; otherwise its alpha is kept.
+    #[test]
+    fn an_ignored_alpha_channel_is_opaque() -> Result<(), Box<dyn std::error::Error>> {
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-ignore-alpha-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("half.png");
+        let file = std::io::BufWriter::new(std::fs::File::create(&path)?);
+        let mut encoder = png::Encoder::new(file, 2, 1);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()?
+            .write_image_data(&[200, 100, 50, 128, 10, 20, 30, 0])?;
+        let mut project = Project::default();
+        let id = project.add_asset(&path)?;
+        let alpha = |project: &Project| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+            let image = load_image(project, id, 720, 480)?;
+            assert_eq!(image.channels, 4);
+            Ok(image
+                .data
+                .chunks(4)
+                .filter_map(|pixel| pixel.get(3).copied())
+                .collect())
+        };
+        assert_eq!(alpha(&project)?, vec![128, 0]);
+        if let Some(asset) = project.assets.get_mut(&id) {
+            asset.ignore_alpha = true;
+        }
+        assert_eq!(alpha(&project)?, vec![255, 255]);
+        assert_eq!(
+            load_image(&project, id, 720, 480)?.data,
+            vec![200, 100, 50, 255, 10, 20, 30, 255]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
     }
 }

@@ -143,7 +143,12 @@ impl DiscCraftApp {
         if let Some(page) =
             added.and_then(|value| value.get("menu").and_then(serde_json::Value::as_u64))
         {
-            self.select(crate::app::Selection::Menu(disccraft_project::MenuId(page)));
+            let page = disccraft_project::MenuId(page);
+            self.select(crate::app::Selection::Menu(page));
+            self.status = tlf!(
+                "Added page {n}. The pages are listed under the menu in the Menus panel; the arrows under the viewer go from page to page.",
+                n = self.session.project.menu_page_number(page)
+            );
         }
     }
 
@@ -158,6 +163,7 @@ impl DiscCraftApp {
         self.store_user_item(UserItem {
             name: menu.name.clone(),
             kind: UserItemKind::Menu(spec),
+            set: String::new(),
         });
     }
 }

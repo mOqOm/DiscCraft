@@ -77,7 +77,7 @@ pub(crate) fn matte(black: &[u8], white: &[u8]) -> Vec<u8> {
 }
 
 /// 窓の大きさ（Encore のプロジェクトプレビューと同じくらい）。
-const WINDOW_SIZE: [f32; 2] = [880.0, 600.0];
+const WINDOW_SIZE: [f32; 2] = [1040.0, 680.0];
 
 impl DiscCraftApp {
     /// ファイル ▸ プレビュー: ビルドせずに、プロジェクトのディスクをファーストプレイから（`start` があれば
@@ -87,10 +87,16 @@ impl DiscCraftApp {
         self.preview_playback = None;
         self.preview_paused = false;
         self.preview_resume = None;
+        self.preview_slides.clear();
+        if !self.preview_player_accepts() {
+            return;
+        }
+        let start = self.with_player_settings(start);
         let Some(state) = self.run_query("preview.open", start) else {
             return;
         };
         self.preview = parse_preview_state(&state);
+        self.note_parental_stop();
         let return_to = self
             .project_preview
             .as_ref()
@@ -117,6 +123,7 @@ impl DiscCraftApp {
             .with_title(title)
             .with_inner_size(WINDOW_SIZE)
             .with_min_inner_size([640.0, 420.0]);
+        // (The bar under the picture scrolls sideways when the window is made narrower than its buttons.)
         let exit = ctx.show_viewport_immediate(
             ViewportId::from_hash_of("disccraft_project_preview"),
             builder,
@@ -166,34 +173,53 @@ impl DiscCraftApp {
                 .menu_for_pgcn(menu.pgcn)
                 .and_then(|id| self.session.project.menu(id).cloned())
             else {
+                self.preview_motion = None;
                 ui.centered_and_justified(|ui| {
                     ui.colored_label(egui::Color32::GRAY, state.label.clone());
                 });
                 return;
             };
             let highlight = usize::from(menu.button.saturating_sub(1));
+            // A rendered motion menu plays (M6.334), as in Encore's preview; otherwise the still picture.
+            let moving = self.motion_menu_picture(ui.ctx(), menu.pgcn, &project_menu);
             ui.centered_and_justified(|ui| {
-                let _ = self.menu_canvas(ui, &project_menu, Some(highlight), zoom);
+                let _ = self.menu_canvas_over(
+                    ui,
+                    &project_menu,
+                    (Some(highlight), zoom),
+                    moving.as_ref(),
+                );
             });
             return;
         }
+        self.preview_motion = None;
         if let Some(picture) = self.preview_picture() {
             let area = ui.max_rect();
-            let aspect = if picture.wide { 16.0 / 9.0 } else { 4.0 / 3.0 };
-            let frame = egui::Rect::from_center_size(area.center(), zoom.size(area.size(), aspect));
-            ui.painter().image(
-                picture.texture.id(),
-                frame,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                egui::Color32::WHITE,
-            );
-            if let Some((text, colors, look)) = &picture.subtitle {
-                crate::monitor::draw_subtitle(
-                    ui.painter(),
-                    frame.intersect(area),
-                    text,
-                    (*colors, *look),
+            // The television of Preferences ▸ Preview: a 16:9 title on a 4:3 one is letterboxed or panned and
+            // scanned.
+            let (screen, frame) =
+                crate::monitor::tv_screen(picture.wide, &self.preview_prefs, area, zoom);
+            ui.painter().rect_filled(screen, 0.0, egui::Color32::BLACK);
+            let clipped = ui.painter().with_clip_rect(screen.intersect(area));
+            if picture.fitted {
+                // A slide: on black, in its own shape, moved by its pan and zoom (as on the disc).
+                crate::preview_playback::draw_slides(
+                    &clipped,
+                    frame,
+                    (&picture.texture, picture.view),
+                    picture.blend.as_ref(),
                 );
+            } else {
+                clipped.image(
+                    picture.texture.id(),
+                    frame,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
+            if let Some(subtitle) = &picture.subtitle {
+                let painter = ui.painter().clone();
+                let _ = self.draw_shown_subtitle(ui.ctx(), &painter, (frame, area), subtitle);
             }
             // Blu-ray のポップアップメニュー: タイトルは再生を続け、その上にメニューとハイライトを重ねる。
             if let Some(popup) = &state.popup {
@@ -204,6 +230,92 @@ impl DiscCraftApp {
         ui.centered_and_justified(|ui| {
             ui.colored_label(egui::Color32::GRAY, state.label.clone());
         });
+    }
+
+    /// The picture of motion menu `menu` (on the preview's PGC `pgcn`) playing, when it has been rendered into the
+    /// build's cache (File ▸ Render ▸ Motion Menu, or a build): Encore's preview plays a motion menu, its motion
+    /// buttons too, once it is rendered. It loops from its loop point. `None` (the still picture) for a menu that is not
+    /// moving or not rendered.
+    fn motion_menu_picture(
+        &mut self,
+        ctx: &Context,
+        pgcn: u16,
+        menu: &disccraft_project::Menu,
+    ) -> Option<egui::TextureHandle> {
+        if !menu.is_motion() {
+            self.preview_motion = None;
+            return None;
+        }
+        let fresh = self
+            .preview_motion
+            .as_ref()
+            .is_none_or(|play| play.pgcn != pgcn || play.menu != menu.id);
+        if fresh {
+            let path = self.cache_options().and_then(|options| {
+                disccraft_build::rendered_motion_menu(&self.session.project, &options, menu.id)
+            });
+            let frame = disccraft_project::frame_size(&self.session.project.settings);
+            let height = 480_u32;
+            // Square pixels in the menu's shape, as the still is shown.
+            let width = (f64::from(height)
+                * f64::from(crate::menu_editor::menu_aspect(menu, frame)))
+            .round() as u32;
+            let fps = self.preview_fps();
+            let player = path.clone().map(|path| {
+                disccraft_engine::Player::start_sized(path, None, 0.0, fps, Some((width, height)))
+            });
+            self.preview_motion = Some(MotionPlay {
+                pgcn,
+                menu: menu.id,
+                path,
+                player,
+                texture: None,
+                loop_from: menu
+                    .effective_loop_point()
+                    .map_or(0.0, |point| point.seconds()),
+                fps,
+                size: (width, height),
+            });
+        }
+        let play = self.preview_motion.as_mut()?;
+        let player = play.player.as_ref()?;
+        if let Some(frame) = player.take_frame() {
+            let (width, height) = (frame.width as usize, frame.height as usize);
+            if frame.rgb.len() == width * height * 3 {
+                let image = egui::ColorImage::from_rgb([width, height], &frame.rgb);
+                match play.texture.as_mut() {
+                    Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
+                    None => {
+                        play.texture = Some(ctx.load_texture(
+                            "preview_motion_menu",
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        ));
+                    }
+                }
+            }
+        }
+        match player.status() {
+            disccraft_engine::PlayerStatus::Playing => {}
+            // One play done: again from the loop point.
+            disccraft_engine::PlayerStatus::Ended => {
+                play.player = play.path.clone().map(|path| {
+                    disccraft_engine::Player::start_sized(
+                        path,
+                        None,
+                        play.loop_from,
+                        play.fps,
+                        Some(play.size),
+                    )
+                });
+            }
+            disccraft_engine::PlayerStatus::Failed(error) => {
+                self.status = error;
+                play.player = None;
+            }
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(15));
+        play.texture.clone()
     }
 
     /// 再生中のタイトルの画面 `screen` に、Blu-ray のポップアップメニュー（PGCN `pgcn`）を重ね、`button` を
@@ -307,6 +419,20 @@ impl DiscCraftApp {
 
     /// 下の操作バー（Encore と同じ並び）。押された終わり方を返す。
     fn preview_bar(&mut self, ui: &mut Ui) -> Option<Exit> {
+        let mut exit = None;
+        // A Blu-ray's bar has one button more (Pop-up Menu) and was wider than the window: its last buttons
+        // (Exit Here, Exit and Return) were cut off. The window is wider now, and a narrower one scrolls the bar.
+        let scroll = egui::ScrollArea::horizontal()
+            .id_salt("project_preview_bar")
+            .auto_shrink([false, true]);
+        let _ = scroll.show(ui, |ui| {
+            exit = self.preview_bar_buttons(ui);
+        });
+        exit
+    }
+
+    /// The buttons of [`Self::preview_bar`], left to right.
+    fn preview_bar_buttons(&mut self, ui: &mut Ui) -> Option<Exit> {
         let mut exit = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
@@ -432,8 +558,24 @@ impl DiscCraftApp {
             return (0, 0);
         };
         let project = &self.session.project;
-        let Some(timeline) = title_timeline(project, title).and_then(|id| project.timeline(id))
-        else {
+        let timeline = match crate::preview_playback::title_kind(project, title) {
+            Some(crate::preview_playback::TitleKind::Timeline(id)) => project.timeline(id),
+            // A chapter playlist plays its master timeline's streams.
+            Some(crate::preview_playback::TitleKind::ChapterPlaylist(id)) => project
+                .chapter_playlists
+                .get(&id)
+                .and_then(|list| project.timeline(list.timeline)),
+            // A slideshow: its sound (silence when it has none), and one subtitle stream when a slide makes a
+            // subtitle (Create Subtitle), as the build gives it.
+            Some(crate::preview_playback::TitleKind::Slideshow(id)) => {
+                let subtitles = project
+                    .slideshow(id)
+                    .is_some_and(|show| show.slides.iter().any(|slide| slide.subtitle));
+                return (1, u8::from(subtitles));
+            }
+            None => None,
+        };
+        let Some(timeline) = timeline else {
             return (0, 0);
         };
         // トラックがなければ、映像の素材の音の 1 本。
@@ -802,6 +944,21 @@ fn title_name(project: &disccraft_project::Project, title: u8) -> String {
         .checked_sub(slideshows.len())
         .and_then(|index| project.chapter_playlists.values().nth(index))
         .map_or_else(|| tlf!("Title {n}", n = title), |list| list.name.clone())
+}
+
+/// A rendered motion menu playing in the project preview (M6.334).
+pub(crate) struct MotionPlay {
+    /// The preview's PGC it plays on, and its menu.
+    pgcn: u16,
+    menu: disccraft_project::MenuId,
+    /// The rendered video (`None`: not rendered, the still is shown).
+    path: Option<std::path::PathBuf>,
+    player: Option<disccraft_engine::Player>,
+    texture: Option<egui::TextureHandle>,
+    /// Where each play after the first starts (the menu's loop point), seconds.
+    loop_from: f64,
+    fps: f64,
+    size: (u32, u32),
 }
 
 #[cfg(test)]

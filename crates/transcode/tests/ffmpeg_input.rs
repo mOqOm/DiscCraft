@@ -60,11 +60,15 @@ fn run_transcode(input: &Path, dir: &Path) -> Result<(), Box<dyn Error>> {
     let audio_out = dir.join("out.wav");
 
     let options = TranscodeOptions {
+        mode: Default::default(),
         standard: Standard::Ntsc,
         video_bitrate: 6_000_000,
         max_bitrate: 9_800_000,
         wide: false,
         gop_starts: Vec::new(),
+        film: false,
+        quality: disccraft_transcode::BEST_QUALITY,
+        rendering: disccraft_transcode::Rendering::default(),
     };
 
     let mut progress = |_fraction| {};
@@ -93,6 +97,109 @@ fn run_transcode(input: &Path, dir: &Path) -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| "missing audio output".to_string())?;
     let wav = fs::read(&audio_path)?;
     check_wav(&wav)?;
+
+    // M6.314: film (Encore's NTSC DV 23.976 presets): the source's pictures at 23.976 a second, 6 s in 144 of them,
+    // in a 29.97 sequence, each showing as 3:2 pulldown says (a player, here ffprobe, reads repeat_pict 1, 0, 1, 0,
+    // …); the sound as long; and it decodes without an error.
+    let film = TranscodeOptions {
+        film: true,
+        ..options.clone()
+    };
+    let made = transcode(
+        input,
+        &dir.join("film.m2v"),
+        &dir.join("film.wav"),
+        &film,
+        &mut |_| {},
+    )?;
+    assert_eq!(made.frames, 144);
+    let data = fs::read(&made.video)?;
+    let info = parse_video(&data, 0).map_err(|error| format!("parse video: {error}"))?;
+    assert_eq!(info.sequence.frame_rate_code, 4);
+    check_wav(&fs::read(made.audio.as_ref().ok_or("missing film audio")?)?)?;
+    let ffprobe = ffprobe_path();
+    if tool_available(&ffprobe) {
+        let probed = Command::new(&ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "frame=repeat_pict",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(&made.video)
+            .output()?;
+        let text = String::from_utf8_lossy(&probed.stdout);
+        let repeats: Vec<&str> = text
+            .lines()
+            .map(|line| line.trim().trim_end_matches(','))
+            .collect();
+        assert_eq!(repeats.len(), 144, "{text}");
+        assert!(
+            repeats.chunks(4).all(|four| four == ["1", "0", "1", "0"]),
+            "{repeats:?}"
+        );
+    }
+    let decoded = Command::new(ffmpeg_path())
+        .args(["-v", "error", "-xerror", "-i"])
+        .arg(&made.video)
+        .args(["-f", "null", "-"])
+        .output()?;
+    assert!(
+        decoded.status.success() && decoded.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&decoded.stderr)
+    );
+
+    // M6.300: VBR 2 pass goes over the video twice (the first pass writes nothing) and makes the same frames; the
+    // progress runs once from 0 to 1 across both passes.
+    let two = TranscodeOptions {
+        mode: disccraft_transcode::RateMode::Vbr2Pass,
+        ..options.clone()
+    };
+    let mut seen = Vec::new();
+    let mut progress = |fraction: f32| seen.push(fraction);
+    let second = transcode(
+        input,
+        &dir.join("two.m2v"),
+        &dir.join("two.wav"),
+        &two,
+        &mut progress,
+    )?;
+    assert_eq!(second.frames, output.frames);
+    let data = fs::read(&second.video)?;
+    let info = parse_video(&data, 0).map_err(|error| format!("parse video: {error}"))?;
+    assert_eq!((info.sequence.width, info.sequence.height), (720, 480));
+    assert!(seen.windows(2).all(|pair| pair[0] <= pair[1]), "{seen:?}");
+    assert!(seen.iter().any(|fraction| (0.45..=0.55).contains(fraction)));
+    assert_eq!(seen.last().copied(), Some(1.0));
+
+    // M6.326: Encore's "Low quality" (quality 2) searches less for motion: another stream of the same frames, which
+    // decodes without an error.
+    let low = TranscodeOptions {
+        quality: 2,
+        ..options
+    };
+    let made = transcode(
+        input,
+        &dir.join("low.m2v"),
+        &dir.join("low.wav"),
+        &low,
+        &mut |_| {},
+    )?;
+    assert_eq!(made.frames, output.frames);
+    assert_ne!(fs::read(&made.video)?, video_data);
+    let decoded = Command::new(ffmpeg_path())
+        .args(["-v", "error", "-xerror", "-i"])
+        .arg(&made.video)
+        .args(["-f", "null", "-"])
+        .output()?;
+    assert!(
+        decoded.status.success() && decoded.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&decoded.stderr)
+    );
 
     Ok(())
 }
@@ -165,6 +272,12 @@ fn tool_available(cmd: &Path) -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+fn ffprobe_path() -> PathBuf {
+    env::var_os("DISCCRAFT_FFPROBE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("ffprobe"))
 }
 
 fn ffmpeg_path() -> PathBuf {

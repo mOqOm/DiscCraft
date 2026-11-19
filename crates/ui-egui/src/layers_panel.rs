@@ -385,6 +385,9 @@ mod tests {
         let _ = project.add_button(menu, "Two".to_owned(), None, Link::NotSet)?;
         let mut menu = project.menu(menu).ok_or("menu")?.clone();
         menu.texts.push(disccraft_project::MenuText {
+            effects: Default::default(),
+            box_width: None,
+            box_height: None,
             text: "Title".to_owned(),
             x: 0,
             y: 0,

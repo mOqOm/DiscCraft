@@ -62,6 +62,97 @@ impl DiscCraftApp {
         self.start_playback_at(ctx, id, from);
     }
 
+    /// Edit ▸ Ripple Delete: the video clip under the playhead of the timeline in the viewer goes, and the clips
+    /// after it move up (Encore: Ripple Delete on the selected clip). A timeline's only clip stays.
+    pub(crate) fn ripple_delete_at_playhead(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.viewer_timeline() else {
+            return;
+        };
+        let here = crate::timeline_view::playhead_seconds(ctx, id);
+        let clips = self.timeline_clips(id);
+        if clips.len() < 2 {
+            self.status = tl!("A timeline's only clip cannot be removed").to_owned();
+            return;
+        }
+        // The chosen video clip (Encore: the selected clip), else the one under the playhead.
+        let chosen = match self.clip_selection {
+            Some((timeline, crate::timeline_view::ClipPick::Video(clip))) if timeline == id => {
+                Some(clip)
+            }
+            _ => None,
+        };
+        if chosen.is_some() {
+            self.clip_selection = None;
+        }
+        let clip = chosen.unwrap_or_else(|| {
+            clips
+                .iter()
+                .rposition(|clip| here >= clip.start)
+                .unwrap_or(0)
+        });
+        let _ = self.run_command(
+            "timeline.removeVideo",
+            serde_json::json!({"timeline": id.0, "clip": clip, "ripple": true}),
+        );
+    }
+
+    /// Timeline ▸ Set Poster Frame: the poster frame of the chapter the playhead is in, at the playhead.
+    pub(crate) fn set_poster_frame_at_playhead(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.viewer_timeline() else {
+            return;
+        };
+        let here = crate::timeline_view::playhead_seconds(ctx, id);
+        let Some(timeline) = self.session.project.timeline(id) else {
+            return;
+        };
+        let ticks = crate::timeline_view::seconds_to_ticks(here);
+        let chapter = timeline
+            .chapters
+            .iter()
+            .rposition(|chapter| chapter.time.0 <= ticks)
+            .unwrap_or(0);
+        let _ = self.run_command(
+            "timeline.setPosterFrame",
+            serde_json::json!({"timeline": id.0, "chapter": chapter, "time": ticks}),
+        );
+    }
+
+    /// Timeline ▸ Save Frame as File…: the frame at the playhead of the timeline in the viewer as a PNG file,
+    /// at the picture's own size in square pixels.
+    pub(crate) fn save_frame_as_file(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.viewer_timeline() else {
+            return;
+        };
+        let here = crate::timeline_view::playhead_seconds(ctx, id);
+        let clips = self.timeline_clips(id);
+        let Some((clip, local)) = clip_at(&clips, here) else {
+            return;
+        };
+        let name = self
+            .session
+            .project
+            .timeline(id)
+            .map_or_else(|| "frame".to_owned(), |timeline| timeline.name.clone());
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("PNG", &["png"])
+            .set_file_name(format!("{name}.png"))
+            .save_file()
+        else {
+            return;
+        };
+        let saved = self.run_query(
+            "asset.saveFrame",
+            serde_json::json!({
+                "asset": clip.asset.0,
+                "seconds": local,
+                "path": path.to_string_lossy(),
+            }),
+        );
+        if saved.is_some() {
+            self.status = tlf!("Saved the frame: {path}", path = path.display());
+        }
+    }
+
     /// タイムライン `id` を `from`（秒）から再生する。再生するのは `from` にあるビデオクリップで、終わりに来て
     /// 次のクリップがあれば `poll_playback` がそこから続ける。
     fn start_playback_at(&mut self, ctx: &egui::Context, id: TimelineId, from: f64) {
@@ -84,6 +175,25 @@ impl DiscCraftApp {
         let track_start = heard_track
             .as_ref()
             .map_or(0.0, |track| f64::from(track.start) / fps);
+        // The part of its file the clip plays (its in and out points trimmed), seconds.
+        let (trim_start, trim_end) = heard_track.as_ref().map_or((0.0, None), |track| {
+            (
+                f64::from(track.trim_start) / fps,
+                track.trim_end.map(|end| f64::from(end) / fps),
+            )
+        });
+        // A track of several clips plays as parts, from where the playback starts.
+        let parts = heard_track
+            .as_ref()
+            .map(|track| {
+                disccraft_engine::audio_track_parts(
+                    &self.session.project,
+                    track,
+                    1.0 / fps.max(1.0),
+                    from,
+                )
+            })
+            .unwrap_or_default();
         let track = heard_track.map(|track| track.asset);
         let Some(path) = self
             .session
@@ -121,15 +231,18 @@ impl DiscCraftApp {
         };
         let player_audio = match (&device, audio_path) {
             (Some(device), Some(audio)) => Some(PlayerAudio {
+                parts,
                 path: audio,
                 rate: device.rate(),
                 // オーディオトラックはタイムライン全体に沿って流れる。映像のファイルの音はクリップと同じ位置。
-                from: track.is_some().then_some(from - track_start),
+                from: track.is_some().then_some(from - track_start + trim_start),
+                until: trim_end,
             }),
             _ => None,
         };
-        // The frames at the monitor's screen size, as its still frames.
-        let size = self.monitor_frame_size(id);
+        // The frames at the disc's frame size, as its still frames, or smaller (Preferences ▸ General ▸ Playback
+        // quality, M6.341).
+        let size = self.playback_quality.size(self.monitor_frame_size(id));
         let player = Player::start_sized(path, player_audio, local, fps, Some(size));
         let audio = match (device, player.audio()) {
             (Some(device), Some(feed)) => match device.play(feed) {

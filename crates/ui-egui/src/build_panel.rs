@@ -365,6 +365,27 @@ impl DiscCraftApp {
 
     /// Where a build goes when the Location box is empty: next to the saved project (else in the home folder),
     /// named after the project — a `<name>_DVD` / `<name>_BD` folder, or `<name>.iso`.
+    /// The options a render into the build's cache would use now: the Location as the build panel has it (its
+    /// default when empty). `None` when that is not a valid path.
+    pub(crate) fn cache_options(&self) -> Option<BuildOptions> {
+        let path = if self.build_path.trim().is_empty() {
+            self.default_build_path().to_string_lossy().into_owned()
+        } else {
+            self.build_path.trim().to_owned()
+        };
+        let target = build_target(
+            self.build_output,
+            Path::new(&path),
+            &self.session.project.settings.name,
+        )?;
+        Some(BuildOptions {
+            output: self.build_output,
+            path: target,
+            cache: None,
+            audio_language: Some(crate::i18n::current().code().to_owned()),
+        })
+    }
+
     pub(crate) fn default_build_path(&self) -> PathBuf {
         let saved = self.session.path.as_deref();
         let stem = saved
@@ -509,6 +530,7 @@ impl DiscCraftApp {
 
         self.build_job
             .start(project, options, build_with_progress, true);
+        self.transcode_queue = self.untranscoded_assets(None);
 
         self.status = tl!("Build started").to_string();
         self.simulate = None;
@@ -518,6 +540,48 @@ impl DiscCraftApp {
     /// cache (the build's Location decides where, as for a build). `only` is one asset (the timelines that play
     /// it); `None` is the whole project.
     pub(crate) fn start_transcode_now(&mut self, only: Option<disccraft_project::AssetId>) {
+        let was_running = self.transcode_job.is_running();
+        self.start_cache_job(move |project, options, progress| {
+            disccraft_build::transcode_now(project, options, only, progress)
+        });
+        if !was_running && self.transcode_job.is_running() {
+            self.transcode_queue = self.untranscoded_assets(only);
+        }
+    }
+
+    /// The assets a build would still transcode (`only`: just that one), for the Progress panel's list (M6.340).
+    fn untranscoded_assets(&self, only: Option<disccraft_project::AssetId>) -> Vec<u64> {
+        use crate::project_panel::TranscodeState;
+        self.transcode
+            .iter()
+            .filter(|(id, state)| {
+                **state == TranscodeState::Untranscoded && only.is_none_or(|only| only.0 == **id)
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// File ▸ Render ▸ Project / Motion Menu / Slideshow: makes `what` into the build's cache in the background.
+    pub(crate) fn start_render(&mut self, what: disccraft_build::Render) {
+        let was_running = self.transcode_job.is_running();
+        self.start_cache_job(move |project, options, progress| {
+            disccraft_build::render(project, options, what, progress).map(|_| ())
+        });
+        if !was_running
+            && self.transcode_job.is_running()
+            && what == disccraft_build::Render::Project
+        {
+            self.transcode_queue = self.untranscoded_assets(None);
+        }
+    }
+
+    /// Runs `work` (a transcode or a render into the build's cache) as the background transcode job.
+    fn start_cache_job(
+        &mut self,
+        work: impl Fn(&Project, &BuildOptions, &mut dyn FnMut(&str, f32)) -> Result<(), String>
+        + Send
+        + 'static,
+    ) {
         if self.build_job.is_running() || self.transcode_job.is_running() {
             self.status = tl!("A build or a transcode is already running").to_string();
             return;
@@ -545,7 +609,7 @@ impl DiscCraftApp {
                            options: &BuildOptions,
                            progress: &mut dyn FnMut(&str, f32)| {
             let started = Instant::now();
-            disccraft_build::transcode_now(project, options, only, progress)?;
+            work(project, options, progress)?;
             Ok(BuildReport {
                 output: disccraft_build::cache_dir(options),
                 titles: 0,
@@ -562,6 +626,26 @@ impl DiscCraftApp {
     /// Encore's Revert to Original: takes `asset`'s transcodes out of the build's cache (the one Transcode Now
     /// and the build fill), so that it is "Untranscoded" again.
     pub(crate) fn revert_to_original(&mut self, asset: disccraft_project::AssetId) {
+        // Transcoded files located for this kind of disc are forgotten: the build goes back to the source.
+        let kind = self.session.project.settings.kind;
+        let located = self
+            .session
+            .project
+            .assets
+            .get(&asset)
+            .is_some_and(|found| found.located(kind).is_some());
+        if located {
+            let disc = match kind {
+                disccraft_project::DiscKind::Dvd => "dvd",
+                disccraft_project::DiscKind::BluRay => "bluray",
+            };
+            let params = serde_json::json!({ "asset": asset.0, "disc": disc, "video": null });
+            if self.run_command("asset.locateTranscoded", params).is_some() {
+                self.status = tl!("Reverted to the original").to_string();
+                self.transcode_dirty = true;
+            }
+            return;
+        }
         let path = self.build_path.trim().to_owned();
         let Some(target) = build_target(
             self.build_output,
@@ -585,6 +669,83 @@ impl DiscCraftApp {
         self.transcode_dirty = true;
     }
 
+    /// Whether `asset` is a video (what Locate Transcoded File applies to).
+    pub(crate) fn is_video_asset(&self, asset: disccraft_project::AssetId) -> bool {
+        self.session
+            .project
+            .assets
+            .get(&asset)
+            .is_some_and(|found| found.kind == disccraft_project::AssetKind::Video)
+    }
+
+    /// File ▸ Locate Transcoded File ▸ DVD… / Blu-ray… (and the asset's right-click): choose the video the asset was
+    /// transcoded to for that kind of disc, then its sound (cancel: none), which a build of that kind then takes in
+    /// place of the asset's own file.
+    pub(crate) fn locate_transcoded(
+        &mut self,
+        asset: disccraft_project::AssetId,
+        kind: disccraft_project::DiscKind,
+    ) {
+        let (title, disc, extensions): (&str, &str, &[&str]) = match kind {
+            disccraft_project::DiscKind::Dvd => (
+                tl!("Transcoded Video for DVD"),
+                "dvd",
+                &["m2v", "mpg", "mpeg", "vob"],
+            ),
+            disccraft_project::DiscKind::BluRay => (
+                tl!("Transcoded Video for Blu-ray"),
+                "bluray",
+                &["m2ts", "mts", "m2t", "ts", "m2v", "mp4", "m4v", "mkv"],
+            ),
+        };
+        let start = self
+            .session
+            .project
+            .assets
+            .get(&asset)
+            .and_then(|found| Path::new(&found.path).parent().map(Path::to_path_buf));
+        let mut dialog = FileDialog::new()
+            .set_title(title)
+            .add_filter(tl!("Video"), extensions);
+        if let Some(start) = start.filter(|folder| folder.is_dir()) {
+            dialog = dialog.set_directory(start);
+        }
+        let Some(video) = dialog.pick_file() else {
+            return;
+        };
+        let mut sound = FileDialog::new()
+            .set_title(tl!("Its Sound (Cancel: None)"))
+            .add_filter(tl!("Sound"), &["ac3", "wav", "mpa", "mp2", "dts"]);
+        if let Some(folder) = video.parent() {
+            sound = sound.set_directory(folder);
+        }
+        let sound = sound.pick_file();
+        let mut params = Map::new();
+        params.insert("asset".to_owned(), Value::from(asset.0));
+        params.insert("disc".to_owned(), Value::from(disc));
+        params.insert(
+            "video".to_owned(),
+            Value::from(video.to_string_lossy().into_owned()),
+        );
+        if let Some(sound) = &sound {
+            params.insert(
+                "audio".to_owned(),
+                Value::from(sound.to_string_lossy().into_owned()),
+            );
+        }
+        if self
+            .run_command("asset.locateTranscoded", Value::Object(params))
+            .is_some()
+        {
+            let name = video
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.status = tlf!("Located the transcoded file: {file}", file = name);
+            self.transcode_dirty = true;
+        }
+    }
+
     /// Called as the window is drawn: says in the status bar how far Transcode Now is, and what came of it.
     pub(crate) fn poll_transcode_now(&mut self, ctx: &egui::Context) {
         if let Some(result) = self.transcode_job.poll() {
@@ -593,6 +754,9 @@ impl DiscCraftApp {
                     "Transcode finished ({time})",
                     time = elapsed_text(report.seconds as u64)
                 ),
+                Err(error) if disccraft_build::was_stopped(&error) => {
+                    tl!("Transcode stopped").to_owned()
+                }
                 Err(error) => tlf!("Cannot transcode: {message}", message = error),
             };
             // The statuses in the Project panel are asked for again.

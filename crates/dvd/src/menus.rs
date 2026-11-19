@@ -94,6 +94,8 @@ pub(crate) fn build_menus(
             coding: AudioCoding::Lpcm,
             channels: 2,
             language: None,
+            bits: 16,
+            sample_rate: 48_000,
         });
     let menus = VmgMenus {
         language: *b"en",
@@ -297,6 +299,7 @@ fn build_motion_menu_vob(
     let extra = MuxExtra {
         highlight: Some(&hli),
         base_sector,
+        stop: None,
     };
 
     let layout = mux_vobs_with(&input, &extra, sink).map_err(|err| mux_menu_error(menu, err))?;
@@ -461,11 +464,29 @@ fn motion_parts(context: &MenuContext<'_>, menu: &Menu) -> Result<MotionMenu, Dv
         MotionSource::Video { seconds, .. } | MotionSource::Still { seconds } => seconds,
     };
     let frames = frame_count(seconds, standard).map_err(|err| invalid_menu(menu, err))?;
-    let (first, video) = match source {
+    // A play encoded before (File ▸ Render ▸ Motion Menu, or an earlier build of the same project) is taken
+    // from the cache; its first picture (the buttons' geometry and highlight) is made again from one frame.
+    let cached = motion_cache_path(context, menu);
+    let kept = cached
+        .as_ref()
+        .filter(|(video, marker)| video.is_file() && marker.is_file())
+        .and_then(|(video, _)| std::fs::read(video).ok())
+        .filter(|video| !video.is_empty());
+    let encode = |frames: u64| match source {
         MotionSource::Video { path, .. } => {
-            encode_motion_video(project, menu, path, frames, standard)?
+            encode_motion_video(project, menu, path, frames, standard)
         }
-        MotionSource::Still { .. } => encode_still_loop(project, menu, frames, standard)?,
+        MotionSource::Still { .. } => encode_still_loop(project, menu, frames, standard),
+    };
+    let (first, video) = match kept {
+        Some(video) => (encode(1)?.0, video),
+        None => {
+            let (first, video) = encode(frames)?;
+            if let Some((path, marker)) = &cached {
+                store_motion_video(path, marker, &video);
+            }
+            (first, video)
+        }
     };
     let audio = menu_audio(context, menu, seconds)?;
     Ok(MotionMenu {
@@ -473,6 +494,110 @@ fn motion_parts(context: &MenuContext<'_>, menu: &Menu) -> Result<MotionMenu, Dv
         video,
         audio,
     })
+}
+
+/// Where one play of `menu`'s motion video is kept in the cache, and its marker: named after everything it is
+/// made of (the whole project as saved, and the size and time of every file the project uses), so any change
+/// makes another; `None` when the project cannot be put in words.
+fn motion_cache_path(
+    context: &MenuContext<'_>,
+    menu: &Menu,
+) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    disccraft_project::to_json(context.project)
+        .ok()?
+        .hash(&mut hasher);
+    menu.id.0.hash(&mut hasher);
+    (context.standard == Standard::Ntsc).hash(&mut hasher);
+    for asset in context.project.assets.values() {
+        let file = asset.media_file();
+        if let Ok(metadata) = std::fs::metadata(&*file) {
+            metadata.len().hash(&mut hasher);
+            metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|since| since.as_nanos())
+                .hash(&mut hasher);
+        }
+    }
+    MOTION_CACHE_VERSION.hash(&mut hasher);
+    let key = format!("motion-{:016x}", hasher.finish());
+    Some((
+        context.cache_dir.join(format!("{key}.m2v")),
+        context.cache_dir.join(format!("{key}.ok")),
+    ))
+}
+
+/// Changed when the motion menus' encoding changes, so that older plays in a cache are not taken.
+const MOTION_CACHE_VERSION: u32 = 1;
+
+/// Keeps an encoded play in the cache (written whole under another name first). A cache that cannot be written
+/// only means the next build encodes it again.
+fn store_motion_video(path: &Path, marker: &Path, video: &[u8]) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let part = path.with_extension(format!("{}.part", crate::prepare::part_number()));
+    let written = std::fs::write(&part, video)
+        .and_then(|()| std::fs::rename(&part, path))
+        .and_then(|()| std::fs::write(marker, b"ok"));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+}
+
+/// The motion menu `menu` rendered into `cache_dir` (File ▸ Render ▸ Motion Menu, or a build), when it is there and
+/// still the menu as it is: its MPEG-2 video. M6.334: the project preview plays it, as Encore's preview plays a motion
+/// menu (its motion buttons too) once it is rendered.
+#[must_use]
+pub fn rendered_motion_menu(
+    project: &Project,
+    menu: disccraft_project::MenuId,
+    cache_dir: &Path,
+) -> Option<std::path::PathBuf> {
+    let found = project.menu(menu)?;
+    if !found.is_motion() {
+        return None;
+    }
+    let context = MenuContext {
+        project,
+        standard: crate::ifo_standard(project.settings.standard),
+        cache_dir,
+    };
+    let (video, marker) = motion_cache_path(&context, found)?;
+    (video.is_file() && marker.is_file()).then_some(video)
+}
+
+/// File ▸ Render ▸ Motion Menu: encodes the motion menus (`only`: one of them) into `cache_dir`, where a build
+/// with that cache then takes them. Returns how many were made or found ready.
+///
+/// # Errors
+///
+/// As [`encode_motion_menu`].
+pub fn render_motion_menus(
+    project: &Project,
+    cache_dir: &Path,
+    only: Option<disccraft_project::MenuId>,
+    progress: &mut dyn FnMut(&str, f32),
+) -> Result<usize, DvdError> {
+    let menus: Vec<&Menu> = project
+        .menus
+        .values()
+        .filter(|menu| menu.is_motion() && only.is_none_or(|id| menu.id == id))
+        .collect();
+    for (index, menu) in menus.iter().enumerate() {
+        crate::prepare::check_stop()?;
+        // `as` is exact for the menu counts a project holds.
+        progress(&menu.name, index as f32 / menus.len().max(1) as f32);
+        let _ = encode_motion_menu(project, menu, cache_dir)?;
+        progress(&menu.name, 1.0);
+    }
+    Ok(menus.len())
 }
 
 /// The cells of a motion menu (27 MHz from the first picture): one, or two split at its loop point (the muxer
@@ -755,6 +880,7 @@ fn motion_encoder(standard: Standard, menu: &Menu, wide: bool) -> Result<Encoder
         max_bitrate: 8_000_000,
         wide,
         format: disccraft_mpeg2venc::encoder::Format::Sd,
+        pulldown: false,
     };
 
     Encoder::new(config).map_err(|err| unsupported_menu(menu, err))

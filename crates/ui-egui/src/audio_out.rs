@@ -17,12 +17,48 @@ pub(crate) struct AudioOut {
     _stream: cpal::Stream,
 }
 
+/// The output device chosen in Preferences ▸ Audio/Video Output (its name); `None`: the system's default.
+static CHOSEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Chooses the output device playback uses from now on, by name (`None`: the system's default).
+pub(crate) fn choose_device(name: Option<String>) {
+    *CHOSEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = name.filter(|name| !name.is_empty());
+}
+
+/// A device's name as the system shows it.
+fn name_of(device: &cpal::Device) -> Option<String> {
+    device
+        .description()
+        .ok()
+        .map(|description| description.name().to_owned())
+}
+
+/// The names of the output devices the system has now, in its order.
+pub(crate) fn device_names() -> Vec<String> {
+    cpal::default_host()
+        .output_devices()
+        .map(|devices| devices.filter_map(|device| name_of(&device)).collect())
+        .unwrap_or_default()
+}
+
 impl AudioDevice {
-    /// 既定の出力デバイスとその既定の形式。
+    /// 既定の出力デバイスとその既定の形式。環境設定で選んだデバイスがあればそれを使い、なくなっていれば（抜かれた
+    /// など）既定のデバイスに戻る。
     pub(crate) fn open_default() -> Result<Self, String> {
         let host = cpal::default_host();
-        let device = host
-            .default_output_device()
+        let chosen = CHOSEN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let named = chosen.and_then(|name| {
+            host.output_devices()
+                .ok()?
+                .find(|device| name_of(device).as_deref() == Some(name.as_str()))
+        });
+        let device = named
+            .or_else(|| host.default_output_device())
             .ok_or_else(|| "no audio output device".to_string())?;
         let supported = device
             .default_output_config()

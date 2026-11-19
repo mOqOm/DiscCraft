@@ -17,6 +17,7 @@ disccraft-mpeg2venc.workspace = true
 disccraft-spu.workspace = true
 disccraft-project.workspace = true
 disccraft-psmux.workspace = true
+disccraft-m2tsmux.workspace = true
 disccraft-ifo.workspace = true
 disccraft-vm.workspace = true
 thiserror.workspace = true

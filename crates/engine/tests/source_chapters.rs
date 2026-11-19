@@ -116,6 +116,29 @@ fn a_files_chapters_become_chapter_points() {
             Some(&Value::from(0)),
             "{container}: {again}"
         );
+        // M6.274: with "replace" the chapter points there are go first: one put in by hand at 1 s is gone,
+        // and the source's three are back.
+        session
+            .execute(
+                "timeline.addChapter",
+                &json!({"timeline": timeline, "time": 254_016_000_000_i64}),
+            )
+            .unwrap();
+        let replaced = session
+            .execute(
+                "timeline.importSourceChapters",
+                &json!({"timeline": timeline, "replace": true}),
+            )
+            .unwrap();
+        assert_eq!(replaced.get("added"), Some(&Value::from(2)), "{container}");
+        let found = session.project.timelines.values().next().unwrap();
+        let names: Vec<&str> = found
+            .chapters
+            .iter()
+            .map(|chapter| chapter.name.as_str())
+            .collect();
+        assert_eq!(names.len(), 3, "{container}: {names:?}");
+        assert_eq!(names[1..], ["Middle", "Ending"], "{container}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -275,10 +275,11 @@ fn write_stream_attributes(buf: &mut Vec<u8>, coding: &StreamCoding) -> Result<(
             aspect,
         } => {
             buf.push(pack_nibble_pair(*video_format, *frame_rate)?);
-            // Aspect is not part of the BD-ROM StreamAttributes video block.
-            // Store it in the first reserved byte so StreamCoding round-trips.
-            buf.push(pack_high_nibble(*aspect)?);
-            buf.extend_from_slice(&[0; 2]);
+            // The aspect is not part of a playlist's video attributes (it is in the clip information): the
+            // three bytes behind are reserved and stay 0. (Until M11.9 the aspect was kept in the first of
+            // them so the value read back; a reader that checks reserved fields would not take the playlist.)
+            let _ = aspect;
+            buf.extend_from_slice(&[0; 3]);
         }
         StreamCoding::Lpcm {
             audio_format,
@@ -286,6 +287,11 @@ fn write_stream_attributes(buf: &mut Vec<u8>, coding: &StreamCoding) -> Result<(
             language,
         }
         | StreamCoding::Ac3 {
+            audio_format,
+            sample_rate,
+            language,
+        }
+        | StreamCoding::Dts {
             audio_format,
             sample_rate,
             language,
@@ -481,6 +487,15 @@ fn read_stream_attributes(r: &mut Reader<'_>, coding_type: u8) -> Result<StreamC
                 language,
             })
         }
+        0x82 => {
+            let b = r.u8()?;
+            let language = read_lang(r)?;
+            Ok(StreamCoding::Dts {
+                audio_format: b >> 4,
+                sample_rate: b & 0x0F,
+                language,
+            })
+        }
         0x90 => {
             let language = read_lang(r)?;
             r.skip(1)?;
@@ -536,10 +551,6 @@ fn count_u8(len: usize) -> Result<u8, BdmvError> {
 fn pack_nibble_pair(high: u8, low: u8) -> Result<u8, BdmvError> {
     let value = (u32::from(high) << 4) | u32::from(low);
     u8::try_from(value).map_err(|_| BdmvError("4-bit field overflow".to_string()))
-}
-
-fn pack_high_nibble(value: u8) -> Result<u8, BdmvError> {
-    pack_nibble_pair(value, 0)
 }
 
 fn usize_from_u32(value: u32) -> Result<usize, BdmvError> {
@@ -611,7 +622,44 @@ mod tests {
     fn round_trip() {
         let playlist = sample_playlist();
         let bytes = write_mpls(&playlist).unwrap();
-        assert_eq!(read_mpls(&bytes).unwrap(), playlist);
+        // The video's aspect is not in a playlist (M11.9: its reserved bytes are 0), so it reads back as 0.
+        let mut read_back = playlist.clone();
+        for stream in read_back
+            .items
+            .iter_mut()
+            .flat_map(|item| item.streams.video.iter_mut())
+        {
+            if let StreamCoding::Mpeg2Video { aspect, .. }
+            | StreamCoding::H264Video { aspect, .. } = &mut stream.coding
+            {
+                *aspect = 0;
+            }
+        }
+        assert_eq!(read_mpls(&bytes).unwrap(), read_back);
+        // The video attributes: length 5, MPEG-2, 480i at 29.97, and three reserved bytes of 0.
+        let at = bytes
+            .windows(3)
+            .position(|window| window == [0x05, 0x02, 0x14])
+            .unwrap();
+        assert_eq!(&bytes[at..at + 6], &[0x05, 0x02, 0x14, 0, 0, 0]);
+    }
+
+    /// M6.348: a playlist lists a DTS stream with its attributes.
+    #[test]
+    fn a_dts_stream_reads_back() {
+        let mut playlist = sample_playlist();
+        playlist.items[0].streams.audio.push(Stream {
+            pid: 0x1101,
+            coding: StreamCoding::Dts {
+                audio_format: 3,
+                sample_rate: 1,
+                language: *b"fra",
+            },
+        });
+        let bytes = write_mpls(&playlist).unwrap();
+        // (The video's aspect is not in a playlist: the audio streams are compared.)
+        let read = read_mpls(&bytes).unwrap();
+        assert_eq!(read.items[0].streams.audio, playlist.items[0].streams.audio);
     }
 
     #[test]

@@ -436,6 +436,7 @@ mod tests {
             let menu_obj = project.menu_mut(menu).ok_or("missing menu")?;
             for index in 0..=MAX_BUTTONS {
                 menu_obj.buttons.push(Button {
+                    effects: Default::default(),
                     name: format!("Button {index}"),
                     label: format!("Button {index}"),
                     rect: Rect {

@@ -123,6 +123,31 @@ pub fn if_eq_goto(reg: u8, value: u16, line: u8) -> Cmd {
     ]
 }
 
+/// Constructs `if (SPRM s >= v) Goto line` (a compare with an immediate value: byte 1 = `1 << 7 | 4 << 4 | 1`).
+pub fn if_sprm_ge_goto(sprm: u8, value: u16, line: u8) -> Cmd {
+    [
+        0x00,
+        0xC1,
+        0x00,
+        0x80 | (sprm & 0x1F),
+        hi(value),
+        lo(value),
+        0x00,
+        line,
+    ]
+}
+
+/// Constructs `NOP`.
+pub fn nop() -> Cmd {
+    [0x00; 8]
+}
+
+/// Constructs `SetTmpPML level, line`: the player asks whether its parental level may be raised to `level` for
+/// this disc (its password); when it is, the commands go on at `line`, else at the next command.
+pub fn set_tmp_pml(level: u8, line: u8) -> Cmd {
+    [0x00, 0x03, 0x00, 0x00, 0x00, 0x00, level & 0x0F, line]
+}
+
 /// Constructs `GPRM d = GPRM s`.
 pub fn mov_gprm(dst: u8, src: u8) -> Cmd {
     [

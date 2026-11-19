@@ -569,17 +569,23 @@ pub fn library_item(id: &str) -> Option<&'static LibraryItem> {
 /// `button`'s rectangle in the project's frame: x and w unchanged, y and h scaled by frame_height / 480
 /// (u32 math, rounded down), then clamped so the rectangle stays inside the frame (w, h at least 1).
 pub fn preset_rect(button: &PresetButton, settings: &DiscSettings) -> Rect {
+    design_rect_of(
+        Rect {
+            x: button.x,
+            y: button.y,
+            w: button.w,
+            h: button.h,
+        },
+        settings,
+    )
+}
+
+/// A rectangle of a 720x480 design in the project's frame (see [`preset_rect`]).
+pub(crate) fn design_rect_of(rect: Rect, settings: &DiscSettings) -> Rect {
     if crate::hd_frame::hd_frame(settings) {
-        return crate::hd_frame::design_rect(
-            settings,
-            Rect {
-                x: button.x,
-                y: button.y,
-                w: button.w,
-                h: button.h,
-            },
-        );
+        return crate::hd_frame::design_rect(settings, rect);
     }
+    let button = &rect;
     let (frame_w, frame_h) = frame_size(settings);
     let frame_w = u32::from(frame_w);
     let frame_h = u32::from(frame_h);

@@ -19,8 +19,10 @@ disccraft-film.workspace = true
 disccraft-psmux.workspace = true
 disccraft-motion.workspace = true
 disccraft-menu.workspace = true
+roxmltree.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+png.workspace = true
 filmcraft-time.workspace = true
 
 [dev-dependencies]

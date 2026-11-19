@@ -134,6 +134,12 @@ impl Button {
                 body.w = side(body.w, sx);
                 body.h = side(body.h, sy);
             }
+            if let Some(area) = self.subpicture.as_mut().and_then(|sub| sub.area.as_mut()) {
+                area.x = scaled(area.x, sx);
+                area.y = scaled(area.y, sy);
+                area.w = side(area.w, sx);
+                area.h = side(area.h, sy);
+            }
             self.label_offset = [
                 scaled(self.label_offset[0], sx),
                 scaled(self.label_offset[1], sy),
@@ -144,6 +150,14 @@ impl Button {
             ];
         }
         self.rect = rect;
+    }
+
+    /// The frame rectangle the button's own subpicture is drawn over before the content is turned: its own area of
+    /// the content box (M6.329), or the box.
+    pub fn subpicture_rect(&self) -> Option<Rect> {
+        self.subpicture
+            .as_ref()
+            .map(|sub| sub.rect_in(self.content_box()))
     }
 
     /// The centre of the content box, which the content turns about.

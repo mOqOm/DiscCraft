@@ -18,6 +18,9 @@ pub(crate) struct MenuTexture {
     /// state's colours to preview it: a frame, the text when the button makes a text subpicture, or the
     /// subpicture's layers.
     pub(crate) highlights: [Option<egui::TextureHandle>; 3],
+    /// A rich-colour menu's PSD buttons: each one's normal, selected and activated pictures in its subpicture
+    /// layers' own colours, over the button's rectangle (M6.335); `None` for a button without colour layers.
+    pub(crate) colour_states: Vec<Option<[Option<egui::TextureHandle>; 3]>>,
     pub(crate) width: u16,
     pub(crate) height: u16,
 }
@@ -275,6 +278,7 @@ impl DiscCraftApp {
         // ドロップシャドウのダイアログのプレビュー中は、下書きを重ねた絵を出す。
         let previewed = self
             .shadow_preview(menu)
+            .or_else(|| self.effects_preview(menu))
             .or_else(|| self.color_set_preview(menu));
         let menu = previewed.as_ref().unwrap_or(menu);
         let hash = self.picture_hash(menu);
@@ -424,8 +428,21 @@ impl DiscCraftApp {
         highlight: Option<usize>,
         zoom: crate::monitor::MonitorZoom,
     ) -> Option<egui::Rect> {
+        self.menu_canvas_over(ui, menu, (highlight, zoom), None)
+    }
+
+    /// [`Self::menu_canvas`] with `moving` (a picture of the menu playing: its rendered motion menu, M6.334) painted
+    /// in place of its still picture, the buttons and highlight over it as over the still.
+    pub(crate) fn menu_canvas_over(
+        &mut self,
+        ui: &mut Ui,
+        menu: &Menu,
+        (highlight, zoom): (Option<usize>, crate::monitor::MonitorZoom),
+        moving: Option<&egui::TextureHandle>,
+    ) -> Option<egui::Rect> {
         let previewed = self
             .shadow_preview(menu)
+            .or_else(|| self.effects_preview(menu))
             .or_else(|| self.color_set_preview(menu));
         let menu = previewed.as_ref().unwrap_or(menu);
         let hash = self.picture_hash(menu);
@@ -450,9 +467,18 @@ impl DiscCraftApp {
         let frame = (cached.width, cached.height);
         let size = zoom.size(ui.available_size(), menu_aspect(menu, frame));
 
-        let response = ui.add(egui::Image::new((cached.handle.id(), size)));
-        self.draw_buttons(ui, menu, frame, response.rect, highlight);
-        Some(response.rect)
+        // The picture is painted on exactly the rectangle the buttons and the highlight are laid over: an
+        // image widget in a justified layout (the project preview's) reports the whole width it was given,
+        // wider than the picture it paints, and the highlight was then drawn stretched over the picture.
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        ui.painter().image(
+            moving.unwrap_or(&cached.handle).id(),
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+        self.draw_buttons(ui, menu, frame, rect, highlight);
+        Some(rect)
     }
 
     /// 下のツールバー: 拡大率 | セーフエリア・ボタンルート | 標準・選択時・アクティベート時 | ボタンを追加。
@@ -640,9 +666,30 @@ impl DiscCraftApp {
                         f32::from(rect.y.saturating_add(rect.h)) / fh,
                     ),
                 );
-                for (n, mask) in (1_u8..).zip(&cached.highlights) {
-                    if let (Some(tint), Some(mask)) = (tint(n), mask) {
-                        ui.painter().image(mask.id(), canvas_rect, uv, tint);
+                // A rich-colour menu's PSD button shows its layers in their own colours in the editor, as Encore's
+                // Menu Viewer does (a preview keeps the colour set's, as Encore's preview does).
+                let own = cached
+                    .colour_states
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .filter(|_| highlight.is_none());
+                if let Some(states) = own {
+                    let state = match look {
+                        HighlightPreview::Selected if active => 1,
+                        HighlightPreview::Activated if active => 2,
+                        _ => 0,
+                    };
+                    if let Some(Some(texture)) = states.get(state) {
+                        let whole =
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                        ui.painter()
+                            .image(texture.id(), canvas_rect, whole, egui::Color32::WHITE);
+                    }
+                } else {
+                    for (n, mask) in (1_u8..).zip(&cached.highlights) {
+                        if let (Some(tint), Some(mask)) = (tint(n), mask) {
+                            ui.painter().image(mask.id(), canvas_rect, uv, tint);
+                        }
                     }
                 }
             }
@@ -781,12 +828,45 @@ impl DiscCraftApp {
         // テキストの入力欄のフォーカスが外れる）。
         let vertical = self.tool == crate::menu_text::Tool::VerticalText;
         if self.tool == crate::menu_text::Tool::Text || vertical {
+            // Where the button went down: a release somewhere else is a drag (a text box).
+            let origin_key = egui::Id::unique(("text_tool_origin", menu.id.0));
+            if ui.input(|i| i.pointer.primary_pressed()) && under_pointer && canvas.contains(point)
+            {
+                ui.data_mut(|data| data.insert_temp(origin_key, point));
+            }
             if ui.input(|i| i.pointer.primary_released()) && under_pointer && canvas.contains(point)
             {
                 let (x, y) = to_frame_point(point, frame, canvas);
-                let x = u16::try_from(x.min(i32::from(frame.0.saturating_sub(1)))).unwrap_or(0);
-                let y = u16::try_from(y.min(i32::from(frame.1.saturating_sub(1)))).unwrap_or(0);
-                self.add_menu_text(menu.id, x, y, vertical);
+                // Dragged (Encore: drawing a text box): a paragraph text as wide as the drag (a vertical one
+                // as tall), with its corner where the box's is.
+                let origin = ui
+                    .data_mut(|data| data.remove_temp::<egui::Pos2>(origin_key))
+                    .filter(|origin| canvas.contains(*origin))
+                    .map(|origin| to_frame_point(origin, frame, canvas));
+                let (x, y, box_width) = match origin {
+                    Some((ox, oy)) => {
+                        let along = if vertical {
+                            (y - oy).abs()
+                        } else {
+                            (x - ox).abs()
+                        };
+                        let side = u16::try_from(along)
+                            .ok()
+                            .filter(|side| *side >= disccraft_project::MIN_TEXT_BOX)
+                            .map(|side| side.min(disccraft_project::MAX_TEXT_BOX));
+                        match side {
+                            // A vertical text's first column is at the right of its box.
+                            Some(side) => (x.min(ox), y.min(oy), Some(side)),
+                            None => (x, y, None),
+                        }
+                    }
+                    None => (x, y, None),
+                };
+                let x =
+                    u16::try_from(x.clamp(0, i32::from(frame.0.saturating_sub(1)))).unwrap_or(0);
+                let y =
+                    u16::try_from(y.clamp(0, i32::from(frame.1.saturating_sub(1)))).unwrap_or(0);
+                self.add_menu_text(menu.id, x, y, vertical, box_width);
             }
             return;
         }
@@ -834,6 +914,12 @@ impl DiscCraftApp {
                     position: guide.position,
                 });
             }
+            return;
+        }
+
+        // 選んでいる段落テキストの枠のハンドル: ドラッグで枠の幅（縦書きは高さ）、横書きの下の辺のハンドルは枠の高さを変える。
+        if !additive && let Some(handle) = self.hit_text_box_handle(menu, frame, canvas, point) {
+            self.press_text_box_handle(menu, handle, point, released);
             return;
         }
 
@@ -1075,6 +1161,7 @@ impl DiscCraftApp {
                     hash,
                     handle,
                     highlights,
+                    colour_states: colour_state_textures(ctx, menu),
                     width: rendered.width,
                     height: rendered.height,
                 });
@@ -1310,6 +1397,38 @@ pub(crate) fn menu_aspect(menu: &Menu, frame: (u16, u16)) -> f32 {
     } else {
         4.0 / 3.0
     }
+}
+
+/// A rich-colour menu's PSD buttons' pictures in their subpicture layers' own colours (M6.335), as Encore's Menu
+/// Viewer shows them: for each button, its normal, selected and activated pictures over its rectangle.
+fn colour_state_textures(
+    ctx: &Context,
+    menu: &Menu,
+) -> Vec<Option<[Option<egui::TextureHandle>; 3]>> {
+    if !menu.rich_highlights {
+        return Vec::new();
+    }
+    menu.buttons
+        .iter()
+        .enumerate()
+        .map(|(index, button)| {
+            let states = disccraft_menu::button_color_states(button)?;
+            let size = [usize::from(button.rect.w), usize::from(button.rect.h)];
+            let mut state = 0_u8;
+            Some(states.map(|picture| {
+                state = state.saturating_add(1);
+                let rgba = picture?;
+                // egui wants exactly the bytes of the size.
+                (size[0].checked_mul(size[1])?.checked_mul(4)? == rgba.len()).then(|| {
+                    ctx.load_texture(
+                        format!("menu_colour_{index}_{state}"),
+                        egui::ColorImage::from_rgba_unmultiplied(size, &rgba),
+                        egui::TextureOptions::NEAREST,
+                    )
+                })
+            }))
+        })
+        .collect()
 }
 
 /// Colour `n` (1 to 3) of the highlight layer as a white mask the size of the frame (`None` for colours 2 and 3

@@ -126,6 +126,73 @@ mod tests {
         rgba.repeat(width * height)
     }
 
+    /// M6.343: a PSD layer's layer effects (Photoshop layer styles) are in the menu read from it: a red stroke
+    /// round a white square in the PSD is red round it in the menu's background.
+    #[test]
+    fn a_psd_layers_effects_are_in_the_menu() -> Result<(), Box<dyn Error>> {
+        use photocraft_doc::{
+            BlendMode, Color, Effect, FxCommon, FxPaint, StrokeFx, StrokePosition,
+        };
+        let dir = std::env::temp_dir().join(format!("disccraft-psd-fx-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let plain = dir.join("plain.psd");
+        let (w, h) = (40_usize, 40_usize);
+        let mut square = vec![0u8; w * h * 4];
+        for y in 10..30 {
+            for x in 10..30 {
+                let i = (y * w + x) * 4;
+                if let Some(px) = square.get_mut(i..i + 4) {
+                    px.copy_from_slice(&[255, 255, 255, 255]);
+                }
+            }
+        }
+        write_layered_psd(
+            &plain,
+            40,
+            40,
+            &[
+                PsdLayer::Raster {
+                    name: "背景".to_owned(),
+                    rgba: solid(w, h, [0, 0, 0, 255]),
+                    visible: true,
+                },
+                PsdLayer::Raster {
+                    name: "square".to_owned(),
+                    rgba: square,
+                    visible: true,
+                },
+            ],
+        )?;
+        // The square gets a stroke in PhotoCraft (as a PSD made in Photoshop with a layer style has it).
+        let mut doc = photocraft_io::import("plain.psd", &std::fs::read(&plain)?)?.document;
+        let layer = doc.layers.get_mut(1).ok_or("square layer")?;
+        layer.effects.enabled = true;
+        layer.effects.items.push(Effect::Stroke(StrokeFx {
+            common: FxCommon::new(BlendMode::Normal, 1.0),
+            size: 4.0,
+            position: StrokePosition::Outside,
+            paint: FxPaint::Color(Color::rgb(1.0, 0.0, 0.0)),
+            overprint: false,
+        }));
+        let styled = dir.join("styled.psd");
+        let exported =
+            photocraft_io::export(&doc, "psd", &photocraft_io::ExportOptions::default())?;
+        std::fs::write(&styled, exported.bytes)?;
+        let menu = load_psd_menu(&styled)?;
+        let _ = std::fs::remove_dir_all(&dir);
+        let at = |x: usize, y: usize| -> Option<[u8; 4]> {
+            let i = (y * menu.background.width as usize + x) * 4;
+            let px = menu.background.rgba.get(i..i + 4)?;
+            Some([px[0], px[1], px[2], px[3]])
+        };
+        // Inside the square white, just outside it red, further out the black background.
+        assert_eq!(at(20, 20), Some([255, 255, 255, 255]));
+        let edge = at(8, 20).ok_or("pixel")?;
+        assert!(edge[0] > 200 && edge[1] < 60 && edge[2] < 60, "{edge:?}");
+        assert_eq!(at(2, 20), Some([0, 0, 0, 255]));
+        Ok(())
+    }
+
     #[test]
     fn a_thumbnail_layer_marks_where_the_video_goes() -> Result<(), Box<dyn Error>> {
         let dir = std::env::temp_dir().join(format!("disccraft-psd-thumb-{}", std::process::id()));

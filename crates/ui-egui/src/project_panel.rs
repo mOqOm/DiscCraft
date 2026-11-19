@@ -31,6 +31,39 @@ pub(crate) struct ProbeInfo {
     pub(crate) modified: Option<i64>,
     /// 映像に音声があるか（映像のアセットだけ。読めなければ `false`）。
     pub(crate) audio: bool,
+    /// How the video's frames are scanned (Encore's フィールドタイプ), when its headers say.
+    pub(crate) field: Option<FieldScan>,
+}
+
+/// How a video's frames are scanned (`asset.probe`'s "fieldType"; Encore's フィールドタイプ).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FieldScan {
+    /// Whole frames.
+    Progressive,
+    /// The upper (odd) field first.
+    UpperFirst,
+    /// The lower (even) field first.
+    LowerFirst,
+}
+
+impl FieldScan {
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "progressive" => Some(Self::Progressive),
+            "upperFirst" => Some(Self::UpperFirst),
+            "lowerFirst" => Some(Self::LowerFirst),
+            _ => None,
+        }
+    }
+
+    /// Encore's words for it.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Progressive => tl!("No Fields (Progressive Scan)"),
+            Self::UpperFirst => tl!("Odd Field First"),
+            Self::LowerFirst => tl!("Even Field First"),
+        }
+    }
 }
 
 /// プロジェクトの表の列（Encore の「列の表示 / 非表示」の並び。名前は常に出る）。
@@ -172,6 +205,24 @@ impl TranscodeState {
         }
     }
 
+    /// The settings column (DVD, or Blu-ray when `bluray`) for an asset `asset` (`None`: no asset's row): the name
+    /// of its quality preset or rate when it is transcoded (M6.251, M6.307), else as [`Self::setting_label`].
+    pub(crate) fn setting_text(
+        self,
+        asset: Option<&disccraft_project::Asset>,
+        bluray: bool,
+    ) -> String {
+        match (self, asset) {
+            (Self::Untranscoded | Self::Transcoded, Some(asset)) if bluray => {
+                crate::transcode_settings::bluray_setting_name(asset, None)
+            }
+            (Self::Untranscoded | Self::Transcoded, Some(asset)) => {
+                crate::transcode_settings::dvd_setting_name(asset)
+            }
+            _ => self.setting_label().to_owned(),
+        }
+    }
+
     /// もう一方のディスクの種類での状態。容量が変わるとビットレートも変わるので、キャッシュは使えない。
     fn for_other_kind(self) -> Self {
         match self {
@@ -265,8 +316,10 @@ struct ProjectRow {
     seconds: Option<f64>,
     /// 素材のフレームレート（デュレーションをその素材のタイムコードで出す。Encore と同じ）。
     fps: Option<f64>,
-    /// トランスコードステータス（アセットとタイムラインの本編。ほかは `None`）。
-    transcode: Option<TranscodeState>,
+    /// トランスコードステータス（DVD, Blu-ray。アセットとタイムラインの本編。ほかは `None`）。
+    transcode: Option<(TranscodeState, TranscodeState)>,
+    /// The asset itself, for its transcode settings (`None` for rows that are not assets).
+    transcode_asset: Option<disccraft_project::Asset>,
     /// 寸法（映像・画像のアセットは素材の、メニューとタイムラインはディスクの）。
     dimensions: Option<(u32, u32)>,
     /// ファイルの大きさ（アセットだけ）。
@@ -334,10 +387,7 @@ impl DiscCraftApp {
         let mut rows = self.project_rows();
         // Encore と同じく、見出しで並べ替える（初めは名前の昇順）。
         let sort = self.table_sort("project_grid");
-        let kind = self.session.project.settings.kind;
-        crate::theme::sort_rows(&mut rows, sort, |row, column| {
-            project_sort_key(row, column, kind)
-        });
+        crate::theme::sort_rows(&mut rows, sort, project_sort_key);
         let filter = self.project_filter;
         rows.retain(|row| filter.shows(row.selection));
         let rows = self.folder_tree(rows);
@@ -523,6 +573,7 @@ impl DiscCraftApp {
                     seconds: None,
                     fps: None,
                     transcode: None,
+                    transcode_asset: None,
                     dimensions: None,
                     size: None,
                     category: "",
@@ -576,7 +627,6 @@ impl DiscCraftApp {
 
     /// 表の本体。
     fn project_table(&mut self, ui: &mut Ui, rows: &[ProjectRow]) {
-        let kind = self.session.project.settings.kind;
         let selected = rows.iter().position(|row| {
             row.selection != Selection::None && row.selection == self.listed_selection()
         });
@@ -631,7 +681,7 @@ impl DiscCraftApp {
                         .1;
                     let mut last = first;
                     for (column, width) in columns.iter().zip(&widths).skip(1) {
-                        last = self.project_cell(ui, row, *column, kind, *width);
+                        last = self.project_cell(ui, row, *column, *width);
                     }
                     let id = egui::Id::unique("project_row").with(index);
                     let response =
@@ -844,10 +894,9 @@ impl DiscCraftApp {
         ui: &mut Ui,
         row: &ProjectRow,
         column: ProjectColumn,
-        kind: DiscKind,
         width: Option<f32>,
     ) -> egui::Rect {
-        let transcode = row.transcode.map(|state| state.by_kind(kind));
+        let transcode = row.transcode;
         let text = match column {
             ProjectColumn::Name => row.name.clone(),
             ProjectColumn::Type => row.kind.to_owned(),
@@ -863,13 +912,13 @@ impl DiscCraftApp {
                 .map(|(dvd, _)| dvd.status_label().to_owned())
                 .unwrap_or_default(),
             ProjectColumn::DvdSettings => transcode
-                .map(|(dvd, _)| dvd.setting_label().to_owned())
+                .map(|(dvd, _)| dvd.setting_text(row.transcode_asset.as_ref(), false))
                 .unwrap_or_default(),
             ProjectColumn::BlurayStatus => transcode
                 .map(|(_, bluray)| bluray.status_label().to_owned())
                 .unwrap_or_default(),
             ProjectColumn::BluraySettings => transcode
-                .map(|(_, bluray)| bluray.setting_label().to_owned())
+                .map(|(_, bluray)| bluray.setting_text(row.transcode_asset.as_ref(), true))
                 .unwrap_or_default(),
             ProjectColumn::Size => row
                 .size
@@ -959,6 +1008,22 @@ impl DiscCraftApp {
         ) else {
             return;
         };
+        self.transcode_fits = value
+            .get("assets")
+            .and_then(Value::as_array)
+            .map(|assets| {
+                assets
+                    .iter()
+                    .filter_map(|entry| {
+                        let flag =
+                            |key: &str| entry.get(key).and_then(Value::as_bool) == Some(true);
+                        let asset = entry.get("asset").and_then(Value::as_u64)?;
+                        Some((asset, (flag("fitsDvd"), flag("fitsBluray"))))
+                    })
+                    .filter(|(_, (dvd, bluray))| *dvd || *bluray)
+                    .collect()
+            })
+            .unwrap_or_default();
         self.transcode = value
             .get("assets")
             .and_then(Value::as_array)
@@ -981,6 +1046,44 @@ impl DiscCraftApp {
     /// アセットのトランスコードステータス。
     pub(crate) fn transcode_state(&self, id: AssetId) -> Option<TranscodeState> {
         self.transcode.get(&id.0).copied()
+    }
+
+    /// The (DVD, Blu-ray) statuses of an asset: the disc's own kind's as the build tells it; for a video the other
+    /// kind's by whether it would fit that disc as it is (and has no preset of its own for it, M6.315 / M6.324), as
+    /// the engine tells (its cache there is not looked at); for other media the same as the disc's.
+    pub(crate) fn transcode_columns(
+        &self,
+        id: AssetId,
+    ) -> Option<(TranscodeState, TranscodeState)> {
+        let state = self.transcode_state(id)?;
+        let kind = self.session.project.settings.kind;
+        let asset = self.session.project.assets.get(&id);
+        if !asset.is_some_and(|asset| asset.kind == AssetKind::Video) {
+            return Some(state.by_kind(kind));
+        }
+        let (fits_dvd, fits_bluray) = self.video_fits(id);
+        let dvd_preset = asset.is_some_and(|asset| asset.transcode_kbps.is_some());
+        let bluray_preset = asset.is_some_and(|asset| asset.bluray_transcode.is_some());
+        let other = |fits: bool, preset: bool| {
+            if fits && !preset {
+                TranscodeState::Unneeded
+            } else {
+                TranscodeState::Untranscoded
+            }
+        };
+        Some(match kind {
+            DiscKind::Dvd => (state, other(fits_bluray, bluray_preset)),
+            DiscKind::BluRay => (other(fits_dvd, dvd_preset), state),
+        })
+    }
+
+    /// Whether video asset `id` would fit a DVD and a Blu-ray as it is (`asset.transcodeStatus`'s "fitsDvd" and
+    /// "fitsBluray").
+    pub(crate) fn video_fits(&self, id: AssetId) -> (bool, bool) {
+        self.transcode_fits
+            .get(&id.0)
+            .copied()
+            .unwrap_or((false, false))
     }
 
     /// いちばん下のボタン（読み込み、新規作成）。
@@ -1053,6 +1156,7 @@ impl DiscCraftApp {
                 seconds: None,
                 fps: None,
                 transcode: None,
+                transcode_asset: None,
                 dimensions: Some(frame),
                 size: None,
                 category: "",
@@ -1073,6 +1177,7 @@ impl DiscCraftApp {
                 seconds: None,
                 fps: None,
                 transcode: None,
+                transcode_asset: None,
                 dimensions: None,
                 size: None,
                 category: "",
@@ -1099,6 +1204,7 @@ impl DiscCraftApp {
                 seconds,
                 fps: None,
                 transcode: None,
+                transcode_asset: None,
                 dimensions: None,
                 size: None,
                 category: "",
@@ -1124,6 +1230,7 @@ impl DiscCraftApp {
                 seconds: Some(ticks_to_seconds(ticks)),
                 fps: None,
                 transcode: None,
+                transcode_asset: None,
                 dimensions: Some(frame),
                 size: None,
                 category: "",
@@ -1170,10 +1277,11 @@ impl DiscCraftApp {
                 icon: RowIcon::of_asset(kind),
                 seconds: probe.seconds,
                 fps: probe.fps,
-                transcode: self.transcode_state(id),
+                transcode: self.transcode_columns(id),
+                transcode_asset: self.session.project.assets.get(&id).cloned(),
                 dimensions: probe.dimensions,
                 size: probe.size,
-                category: crate::properties::media_category(kind),
+                category: crate::properties::media_category(kind, probe.audio),
                 description,
                 path,
                 folder: None,
@@ -1211,7 +1319,8 @@ impl DiscCraftApp {
                 // The whole timeline: its clips added up.
                 seconds: Some(self.timeline_seconds(id)).filter(|seconds| *seconds > 0.0),
                 fps: self.asset_probe(video).fps,
-                transcode: self.transcode_state(video),
+                transcode: self.transcode_columns(video),
+                transcode_asset: None,
                 dimensions: Some(frame),
                 size: None,
                 category: "",
@@ -1382,6 +1491,10 @@ impl DiscCraftApp {
                     .get("audio")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false),
+                field: value
+                    .get("fieldType")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(FieldScan::parse),
             },
             None => ProbeInfo {
                 size,
@@ -1425,13 +1538,27 @@ impl DiscCraftApp {
     /// メニューのタブ: メニューの表と、選んだメニューのボタンの表。
     pub(crate) fn menus_tab(&mut self, ui: &mut Ui) {
         let project = &self.session.project;
-        let menus: Vec<MenuRow> = project
+        // Every menu, and under each its later pages (M6.276): a page is reached from here as well as with the
+        // viewer's page buttons, so it is not lost from sight when another menu was looked at in between.
+        let listed: Vec<MenuId> = project
             .menus
+            .keys()
+            .filter(|id| !project.is_menu_page(**id))
+            .flat_map(|id| project.menu_pages(*id))
+            .collect();
+        let menus: Vec<MenuRow> = listed
             .iter()
-            .filter(|(id, _)| !project.is_menu_page(**id))
+            .filter_map(|id| project.menu(*id).map(|menu| (id, menu)))
             .map(|(id, menu)| MenuRow {
                 id: *id,
-                name: menu.name.clone(),
+                name: if project.is_menu_page(*id) {
+                    format!(
+                        "    {}",
+                        tlf!("Page {n}", n = project.menu_page_number(*id))
+                    )
+                } else {
+                    menu.name.clone()
+                },
                 end_action: link_label(project, &menu.end_action),
                 override_link: menu.override_link.as_ref().map_or_else(
                     || tl!("Not set").to_owned(),
@@ -1452,7 +1579,7 @@ impl DiscCraftApp {
             _ => crate::theme::SortKey::Text(row.description.clone()),
         });
         let selected = menus.iter().position(|row| match self.selection {
-            Selection::Menu(menu) => self.session.project.menu_root(menu) == row.id,
+            Selection::Menu(menu) => menu == row.id,
             _ => false,
         });
         // Encore と同じく、上にメニューの表、下に選んだメニューのボタンの表（境目はドラッグで動かせる）。
@@ -1515,8 +1642,9 @@ impl DiscCraftApp {
                     if response.clicked() || response.secondary_clicked() {
                         self.select(Selection::Menu(*id));
                     }
-                    let _ = response
-                        .context_menu(|ui| self.object_menu_items(ui, Selection::Menu(*id)));
+                    // Encore's own right-click menu for this panel (M6.338).
+                    let _ =
+                        response.context_menu(|ui| self.tab_item_menu(ui, Selection::Menu(*id)));
                     let _ = self.pick_whip_target(ui, &response, NodeId::Menu(*id));
                     ui.end_row();
                 }
@@ -1629,9 +1757,9 @@ impl DiscCraftApp {
                     let _ = columns.label(ui, 6, row.override_link.as_str());
                     let last = columns.label(ui, 7, row.label.as_str());
                     let row_id = egui::Id::unique("menu_buttons_row").with(index);
-                    if crate::theme::table_row(ui, row_id, first, fill.row_end(first, last))
-                        .clicked()
-                    {
+                    let response =
+                        crate::theme::table_row(ui, row_id, first, fill.row_end(first, last));
+                    if response.clicked() {
                         let modifiers = ui.input(|i| i.modifiers);
                         if modifiers.shift || modifiers.command {
                             self.toggle_button(id, index);
@@ -1639,6 +1767,11 @@ impl DiscCraftApp {
                             self.select_only_button(id, index);
                         }
                     }
+                    // Right click selects the button too, and shows Encore's menu for it (M6.338).
+                    if response.secondary_clicked() && !selected {
+                        self.select_only_button(id, index);
+                    }
+                    let _ = response.context_menu(|ui| self.tab_button_menu(ui, id, index));
                     ui.end_row();
                 }
             });
@@ -1696,6 +1829,32 @@ impl DiscCraftApp {
             _ => crate::theme::SortKey::Number(row.chapters as f64),
         });
 
+        // Encore と同じく、上にタイムラインの表、下に選んだタイムラインのチャプターの表（M6.338。境目はドラッグで
+        // 動かせる）。
+        let half = ui.available_height() * 0.5;
+        let _ = egui::Panel::top("timelines_split")
+            .resizable(true)
+            .default_size(half)
+            .min_size(60.0)
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
+                egui::ScrollArea::both()
+                    .id_salt("timelines_table")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.timelines_table(ui, &rows));
+            });
+        let _ = egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
+                egui::ScrollArea::both()
+                    .id_salt("timeline_chapters_table")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.timeline_chapters_table(ui));
+            });
+    }
+
+    /// The Timelines panel's upper table: the timelines.
+    fn timelines_table(&mut self, ui: &mut Ui, rows: &[TimelineRow]) {
         let selected = rows
             .iter()
             .position(|row| self.selection == Selection::Timeline(row.id));
@@ -1722,7 +1881,7 @@ impl DiscCraftApp {
                 fill.cell(ui);
                 ui.end_row();
 
-                for row in &rows {
+                for row in rows {
                     let selection = Selection::Timeline(row.id);
                     let first = columns.label(ui, 0, row.name.as_str());
                     let _ = columns.label(ui, 1, row.end_action.as_str());
@@ -1753,7 +1912,8 @@ impl DiscCraftApp {
                     if response.clicked() || response.secondary_clicked() {
                         self.select(selection);
                     }
-                    let _ = response.context_menu(|ui| self.object_menu_items(ui, selection));
+                    // Encore's own right-click menu for this panel (M6.338).
+                    let _ = response.context_menu(|ui| self.tab_item_menu(ui, selection));
                     let _ = self.pick_whip_target(ui, &response, NodeId::Timeline(row.id));
                     ui.end_row();
                 }
@@ -1761,6 +1921,90 @@ impl DiscCraftApp {
         fill.store(ui, table.response.rect);
         let _ = self.table_sorts.insert("timelines_grid", sort);
         self.finish_columns(ui, "timelines_grid", columns);
+    }
+
+    /// The Timelines panel's lower table (Encore, M6.338): the selected timeline's chapters — number, name,
+    /// timeline, chapter in and poster frame. A click selects the chapter (its sheet in the properties); the right
+    /// click has Encore's Clear / Open / Preview from Here.
+    fn timeline_chapters_table(&mut self, ui: &mut Ui) {
+        let Selection::Timeline(id) = self.selection else {
+            return;
+        };
+        let Some(timeline) = self.session.project.timeline(id).cloned() else {
+            return;
+        };
+        let fps = self.asset_probe(timeline.video).fps;
+        // (index, name, in, poster), sorted by the header the user picked (number first, as in Encore).
+        let mut rows: Vec<(usize, String, f64, f64)> = timeline
+            .chapters
+            .iter()
+            .enumerate()
+            .map(|(index, chapter)| {
+                (
+                    index,
+                    crate::timeline_view::chapter_label(&chapter.name, index),
+                    chapter.time.seconds(),
+                    chapter.poster.unwrap_or(chapter.time).seconds(),
+                )
+            })
+            .collect();
+        let mut sort = self.table_sort("timeline_chapters_grid");
+        crate::theme::sort_rows(&mut rows, sort, |row, column| match column {
+            1 => crate::theme::SortKey::Text(row.1.clone()),
+            3 => crate::theme::SortKey::Number(row.2),
+            4 => crate::theme::SortKey::Number(row.3),
+            // Small integers are exact.
+            _ => crate::theme::SortKey::Number(row.0 as f64),
+        });
+        let focused = self
+            .chapter_focus
+            .filter(|(focused, _)| *focused == id)
+            .map(|(_, chapter)| chapter);
+        let selected = rows.iter().position(|row| Some(row.0) == focused);
+        let fill = crate::theme::TableFill::new(ui, "timeline_chapters_grid");
+        let mut columns = self.table_columns("timeline_chapters_grid", 5);
+        let table = crate::theme::table_selecting("timeline_chapters_grid", selected)
+            .num_columns(6)
+            .show(ui, |ui| {
+                for (column, label) in [
+                    tl!("Chapter"),
+                    tl!("Name"),
+                    tl!("Timeline"),
+                    tl!("Chapter In"),
+                    tl!("Poster"),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let _ = columns.header(ui, &mut sort, column, label);
+                }
+                fill.cell(ui);
+                ui.end_row();
+
+                for (index, name, start, poster) in &rows {
+                    let index = *index;
+                    let first = columns.label(ui, 0, index.saturating_add(1).to_string());
+                    let _ = columns.label(ui, 1, name.as_str());
+                    let _ = columns.label(ui, 2, timeline.name.as_str());
+                    let _ = columns.label(ui, 3, self.duration_text_at(*start, fps));
+                    let last = columns.label(ui, 4, self.duration_text_at(*poster, fps));
+                    let row_id = egui::Id::unique("timeline_chapters_row").with((id.0, index));
+                    let response =
+                        crate::theme::table_row(ui, row_id, first, fill.row_end(first, last));
+                    if response.clicked() || response.secondary_clicked() {
+                        self.focus_chapter(id, Some(index));
+                        crate::timeline_view::set_selected_chapter(ui.ctx(), id, Some(index));
+                    }
+                    if response.double_clicked() {
+                        self.open_chapter(ui.ctx(), id, index);
+                    }
+                    let _ = response.context_menu(|ui| self.tab_chapter_menu(ui, id, index));
+                    ui.end_row();
+                }
+            });
+        fill.store(ui, table.response.rect);
+        let _ = self.table_sorts.insert("timeline_chapters_grid", sort);
+        self.finish_columns(ui, "timeline_chapters_grid", columns);
     }
 
     /// ビルドのタブ: 出力、容量、チェック。
@@ -1845,9 +2089,9 @@ fn bitrate_text(bits_per_second: f64) -> String {
 }
 
 /// プロジェクトの表の並べ替えの鍵（列は `ProjectColumn::ALL` の番号）。
-fn project_sort_key(row: &ProjectRow, column: usize, kind: DiscKind) -> crate::theme::SortKey {
+fn project_sort_key(row: &ProjectRow, column: usize) -> crate::theme::SortKey {
     use crate::theme::SortKey;
-    let transcode = row.transcode.map(|state| state.by_kind(kind));
+    let transcode = row.transcode;
     let text = |text: String| {
         if text.is_empty() {
             SortKey::None
@@ -1865,13 +2109,13 @@ fn project_sort_key(row: &ProjectRow, column: usize, kind: DiscKind) -> crate::t
             transcode.map_or(SortKey::None, |(dvd, _)| SortKey::Text(format!("{dvd:?}")))
         }
         Some(ProjectColumn::DvdSettings) => transcode.map_or(SortKey::None, |(dvd, _)| {
-            SortKey::Text(dvd.setting_label().to_owned())
+            SortKey::Text(dvd.setting_text(row.transcode_asset.as_ref(), false))
         }),
         Some(ProjectColumn::BlurayStatus) => transcode.map_or(SortKey::None, |(_, bluray)| {
             SortKey::Text(format!("{bluray:?}"))
         }),
         Some(ProjectColumn::BluraySettings) => transcode.map_or(SortKey::None, |(_, bluray)| {
-            SortKey::Text(bluray.setting_label().to_owned())
+            SortKey::Text(bluray.setting_text(row.transcode_asset.as_ref(), true))
         }),
         Some(ProjectColumn::Size) => row.size.map_or(SortKey::None, |size| {
             // Sizes fit in f64 well enough for ordering.

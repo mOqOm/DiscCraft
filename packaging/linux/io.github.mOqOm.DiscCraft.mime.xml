@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-disccraft-project">
+    <comment>DiscCraft project</comment>
+    <comment xml:lang="ja">DiscCraft のプロジェクト</comment>
+    <sub-class-of type="application/json"/>
+    <glob pattern="*.dcproj"/>
+    <icon name="io.github.mOqOm.DiscCraft"/>
+  </mime-type>
+</mime-info>

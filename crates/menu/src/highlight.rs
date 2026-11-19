@@ -47,14 +47,22 @@ pub(crate) fn build(menu: &Menu, _width: u16, _height: u16) -> Result<HighlightL
 
     for button in &menu.buttons {
         // A button's own subpicture (a PSD button's subpicture layers) comes first.
-        if let Some((values, sub_w, sub_h)) = button.subpicture.as_ref().and_then(|sub| {
-            sub.values()
-                .map(|values| (values, usize::from(sub.width), usize::from(sub.height)))
+        // Over the content box, or its own area of it (a pasted layer that reaches past the button, M6.329); turned
+        // with the content about the box's centre.
+        if let Some((values, sub_w, sub_h, area)) = button.subpicture.as_ref().and_then(|sub| {
+            sub.values().map(|values| {
+                (
+                    values,
+                    usize::from(sub.width),
+                    usize::from(sub.height),
+                    sub.rect_in(button.content_box()),
+                )
+            })
         }) {
             paint_subpicture(
                 &mut pixels,
                 (x, y, layer_w, layer_h),
-                (button.content_box(), button.orientation.angle),
+                (area, button.orientation.angle, button.content_centre()),
                 (&values, sub_w, sub_h),
             );
             continue;
@@ -270,7 +278,7 @@ fn paint_mask(
 fn paint_subpicture(
     pixels: &mut [u8],
     (layer_x, layer_y, layer_w, layer_h): (u16, u16, u16, u16),
-    (rect, angle): (Rect, i16),
+    (rect, angle, pivot): (Rect, i16, (f32, f32)),
     (values, sub_w, sub_h): (&[u8], usize, usize),
 ) {
     let (rect_w, rect_h) = (usize::from(rect.w), usize::from(rect.h));
@@ -281,7 +289,7 @@ fn paint_subpicture(
         paint_turned_subpicture(
             pixels,
             (layer_x, layer_y, layer_w, layer_h),
-            (rect, angle),
+            (rect, angle, pivot),
             (values, sub_w, sub_h),
         );
         return;
@@ -329,20 +337,19 @@ fn paint_subpicture(
 fn paint_turned_subpicture(
     pixels: &mut [u8],
     (layer_x, layer_y, layer_w, layer_h): (u16, u16, u16, u16),
-    (rect, angle): (Rect, i16),
+    (rect, angle, (cx, cy)): (Rect, i16, (f32, f32)),
     (values, sub_w, sub_h): (&[u8], usize, usize),
 ) {
-    let bounds = disccraft_project::rotated_bounds(rect, angle);
+    let bounds = disccraft_project::rotated_bounds_about(rect, (cx, cy), angle);
     let (sin, cos) = (f32::from(angle) / 10.0).to_radians().sin_cos();
     let (w, h) = (f32::from(rect.w), f32::from(rect.h));
-    let (cx, cy) = (f32::from(rect.x) + w * 0.5, f32::from(rect.y) + h * 0.5);
     for y in bounds.y..bounds.y.saturating_add(bounds.h) {
         for x in bounds.x..bounds.x.saturating_add(bounds.w) {
-            // The pixel centre turned back into the box.
+            // The pixel centre turned back about the pivot, into the box.
             let (px, py) = (f32::from(x) + 0.5 - cx, f32::from(y) + 0.5 - cy);
             let (lx, ly) = (
-                px * cos + py * sin + w * 0.5,
-                -px * sin + py * cos + h * 0.5,
+                px * cos + py * sin + cx - f32::from(rect.x),
+                -px * sin + py * cos + cy - f32::from(rect.y),
             );
             if lx < 0.0 || ly < 0.0 || lx >= w || ly >= h {
                 continue;
@@ -372,6 +379,118 @@ fn paint_turned_subpicture(
             }
         }
     }
+}
+
+/// A PSD button's subpicture layers in their own colours as a rich-colour Blu-ray highlight shows them (M6.335):
+/// the normal, selected and activated pictures ([`disccraft_project::Subpicture::color_states`]) laid over the
+/// button's rectangle as its subpicture is (stretched over its area, turned with the content), each straight-alpha
+/// RGBA, `rect.w * rect.h * 4` bytes; `None` for a button without colour layers.
+pub(crate) fn color_states(button: &disccraft_project::Button) -> Option<[Option<Vec<u8>>; 3]> {
+    let sub = button.subpicture.as_ref()?;
+    let states = sub.color_states()?;
+    let over = layer_over_button(button)?;
+    Some(states.map(|state| over(state?)))
+}
+
+/// A PSD button's `(=1)`, `(=2)` and `(=3)` layers in their own colours over the button's rectangle, laid as
+/// [`color_states`] lays them; `None` for a button without colour layers.
+pub(crate) fn color_layers(button: &disccraft_project::Button) -> Option<[Option<Vec<u8>>; 3]> {
+    let sub = button.subpicture.as_ref()?;
+    sub.color_states()?;
+    let over = layer_over_button(button)?;
+    Some(
+        sub.color_layers
+            .each_ref()
+            .map(|layer| over(layer.as_ref()?)),
+    )
+}
+
+/// Lays one of the button's colour layers over its rectangle (RGBA, `rect.w * rect.h * 4` bytes).
+fn layer_over_button(
+    button: &disccraft_project::Button,
+) -> Option<impl Fn(&disccraft_project::ColorLayer) -> Option<Vec<u8>>> {
+    let sub = button.subpicture.as_ref()?;
+    let area = sub.rect_in(button.content_box());
+    let sources = subpicture_sources(
+        button.rect,
+        (area, button.orientation.angle, button.content_centre()),
+        (usize::from(sub.width), usize::from(sub.height)),
+    )?;
+    let (width, height) = (sub.width, sub.height);
+    Some(move |layer: &disccraft_project::ColorLayer| {
+        let rgba = layer.rgba(width, height)?;
+        let colours = rgba.as_chunks::<4>().0;
+        let mut out = vec![0_u8; sources.len().checked_mul(4)?];
+        for (pixel, source) in out.as_chunks_mut::<4>().0.iter_mut().zip(&sources) {
+            if let Some(colour) = source.and_then(|source| colours.get(source)) {
+                *pixel = *colour;
+            }
+        }
+        Some(out)
+    })
+}
+
+/// For each pixel of `rect` (row by row), the subpicture pixel (`sub_w` x `sub_h`, row by row) drawn there when
+/// the subpicture is stretched over `area` and turned by `angle` about `pivot`, as [`paint_subpicture`] draws it.
+fn subpicture_sources(
+    rect: Rect,
+    (area, angle, (cx, cy)): (Rect, i16, (f32, f32)),
+    (sub_w, sub_h): (usize, usize),
+) -> Option<Vec<Option<usize>>> {
+    let (rect_w, rect_h) = (usize::from(rect.w), usize::from(rect.h));
+    let mut sources = vec![None; rect_w.checked_mul(rect_h)?];
+    if area.w == 0 || area.h == 0 || sub_w == 0 || sub_h == 0 {
+        return Some(sources);
+    }
+    let turned = disccraft_project::normalized_angle(i32::from(angle)) != 0;
+    let (sin, cos) = (f32::from(angle) / 10.0).to_radians().sin_cos();
+    let (w, h) = (f32::from(area.w), f32::from(area.h));
+    for row in 0..rect_h {
+        for col in 0..rect_w {
+            let x = i64::from(rect.x) + i64::try_from(col).ok()?;
+            let y = i64::from(rect.y) + i64::try_from(row).ok()?;
+            let source = if turned {
+                // The pixel centre turned back about the pivot, into the area.
+                let (px, py) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+                let (lx, ly) = (
+                    px * cos + py * sin + cx - f32::from(area.x),
+                    -px * sin + py * cos + cy - f32::from(area.y),
+                );
+                if lx < 0.0 || ly < 0.0 || lx >= w || ly >= h {
+                    continue;
+                }
+                // Inside the area; `as` truncates the non-negative position.
+                let (source_col, source_row) = (
+                    (lx / w * sub_w as f32) as usize,
+                    (ly / h * sub_h as f32) as usize,
+                );
+                source_row
+                    .checked_mul(sub_w)?
+                    .checked_add(source_col.min(sub_w - 1))
+            } else {
+                let (Ok(ax), Ok(ay)) = (
+                    usize::try_from(x - i64::from(area.x)),
+                    usize::try_from(y - i64::from(area.y)),
+                ) else {
+                    continue;
+                };
+                if ax >= usize::from(area.w) || ay >= usize::from(area.h) {
+                    continue;
+                }
+                let source_row = ay.saturating_mul(sub_h) / usize::from(area.h);
+                let source_col = ax.saturating_mul(sub_w) / usize::from(area.w);
+                source_row.checked_mul(sub_w)?.checked_add(source_col)
+            };
+            if let Some(slot) = row
+                .checked_mul(rect_w)
+                .and_then(|n| n.checked_add(col))
+                .and_then(|n| sources.get_mut(n))
+            {
+                *slot = source;
+            }
+        }
+    }
+    Some(sources)
 }
 
 /// The highlight of button `index` alone over its rectangle (`width` x `height` values, row by row), as the disc

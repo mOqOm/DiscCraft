@@ -87,7 +87,7 @@ pub(crate) fn runs(line: &str) -> Vec<(bool, &str)> {
 
 /// Lays out `text` vertically at `size` in `family` (and `face`) with `format`: the pieces in the block's own
 /// coordinates and the block's bounds `[x0, y0, x1, y1]` (the first column's middle at x 0, the top at y 0).
-/// Columns are `size` × 1.2 apart plus the format's leading; `format.align` places each column at the top
+/// Columns are the format's line pitch apart (自動: `size` × 1.2); `format.align` places each column at the top
 /// (left), the middle (centre) or the bottom (right) of the tallest one.
 pub(crate) fn vertical_block(
     text: &str,
@@ -96,16 +96,55 @@ pub(crate) fn vertical_block(
     face: Option<&str>,
     format: &TextFormat,
 ) -> (Vec<Piece>, [f32; 4]) {
-    let column = (size * 1.2 + f32::from(format.leading)).max(size * 0.5);
+    vertical_block_with(text, family, size, face, format, &[])
+}
+
+/// [`vertical_block`] with `room` put after some characters (byte ranges of `text`, 1/1000 em, as tracking is): a
+/// justified paragraph text's columns.
+pub(crate) fn vertical_block_with(
+    text: &str,
+    family: &str,
+    size: f32,
+    face: Option<&str>,
+    format: &TextFormat,
+    room: &[(std::ops::Range<usize>, f32)],
+) -> (Vec<Piece>, [f32; 4]) {
+    let column = format.line_pitch_at(size);
     let mut columns: Vec<(Vec<Piece>, f32)> = Vec::new();
+    let mut line_start = 0_usize;
     for (index, line) in text.split('\n').enumerate() {
+        let mut run_start = line_start;
+        line_start = line_start.saturating_add(line.len()).saturating_add(1);
         let line = line.strip_suffix('\r').unwrap_or(line);
         // `as` is exact for the line counts a text holds.
         let cx = -(index as f32) * column;
         let mut pieces = Vec::new();
         let mut cursor = 0.0_f32;
         for (up, run) in runs(line) {
-            let laid = formatted_layout_in(run, family, size, face, format, up);
+            // The room of this run's characters, from its start.
+            let from = run_start;
+            run_start = run_start.saturating_add(run.len());
+            let mine: Vec<(std::ops::Range<usize>, f32)> = room
+                .iter()
+                .filter(|(range, _)| range.start >= from && range.end <= run_start)
+                .map(|(range, more)| (range.start - from..range.end - from, *more))
+                .collect();
+            let laid = if mine.is_empty() {
+                formatted_layout_in(run, family, size, face, format, up)
+            } else if up {
+                // A column's layout keeps one tracking for all its characters: the room moves the characters after
+                // it down instead.
+                let em = crate::draw::room_em(size, format);
+                spread_down(
+                    &formatted_layout_in(run, family, size, face, format, true),
+                    &mine
+                        .iter()
+                        .map(|(range, more)| (range.end, more * em / 1000.0))
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                crate::draw::formatted_layout_with(run, family, size, face, format, (false, &mine))
+            };
             let [x0, y0, x1, y1] = laid.bounds;
             if up {
                 // Already a column (centred on x 0): from the cursor down.
@@ -130,7 +169,8 @@ pub(crate) fn vertical_block(
     let mut pieces = Vec::new();
     for (column_pieces, height) in columns.iter() {
         let shift = match format.align {
-            TextAlign::Left => 0.0,
+            // A justified text's columns are spread down to the box (its last ones start at the top).
+            TextAlign::Left | TextAlign::Justify => 0.0,
             TextAlign::Center => (tallest - height) * 0.5,
             TextAlign::Right => tallest - height,
         };
@@ -149,6 +189,31 @@ pub(crate) fn vertical_block(
         tallest,
     ];
     (pieces, bounds)
+}
+
+/// A column's layout with room put in it: each `(at, room)` moves the characters from byte `at` on down by `room`
+/// (layout units), and the column grows by all of it.
+fn spread_down(laid: &Arc<Layout>, room: &[(usize, f32)]) -> Arc<Layout> {
+    let below = |at: usize| -> f32 {
+        room.iter()
+            .filter(|(from, _)| *from <= at)
+            .map(|(_, more)| *more)
+            .sum()
+    };
+    let mut owned = (**laid).clone();
+    for glyph in &mut owned.glyphs {
+        glyph.y += below(glyph.cluster);
+    }
+    for line in &mut owned.lines {
+        line.baseline += below(line.range.start);
+    }
+    let total: f32 = room
+        .iter()
+        .filter(|(from, _)| *from < laid.text_len.max(1))
+        .map(|(_, more)| *more)
+        .sum();
+    owned.bounds[3] += total;
+    Arc::new(owned)
 }
 
 /// The pieces rasterised into one coverage mask, with where its corner lands. Where pieces overlap the larger

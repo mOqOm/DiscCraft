@@ -11,6 +11,7 @@ fn video_attributes() {
             standard: Standard::Ntsc,
             wide: false,
             resolution: disccraft_ifo::Resolution::Full,
+            mpeg1: false,
         }
         .to_bytes(),
         // 4:3: neither automatic pan/scan nor letterbox (they apply to 16:9 only).
@@ -21,6 +22,7 @@ fn video_attributes() {
             standard: Standard::Pal,
             wide: false,
             resolution: disccraft_ifo::Resolution::Full,
+            mpeg1: false,
         }
         .to_bytes(),
         [0x53, 0x00]
@@ -30,6 +32,7 @@ fn video_attributes() {
             standard: Standard::Ntsc,
             wide: true,
             resolution: disccraft_ifo::Resolution::Full,
+            mpeg1: false,
         }
         .to_bytes(),
         [0x4e, 0x00]
@@ -48,14 +51,28 @@ fn audio_attributes() {
         coding: AudioCoding::Ac3,
         channels: 2,
         language: Some(*b"ja"),
+        bits: 16,
+        sample_rate: 48_000,
     };
     assert_eq!(ac3.to_bytes(), [0x04, 0x01, b'j', b'a', 0, 0, 0, 0]);
     let lpcm = AudioAttr {
         coding: AudioCoding::Lpcm,
         channels: 2,
         language: None,
+        bits: 16,
+        sample_rate: 48_000,
     };
     assert_eq!(lpcm.to_bytes(), [0x80, 0x01, 0, 0, 0, 0, 0, 0]);
+    // 96 kHz 24-bit stereo LPCM: quantization 2 and sampling frequency 1 above the channels.
+    let fine = AudioAttr {
+        bits: 24,
+        sample_rate: 96_000,
+        ..lpcm
+    };
+    assert_eq!(fine.to_bytes(), [0x80, 0x91, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(AudioAttr::from_bytes(fine.to_bytes()).unwrap(), fine);
+    // Only LPCM has those; AC-3 with them is not read.
+    assert!(AudioAttr::from_bytes([0x00, 0x91, 0, 0, 0, 0, 0, 0]).is_err());
     assert_eq!(AudioAttr::from_bytes(ac3.to_bytes()).unwrap(), ac3);
     assert_eq!(AudioAttr::from_bytes(lpcm.to_bytes()).unwrap(), lpcm);
 }
@@ -153,9 +170,21 @@ fn video_attributes_carry_the_picture_size() {
             standard: Standard::Ntsc,
             wide: false,
             resolution,
+            mpeg1: false,
         };
         assert_eq!(attr.to_bytes(), [0x43, byte]);
         assert_eq!(VideoAttr::from_bytes([0x43, byte]).unwrap(), attr);
+    }
+    // M6.350: MPEG-1 has the coding mode bits 0 (NTSC 0x03, PAL 0x13 with the 4:3 flags).
+    for (standard, byte) in [(Standard::Ntsc, 0x03), (Standard::Pal, 0x13)] {
+        let attr = VideoAttr {
+            standard,
+            wide: false,
+            resolution: Resolution::Quarter,
+            mpeg1: true,
+        };
+        assert_eq!(attr.to_bytes(), [byte, 0x18]);
+        assert_eq!(VideoAttr::from_bytes([byte, 0x18]).unwrap(), attr);
     }
     assert_eq!(
         Resolution::of_picture(352, 288, Standard::Pal),

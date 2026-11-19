@@ -18,6 +18,7 @@ mod menu_guide;
 mod menu_options;
 mod menu_orient;
 mod menu_shadow;
+mod menu_style;
 mod menu_text;
 mod nav;
 mod preview;
@@ -49,6 +50,7 @@ fn build_all() -> Box<[CommandSpec]> {
     all.extend_from_slice(menu_options::COMMANDS);
     all.extend_from_slice(menu_text::COMMANDS);
     all.extend_from_slice(menu_shadow::COMMANDS);
+    all.extend_from_slice(menu_style::COMMANDS);
     all.extend_from_slice(menu_orient::COMMANDS);
     all.extend_from_slice(menu_guide::COMMANDS);
     all.extend_from_slice(menu_graphic::COMMANDS);

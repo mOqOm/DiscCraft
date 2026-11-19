@@ -11,18 +11,19 @@ const CHUNK_FRAMES: usize = 48_000;
 const CENTER_WEIGHT: f32 = 0.707;
 const CENTER_SCALE: f32 = 1.0 / 1.707;
 
-/// Extract and downmix source audio to a 48 kHz stereo WAV file.
+/// Extract and downmix source audio to a 48 kHz stereo WAV file, as long as `frames` pictures of `standard` (film's
+/// 23.976 a second with `film`).
 pub(crate) fn extract_audio(
     source: &Source,
     frames: u64,
-    standard: Standard,
+    (standard, film): (Standard, bool),
     output_path: &Path,
 ) -> Result<Option<PathBuf>, TranscodeError> {
     if !source.has_audio() {
         return Ok(None);
     }
 
-    let target_samples = target_sample_frames(frames, standard)
+    let target_samples = target_sample_frames(frames, standard, film)
         .ok_or_else(|| TranscodeError::Unsupported("audio duration overflow".to_string()))?;
 
     if target_samples == 0 {
@@ -114,6 +115,8 @@ fn write_audio_samples(
     let mut produced: u64 = 0;
 
     while produced < sample_frames {
+        // Progress panel ▸ Stop: between chunks of sound.
+        crate::check_stop()?;
         let remaining = sample_frames
             .checked_sub(produced)
             .ok_or_else(|| TranscodeError::Unsupported("audio remaining overflow".to_string()))?;
@@ -165,6 +168,7 @@ pub(crate) fn write_audio_sequence(
         for source in &clips {
             let mut position: u64 = 0;
             loop {
+                crate::check_stop()?;
                 let remaining = sample_frames.saturating_sub(produced);
                 if remaining == 0 {
                     break 'passes;
@@ -199,11 +203,11 @@ pub(crate) fn write_audio_sequence(
     Ok(produced)
 }
 
-fn target_sample_frames(frames: u64, standard: Standard) -> Option<u64> {
-    let (num, den) = if standard == Standard::Ntsc {
-        (48_000u64.checked_mul(1_001)?, 30_000u64)
-    } else {
-        (48_000u64, 25u64)
+fn target_sample_frames(frames: u64, standard: Standard, film: bool) -> Option<u64> {
+    let (num, den) = match (standard, film) {
+        (Standard::Ntsc, true) => (48_000u64.checked_mul(1_001)?, 24_000u64),
+        (Standard::Ntsc, false) => (48_000u64.checked_mul(1_001)?, 30_000u64),
+        (Standard::Pal, _) => (48_000u64, 25u64),
     };
 
     let numerator = frames.checked_mul(num)?;

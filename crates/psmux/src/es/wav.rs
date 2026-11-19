@@ -10,10 +10,14 @@ pub struct LpcmStream {
     pub channels: u8,
     /// Bits per sample.
     pub bits: u8,
-    /// Big-endian interleaved sample data.
+    /// The samples as a DVD's LPCM stores them: 16-bit samples big-endian and interleaved; 24-bit samples in
+    /// groups of two samples a channel, the 16 high bits of each sample first, then their low bytes.
     pub data: Vec<u8>,
     /// Bytes per 1/600 s LPCM frame.
     pub frame_bytes: usize,
+    /// The speakers of the channels (a `WAVE_FORMAT_EXTENSIBLE` file's `dwChannelMask`); 0 when the file names
+    /// none.
+    pub channel_mask: u32,
 }
 
 const RIFF: &[u8] = b"RIFF";
@@ -25,13 +29,27 @@ const EXTENSIBLE: u16 = 0xFFFE;
 const PCM_SUBFORMAT: &[u8] = &[
     0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
 ];
-const LPCM_FRAME_SAMPLES: usize = 80;
+/// LPCM frames a second: a frame is 1/600 s (80 samples at 48 kHz, 160 at 96 kHz).
+const LPCM_FRAMES_PER_SECOND: u32 = 600;
 const LPCM_FRAME_PTS: i64 = 45_000;
+/// The most a DVD's LPCM stream carries, bits a second.
+const LPCM_MAX_BITRATE: u64 = 6_144_000;
+/// The most a Blu-ray's LPCM stream carries, bits a second (six channels of 24 bits at 192 kHz), counting the
+/// channels as stored (an odd count takes one more, silent).
+pub const BD_LPCM_MAX_BITRATE: u64 = 27_648_000;
+
+/// The disc whose LPCM a WAV file is read for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Disc {
+    Dvd,
+    BluRay,
+}
 
 struct FmtInfo {
     channels: u8,
     sample_rate: u32,
     bits: u8,
+    channel_mask: u32,
 }
 
 struct DataChunk {
@@ -39,20 +57,32 @@ struct DataChunk {
     len: usize,
 }
 
-/// Parse a WAV file into DVD LPCM data.
+/// Parse a WAV file into DVD LPCM data: 16, 20 or 24 bits (20 carried as 24), 48 or 96 kHz, up to 8 channels
+/// within the stream's 6.144 Mbit/s.
 pub fn parse_wav(data: &[u8]) -> Result<LpcmStream, EsError> {
+    parse_wav_for(data, Disc::Dvd)
+}
+
+/// Parse a WAV file into LPCM data for a Blu-ray (M6.347): as [`parse_wav`], also at 192 kHz, within the stream's
+/// 27.648 Mbit/s ([`BD_LPCM_MAX_BITRATE`]).
+pub fn parse_wav_for_bd(data: &[u8]) -> Result<LpcmStream, EsError> {
+    parse_wav_for(data, Disc::BluRay)
+}
+
+fn parse_wav_for(data: &[u8], disc: Disc) -> Result<LpcmStream, EsError> {
     let limit = parse_riff_header(data)?;
-    let (fmt, chunk) = parse_chunks(data, limit)?;
+    let (fmt, chunk) = parse_chunks(data, limit, disc)?;
     let fmt = fmt.ok_or_else(|| EsError("missing fmt chunk".to_string()))?;
     let chunk = chunk.ok_or_else(|| EsError("missing data chunk".to_string()))?;
-    let samples = convert_samples(data, &chunk, fmt.channels)?;
-    let frame_bytes = frame_bytes(fmt.channels)?;
+    let samples = convert_samples(data, &chunk, &fmt)?;
+    let frame_bytes = frame_bytes(&fmt)?;
     Ok(LpcmStream {
         sample_rate: fmt.sample_rate,
         channels: fmt.channels,
         bits: fmt.bits,
         data: samples,
         frame_bytes,
+        channel_mask: fmt.channel_mask,
     })
 }
 
@@ -85,6 +115,7 @@ fn parse_riff_header(data: &[u8]) -> Result<usize, EsError> {
 fn parse_chunks(
     data: &[u8],
     limit: usize,
+    disc: Disc,
 ) -> Result<(Option<FmtInfo>, Option<DataChunk>), EsError> {
     let mut fmt = None;
     let mut chunk = None;
@@ -114,7 +145,7 @@ fn parse_chunks(
             .get(body_start..body_end)
             .ok_or_else(|| EsError("missing chunk body".to_string()))?;
         if id == FMT && fmt.is_none() {
-            fmt = Some(parse_fmt(body)?);
+            fmt = Some(parse_fmt(body, disc)?);
         } else if id == DATA && chunk.is_none() {
             chunk = Some(DataChunk {
                 start: body_start,
@@ -129,7 +160,7 @@ fn parse_chunks(
     Ok((fmt, chunk))
 }
 
-fn parse_fmt(body: &[u8]) -> Result<FmtInfo, EsError> {
+fn parse_fmt(body: &[u8], disc: Disc) -> Result<FmtInfo, EsError> {
     let tag = read_u16_le(body, 0).ok_or_else(|| EsError("missing format tag".to_string()))?;
     let channels =
         read_u16_le(body, 2).ok_or_else(|| EsError("missing channel count".to_string()))?;
@@ -140,6 +171,7 @@ fn parse_fmt(body: &[u8]) -> Result<FmtInfo, EsError> {
     let bits =
         read_u16_le(body, 14).ok_or_else(|| EsError("missing bits per sample".to_string()))?;
 
+    let mut channel_mask = 0;
     if tag == EXTENSIBLE {
         let sub = body
             .get(24..40)
@@ -147,6 +179,7 @@ fn parse_fmt(body: &[u8]) -> Result<FmtInfo, EsError> {
         if sub != PCM_SUBFORMAT {
             return Err(EsError("extensible subformat is not PCM".to_string()));
         }
+        channel_mask = read_u32_le(body, 20).unwrap_or(0);
     } else if tag != PCM {
         return Err(EsError("unsupported WAV format tag".to_string()));
     }
@@ -154,14 +187,34 @@ fn parse_fmt(body: &[u8]) -> Result<FmtInfo, EsError> {
     if channels == 0 || channels > 8 {
         return Err(EsError("channel count must be 1..=8".to_string()));
     }
-    if bits != 16 {
-        return Err(EsError("bits per sample must be 16".to_string()));
+    // 20-bit samples fill the top of three bytes: they are carried as 24-bit ones (M6.347).
+    let bits = if bits == 20 { 24 } else { bits };
+    if bits != 16 && bits != 24 {
+        return Err(EsError("bits per sample must be 16, 20 or 24".to_string()));
     }
-    if sample_rate != 48_000 {
-        return Err(EsError("sample rate must be 48000 Hz".to_string()));
+    let rates: &[u32] = match disc {
+        Disc::Dvd => &[48_000, 96_000],
+        Disc::BluRay => &[48_000, 96_000, 192_000],
+    };
+    if !rates.contains(&sample_rate) {
+        return Err(EsError(match disc {
+            Disc::Dvd => "sample rate must be 48000 or 96000 Hz".to_string(),
+            Disc::BluRay => "sample rate must be 48000, 96000 or 192000 Hz".to_string(),
+        }));
+    }
+    // Rate, word length and channels together stay within what the stream may carry (on a DVD 96 kHz 24-bit is
+    // stereo; a Blu-ray stores an odd count of channels with one more).
+    let (stored, max) = match disc {
+        Disc::Dvd => (channels, LPCM_MAX_BITRATE),
+        Disc::BluRay => (channels.max(2).next_multiple_of(2), BD_LPCM_MAX_BITRATE),
+    };
+    if u64::from(sample_rate) * u64::from(bits) * u64::from(stored) > max {
+        return Err(EsError(
+            "too many channels for this sample rate and word length".to_string(),
+        ));
     }
     let expected_block = channels
-        .checked_mul(2)
+        .checked_mul(bits / 8)
         .ok_or_else(|| EsError("block align overflow".to_string()))?;
     if block_align != expected_block {
         return Err(EsError("block align mismatch".to_string()));
@@ -173,10 +226,15 @@ fn parse_fmt(body: &[u8]) -> Result<FmtInfo, EsError> {
         channels,
         sample_rate,
         bits,
+        channel_mask,
     })
 }
 
-fn convert_samples(data: &[u8], chunk: &DataChunk, channels: u8) -> Result<Vec<u8>, EsError> {
+fn convert_samples(data: &[u8], chunk: &DataChunk, fmt: &FmtInfo) -> Result<Vec<u8>, EsError> {
+    let channels = fmt.channels;
+    if fmt.bits == 24 {
+        return convert_samples_24(data, chunk, channels);
+    }
     let end = chunk
         .start
         .checked_add(chunk.len)
@@ -205,10 +263,41 @@ fn convert_samples(data: &[u8], chunk: &DataChunk, channels: u8) -> Result<Vec<u
     Ok(out)
 }
 
-fn frame_bytes(channels: u8) -> Result<usize, EsError> {
-    LPCM_FRAME_SAMPLES
-        .checked_mul(usize::from(channels))
-        .and_then(|v| v.checked_mul(2))
+/// 24-bit samples (little-endian in the WAV) in the DVD's order: for every two samples a channel (that is,
+/// `2 * channels` samples in the order they play), the two high bytes of each sample, then the low byte of each.
+/// A last single sample frame that fills no group is left out.
+fn convert_samples_24(data: &[u8], chunk: &DataChunk, channels: u8) -> Result<Vec<u8>, EsError> {
+    let end = chunk
+        .start
+        .checked_add(chunk.len)
+        .ok_or_else(|| EsError("data chunk overflow".to_string()))?;
+    let raw = data
+        .get(chunk.start..end)
+        .ok_or_else(|| EsError("missing data chunk body".to_string()))?;
+    let group = usize::from(channels)
+        .checked_mul(2 * 3)
+        .filter(|group| *group > 0)
+        .ok_or_else(|| EsError("frame size overflow".to_string()))?;
+    let usable = raw.len() - (raw.len() % group);
+    let mut out = Vec::with_capacity(usable);
+    for samples in raw.get(..usable).unwrap_or_default().chunks_exact(group) {
+        let (samples, _) = samples.as_chunks::<3>();
+        for [_, mid, high] in samples {
+            out.push(*high);
+            out.push(*mid);
+        }
+        for [low, _, _] in samples {
+            out.push(*low);
+        }
+    }
+    Ok(out)
+}
+
+fn frame_bytes(fmt: &FmtInfo) -> Result<usize, EsError> {
+    usize::try_from(fmt.sample_rate / LPCM_FRAMES_PER_SECOND)
+        .ok()
+        .and_then(|samples| samples.checked_mul(usize::from(fmt.channels)))
+        .and_then(|v| v.checked_mul(usize::from(fmt.bits / 8)))
         .ok_or_else(|| EsError("frame size overflow".to_string()))
 }
 
@@ -226,7 +315,151 @@ fn read_u32_le(data: &[u8], offset: usize) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EsError, lpcm_frame_pts, parse_wav};
+    use super::{EsError, lpcm_frame_pts, parse_wav, parse_wav_for_bd};
+
+    /// A WAV of `rate` Hz, `bits` bits and `channels` channels holding `samples` (one value a sample, in the
+    /// order they play).
+    fn pcm_wav(rate: u32, bits: u16, channels: u16, samples: &[i32]) -> Vec<u8> {
+        let width = usize::from(bits / 8);
+        let mut data = Vec::new();
+        for sample in samples {
+            data.extend_from_slice(&sample.to_le_bytes()[..width]);
+        }
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&channels.to_le_bytes());
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * u32::from(channels) * u32::from(bits / 8)).to_le_bytes());
+        wav.extend_from_slice(&(channels * (bits / 8)).to_le_bytes());
+        wav.extend_from_slice(&bits.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&data);
+        wav
+    }
+
+    /// 24-bit samples go in groups of two samples a channel: the high 16 bits of each, then their low bytes.
+    #[test]
+    fn twenty_four_bit_samples_are_grouped() -> Result<(), EsError> {
+        // Stereo, two sample frames and a third that fills no group.
+        let samples = [
+            0x11_22_33, 0x44_55_66, 0x77_08_99, 0x0A_BB_CC, 0x01_02_03, 0x04_05_06,
+        ];
+        let stream = parse_wav(&pcm_wav(96_000, 24, 2, &samples))?;
+        assert_eq!(
+            (stream.sample_rate, stream.bits, stream.channels),
+            (96_000, 24, 2)
+        );
+        assert_eq!(
+            stream.data,
+            [
+                0x11, 0x22, 0x44, 0x55, 0x77, 0x08, 0x0A,
+                0xBB, // the high 16 bits of four samples
+                0x33, 0x66, 0x99, 0xCC, // their low bytes
+            ]
+        );
+        // A 1/600 s frame: 160 samples a channel of 3 bytes.
+        assert_eq!(stream.frame_bytes, 160 * 2 * 3);
+        // 48 kHz 24-bit mono: 80 samples of 3 bytes.
+        assert_eq!(
+            parse_wav(&pcm_wav(48_000, 24, 1, &[1, 2]))?.frame_bytes,
+            240
+        );
+        // 16-bit at 96 kHz is plain big-endian.
+        let plain = parse_wav(&pcm_wav(96_000, 16, 1, &[0x0102, 0x0304]))?;
+        assert_eq!(plain.data, [1, 2, 3, 4]);
+        assert_eq!(plain.frame_bytes, 320);
+        Ok(())
+    }
+
+    /// What a DVD's LPCM cannot carry is refused: other rates and word lengths, and too many channels for the
+    /// rate and word length (6.144 Mbit/s).
+    #[test]
+    fn rates_and_sizes_past_the_stream_are_refused() {
+        assert!(parse_wav(&pcm_wav(44_100, 16, 2, &[0, 0])).is_err());
+        assert!(parse_wav(&pcm_wav(48_000, 8, 2, &[0, 0])).is_err());
+        assert!(parse_wav(&pcm_wav(96_000, 24, 3, &[0; 6])).is_err());
+        assert!(parse_wav(&pcm_wav(48_000, 24, 6, &[0; 12])).is_err());
+        assert!(parse_wav(&pcm_wav(48_000, 24, 5, &[0; 10])).is_ok());
+        assert!(parse_wav(&pcm_wav(96_000, 16, 4, &[0; 8])).is_ok());
+    }
+
+    /// M6.347: a Blu-ray's LPCM is also 192 kHz and up to 27.648 Mbit/s (an odd count of channels stored with
+    /// one more); 20-bit samples are carried as 24-bit ones; an extensible file's speakers are kept.
+    #[test]
+    fn a_blu_ray_takes_192_khz_and_more_channels() -> Result<(), EsError> {
+        assert!(parse_wav(&pcm_wav(192_000, 16, 2, &[0, 0])).is_err());
+        let stream = parse_wav_for_bd(&pcm_wav(192_000, 24, 6, &[0; 12]))?;
+        assert_eq!(
+            (stream.sample_rate, stream.channels, stream.bits),
+            (192_000, 6, 24)
+        );
+        assert_eq!(stream.frame_bytes, 320 * 6 * 3);
+        // Five channels at 192 kHz 24-bit are stored as six: just within; seven as eight are not.
+        assert!(parse_wav_for_bd(&pcm_wav(192_000, 24, 5, &[0; 10])).is_ok());
+        assert!(parse_wav_for_bd(&pcm_wav(192_000, 24, 7, &[0; 14])).is_err());
+        assert!(parse_wav_for_bd(&pcm_wav(192_000, 16, 8, &[0; 16])).is_ok());
+        assert!(parse_wav_for_bd(&pcm_wav(44_100, 16, 2, &[0, 0])).is_err());
+        // 20 bits in three bytes: as 24-bit samples, on either disc.
+        let mut twenty = pcm_wav(
+            48_000,
+            24,
+            2,
+            &[0x12_34_50, 0x65_43_20, 0x0A_BC_D0, 0x0F_ED_C0],
+        );
+        twenty[34] = 20;
+        let stream = parse_wav(&twenty)?;
+        assert_eq!(stream.bits, 24);
+        assert_eq!(
+            stream.data,
+            [
+                0x12, 0x34, 0x65, 0x43, 0x0A, 0xBC, 0x0F, 0xED, 0x50, 0x20, 0xD0, 0xC0
+            ]
+        );
+        assert_eq!(parse_wav_for_bd(&twenty)?.data, stream.data);
+        // The speakers of an extensible file (5.1 with side surrounds).
+        let mut wav = pcm_wav(48_000, 16, 6, &[0; 6]);
+        let fmt = [
+            &1u16.to_le_bytes()[..],
+            &6u16.to_le_bytes(),
+            &48_000u32.to_le_bytes(),
+            &(48_000u32 * 12).to_le_bytes(),
+            &12u16.to_le_bytes(),
+            &16u16.to_le_bytes(),
+        ]
+        .concat();
+        let mut extensible = fmt.clone();
+        extensible[0..2].copy_from_slice(&0xFFFEu16.to_le_bytes());
+        extensible.extend_from_slice(&22u16.to_le_bytes());
+        extensible.extend_from_slice(&16u16.to_le_bytes());
+        extensible.extend_from_slice(&0x60Fu32.to_le_bytes());
+        extensible.extend_from_slice(&[
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38,
+            0x9b, 0x71,
+        ]);
+        let data = wav.split_off(36);
+        assert_eq!(
+            parse_wav_for_bd(&wav_with(&extensible, &data))?.channel_mask,
+            0x60F
+        );
+        assert_eq!(parse_wav(&wav_with(&fmt, &data))?.channel_mask, 0);
+        Ok(())
+    }
+
+    /// A RIFF WAVE file of `fmt` and the `data` chunk (header included).
+    fn wav_with(fmt: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut file = b"RIFF".to_vec();
+        file.extend_from_slice(&(4 + 8 + fmt.len() as u32 + data.len() as u32).to_le_bytes());
+        file.extend_from_slice(b"WAVEfmt ");
+        file.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        file.extend_from_slice(fmt);
+        file.extend_from_slice(data);
+        file
+    }
 
     fn build_wav(
         sample_rate: u32,

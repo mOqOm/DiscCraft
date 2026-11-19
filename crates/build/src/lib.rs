@@ -14,14 +14,22 @@
 )]
 
 use disccraft_udf::image::{DVD_ROOT_NAMES, ImageFile, dvd_file_order, write_dvd_iso_with_rom};
-use disccraft_udf::tree::{TreeFile, write_udf250_iso};
+use disccraft_udf::tree::{TreeFile, write_udf250_iso_with_dirs};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use disccraft_bd::{BdBuildReport, build_bdmv_with};
 pub use disccraft_dvd::TranscodeStatus;
+/// Whether a video asset fits the project's disc as it is (a DVD preset of its own transcodes it all the same).
+pub use disccraft_dvd::video_fits_as_is;
+/// Whether a video asset would fit a Blu-ray title in a format as it is (for a format being chosen).
+pub use disccraft_dvd::video_fits_bluray_as;
+/// Whether a video asset would fit a disc of a kind as it is (for the column of the other kind of disc).
+pub use disccraft_dvd::video_fits_disc;
 use disccraft_dvd::{DvdBuildReport, DvdError, build_video_ts_with};
+/// A slide's pan and zoom as the build moves its picture (the preview shows it the same way).
+pub use disccraft_dvd::{SlideMotion, slide_motion};
 
 /// The transcode status of every asset in `project` (`disccraft_dvd::transcode_status`). On an HD Blu-ray, a
 /// video whose H.264 for the project's format is in `cache_dir` is [`TranscodeStatus::Transcoded`] (the DVD
@@ -31,6 +39,7 @@ pub fn transcode_status(
     project: &Project,
     cache_dir: Option<&Path>,
 ) -> std::collections::BTreeMap<disccraft_project::AssetId, TranscodeStatus> {
+    disccraft_dvd::sync_media_choices(project);
     let mut all = disccraft_dvd::transcode_status(project, cache_dir);
     let hd = project.settings.kind == DiscKind::BluRay && project.settings.bd_video.hd().is_some();
     if let (true, Some(cache)) = (hd, cache_dir) {
@@ -49,7 +58,26 @@ pub fn transcode_status(
             }
         }
     }
+    // A video whose transcoded files were located for this kind of disc (and are there) is transcoded, as in
+    // Encore after Locate Transcoded File.
+    for asset in project.assets.values() {
+        let located = asset
+            .located(project.settings.kind)
+            .is_some_and(|located| Path::new(&located.video).is_file());
+        if located {
+            all.insert(asset.id, TranscodeStatus::Transcoded);
+        }
+    }
     all
+}
+
+/// The project as a build sees it: button transitions become hidden titles (Encore's button Transition), and
+/// transcoded files located for the disc's kind take their assets' place (Encore's Locate Transcoded File).
+fn for_build(project: &Project) -> Result<Project, String> {
+    project
+        .with_transitions_expanded()
+        .and_then(|expanded| expanded.with_located_transcodes())
+        .map_err(|error| error.to_string())
 }
 use disccraft_project::{DiscKind, Project};
 
@@ -99,6 +127,34 @@ pub struct BuildReport {
     pub layer_break: Option<LayerBreak>,
 }
 
+/// Asks the transcodes of the running build or Transcode Now to stop (Encore's Progress panel ▸ Stop). The job
+/// ends with an error that [`was_stopped`] tells from a failure; what it had transcoded so far stays in the cache.
+pub fn request_stop() {
+    disccraft_dvd::request_stop();
+    // An image that is being written stops at its next chunk (M6.278).
+    disccraft_udf::request_cancel();
+}
+
+/// Whether `error` (of [`build`], [`build_with_progress`] or [`transcode_now`]) says the job was stopped.
+#[must_use]
+pub fn was_stopped(error: &str) -> bool {
+    error.contains(disccraft_dvd::STOPPED) || error.contains(disccraft_udf::CANCELLED)
+}
+
+/// Progress panel ▸ Stop between the steps of a build that are not transcodes (before the image is written,
+/// between the files of the ROM content): the build ends there. Writing the image itself is not interrupted.
+fn stop_before_step() -> Result<(), String> {
+    if disccraft_dvd::stop_requested() {
+        return Err(disccraft_dvd::STOPPED.to_string());
+    }
+    Ok(())
+}
+
+/// Sets how many transcodes a build (and Transcode Now) runs at a time; 0 runs one for every core of the CPU.
+pub fn set_parallel_transcodes(most: usize) {
+    disccraft_dvd::set_parallel_transcodes(most);
+}
+
 /// The transcode cache a build with `options` uses: `disccraft-cache` inside the disc folder (for an image,
 /// inside the `<name>.files` folder built next to it).
 #[must_use]
@@ -138,15 +194,83 @@ pub fn transcode_now(
     only: Option<disccraft_project::AssetId>,
     progress: &mut dyn FnMut(&str, f32),
 ) -> Result<(), String> {
-    let expanded = project
-        .with_transitions_expanded()
-        .map_err(|error| error.to_string())?;
+    disccraft_dvd::clear_stop();
+    disccraft_udf::clear_cancel();
+    disccraft_dvd::sync_media_choices(project);
+    let expanded = for_build(project)?;
     let cache = cache_dir(options);
     match expanded.settings.kind {
         DiscKind::Dvd => disccraft_dvd::transcode_now(&expanded, &cache, only, progress)
             .map_err(|error| error.to_string()),
         DiscKind::BluRay => disccraft_bd::transcode_now(&expanded, &cache, only, progress)
             .map_err(|error| error.to_string()),
+    }
+}
+
+/// What File ▸ Render makes ahead of a build (Encore: Render ▸ Project / Motion Menu / Slideshow).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Render {
+    /// Everything a build would transcode (as Transcode Now of every asset).
+    Project,
+    /// The motion menus' pictures (`Some`: one menu). An HD Blu-ray's are made at the build.
+    MotionMenus(Option<disccraft_project::MenuId>),
+    /// The slideshows (`Some`: one).
+    Slideshows(Option<u64>),
+}
+
+/// The motion menu `menu` as File ▸ Render ▸ Motion Menu (or a build with `options`) left it in the build's cache,
+/// when it is there and still the menu as it is: its MPEG-2 video, for the project preview to play (M6.334). `None`
+/// for an HD Blu-ray (its motion menus are made at the build) and a menu not rendered.
+#[must_use]
+pub fn rendered_motion_menu(
+    project: &Project,
+    options: &BuildOptions,
+    menu: disccraft_project::MenuId,
+) -> Option<std::path::PathBuf> {
+    let expanded = for_build(project).ok()?;
+    if expanded.settings.kind == DiscKind::BluRay && expanded.settings.bd_video.hd().is_some() {
+        return None;
+    }
+    disccraft_dvd::rendered_motion_menu(&expanded, menu, &cache_dir(options))
+}
+
+/// File ▸ Render: makes `what` into the cache a build with `options` uses, so the build takes it as it is.
+/// Returns how many items were made or found ready (0 for [`Render::Project`]).
+///
+/// # Errors
+///
+/// The first one that cannot be made, as a build would say it; stopped as [`was_stopped`] tells.
+pub fn render(
+    project: &Project,
+    options: &BuildOptions,
+    what: Render,
+    progress: &mut dyn FnMut(&str, f32),
+) -> Result<usize, String> {
+    if what == Render::Project {
+        return transcode_now(project, options, None, progress).map(|()| 0);
+    }
+    disccraft_dvd::clear_stop();
+    disccraft_udf::clear_cancel();
+    disccraft_dvd::sync_media_choices(project);
+    let expanded = for_build(project)?;
+    let cache = cache_dir(options);
+    let hd =
+        expanded.settings.kind == DiscKind::BluRay && expanded.settings.bd_video.hd().is_some();
+    match what {
+        Render::Project => Ok(0),
+        Render::MotionMenus(_) if hd => {
+            Err("an HD Blu-ray's motion menus are made when the disc is built".to_string())
+        }
+        Render::MotionMenus(only) => {
+            disccraft_dvd::render_motion_menus(&expanded, &cache, only, progress)
+                .map_err(|error| error.to_string())
+        }
+        Render::Slideshows(only) => match expanded.settings.kind {
+            DiscKind::Dvd => disccraft_dvd::render_slideshows(&expanded, &cache, only, progress)
+                .map_err(|error| error.to_string()),
+            DiscKind::BluRay => disccraft_bd::render_slideshows(&expanded, &cache, only, progress)
+                .map_err(|error| error.to_string()),
+        },
     }
 }
 
@@ -182,10 +306,10 @@ pub fn build_with_progress(
     progress: &mut dyn FnMut(&str, f32),
 ) -> Result<BuildReport, String> {
     let started = Instant::now();
-    // Button transitions become hidden titles (Encore's button Transition).
-    let mut expanded = project
-        .with_transitions_expanded()
-        .map_err(|error| error.to_string())?;
+    disccraft_dvd::clear_stop();
+    disccraft_udf::clear_cancel();
+    disccraft_dvd::sync_media_choices(project);
+    let mut expanded = for_build(project)?;
     if expanded.settings.audio_language.is_none() {
         expanded
             .settings
@@ -272,6 +396,7 @@ fn copy_rom(project: &Project, rom: &[TreeFile], root: &Path) -> Result<u64, Str
     }
     let mut bytes = 0_u64;
     for file in rom {
+        stop_before_step()?;
         let mut target = root.to_path_buf();
         target.extend(file.path.split('/'));
         if let Some(parent) = target.parent() {
@@ -318,18 +443,31 @@ fn build_bd_iso(
     let folder = iso.with_file_name(format!("{stem}.files"));
     let mut report = build_bd_folder(project, &folder, (cache, started), progress)?;
     progress(STEP_IMAGE, 0.0);
+    stop_before_step()?;
     let mut files = Vec::new();
     collect_tree(&folder, &folder.join("BDMV"), &mut files)?;
+    // The directories that stay empty (AUXDATA, BDJO, JAR, META, CERTIFICATE) are in the image as in the folder.
+    let mut dirs = Vec::new();
+    collect_dirs(&folder, &folder.join("BDMV"), &mut dirs)?;
+    let certificate = folder.join("CERTIFICATE");
+    if certificate.is_dir() {
+        dirs.push("CERTIFICATE".to_string());
+        collect_dirs(&folder, &certificate, &mut dirs)?;
+    }
     files.extend(rom.iter().cloned());
     files.sort_by(|a, b| a.path.cmp(&b.path));
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
     let iso_report = catch_unwind(AssertUnwindSafe(|| {
-        write_udf250_iso(&files, &disc_label(project, stem), iso, now)
+        write_udf250_iso_with_dirs(&files, &dirs, &disc_label(project, stem), iso, now)
     }))
-    .map_err(|_| "internal error while writing the ISO image".to_string())?
-    .map_err(|e| format!("ISO: {e}"))?;
+    .map_err(|_| "internal error while writing the ISO image".to_string())
+    .and_then(|written| written.map_err(|e| format!("ISO: {e}")))
+    .inspect_err(|_| {
+        // What was written of the image is no image: it is not left for a player to open.
+        let _ = std::fs::remove_file(iso);
+    })?;
     progress(STEP_IMAGE, 1.0);
     report.output = iso.to_path_buf();
     report.total_bytes = u64::from(iso_report.sectors) * 2048;
@@ -356,6 +494,26 @@ fn collect_tree(root: &Path, dir: &Path, out: &mut Vec<TreeFile>) -> Result<(), 
                 path: parts.join("/"),
                 source: path,
             });
+        }
+    }
+    Ok(())
+}
+
+/// The directories under `dir` (paths relative to `root`, with `/`), whether files are in them or not.
+fn collect_dirs(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for entry in entries {
+        let path = entry.map_err(|e| format!("{}: {e}", dir.display()))?.path();
+        if path.is_dir() {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            let parts: Vec<String> = relative
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            out.push(parts.join("/"));
+            collect_dirs(root, &path, out)?;
         }
     }
     Ok(())
@@ -441,6 +599,7 @@ fn build_dvd_iso(
     let dvd = build_video_ts_checked(project, &folder, cache, progress)?;
     let mut report = report_from_dvd(&dvd, started);
     progress(STEP_IMAGE, 0.0);
+    stop_before_step()?;
     let video_ts = folder.join("VIDEO_TS");
     let names: Vec<String> = std::fs::read_dir(&video_ts)
         .map_err(|e| format!("{}: {e}", video_ts.display()))?
@@ -461,8 +620,12 @@ fn build_dvd_iso(
     let iso_report = catch_unwind(AssertUnwindSafe(|| {
         write_dvd_iso_with_rom(&files, rom, &label, iso, now)
     }))
-    .map_err(|_| "internal error while writing the ISO image".to_string())?
-    .map_err(|e| format!("ISO: {e}"))?;
+    .map_err(|_| "internal error while writing the ISO image".to_string())
+    .and_then(|written| written.map_err(|e| format!("ISO: {e}")))
+    .inspect_err(|_| {
+        // What was written of the image is no image: it is not left for a player to open.
+        let _ = std::fs::remove_file(iso);
+    })?;
     progress(STEP_IMAGE, 1.0);
     report.output = iso.to_path_buf();
     report.total_bytes = u64::from(iso_report.sectors) * 2048;

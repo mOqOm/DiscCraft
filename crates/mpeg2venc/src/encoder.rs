@@ -97,6 +97,22 @@ pub fn max_gop_frames(standard: Standard) -> u64 {
     }
 }
 
+/// The longest GOP of film pictures shown by 3:2 pulldown ([`EncoderConfig::pulldown`]) a DVD allows: 14 pictures
+/// make at most 35 fields, within the 36 of an NTSC GOP.
+pub const MAX_FILM_GOP_FRAMES: u64 = 14;
+
+/// How film picture `index` (from 0) is shown by 3:2 pulldown: (top_field_first, repeat_first_field). Four pictures
+/// make ten fields, T B T | B T | B T B | T B, so the fields keep alternating from one picture to the next.
+#[must_use]
+pub fn pulldown_flags(index: u64) -> (bool, bool) {
+    match index % 4 {
+        0 => (true, true),
+        1 => (false, false),
+        2 => (false, true),
+        _ => (true, false),
+    }
+}
+
 static COS_TABLE: OnceLock<[[f64; 8]; 8]> = OnceLock::new();
 
 /// Encoder configuration for an I/P MPEG-2 sequence.
@@ -114,6 +130,10 @@ pub struct EncoderConfig {
     pub wide: bool,
     /// The picture format.
     pub format: Format,
+    /// Film (NTSC SD only; Encore's 23.976 presets): the frames given are 23.976 a second, progressive, and are
+    /// shown by 3:2 pulldown ([`pulldown_flags`]) in the 29.97 sequence a DVD plays. A GOP holds at most
+    /// [`MAX_FILM_GOP_FRAMES`] of them.
+    pub pulldown: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +171,172 @@ pub struct Encoder {
     quant_p: u8,
     vbv_fullness: u64,
     rate: RateControl,
+    /// A second pass's plan (VBR 2 pass): each picture's bits from what the first pass measured.
+    plan: Option<TwoPassPlan>,
+    /// What the last coded picture took.
+    last: Option<PictureStats>,
+    /// How hard motion is searched for (Encore's quality, [`MIN_QUALITY`] to [`BEST_QUALITY`]).
+    quality: u8,
+}
+
+/// The best quality (Encore's presets' 5, its "High quality"): the whole search range, to half a pixel.
+pub const BEST_QUALITY: u8 = 5;
+
+/// The lowest quality (Encore's quality slider's 1).
+pub const MIN_QUALITY: u8 = 1;
+
+/// The fewest pixels a lower quality still searches either way.
+const LEAST_SEARCH: i32 = 4;
+
+/// What one coded picture took: its bits, its quantiser_scale_code and whether it was an I picture. A first pass
+/// of two records these for the second ([`Encoder::plan_second_pass`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PictureStats {
+    /// The picture's bits.
+    pub bits: u64,
+    /// Its quantiser_scale_code (2–31).
+    pub code: u8,
+    /// An I picture.
+    pub intra: bool,
+}
+
+/// How much of a picture's complexity its bits follow in a second pass (0: the same bits for every picture, 1:
+/// the same quantiser): between the two, so a hard scene gets more bits and an easy one gives some up, as
+/// two-pass encoders commonly do.
+const PLAN_COMPRESSION: f64 = 0.6;
+
+/// How many pictures either side a first-pass picture's complexity is averaged with (those of its own type): one
+/// picture's bits at one quantiser are a noisy measure, its neighbours' smooth it.
+const PLAN_BLUR: usize = 7;
+
+/// How much of the correction ([`TwoPassPlan::scale`]) the newest picture moves.
+const SCALE_STEP: f64 = 0.2;
+
+/// A second pass's bits for each picture (VBR 2 pass): the sequence's bits shared in proportion to each picture's
+/// complexity (first-pass bits × quantiser, averaged with its neighbours of the same type) raised to
+/// [`PLAN_COMPRESSION`], none more than it takes at the finest quantiser (the rest goes to the others); the bits
+/// spent beyond the plan so far are paid back over the next two GOPs.
+#[derive(Debug, Clone, PartialEq)]
+struct TwoPassPlan {
+    complexity: Vec<f64>,
+    target: Vec<f64>,
+    debt: f64,
+    /// How many times its foretold bits (complexity over quantiser) a picture of this pass took, lately: coded
+    /// finer than in the first pass, a picture takes more than its complexity says. Pictures at the finest
+    /// quantiser are left out (their bits do not follow it).
+    scale: f64,
+}
+
+impl TwoPassPlan {
+    fn new(first: &[PictureStats], frame_bits: f64) -> Self {
+        let raw: Vec<f64> = first
+            .iter()
+            .map(|picture| (picture.bits as f64 * f64::from(picture.code)).max(1.0))
+            .collect();
+        let complexity: Vec<f64> = first
+            .iter()
+            .enumerate()
+            .map(|(index, picture)| {
+                let from = index.saturating_sub(PLAN_BLUR);
+                let (sum, count) = first
+                    .iter()
+                    .zip(&raw)
+                    .enumerate()
+                    .skip(from)
+                    .take(2 * PLAN_BLUR + 1)
+                    .filter(|(_, (other, _))| other.intra == picture.intra)
+                    .fold((0.0, 0.0), |(sum, count), (_, (_, value))| {
+                        (sum + value, count + 1.0)
+                    });
+                if count > 0.0 { sum / count } else { 1.0 }
+            })
+            .collect();
+        let weights: Vec<f64> = complexity
+            .iter()
+            .map(|complexity| complexity.powf(PLAN_COMPRESSION))
+            .collect();
+        // At most what a picture takes at the finest quantiser (2); what that leaves goes to the others.
+        let caps: Vec<f64> = complexity
+            .iter()
+            .map(|complexity| complexity / 2.0)
+            .collect();
+        // `as` is exact for a sequence's count of pictures.
+        let total = frame_bits * first.len() as f64;
+        let mut target = vec![frame_bits; first.len()];
+        let mut capped = vec![false; first.len()];
+        for _ in 0..8 {
+            let spent: f64 = target
+                .iter()
+                .zip(&capped)
+                .filter(|(_, capped)| **capped)
+                .map(|(target, _)| *target)
+                .sum();
+            let free: f64 = weights
+                .iter()
+                .zip(&capped)
+                .filter(|(_, capped)| !**capped)
+                .map(|(weight, _)| *weight)
+                .sum();
+            if !(free > 0.0 && free.is_finite()) {
+                break;
+            }
+            let share = (total - spent).max(0.0) / free;
+            let mut changed = false;
+            for (((target, capped), weight), cap) in target
+                .iter_mut()
+                .zip(capped.iter_mut())
+                .zip(&weights)
+                .zip(&caps)
+            {
+                if *capped {
+                    continue;
+                }
+                *target = share * weight;
+                if *target > *cap {
+                    *target = *cap;
+                    *capped = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        Self {
+            complexity,
+            target,
+            debt: 0.0,
+            scale: 1.0,
+        }
+    }
+
+    /// The quantiser_scale_code for picture `index`, aiming at its planned bits less its share of the debt and
+    /// leaving the VBV margin free of the `available` bits; `None` past the plan.
+    fn code(&self, index: usize, budget: Budget, available: u64) -> Option<u8> {
+        let complexity = *self.complexity.get(index)?;
+        let target = *self.target.get(index)?;
+        let payback = self.debt / (2.0 * budget.gop_frames.max(1.0));
+        let aimed = (target - payback).max(target * MIN_TARGET_SHARE);
+        let available = available as f64;
+        let room = (available - VBV_MARGIN * budget.vbv_bits).max(available / 2.0);
+        let aimed = aimed.min(room).max(1.0);
+        Some((complexity * self.scale / aimed).round().clamp(2.0, 31.0) as u8)
+    }
+
+    /// Notes that picture `index` took `bits` at `code`.
+    fn spent(&mut self, index: usize, bits: u64, code: u8) {
+        if let Some(target) = self.target.get(index) {
+            self.debt += bits as f64 - target;
+        }
+        if let Some(complexity) = self.complexity.get(index).filter(|_| code > 2) {
+            let foretold = complexity / f64::from(code);
+            if foretold > 0.0 {
+                let ratio = (bits as f64 / foretold).clamp(0.25, 4.0);
+                self.scale =
+                    (self.scale * (1.0 - SCALE_STEP) + ratio * SCALE_STEP).clamp(0.25, 4.0);
+            }
+        }
+    }
 }
 
 /// Picture-level rate control in the manner of MPEG-2 Test Model 5: each picture type has a complexity
@@ -253,6 +439,12 @@ impl Encoder {
             return Err(EncodeError("max_bitrate must be non-zero".to_string()));
         }
 
+        if config.pulldown && (config.standard != Standard::Ntsc || config.format != Format::Sd) {
+            return Err(EncodeError(
+                "3:2 pulldown is for an NTSC DVD's video only".to_string(),
+            ));
+        }
+
         let params = Params::of(config.format, config.standard);
         if config.max_bitrate > params.max_bitrate {
             return Err(EncodeError(format!(
@@ -272,7 +464,43 @@ impl Encoder {
             quant_p: FIRST_CODE,
             vbv_fullness: params.vbv_bits,
             rate: RateControl::default(),
+            plan: None,
+            last: None,
+            quality: BEST_QUALITY,
         })
+    }
+
+    /// Sets how hard motion is searched for, as Encore's quality (its "Low quality" presets' 2, "Long Form"
+    /// MPEG-2's 3, the others' 5; clamped to [`MIN_QUALITY`]..=[`BEST_QUALITY`]): a lower one searches a smaller
+    /// range (the full one times quality / 5, at least 4 pixels) and below 3 to whole pixels only. Faster, and
+    /// the pictures are a little worse at the same bit rate.
+    pub fn set_quality(&mut self, quality: u8) {
+        self.quality = quality.clamp(MIN_QUALITY, BEST_QUALITY);
+    }
+
+    /// The motion search range and whether vectors are refined to half a pixel, at the encoder's quality.
+    fn search(&self) -> (i32, bool) {
+        let full = self.params.search;
+        if self.quality >= BEST_QUALITY {
+            return (full, true);
+        }
+        let range = (full * i32::from(self.quality) / i32::from(BEST_QUALITY)).max(LEAST_SEARCH);
+        (range.min(full), self.quality >= 3)
+    }
+
+    /// Makes this encoder the second pass of two (VBR 2 pass): `first` is what a first pass over the same pictures
+    /// with the same configuration measured, one entry a picture ([`Encoder::last_picture`]). Each picture then
+    /// gets its share of the sequence's bits by its complexity; pictures past the plan fall back to the one-pass
+    /// rate control.
+    pub fn plan_second_pass(&mut self, first: &[PictureStats]) {
+        let frame_bits = self.budget().frame_bits;
+        self.plan = Some(TwoPassPlan::new(first, frame_bits));
+    }
+
+    /// What the last coded picture took (a first pass records it for each picture).
+    #[must_use]
+    pub fn last_picture(&self) -> Option<PictureStats> {
+        self.last
     }
 
     /// Encode one frame as one access unit, a closed GOP starting every `gop_size` frames.
@@ -292,9 +520,8 @@ impl Encoder {
     ) -> Result<Vec<u8>, EncodeError> {
         validate_frame(frame, self.params.coded)?;
 
-        let is_gop_start = start_gop
-            || self.frames_encoded == 0
-            || self.frames_in_gop >= max_gop_frames(self.config.standard);
+        let is_gop_start =
+            start_gop || self.frames_encoded == 0 || self.frames_in_gop >= self.max_gop();
         if is_gop_start {
             self.frames_in_gop = 0;
         }
@@ -313,7 +540,15 @@ impl Encoder {
             .min(self.params.vbv_bits);
         let budget = self.budget();
         let codes = (self.quant_i, self.quant_p);
-        let mut code = self.rate.code(picture_type, budget, fullness, codes);
+        let index = usize::try_from(self.frames_encoded).unwrap_or(usize::MAX);
+        let mut code = match self
+            .plan
+            .as_ref()
+            .and_then(|plan| plan.code(index, budget, fullness))
+        {
+            Some(code) => code,
+            None => self.rate.code(picture_type, budget, fullness, codes),
+        };
         let mut attempts = 0u32;
         let mut bits;
 
@@ -343,6 +578,14 @@ impl Encoder {
         self.vbv_fullness = fullness.saturating_sub(bits);
 
         self.rate.update(picture_type, bits, code, budget);
+        if let Some(plan) = self.plan.as_mut() {
+            plan.spent(index, bits, code);
+        }
+        self.last = Some(PictureStats {
+            bits,
+            code,
+            intra: picture_type == PictureType::I,
+        });
         match picture_type {
             PictureType::I => self.quant_i = code,
             PictureType::P => self.quant_p = code,
@@ -385,11 +628,45 @@ impl Encoder {
         }
     }
 
-    /// Seconds per picture: 1001/30000 (NTSC) or 1/25 (PAL).
+    /// The longest GOP, in pictures.
+    fn max_gop(&self) -> u64 {
+        if self.config.pulldown {
+            MAX_FILM_GOP_FRAMES
+        } else {
+            max_gop_frames(self.config.standard)
+        }
+    }
+
+    /// Seconds per picture: 1001/30000 (NTSC) or 1/25 (PAL); film's 1001/24000 on average (two and a half fields).
     fn frame_seconds(&self) -> f64 {
-        match self.config.standard {
-            Standard::Ntsc => 1001.0 / 30000.0,
-            Standard::Pal => 1.0 / 25.0,
+        match (self.config.standard, self.config.pulldown) {
+            (Standard::Ntsc, true) => 1001.0 / 24000.0,
+            (Standard::Ntsc, false) => 1001.0 / 30000.0,
+            (Standard::Pal, _) => 1.0 / 25.0,
+        }
+    }
+
+    /// The fields picture `index` is shown for: two, or three when pulldown repeats its first field.
+    fn picture_fields(&self, index: u64) -> u64 {
+        if self.config.pulldown && pulldown_flags(index).1 {
+            3
+        } else {
+            2
+        }
+    }
+
+    /// The pictures shown before picture `index`, counted in the sequence's frames (29.97 or 25 a second): film's
+    /// shown fields, two a frame.
+    fn shown_frames_before(&self, index: u64) -> u64 {
+        if self.config.pulldown {
+            // Ten fields every four pictures, then those of the pictures past the last four.
+            let whole = index / 4 * 10;
+            let rest: u64 = (index / 4 * 4..index)
+                .map(|picture| self.picture_fields(picture))
+                .sum();
+            (whole + rest) / 2
+        } else {
+            index
         }
     }
 
@@ -401,9 +678,16 @@ impl Encoder {
         }
     }
 
-    /// The bits the VBV buffer gains in one picture period, filling at the maximum bitrate.
+    /// The bits the VBV buffer gains in one picture period, filling at the maximum bitrate: film's picture before
+    /// this one was shown for two or three fields.
     fn fill_bits(&self) -> u64 {
-        ((f64::from(self.config.max_bitrate) * self.frame_seconds()) as u64).max(1)
+        let seconds = if self.config.pulldown {
+            let before = self.frames_encoded.saturating_sub(1);
+            self.picture_fields(before) as f64 * 1001.0 / 60000.0
+        } else {
+            self.frame_seconds()
+        };
+        ((f64::from(self.config.max_bitrate) * seconds) as u64).max(1)
     }
 
     fn encode_picture(
@@ -419,11 +703,20 @@ impl Encoder {
 
         if is_gop_start {
             self.write_sequence_headers(&mut writer);
-            write_gop_header(&mut writer, self.frames_encoded, self.fps());
+            write_gop_header(
+                &mut writer,
+                self.shown_frames_before(self.frames_encoded),
+                self.fps(),
+            );
         }
 
         write_picture_header(&mut writer, picture_type, temporal_reference);
-        write_picture_coding_extension(&mut writer, picture_type, self.params.f_code);
+        let fields = if self.config.pulldown {
+            pulldown_flags(self.frames_encoded)
+        } else {
+            (true, false)
+        };
+        write_picture_coding_extension(&mut writer, picture_type, self.params.f_code, fields);
 
         let qs = u16::from(code).saturating_mul(2);
 
@@ -437,11 +730,13 @@ impl Encoder {
         };
         let mut data = writer.finish();
         let workers = slice_workers(usize::from(frame.height) / 16);
+        let (search, half_pel) = self.search();
         let coding = Coding {
             code,
             qs,
             f_code: self.params.f_code,
-            search: self.params.search,
+            search,
+            half_pel,
         };
         encode_slices(frame, reference, &mut recon, (coding, workers), &mut data)?;
         Ok((data, recon))
@@ -503,6 +798,8 @@ struct Coding {
     f_code: u8,
     /// Motion search range, pixels.
     search: i32,
+    /// Whether vectors are refined to half a pixel.
+    half_pel: bool,
 }
 
 /// Encodes the picture's slices (one per macroblock row) into `out` and `recon`, the rows in bands on several
@@ -791,7 +1088,13 @@ fn write_picture_header(
     }
 }
 
-fn write_picture_coding_extension(writer: &mut BitWriter, picture_type: PictureType, f_code: u8) {
+/// The picture coding extension of a frame picture; `(top_field_first, repeat_first_field)` as it is shown.
+fn write_picture_coding_extension(
+    writer: &mut BitWriter,
+    picture_type: PictureType,
+    f_code: u8,
+    (top_field_first, repeat_first_field): (bool, bool),
+) {
     let (f00, f01) = match picture_type {
         PictureType::I => (15, 15),
         PictureType::P => (u32::from(f_code), u32::from(f_code)),
@@ -805,13 +1108,13 @@ fn write_picture_coding_extension(writer: &mut BitWriter, picture_type: PictureT
     writer.write_bits(15, 4);
     writer.write_bits(0, 2); // intra_dc_precision: 8 bits
     writer.write_bits(3, 2); // picture_structure: frame
-    writer.write_bits(1, 1); // top_field_first
+    writer.write_bits(u32::from(top_field_first), 1);
     writer.write_bits(1, 1); // frame_pred_frame_dct
     writer.write_bits(0, 1); // concealment_motion_vectors
     writer.write_bits(0, 1); // q_scale_type: linear
     writer.write_bits(1, 1); // intra_vlc_format: table one (B.15) for intra AC coefficients
     writer.write_bits(0, 1); // alternate_scan
-    writer.write_bits(0, 1); // repeat_first_field
+    writer.write_bits(u32::from(repeat_first_field), 1);
     writer.write_bits(1, 1); // chroma_420_type
     writer.write_bits(1, 1); // progressive_frame
     writer.write_bits(0, 1); // composite_display_flag
@@ -997,9 +1300,12 @@ fn encode_p_macroblock(
         coding.search,
         (*pmv_x / 2, *pmv_y / 2),
     );
-    // To half a pixel around the best whole-pixel vector.
-    let (mv_x, mv_y, sad) =
-        motion::refine_half(cur, reference, (x, y), (dx, dy, sad), coding.search);
+    // To half a pixel around the best whole-pixel vector (a low quality keeps whole pixels).
+    let (mv_x, mv_y, sad) = if coding.half_pel {
+        motion::refine_half(cur, reference, (x, y), (dx, dy, sad), coding.search)
+    } else {
+        (dx.saturating_mul(2), dy.saturating_mul(2), sad)
+    };
     let intra = motion::intra_cost(cur, x, y);
 
     if intra.saturating_add(512) < sad {
@@ -1479,6 +1785,7 @@ mod tests {
                 qs: 16,
                 f_code: 2,
                 search: 15,
+                half_pel: true,
             };
             encode_slices(frame, reference, &mut recon, (coding, workers), &mut out)
                 .map(|()| (out, recon))

@@ -52,7 +52,7 @@ impl Resolution {
     }
 }
 
-/// Video attributes: MPEG-2, 4:3 or 16:9, one of the DVD picture sizes.
+/// Video attributes: MPEG-2 (or MPEG-1, M6.350), 4:3 or 16:9, one of the DVD picture sizes.
 ///
 /// Byte 1 holds the source resolution in bits 5 to 3 (0 = 720x480/576, 1 = 704x480/576, 2 = 352x480/576,
 /// 3 = 352x240/288), between the line 21 flags (bits 7 and 6) and the letterboxed flag (bit 2), as the DVD-Video
@@ -66,27 +66,32 @@ pub struct VideoAttr {
     pub wide: bool,
     /// The picture size.
     pub resolution: Resolution,
+    /// MPEG-1 video (the coding mode bits 0 instead of MPEG-2's 1; 352x240 / 352x288, 4:3).
+    pub mpeg1: bool,
 }
 
 impl VideoAttr {
     /// Encode as the two-byte DVD video attribute field.
     pub fn to_bytes(&self) -> [u8; 2] {
         let standard = match self.standard {
-            Standard::Ntsc => 0x40,
-            Standard::Pal => 0x50,
+            Standard::Ntsc => 0x00,
+            Standard::Pal => 0x10,
         };
-        // byte 0: coding (MPEG-2) << 6 | standard << 4 | aspect << 2 | pan/scan disallowed << 1 | letterbox disallowed.
+        let coding = if self.mpeg1 { 0x00 } else { 0x40 };
+        // byte 0: coding (MPEG-1 0, MPEG-2 1) << 6 | standard << 4 | aspect << 2 | pan/scan disallowed << 1 | letterbox disallowed.
         // 16:9: no pan/scan vectors, letterbox allowed. 4:3: neither display conversion applies, both disallowed
         // (as Encore and other authoring tools write it).
         let aspect = if self.wide { 0x0C | 0x02 } else { 0x03 };
-        [standard | aspect, self.resolution.code() << 3]
+        [coding | standard | aspect, self.resolution.code() << 3]
     }
 
     /// Decode the two-byte DVD video attribute field, accepting only M2 values.
     pub fn from_bytes(b: [u8; 2]) -> Result<Self, IfoError> {
-        let standard = match b[0] & 0xF0 {
-            0x40 => Standard::Ntsc,
-            0x50 => Standard::Pal,
+        let (standard, mpeg1) = match b[0] & 0xF0 {
+            0x40 => (Standard::Ntsc, false),
+            0x50 => (Standard::Pal, false),
+            0x00 => (Standard::Ntsc, true),
+            0x10 => (Standard::Pal, true),
             _ => return Err(IfoError("unsupported video attributes".to_string())),
         };
         let wide = match b[0] & 0x0F {
@@ -108,6 +113,7 @@ impl VideoAttr {
             standard,
             wide,
             resolution,
+            mpeg1,
         })
     }
 }
@@ -117,6 +123,8 @@ impl VideoAttr {
 pub enum AudioCoding {
     /// AC-3.
     Ac3,
+    /// MPEG-1 audio (Layer II).
+    Mpeg1,
     /// LPCM.
     Lpcm,
     /// DTS.
@@ -132,6 +140,10 @@ pub struct AudioAttr {
     pub channels: u8,
     /// Optional two-byte ISO 639-1 language code.
     pub language: Option<[u8; 2]>,
+    /// LPCM word length in bits (16 or 24); 16 for the other codings.
+    pub bits: u8,
+    /// Sampling frequency in Hz (48000, or 96000 for LPCM).
+    pub sample_rate: u32,
 }
 
 impl AudioAttr {
@@ -139,6 +151,7 @@ impl AudioAttr {
     pub fn to_bytes(&self) -> [u8; 8] {
         let coding = match self.coding {
             AudioCoding::Ac3 => 0,
+            AudioCoding::Mpeg1 => 2,
             AudioCoding::Lpcm => 4,
             AudioCoding::Dts => 6,
         };
@@ -146,7 +159,10 @@ impl AudioAttr {
         let ch = self.channels.saturating_sub(1).min(7);
         let mut out = [0u8; 8];
         out[0] = (coding << 5) | (lang_type << 2);
-        out[1] = ch;
+        // Quantization (0: 16 bits, 2: 24) and sampling frequency (0: 48 kHz, 1: 96 kHz) above the channels.
+        let quant: u8 = if self.bits == 24 { 2 } else { 0 };
+        let rate: u8 = u8::from(self.sample_rate == 96_000);
+        out[1] = (quant << 6) | (rate << 4) | ch;
         if let Some(lang) = self.language {
             out[2] = lang[0];
             out[3] = lang[1];
@@ -161,6 +177,7 @@ impl AudioAttr {
         }
         let coding = match b[0] >> 5 {
             0 => AudioCoding::Ac3,
+            2 => AudioCoding::Mpeg1,
             4 => AudioCoding::Lpcm,
             6 => AudioCoding::Dts,
             _ => return Err(IfoError("unsupported audio coding".to_string())),
@@ -171,9 +188,16 @@ impl AudioAttr {
         }
         let quant = b[1] >> 6;
         let rate = (b[1] >> 4) & 0x03;
-        if quant != 0 || rate != 0 {
-            return Err(IfoError("unsupported audio quant/rate".to_string()));
-        }
+        let bits = match quant {
+            0 => 16,
+            2 if coding == AudioCoding::Lpcm => 24,
+            _ => return Err(IfoError("unsupported audio quantization".to_string())),
+        };
+        let sample_rate = match rate {
+            0 => 48_000,
+            1 if coding == AudioCoding::Lpcm => 96_000,
+            _ => return Err(IfoError("unsupported audio sampling rate".to_string())),
+        };
         let channels = (b[1] & 0x07) + 1;
         let language = if lang_type == 1 {
             Some([b[2], b[3]])
@@ -194,6 +218,8 @@ impl AudioAttr {
             coding,
             channels,
             language,
+            bits,
+            sample_rate,
         })
     }
 }

@@ -36,7 +36,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "ライブラリのボタンを配置",
         menu: &["ライブラリ"],
         shortcut: None,
-        params: r#"{"menu": id, "preset"?: string, "button"?: ButtonSpec, "label"?: string}"#,
+        params: r#"{"menu": id, "preset"?: string, "button"?: ButtonSpec, "label"?: string, "x"?: n, "y"?: n (the button's centre, frame pixels: where it was dropped)}"#,
         enabled: always_enabled,
         run: run_place,
         journal: true,
@@ -164,6 +164,26 @@ fn run_place(session: &mut Session, params: &Value) -> CommandResult {
         }
         _ => return Err("give exactly one of \"preset\" or \"button\"".to_string()),
     };
+    // Dropped on the menu viewer (Encore: dragging a Library item into a menu): centred where it was dropped,
+    // kept inside the frame.
+    let at = |name: &str| params.get(name).and_then(Value::as_u64);
+    if let (Some(x), Some(y)) = (at("x"), at("y")) {
+        let (width, height) = disccraft_project::frame_size(&session.project.settings);
+        if let Some(button) = session
+            .project
+            .menu_mut(menu)
+            .and_then(|found| found.buttons.get_mut(index))
+        {
+            let centre = |at: u64, size: u16, frame: u16| {
+                let at = i64::try_from(at).unwrap_or(i64::MAX);
+                let start = at.saturating_sub(i64::from(size) / 2);
+                let limit = i64::from(frame.saturating_sub(size));
+                u16::try_from(start.clamp(0, limit.max(0))).unwrap_or(0)
+            };
+            button.rect.x = centre(x, button.rect.w, width);
+            button.rect.y = centre(y, button.rect.h, height);
+        }
+    }
     let index = u64::try_from(index).map_err(|_| "button index is too large".to_string())?;
     Ok(object(&[("button", Value::from(index))]))
 }
@@ -253,6 +273,53 @@ mod tests {
         session.undo()?;
         session.undo()?;
         assert!(session.project.menus.is_empty());
+        Ok(())
+    }
+
+    /// M6.292: a Library button dropped on the menu viewer is centred where it was dropped, and kept inside the
+    /// frame near an edge.
+    #[test]
+    fn a_dropped_library_button_is_centred_where_it_fell() -> Result<(), Box<dyn Error>> {
+        let mut session = Session::new();
+        let created =
+            session.execute("library.newMenu", &json!({ "preset": "menu.plain-dark" }))?;
+        let menu = created.get("menu").and_then(Value::as_u64).ok_or("menu")?;
+        let rect = |session: &Session, index: u64| {
+            session
+                .project
+                .menus
+                .values()
+                .next()
+                .and_then(|menu| menu.buttons.get(usize::try_from(index).ok()?))
+                .map(|button| button.rect)
+        };
+        let placed = session.execute(
+            "library.place",
+            &json!({ "menu": menu, "preset": "button.small", "x": 300, "y": 200 }),
+        )?;
+        let index = placed
+            .get("button")
+            .and_then(Value::as_u64)
+            .ok_or("button")?;
+        let at = rect(&session, index).ok_or("rect")?;
+        assert_eq!(
+            (
+                u32::from(at.x) + u32::from(at.w) / 2,
+                u32::from(at.y) + u32::from(at.h) / 2
+            ),
+            (300, 200)
+        );
+        // At the corner of the frame it stays inside.
+        let placed = session.execute(
+            "library.place",
+            &json!({ "menu": menu, "preset": "button.small", "x": 719, "y": 0 }),
+        )?;
+        let index = placed
+            .get("button")
+            .and_then(Value::as_u64)
+            .ok_or("button")?;
+        let at = rect(&session, index).ok_or("rect")?;
+        assert_eq!((u32::from(at.x) + u32::from(at.w), at.y), (720, 0));
         Ok(())
     }
 

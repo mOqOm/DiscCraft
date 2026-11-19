@@ -1283,6 +1283,7 @@ mod tests {
                 standard: Standard::Ntsc,
                 wide: false,
                 resolution: crate::Resolution::Full,
+                mpeg1: false,
             },
             first_play: Pgc {
                 prohibited_ops: 0,
@@ -1369,6 +1370,8 @@ mod tests {
                 coding: AudioCoding::Lpcm,
                 channels: 2,
                 language: None,
+                bits: 16,
+                sample_rate: 48_000,
             });
         }
         let data = write_vmgi(&v)?;

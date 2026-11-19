@@ -107,6 +107,9 @@ pub(crate) fn options(video: BdVideo, (target_kbps, max_kbps): (u32, u32)) -> Op
         target_kbps,
         max_kbps,
         codec,
+        quality: disccraft_transcode::BEST_QUALITY,
+        rendering: disccraft_transcode::Rendering::default(),
+        mode: disccraft_transcode::RateMode::Vbr,
     })
 }
 
@@ -221,9 +224,35 @@ impl HdTitle {
     }
 }
 
+/// The HD format `title` is made in: a timeline's its video's own (M6.325) or the project's, a slideshow's the
+/// project's.
+pub(crate) fn title_video(project: &Project, title: &TitleStreams) -> BdVideo {
+    match title.source {
+        TitleSource::Timeline(id) => project
+            .timelines
+            .get(&TimelineId(id))
+            .map_or(project.settings.bd_video, |timeline| {
+                project.title_bd_video(timeline)
+            }),
+        TitleSource::Slideshow(_) => project.settings.bd_video,
+    }
+}
+
+/// The rates (target and peak, kilobits per second) `title` is encoded at from the project's `budget`: those of
+/// its format's codec ([`disccraft_dvd::HdBudget::rates_for`]); nothing without a budget.
+pub(crate) fn title_rates(
+    project: &Project,
+    title: &TitleStreams,
+    budget: Option<&disccraft_dvd::HdBudget>,
+) -> (u32, u32) {
+    budget.map_or((0, 0), |budget| {
+        budget.rates_for(title_video(project, title))
+    })
+}
+
 /// The HD video of `title` when the disc's titles are HD: a timeline's video or a slideshow's pictures, encoded
-/// once at `rates` (target and peak, kilobits per second: `disccraft_dvd::hd_budget`) and kept in `cache_dir` (a
-/// timeline's by the video file, its size and time, the format and the rates).
+/// once at `rates` (target and peak, kilobits per second: [`title_rates`]) in its format ([`title_video`]) and kept
+/// in `cache_dir` (a timeline's by the video file, its size and time, the format and the rates).
 pub(crate) fn hd_title(
     project: &Project,
     title: &TitleStreams,
@@ -231,8 +260,9 @@ pub(crate) fn hd_title(
     rates: (u32, u32),
     progress: &mut dyn FnMut(&str, f32),
 ) -> Result<Option<HdTitle>, BdError> {
-    let video = project.settings.bd_video;
+    let video = title_video(project, title);
     let video_format = video;
+    let format_id = video.id();
     let Some(options) = options(video, rates) else {
         return Ok(None);
     };
@@ -304,23 +334,25 @@ pub(crate) fn hd_title(
             parts.push(black_part(
                 cache_dir,
                 gap_frames(gap, standard_rate, (fps_num, fps_den)),
-                project.settings.bd_video.id(),
+                format_id,
                 &options,
             )?);
         }
-        // A Blu-ray's own H.264 (in an .m2ts or .mkv) that fits the disc goes on it as it is (a clip used whole);
-        // anything else is encoded. On a disc whose encoded video is MPEG-2 (1080i), only a title of that one
-        // clip: H.264 and MPEG-2 do not join into one stream.
+        // A Blu-ray's own H.264 (in an .m2ts, .mkv or .mp4) that fits the disc goes on it as it is: a clip used
+        // whole, or trimmed at its key pictures. Anything else is encoded. On a disc whose encoded video is
+        // MPEG-2 (1080i), only a title of that one clip: H.264 and MPEG-2 do not join into one stream.
         let whole = trim.start == 0 && trim.end.is_none();
         let alone = videos.len() == 1 && gap == 0;
-        let passthrough = if whole && (options.codec == HdCodec::H264 || alone) {
+        // A Blu-ray preset of its own transcodes it all the same (Encore's preset picked for a compliant asset).
+        let forced = asset.bluray_transcode.is_some();
+        let format = disccraft_dvd::BdVideoFormat {
+            width,
+            height,
+            rate: (fps_num, fps_den),
+            interlaced: video_format.interlaced(),
+        };
+        let passthrough = if (options.codec == HdCodec::H264 || alone) && !forced {
             let label = format!("HD: {}", asset.name);
-            let format = disccraft_dvd::BdVideoFormat {
-                width,
-                height,
-                rate: (fps_num, fps_den),
-                interlaced: video_format.interlaced(),
-            };
             disccraft_dvd::demux_h264_for_bd(source, cache_dir, format, &mut |fraction| {
                 progress(&label, fraction);
             })
@@ -328,8 +360,42 @@ pub(crate) fn hd_title(
         } else {
             None
         };
-        if passthrough.is_some() {
-            title_codec = HdCodec::H264;
+        // HD MPEG-2 in a transport stream (HDV, a broadcast recording: M10.22) goes on the disc as it is too,
+        // as the only clip of its title, used whole (its sequence does not join with another's).
+        let passthrough = match passthrough {
+            None if alone && whole && !forced => {
+                disccraft_dvd::demux_mpeg2_for_bd(source, cache_dir, format)
+                    .map_err(|error| BdError::Prepare(error.to_string()))?
+            }
+            other => other,
+        };
+        // A trimmed clip: the pictures between its in and out points, when the stream can be cut there.
+        let passthrough = match passthrough {
+            Some(found) if !whole => {
+                match found
+                    .trimmed(trim, standard_rate)
+                    .map_err(|error| BdError::Prepare(error.to_string()))?
+                {
+                    Some(disccraft_dvd::TrimmedPassthrough::Samples(samples)) => {
+                        let units = samples.units().to_vec();
+                        parts.push((HdSource::Samples(std::sync::Arc::new(samples)), units));
+                        title_codec = HdCodec::H264;
+                        continue;
+                    }
+                    Some(disccraft_dvd::TrimmedPassthrough::Stream { es, units }) => {
+                        parts.push((HdSource::File(es), units));
+                        title_codec = HdCodec::H264;
+                        continue;
+                    }
+                    None => None,
+                }
+            }
+            other => other,
+        };
+        match &passthrough {
+            Some(disccraft_dvd::Passthrough::Mpeg2 { .. }) => title_codec = HdCodec::Mpeg2,
+            Some(_) => title_codec = HdCodec::H264,
+            None => {}
         }
         let (es, index) = match passthrough {
             Some(disccraft_dvd::Passthrough::Samples(samples)) => {
@@ -337,13 +403,28 @@ pub(crate) fn hd_title(
                 parts.push((HdSource::Samples(std::sync::Arc::new(samples)), units));
                 continue;
             }
-            Some(disccraft_dvd::Passthrough::Stream { es, index }) => (es, index),
+            Some(
+                disccraft_dvd::Passthrough::Stream { es, index }
+                | disccraft_dvd::Passthrough::Mpeg2 { es, index },
+            ) => (es, index),
             None => cached_paths(
                 cache_dir,
                 source,
-                (project.settings.bd_video.id(), rates),
+                (format_id, clip_rates(asset, rates), clip_coding(asset)),
                 trim,
             )?,
+        };
+        // The clip's own bit rate (M6.251), when its asset has one.
+        let options = {
+            let (target_kbps, max_kbps) = clip_rates(asset, rates);
+            HdOptions {
+                target_kbps,
+                max_kbps,
+                quality: clip_quality(asset),
+                rendering: clip_rendering(asset),
+                mode: clip_mode(asset),
+                ..options.clone()
+            }
         };
         if !(es.is_file() && index.is_file()) {
             std::fs::create_dir_all(cache_dir).map_err(|error| io_error(cache_dir, error))?;
@@ -393,6 +474,75 @@ pub(crate) fn hd_title(
         rate: (fps_num, fps_den),
         subtitles,
     }))
+}
+
+/// How hard a clip of `asset` is searched for motion when it is encoded as MPEG-2 (M6.326): its own Blu-ray
+/// preset's quality (Encore's "Long Form" MPEG-2's 3), else the best.
+fn clip_quality(asset: &disccraft_project::Asset) -> u8 {
+    asset
+        .bluray_transcode
+        .as_ref()
+        .map_or(disccraft_transcode::BEST_QUALITY, |setting| {
+            setting.quality.clamp(
+                disccraft_project::MIN_QUALITY,
+                disccraft_project::BEST_QUALITY,
+            )
+        })
+}
+
+/// How a clip of `asset` makes its pictures (M6.327): Encore's rendering checkboxes.
+fn clip_rendering(asset: &disccraft_project::Asset) -> disccraft_transcode::Rendering {
+    disccraft_transcode::Rendering {
+        max_quality: asset.max_render_quality,
+        frame_blend: asset.frame_blend,
+    }
+}
+
+/// How a clip of `asset` keeps its rate (M6.328): its own Blu-ray setting's way (Encore's presets: one-pass VBR).
+fn clip_mode(asset: &disccraft_project::Asset) -> disccraft_transcode::RateMode {
+    use disccraft_project::TranscodeMode;
+    use disccraft_transcode::RateMode;
+    match asset
+        .bluray_transcode
+        .as_ref()
+        .map(|setting| setting.mode)
+        .unwrap_or_default()
+    {
+        TranscodeMode::Vbr => RateMode::Vbr,
+        TranscodeMode::Vbr2Pass => RateMode::Vbr2Pass,
+        TranscodeMode::Cbr => RateMode::Cbr,
+    }
+}
+
+/// What besides the format and rates makes a clip's encode another one: its quality, rendering and way of keeping
+/// the rate.
+fn clip_coding(asset: &disccraft_project::Asset) -> ClipCoding {
+    (clip_quality(asset), clip_rendering(asset), clip_mode(asset))
+}
+
+/// A clip's quality, rendering and way of keeping the rate ([`clip_coding`]).
+type ClipCoding = (
+    u8,
+    disccraft_transcode::Rendering,
+    disccraft_transcode::RateMode,
+);
+
+/// The target and peak bit rates (kbit/s) a clip of `asset` is encoded at: the asset's own Blu-ray transcode
+/// setting (Encore's Blu-ray quality preset: its target and peak), else the disc's `rates`.
+fn clip_rates(asset: &disccraft_project::Asset, rates: (u32, u32)) -> (u32, u32) {
+    match &asset.bluray_transcode {
+        Some(setting) => {
+            let kbps = setting.kbps.clamp(
+                disccraft_project::MIN_TRANSCODE_KBPS,
+                disccraft_project::MAX_TRANSCODE_KBPS,
+            );
+            let peak = setting
+                .max_kbps
+                .clamp(kbps, disccraft_project::MAX_TRANSCODE_KBPS);
+            (kbps, peak)
+        }
+        None => rates,
+    }
 }
 
 /// A gap of `gap` frames of the disc's standard rate, as frames of the HD rate (the nearest count, at least one).
@@ -535,7 +685,22 @@ pub(crate) fn hd_transcoded(
     let Ok(Some(budget)) = disccraft_dvd::hd_budget(project) else {
         return false;
     };
-    let rates = (budget.target_kbps, budget.max_kbps);
+    // In its own format (M6.325), at that format's rates.
+    let format = project.asset_bd_video(asset);
+    let rates = budget.rates_for(format);
+    // At the asset's own bit rate, when it has one.
+    let rates = project
+        .assets
+        .get(&asset)
+        .map_or(rates, |found| clip_rates(found, rates));
+    let coding = project.assets.get(&asset).map_or(
+        (
+            disccraft_transcode::BEST_QUALITY,
+            Default::default(),
+            Default::default(),
+        ),
+        clip_coding,
+    );
     let Some(media) = project.assets.get(&asset).map(|asset| asset.media_file()) else {
         return false;
     };
@@ -550,7 +715,7 @@ pub(crate) fn hd_transcoded(
             let cached = cached_paths(
                 cache_dir,
                 source,
-                (project.settings.bd_video.id(), rates),
+                (format.id(), rates, coding),
                 timeline.video_trim(clip),
             )
             .is_ok_and(|(es, index)| es.is_file() && index.is_file());
@@ -572,7 +737,21 @@ pub(crate) fn revert_hd(
     let Ok(Some(budget)) = disccraft_dvd::hd_budget(project) else {
         return 0;
     };
-    let rates = (budget.target_kbps, budget.max_kbps);
+    let format = project.asset_bd_video(asset);
+    let rates = budget.rates_for(format);
+    // At the asset's own bit rate, when it has one.
+    let rates = project
+        .assets
+        .get(&asset)
+        .map_or(rates, |found| clip_rates(found, rates));
+    let coding = project.assets.get(&asset).map_or(
+        (
+            disccraft_transcode::BEST_QUALITY,
+            Default::default(),
+            Default::default(),
+        ),
+        clip_coding,
+    );
     let Some(media) = project.assets.get(&asset).map(|asset| asset.media_file()) else {
         return 0;
     };
@@ -586,7 +765,7 @@ pub(crate) fn revert_hd(
             let Ok((es, index)) = cached_paths(
                 cache_dir,
                 source,
-                (project.settings.bd_video.id(), rates),
+                (format.id(), rates, coding),
                 timeline.video_trim(clip),
             ) else {
                 continue;
@@ -605,7 +784,7 @@ pub(crate) fn revert_hd(
 fn cached_paths(
     cache_dir: &Path,
     source: &Path,
-    (format, rates): (&str, (u32, u32)),
+    (format, rates, (quality, rendering, mode)): (&str, (u32, u32), ClipCoding),
     trim: disccraft_project::ClipTrim,
 ) -> Result<(PathBuf, PathBuf), BdError> {
     let metadata =
@@ -624,10 +803,33 @@ fn cached_paths(
         trim.start.hash(&mut hasher);
         trim.end.hash(&mut hasher);
     }
+    // Interpret Footage: pixels of another shape make another picture.
+    if let Some(aspect) = disccraft_transcode::chosen_pixel_aspect(source) {
+        "par".hash(&mut hasher);
+        aspect.hash(&mut hasher);
+    }
     // The encode's version (2: frame counts round to the nearest frame).
     2u8.hash(&mut hasher);
     rates.0.hash(&mut hasher);
     rates.1.hash(&mut hasher);
+    // A lower quality makes another MPEG-2 stream (the best leaves the keys as they were).
+    if quality != disccraft_transcode::BEST_QUALITY {
+        "quality".hash(&mut hasher);
+        quality.hash(&mut hasher);
+    }
+    // So do Encore's rendering checkboxes (both off leaves the keys as they were).
+    if rendering.max_quality {
+        "max-render-quality".hash(&mut hasher);
+    }
+    if rendering.frame_blend {
+        "frame-blend".hash(&mut hasher);
+    }
+    // So do two passes or a constant rate (one-pass VBR leaves the keys as they were).
+    match mode {
+        disccraft_transcode::RateMode::Vbr => {}
+        disccraft_transcode::RateMode::Vbr2Pass => "vbr2pass".hash(&mut hasher),
+        disccraft_transcode::RateMode::Cbr => "cbr".hash(&mut hasher),
+    }
     let key = hasher.finish();
     Ok((
         cache_dir.join(format!("hd-{key:016x}.h264")),

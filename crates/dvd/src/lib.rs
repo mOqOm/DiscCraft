@@ -15,17 +15,22 @@ pub use thumbnails::{ThumbnailFrame, still_thumbnails};
 mod demux;
 mod demux_mkv;
 mod demux_mp4;
-mod h264_sps;
+mod h264_cut;
 mod output;
 mod prepare;
 mod preview;
 mod sup;
 mod vobsub;
-pub use demux::{BdVideoFormat, Passthrough, demux_h264_for_bd, h264_fits_bd};
+pub use demux::{
+    BdVideoFormat, Passthrough, demux_h264_for_bd, demux_mpeg2_for_bd, demux_video_for_bd,
+    h264_fits_bd, mpeg2_fits_bd, video_fits_bd,
+};
 pub use demux_mkv::H264Samples;
+pub use h264_cut::{CutPoints, TrimmedPassthrough, bd_cut_points};
 pub use prepare::{
     Estimate, HdBudget, TimelineRate, TranscodeStatus, encode_hd_slideshow, estimate, hd_budget,
-    hd_default_kbps, timeline_rates, transcode_status,
+    hd_default_kbps, timeline_rates, transcode_status, video_fits_as_is, video_fits_bluray_as,
+    video_fits_disc,
 };
 pub use sup::PgSegment;
 
@@ -37,6 +42,18 @@ pub use streams::{
     load_title_streams_for_hd, slide_subtitles_sized, subtitle_tracks_sized,
 };
 mod parallel;
+pub use parallel::set_parallel_transcodes;
+
+/// Asks the running transcodes to stop, lets them run again, and what a stopped one says: see
+/// `disccraft_transcode::request_stop`.
+pub use disccraft_transcode::{STOPPED, clear_stop, request_stop, stop_requested};
+
+/// Tells the media reader what `project` chose for its files' pictures (Interpret Footage: a pixel aspect ratio
+/// of the project's choosing), before the project is built, transcoded or asked for its transcode status. The
+/// engine does the same for a project that is open.
+pub fn sync_media_choices(project: &Project) {
+    disccraft_transcode::set_pixel_aspects(project.pixel_aspects());
+}
 
 /// UOP0, Time play / Time search: prohibited in the first play PGC and in menus (it means nothing there), as
 /// Encore writes them.
@@ -211,6 +228,15 @@ pub fn region_mask(regions: &[u8]) -> u8 {
     mask
 }
 
+/// Progress panel ▸ Stop while the titles are multiplexed: the build ends before the next title set is written
+/// (one that is being written is finished first).
+fn stop_between_titles() -> Result<(), DvdError> {
+    if stop_requested() {
+        return Err(DvdError::Unsupported(STOPPED.to_string()));
+    }
+    Ok(())
+}
+
 /// Build a DVD-Video folder from a project.
 ///
 /// # Errors
@@ -244,7 +270,26 @@ pub fn transcode_now(
     prepare::prepare_all_of(project, cache_dir, &budget, progress, true, only)
 }
 
+pub use disccraft_transcode::slideshow::Motion as SlideMotion;
+pub use menus::{render_motion_menus, rendered_motion_menu};
+pub use prepare::slide_motion;
 pub use prepare::{revert_transcodes, undecodable_videos};
+
+/// File ▸ Render ▸ Slideshow: transcodes the slideshows (`only`: one of them) into `cache_dir`, at the rate the
+/// whole project gives them, so a build with that cache takes them as they are. Returns how many.
+///
+/// # Errors
+///
+/// When a slideshow's pictures or sound cannot be read or encoded, or the cache cannot be written.
+pub fn render_slideshows(
+    project: &Project,
+    cache_dir: &Path,
+    only: Option<u64>,
+    progress: &mut dyn FnMut(&str, f32),
+) -> Result<usize, DvdError> {
+    let budget = prepare::budget(project)?;
+    prepare::prepare_slideshows(project, cache_dir, &budget, progress, only)
+}
 
 /// Whether `timeline` plays `asset` (a video clip or an audio track).
 #[must_use]
@@ -456,6 +501,7 @@ fn build_timeline_titles(
             .iter()
             .filter(|extra| extra.timeline == timeline.id)
             .collect();
+        stop_between_titles()?;
         let built = vts::build_title_set(&loaded, video_ts, vts, standard, title_nav, &extras)?;
 
         let start = record_built(
@@ -527,6 +573,7 @@ fn build_slideshow_titles(
         let loaded =
             load_slideshow_title(project, slideshow, project.settings.standard, &prepared)?;
         let title_nav = slideshow_title_nav(nav, id)?;
+        stop_between_titles()?;
         let built = vts::build_title_set(&loaded, video_ts, vts, standard, &title_nav, &[])?;
 
         let _ = record_built(
@@ -685,6 +732,7 @@ pub(crate) fn load_slideshow_title(
                     end: Tick(at),
                     text: name,
                     look: disccraft_project::CueLook::default(),
+                    image: None,
                 };
                 units.push(source::subtitle_unit_styled(
                     &cue,
@@ -713,8 +761,13 @@ pub(crate) fn load_slideshow_title(
         subpictures,
         subtitle_languages,
         palette: source::subtitle_palette(&slide_colors),
-        // 手動で進める: 各スライドのセルを無限の静止にして、リモコンの次へ / 決定で進む。
-        cell_still: if slideshow.manual_advance { 0xFF } else { 0 },
+        // 手動で進める: そのスライドのセルを無限の静止にして、リモコンの次へ / 決定で進む（スライドショー全体か、
+        // スライドごと）。
+        cell_stills: slideshow
+            .held_slides()
+            .into_iter()
+            .map(|held| if held { 0xFF } else { 0 })
+            .collect(),
     })
 }
 
@@ -899,6 +952,10 @@ pub fn passthrough_chapter_problems(project: &Project) -> Vec<String> {
             continue;
         };
         let path = Path::new(asset.path.as_str());
+        // Transcoded all the same (a DVD preset of its own): its chapters get GOPs of their own.
+        if !prepare::passes_through(project, path) {
+            continue;
+        }
         // A raw elementary stream is scanned; a program or transport stream's index already has its GOPs.
         let gops = if prepare::is_passthrough(path, project.settings.standard) {
             match disccraft_transcode::mpeg2_gop_starts(path) {

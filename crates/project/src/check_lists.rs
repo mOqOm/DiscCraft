@@ -93,7 +93,23 @@ fn check_chapter_playlist(
             format!("chapter playlist {id} has no entries"),
         ));
     }
+    // Encore's 再生の種類 check (M6.337): a DVD's random and shuffle play hold the number of programs in six bits,
+    // so only the first 64 entries take part (Encore itself plays them in order on a DVD and says so).
+    if project.settings.kind == DiscKind::Dvd
+        && playlist.order != crate::chapter_playlist::PlaybackOrder::Sequential
+        && playlist.chapters.len() > MAX_DVD_RANDOM_ENTRIES
+    {
+        problems.push(warning(
+            "playbackType",
+            format!(
+                "chapter playlist {id} plays at random from its first {MAX_DVD_RANDOM_ENTRIES} entries only on a DVD"
+            ),
+        ));
+    }
 }
+
+/// The most entries a DVD's random or shuffle play picks from.
+const MAX_DVD_RANDOM_ENTRIES: usize = 64;
 
 fn check_slideshow(project: &Project, id: u64, slideshow: &Slideshow, problems: &mut Vec<Problem>) {
     check_slideshow_id(id, slideshow, project.next_id, problems);
@@ -578,6 +594,7 @@ mod tests {
                 subtitle_align: 100,
                 subtitle_group: 0,
                 effect: None,
+                manual_advance: false,
             });
 
         let problems = problems_for(&project);
@@ -609,6 +626,7 @@ mod tests {
                 subtitle_align: 100,
                 subtitle_group: 0,
                 effect: None,
+                manual_advance: false,
             });
 
         let problems = problems_for(&project);
@@ -640,6 +658,7 @@ mod tests {
                 subtitle_align: 100,
                 subtitle_group: 0,
                 effect: None,
+                manual_advance: false,
             });
 
         let problems = problems_for(&project);
@@ -741,6 +760,38 @@ mod tests {
         let problems = problems_for(&project);
         assert!(has_warning_code(&problems, "emptyPlaylist"));
 
+        Ok(())
+    }
+
+    /// M6.337: a DVD's random or shuffle chapter playlist with more than 64 entries plays only the first 64; a
+    /// Blu-ray's, or one in order, is fine.
+    #[test]
+    fn random_play_of_more_than_64_entries_on_a_dvd_is_reported() -> Result<(), Box<dyn Error>> {
+        let mut project = Project::default();
+        project.settings.kind = DiscKind::Dvd;
+        let video = project.add_asset(Path::new("movie.mp4"))?;
+        let timeline = project.add_timeline(video, None)?;
+        let list = project.add_chapter_playlist(timeline, None)?;
+        let playlist = project
+            .chapter_playlist_mut(list)
+            .ok_or("missing chapter playlist")?;
+        playlist.chapters = vec![0; 65];
+        playlist.order = crate::chapter_playlist::PlaybackOrder::Shuffle;
+        assert!(has_warning_code(&problems_for(&project), "playbackType"));
+        if let Some(playlist) = project.chapter_playlist_mut(list) {
+            playlist.chapters.truncate(64);
+        }
+        assert!(!has_warning_code(&problems_for(&project), "playbackType"));
+        if let Some(playlist) = project.chapter_playlist_mut(list) {
+            playlist.chapters = vec![0; 65];
+            playlist.order = crate::chapter_playlist::PlaybackOrder::Sequential;
+        }
+        assert!(!has_warning_code(&problems_for(&project), "playbackType"));
+        project.settings.kind = DiscKind::BluRay;
+        if let Some(playlist) = project.chapter_playlist_mut(list) {
+            playlist.order = crate::chapter_playlist::PlaybackOrder::Random;
+        }
+        assert!(!has_warning_code(&problems_for(&project), "playbackType"));
         Ok(())
     }
 

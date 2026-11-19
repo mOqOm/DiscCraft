@@ -57,7 +57,8 @@ In development (0.1.0). What works now:
 
 What works today:
 
-- DVD: MPEG-2 / LPCM / AC-3 passthrough and re-encoding to MPEG-2, VIDEO_TS folders and ISO images (dual-layer layer break)
+- DVD: MPEG-2 (720 / 704 / 352 wide) / MPEG-1 / LPCM (up to 96 kHz, 24-bit) / AC-3 / DTS / MPEG-1 Layer II (PAL) passthrough and
+  re-encoding to MPEG-2, VIDEO_TS folders and ISO images (dual-layer layer break)
 - DVD: titles (including a timeline built from several video clips), chapters, multiple audio tracks, subtitles, 16:9,
   region codes, playlists and chapter playlists
 - Blu-ray: BDMV folders and ISO images, PG subtitles, IG menus (HDMV; always-on and popup menus, motion menus), user
@@ -65,7 +66,8 @@ What works today:
   720p 59.94 / 50 / 23.976 / 24 as H.264, 1080i 59.94 / 50 as MPEG-2; titles, subtitles and menus and popups are at the HD size too.
   Sources at 29.97 / 25 fps become HD at their own speed as 1080i 59.94 / 50. H.264 in an `.m2ts` / `.mkv` / `.mp4` / `.mov` that fits a
   Blu-ray, interlaced 1080i included, goes on the disc as it is, without conversion. An mkv / mp4 / mov is written to the disc
-  straight from the source file, so no working space the size of the video is needed)
+  straight from the source file, so no working space the size of the video is needed). Audio goes on as it is as LPCM (up to
+  7.1 and 192 kHz, 24-bit), AC-3 or DTS
 - Menus: still menus, buttons and highlights, motion menus, timeouts (duration and end action), auto-activate, PSD import with
   button detection from layer names, chapter index
 - Sources: video (MP4 / MOV / MKV / m2v and more), audio (WAV / AC-3 / MP3 / FLAC and more), images (PNG / JPEG / PSD / TIFF),
@@ -84,12 +86,21 @@ What works today:
 Rust stable 1.95 or newer (rustup). Windows comes first; macOS and Linux are also targets. On Linux, playback audio (cpal) needs
 the ALSA development packages (`libasound2-dev` on Debian / Ubuntu, `alsa-lib-devel` on Fedora).
 
-Besides Windows (x64), the releases carry builds for Linux (`tar.gz` for x86_64 and aarch64) and macOS (a `zip` with Apple
-silicon and Intel in one). **The Linux and macOS builds have not been verified**: they are built automatically on GitHub's
-runners and nothing more; nobody has opened their window or checked a disc they made. Only Windows is verified. The macOS
-build is neither signed nor notarized, so Gatekeeper stops it the first time (open it from the right-click menu, or remove the
-mark with `xattr -d com.apple.quarantine`). Running the Linux build needs ALSA (`libasound2`) and the X11 or Wayland libraries.
-Reports of what works and what does not are welcome.
+The releases carry packages built on GitHub's runners:
+
+| System | Files |
+|---|---|
+| Windows (x64, Arm64) | `.msi` installer, `-portable.zip` (nothing installed) |
+| macOS (Apple silicon and Intel in one) | `.dmg` (DiscCraft.app), `disccraft-cli-…-macos-universal.zip` (the command line) |
+| Linux (x86_64, aarch64) | `.AppImage` (with `.zsync` for updates), `.flatpak`, `.deb`, `.rpm`, `.pkg.tar.zst` (Arch), `.tar.gz` |
+| Linux (riscv64) | `.deb`, `.rpm`, `.tar.gz` |
+
+**Only the Windows x64 build is verified.** The others are built and packaged automatically and nothing more; nobody has
+opened their window or checked a disc they made. Nothing is signed with a developer certificate: Windows SmartScreen asks
+before the installer first runs, and macOS Gatekeeper stops the app the first time (open it from the right-click menu, or
+remove the mark with `xattr -d com.apple.quarantine`). The Linux packages need ALSA (`libasound2`) and the X11 or Wayland
+libraries; the AppImage starts the command line with `disccraft-cli` as its first argument. Reports of what works and what
+does not are welcome.
 
 ## Building and usage
 

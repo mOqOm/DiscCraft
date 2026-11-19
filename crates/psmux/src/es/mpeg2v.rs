@@ -21,6 +21,15 @@ pub struct SequenceInfo {
     pub profile_level: u8,
 }
 
+impl SequenceInfo {
+    /// Whether the stream is MPEG-1 video (M6.350): its sequence header has no sequence extension, so no profile
+    /// and level.
+    #[must_use]
+    pub fn is_mpeg1(&self) -> bool {
+        self.profile_level == 0
+    }
+}
+
 /// MPEG-2 picture coding type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PictureType {

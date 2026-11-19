@@ -142,6 +142,16 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "disc.setParentalLevel",
+        label: "視聴制限レベルを設定",
+        menu: &["ディスク"],
+        shortcut: None,
+        params: r#"{"level": 0..8}"#,
+        enabled: always_enabled,
+        run: run_set_parental_level,
+        journal: true,
+    },
+    CommandSpec {
         id: "disc.setRegions",
         label: "リージョンを設定",
         menu: &["ディスク"],
@@ -365,8 +375,29 @@ fn run_set_capacity(session: &mut Session, params: &Value) -> CommandResult {
     let value = req_value(params, "capacity")?;
     let capacity: Capacity = serde_json::from_value(value.clone())
         .map_err(|error| format!("parameter \"capacity\" must be a valid capacity: {error}"))?;
+    // Encore's Size ▸ Custom: within what the disc kind holds (a larger DVD is DVD9).
+    if let Capacity::Custom { bytes } = capacity {
+        let range = Capacity::custom_range(session.project.settings.kind);
+        if !range.contains(&bytes) {
+            return Err(format!(
+                "a custom capacity must be between {} and {} bytes on this disc",
+                range.start(),
+                range.end()
+            ));
+        }
+    }
 
     session.project.settings.capacity = capacity;
+    Ok(empty_object())
+}
+
+fn run_set_parental_level(session: &mut Session, params: &Value) -> CommandResult {
+    let level = req_value(params, "level")?
+        .as_u64()
+        .and_then(|level| u8::try_from(level).ok())
+        .filter(|level| *level <= 8)
+        .ok_or_else(|| "parameter \"level\" must be between 0 (none) and 8".to_string())?;
+    session.project.settings.parental_level = level;
     Ok(empty_object())
 }
 
@@ -597,6 +628,42 @@ mod tests {
             Some(folder.as_str())
         );
         let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M6.295: Encore's Size ▸ Custom: a size of one's own, from 1 MB to what the disc kind holds in one layer
+    /// (a DVD) or four (a BDXL); undone like the others.
+    #[test]
+    fn a_custom_capacity_is_within_what_the_disc_holds() -> Result<(), Box<dyn Error>> {
+        let mut session = Session::new();
+        let custom = |bytes: u64| json!({"capacity": {"custom": {"bytes": bytes}}});
+        session.execute("disc.setCapacity", &custom(1_400_000_000))?;
+        assert_eq!(
+            session.project.settings.capacity,
+            disccraft_project::Capacity::Custom {
+                bytes: 1_400_000_000
+            }
+        );
+        // More than a single-layer DVD is DVD9; nothing is no disc.
+        assert!(
+            session
+                .execute("disc.setCapacity", &custom(5_000_000_000))
+                .is_err()
+        );
+        assert!(session.execute("disc.setCapacity", &custom(0)).is_err());
+        session.execute("edit.undo", &json!({}))?;
+        assert_eq!(
+            session.project.settings.capacity,
+            disccraft_project::Capacity::Dvd5
+        );
+        // A Blu-ray holds more.
+        session.execute("disc.setKind", &json!({"kind": "bluRay"}))?;
+        session.execute("disc.setCapacity", &custom(5_000_000_000))?;
+        assert!(
+            session
+                .execute("disc.setCapacity", &custom(200_000_000_000))
+                .is_err()
+        );
         Ok(())
     }
 

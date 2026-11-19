@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=DiscCraft
+GenericName=Disc Authoring
+GenericName[ja]=ディスクオーサリング
+Comment=Author DVDs and Blu-ray discs with menus, chapters and subtitles
+Comment[ja]=メニュー、チャプター、字幕のある DVD と Blu-ray を作る
+Exec=disccraft %f
+Icon=io.github.mOqOm.DiscCraft
+Terminal=false
+Categories=AudioVideo;Video;DiscBurning;
+MimeType=application/x-disccraft-project;
+Keywords=DVD;Blu-ray;authoring;menu;chapter;subtitle;
+StartupWMClass=disccraft

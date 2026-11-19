@@ -11,7 +11,8 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use craft_video::h264::{
-    Encoder, EncoderConfig, Packet, PacketFormat, Preset, Profile, RateControl, YuvFrame,
+    Encoder, EncoderConfig, Packet, PacketFormat, Pass, PassStats, Preset, Profile, RateControl,
+    YuvFrame,
 };
 use filmcraft_frame::VideoFrame;
 use filmcraft_time::Tick;
@@ -36,6 +37,14 @@ pub struct HdOptions {
     pub max_kbps: u32,
     /// The video coding.
     pub codec: HdCodec,
+    /// How hard the MPEG-2 encoder searches for motion: Encore's quality (1 to 5; its "Long Form" MPEG-2
+    /// presets' 3, the others' 5). The H.264 encoder has no such setting.
+    pub quality: u8,
+    /// How the pictures are made (Encore's rendering checkboxes).
+    pub rendering: crate::Rendering,
+    /// How the bit rate is kept: one-pass VBR (Encore's Blu-ray presets), two-pass VBR (the video is gone through
+    /// twice, the first time to measure it) or CBR (the target is also the peak).
+    pub mode: crate::RateMode,
 }
 
 /// The video coding of an HD stream.
@@ -68,10 +77,30 @@ impl From<Packet> for Coded {
     }
 }
 
-/// The encoder of an HD stream: H.264, or MPEG-2 for the interlaced formats.
+/// The encoder of an HD stream: H.264, or MPEG-2 for the interlaced formats (with what each picture took, for a
+/// first pass of two).
 enum HdEncoder {
     H264(Box<Encoder>),
-    Mpeg2(Box<disccraft_mpeg2venc::encoder::Encoder>),
+    Mpeg2(
+        Box<disccraft_mpeg2venc::encoder::Encoder>,
+        Vec<disccraft_mpeg2venc::encoder::PictureStats>,
+    ),
+}
+
+/// Which pass of a two-pass encode an [`HdEncoder`] makes (M6.328).
+enum HdPass {
+    /// The only one.
+    Single,
+    /// The first of two: it measures the pictures; what it writes is not kept.
+    First,
+    /// The second, from what the first measured.
+    Second(HdStats),
+}
+
+/// What a first pass measured.
+enum HdStats {
+    H264(PassStats),
+    Mpeg2(Vec<disccraft_mpeg2venc::encoder::PictureStats>),
 }
 
 /// The MPEG-2 encoder's settings for `options`: 1920 x 1080 at 29.97 (NTSC) or 25 (PAL) frames a second.
@@ -101,9 +130,15 @@ fn mpeg2_config(
             12
         },
         bitrate: options.target_kbps.saturating_mul(1000),
-        max_bitrate: options.max_kbps.saturating_mul(1000),
+        // CBR: the target is also the peak.
+        max_bitrate: if options.mode == crate::RateMode::Cbr {
+            options.target_kbps.saturating_mul(1000)
+        } else {
+            options.max_kbps.saturating_mul(1000)
+        },
         wide: true,
         format: disccraft_mpeg2venc::encoder::Format::Hd1080,
+        pulldown: false,
     })
 }
 
@@ -146,13 +181,40 @@ fn mpeg2_frame(
 
 impl HdEncoder {
     fn new(options: &HdOptions) -> Result<Self, TranscodeError> {
+        Self::with_pass(options, HdPass::Single)
+    }
+
+    /// An encoder for `pass` of a two-pass encode.
+    fn with_pass(options: &HdOptions, pass: HdPass) -> Result<Self, TranscodeError> {
         match options.codec {
-            HdCodec::H264 => Encoder::new(encoder_config(options))
-                .map(|encoder| Self::H264(Box::new(encoder)))
-                .map_err(|error| TranscodeError::Encode(error.to_string())),
+            HdCodec::H264 => {
+                let mut config = encoder_config(options);
+                config.pass = match pass {
+                    HdPass::Single | HdPass::Second(HdStats::Mpeg2(_)) => Pass::Single,
+                    HdPass::First => Pass::First,
+                    HdPass::Second(HdStats::H264(stats)) => Pass::Second(stats),
+                };
+                Encoder::new(config)
+                    .map(|encoder| Self::H264(Box::new(encoder)))
+                    .map_err(|error| TranscodeError::Encode(error.to_string()))
+            }
             HdCodec::Mpeg2 => disccraft_mpeg2venc::encoder::Encoder::new(mpeg2_config(options)?)
-                .map(|encoder| Self::Mpeg2(Box::new(encoder)))
+                .map(|mut encoder| {
+                    encoder.set_quality(options.quality);
+                    if let HdPass::Second(HdStats::Mpeg2(first)) = &pass {
+                        encoder.plan_second_pass(first);
+                    }
+                    Self::Mpeg2(Box::new(encoder), Vec::new())
+                })
                 .map_err(|error| TranscodeError::Encode(error.to_string())),
+        }
+    }
+
+    /// What a first pass measured.
+    fn stats(&self) -> Option<HdStats> {
+        match self {
+            Self::H264(encoder) => encoder.pass_stats().map(HdStats::H264),
+            Self::Mpeg2(_, pictures) => Some(HdStats::Mpeg2(pictures.clone())),
         }
     }
 
@@ -170,12 +232,13 @@ impl HdEncoder {
                 .into_iter()
                 .map(Coded::from)
                 .collect()),
-            Self::Mpeg2(encoder) => {
+            Self::Mpeg2(encoder, pictures) => {
                 let config = mpeg2_config(options)?;
                 let frame = mpeg2_frame(planes, config.format.coded_size(config.standard))?;
                 let data = encoder
                     .encode_frame(&frame)
                     .map_err(|error| TranscodeError::Encode(error.to_string()))?;
+                pictures.extend(encoder.last_picture());
                 // I and P pictures only: shown in the order coded. A GOP starts with its sequence header.
                 let keyframe = data.starts_with(&[0, 0, 1, 0xB3]);
                 Ok(vec![Coded {
@@ -192,7 +255,7 @@ impl HdEncoder {
     fn flush(&mut self) -> Vec<Coded> {
         match self {
             Self::H264(encoder) => encoder.flush().into_iter().map(Coded::from).collect(),
-            Self::Mpeg2(_) => Vec::new(),
+            Self::Mpeg2(..) => Vec::new(),
         }
     }
 }
@@ -365,24 +428,71 @@ pub fn transcode_h264_range(
     let (range_start, range_length) = source_range(source.info().duration, range);
     let frames = frame_count(range_length, options)?;
 
+    // VBR 2 pass (M6.328): the video is gone through once to measure it, writing nothing, then encoded by what
+    // was measured; the progress runs once over both passes.
+    let two_pass = options.mode == crate::RateMode::Vbr2Pass && frames > 1;
+    let pass = if two_pass {
+        let mut first = HdEncoder::with_pass(options, HdPass::First)?;
+        let mut nowhere = std::io::sink();
+        let mut discarded = PacketWriter::new(&mut nowhere, es_out);
+        encode_range(
+            (&source, range_start, frames),
+            options,
+            &mut first,
+            &mut discarded,
+            &mut |fraction| progress(fraction * 0.5),
+        )?;
+        let stats = first
+            .stats()
+            .ok_or_else(|| TranscodeError::Encode("the first pass measured nothing".to_string()))?;
+        HdPass::Second(stats)
+    } else {
+        HdPass::Single
+    };
+    let (from, span) = if two_pass { (0.5, 0.5) } else { (0.0, 1.0) };
+
     let file = File::create(es_out).map_err(|error| io_error(es_out, error))?;
     let mut writer = BufWriter::new(file);
-    let mut encoder = HdEncoder::new(options)?;
+    let mut encoder = HdEncoder::with_pass(options, pass)?;
     let mut packets = PacketWriter::new(&mut writer, es_out);
+    encode_range(
+        (&source, range_start, frames),
+        options,
+        &mut encoder,
+        &mut packets,
+        &mut |fraction| progress(from + fraction * span),
+    )?;
+    packets.flush()?;
+    write_h264_index(index_out, packets.units())?;
+    progress(1.0);
+    Ok(frames)
+}
 
+/// One pass over `frames` pictures of `source` from `range_start`: each decoded, scaled and converted on a thread of
+/// its own, a few ahead of `encoder`, whose packets go to `packets` (the encoder flushed at the end).
+fn encode_range<W: Write>(
+    (source, range_start, frames): (&Source, Tick, u64),
+    options: &HdOptions,
+    encoder: &mut HdEncoder,
+    packets: &mut PacketWriter<'_, W>,
+    progress: &mut dyn FnMut(f32),
+) -> Result<(), TranscodeError> {
     // The pictures are decoded, scaled and converted on a thread of their own, a few ahead of the encoder, so the
     // two overlap.
     let (sender, receiver) =
         std::sync::mpsc::sync_channel::<Result<YuvPlanes, TranscodeError>>(PIPELINE_DEPTH);
-    let source = &source;
     std::thread::scope(|scope| -> Result<(), TranscodeError> {
         let _ = scope.spawn(move || {
             for frame_index in 0..frames {
                 let planes = (|| {
                     let time = frame_tick(frame_index, options)?;
                     let time = Tick(time.0.saturating_add(range_start.0));
-                    let frame = source.video_frame(time)?;
-                    let rgb = render_rgb_frame(&frame, options)?;
+                    let rgb = crate::blend::picture_at(
+                        source,
+                        time,
+                        options.rendering.frame_blend,
+                        &|frame| render_rgb_frame(frame, options),
+                    )?;
                     rgb_to_yuv(&rgb, options)
                 })();
                 let failed = planes.is_err();
@@ -392,21 +502,22 @@ pub fn transcode_h264_range(
                 }
             }
         });
+        // Owned by this closure, so an early return (an encode or write error, a stop) drops it: the decoding thread
+        // blocked on a full channel then sees it closed and stops, instead of `scope` waiting for it forever (a
+        // hang seen in the HD tests, M6.348).
+        let receiver = receiver;
         for frame_index in 0..frames {
             let planes = receiver
                 .recv()
                 .map_err(|_| TranscodeError::Encode("the decoder stopped early".to_string()))??;
-            encode_planes(&mut encoder, &planes, frame_index, options, &mut packets)?;
+            encode_planes(encoder, &planes, frame_index, options, packets)?;
             report_progress(progress, frame_index, frames);
+            crate::check_stop()?;
         }
         Ok(())
     })?;
 
-    finish_encoder(&mut encoder, options, &mut packets)?;
-    packets.flush()?;
-    write_h264_index(index_out, packets.units())?;
-    progress(1.0);
-    Ok(frames)
+    finish_encoder(encoder, options, packets)
 }
 
 /// The most black pictures one stream holds (three hours at 60 frames a second).
@@ -752,9 +863,16 @@ fn encoder_config(options: &HdOptions) -> EncoderConfig {
     );
     config.profile = Profile::High;
     config.preset = Preset::Balanced;
-    config.rate = RateControl::Vbr {
-        target_kbps: options.target_kbps,
-        max_kbps: options.max_kbps,
+    config.rate = if options.mode == crate::RateMode::Cbr {
+        // CBR: the target is also the peak.
+        RateControl::Cbr {
+            kbps: options.target_kbps,
+        }
+    } else {
+        RateControl::Vbr {
+            target_kbps: options.target_kbps,
+            max_kbps: options.max_kbps,
+        }
     };
     config.keyint = keyint(options);
     config.bframes = 2;
@@ -829,6 +947,9 @@ pub(crate) fn render_fit(
             target_kbps: 0,
             max_kbps: 0,
             codec: HdCodec::H264,
+            quality: crate::BEST_QUALITY,
+            rendering: crate::Rendering::default(),
+            mode: crate::RateMode::Vbr,
         },
     )
 }
@@ -844,15 +965,25 @@ fn render_rgb_frame(frame: &VideoFrame, options: &HdOptions) -> Result<Vec<u8>, 
     )
     .ok_or_else(|| TranscodeError::Unsupported("invalid frame geometry".to_string()))?;
     let rgba = frame.to_rgba8();
-    render_rgb(
-        &rgba,
-        frame.width,
-        frame.height,
-        geometry,
-        options.width,
-        options.height,
-    )
-    .ok_or_else(|| TranscodeError::Unsupported("failed to render frame".to_string()))
+    // Encore's "Use Maximum Render Quality": the filtered scaler.
+    let rendered = if options.rendering.max_quality {
+        crate::resample::render_rgb_filtered(
+            &rgba,
+            (frame.width, frame.height),
+            (geometry.x, geometry.y, geometry.width, geometry.height),
+            (options.width, options.height),
+        )
+    } else {
+        render_rgb(
+            &rgba,
+            frame.width,
+            frame.height,
+            geometry,
+            options.width,
+            options.height,
+        )
+    };
+    rendered.ok_or_else(|| TranscodeError::Unsupported("failed to render frame".to_string()))
 }
 
 /// Compute letterbox/pillarbox geometry for an HD output frame.
@@ -936,6 +1067,23 @@ fn clamp_u128(value: u128, max: u32) -> u32 {
     }
 }
 
+/// [`render_rgb`] for the other transcodes (the DVD's 720 pixel wide frame): the picture at `(x, y)` of the
+/// output, `(width, height)` large.
+pub(crate) fn render_rgb_at(
+    rgba: &[u8],
+    source: (u32, u32),
+    (x, y, width, height): (u32, u32, u32, u32),
+    output: (u32, u32),
+) -> Option<Vec<u8>> {
+    let geometry = Geometry {
+        x,
+        y,
+        width,
+        height,
+    };
+    render_rgb(rgba, source.0, source.1, geometry, output.0, output.1)
+}
+
 /// Render RGBA source into RGB24 output with bilinear sampling, the picture in `geometry` and black around it.
 ///
 /// The arithmetic is [`sample_bilinear`]'s, pixel for pixel: each source pixel composited onto black once, the
@@ -966,8 +1114,6 @@ fn render_rgb(
     let source_pixels = sw.checked_mul(sh)?;
     let (pixels, _) = rgba.as_chunks::<4>();
     let pixels = pixels.get(..source_pixels)?;
-    // Composited onto black once (exact: an opaque pixel keeps its colour).
-    let composited: Vec<[u8; 3]> = pixels.iter().map(|pixel| composite_pixel(*pixel)).collect();
 
     let axis = |position: u32, origin: u32, content: u32, source: u32, last: usize| {
         let at = source_coordinate(position, origin, content, source);
@@ -989,45 +1135,102 @@ fn render_rgb(
     let left = usize::try_from(geometry.x).ok()?.checked_mul(3)?;
     let top = usize::try_from(geometry.y).ok()?;
     let content_rows = rgb.get_mut(top.checked_mul(stride)?..)?;
+    let place = Place {
+        stride,
+        left,
+        source_width: sw,
+        columns: &columns,
+        rows: &rows,
+    };
+    // A picture without see-through pixels (every video frame) is read as it is: composited onto black, an
+    // opaque pixel keeps its colour, so the copy that compositing makes is not needed.
+    if pixels.iter().all(|pixel| pixel[3] == 255) {
+        fill_rows(content_rows, &place, pixels, |pixel: [u8; 4]| {
+            [pixel[0], pixel[1], pixel[2]]
+        });
+    } else {
+        // Composited onto black once.
+        let composited: Vec<[u8; 3]> = pixels.iter().map(|pixel| composite_pixel(*pixel)).collect();
+        fill_rows(content_rows, &place, &composited, |pixel: [u8; 3]| pixel);
+    }
+    Some(rgb)
+}
+
+/// Where [`fill_rows`] puts the picture: the output's bytes a row and the picture's first byte in a row, the
+/// source's width, and for every column and row of the picture the two source positions it lies between and
+/// its weight.
+struct Place<'a> {
+    stride: usize,
+    left: usize,
+    source_width: usize,
+    columns: &'a [(usize, usize, u32)],
+    rows: &'a [(usize, usize, u32)],
+}
+
+/// The fewest rows worth a thread of their own: starting one costs about as much as scaling a few dozen rows.
+const ROWS_PER_WORKER: usize = 48;
+
+/// Fills the picture's rows of the output (`content`, from the picture's first row on) from `source`, whose
+/// pixels `colour` turns into RGB; the rows are shared out between threads.
+fn fill_rows<P: Copy + Sync>(
+    content: &mut [u8],
+    place: &Place<'_>,
+    source: &[P],
+    colour: impl Fn(P) -> [u8; 3] + Sync,
+) {
+    let sw = place.source_width;
     let render_row = |row: &mut [u8], (y0, y1, fy): (usize, usize, u32)| {
         let (Some(above), Some(below)) = (
-            composited.get(y0 * sw..(y0 + 1) * sw),
-            composited.get(y1 * sw..(y1 + 1) * sw),
+            source.get(y0 * sw..(y0 + 1) * sw),
+            source.get(y1 * sw..(y1 + 1) * sw),
         ) else {
             return;
         };
-        let Some(out) = row.get_mut(left..) else {
+        let Some(out) = row.get_mut(place.left..) else {
             return;
         };
         let (out, _) = out.as_chunks_mut::<3>();
-        for (slot, &(x0, x1, fx)) in out.iter_mut().zip(&columns) {
+        for (slot, &(x0, x1, fx)) in out.iter_mut().zip(place.columns) {
             let (Some(c00), Some(c01), Some(c10), Some(c11)) =
                 (above.get(x0), above.get(x1), below.get(x0), below.get(x1))
             else {
                 continue;
             };
-            *slot = interpolate_rgb(*c00, *c01, *c10, *c11, fx, fy);
+            *slot = interpolate_rgb(
+                colour(*c00),
+                colour(*c01),
+                colour(*c10),
+                colour(*c11),
+                fx,
+                fy,
+            );
         }
     };
+    let rows = place.rows;
     let workers = std::thread::available_parallelism()
         .map_or(1, std::num::NonZero::get)
-        .clamp(1, rows.len().max(1));
+        .clamp(1, (rows.len() / ROWS_PER_WORKER).max(1));
     let per_worker = rows.len().div_ceil(workers).max(1);
+    if workers == 1 {
+        for (row, weights) in content.chunks_mut(place.stride.max(1)).zip(rows) {
+            render_row(row, *weights);
+        }
+        return;
+    }
     std::thread::scope(|scope| {
-        let mut rest: &mut [u8] = content_rows;
+        let mut rest: &mut [u8] = content;
         for block in rows.chunks(per_worker) {
-            let bytes = block.len().saturating_mul(stride).min(rest.len());
+            let bytes = block.len().saturating_mul(place.stride).min(rest.len());
             let (mine, after) = std::mem::take(&mut rest).split_at_mut(bytes);
             rest = after;
             let render_row = &render_row;
             let _ = scope.spawn(move || {
-                for (row, weights) in mine.chunks_mut(stride).zip(block) {
+                for (row, weights) in mine.chunks_mut(place.stride.max(1)).zip(block) {
                     render_row(row, *weights);
                 }
             });
         }
     });
-    Some(rgb)
 }
 
 /// Map an output coordinate to a fixed-point source coordinate.
@@ -1453,6 +1656,9 @@ mod tests {
             target_kbps: 1000,
             max_kbps: 2000,
             codec: super::HdCodec::H264,
+            quality: crate::BEST_QUALITY,
+            rendering: crate::Rendering::default(),
+            mode: crate::RateMode::Vbr,
         }
     }
 
@@ -1585,6 +1791,9 @@ mod tests {
             target_kbps: 1000,
             max_kbps: 2000,
             codec: super::HdCodec::H264,
+            quality: crate::BEST_QUALITY,
+            rendering: crate::Rendering::default(),
+            mode: crate::RateMode::Vbr,
         };
         assert_eq!(frame_count(Tick(ticks), &options).unwrap(), 144);
     }
@@ -1644,6 +1853,9 @@ mod tests {
             target_kbps: 25_000,
             max_kbps: 35_000,
             codec: super::HdCodec::Mpeg2,
+            quality: crate::BEST_QUALITY,
+            rendering: crate::Rendering::default(),
+            mode: crate::RateMode::Vbr,
         }
     }
 

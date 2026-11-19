@@ -103,6 +103,113 @@ fn reads_buttons_highlights_and_background() {
     assert_eq!(pixel(&image, 40, 32), [0, 255, 0, 255]);
 }
 
+/// M6.335: a button's subpicture layers are kept in their own colours, half-clear pixels as they are, one layer
+/// per number (for a Blu-ray menu's rich-colour highlights).
+#[test]
+fn subpicture_layers_keep_their_own_colours() {
+    let mut b = PsdBuilder::new(W, H);
+    b.push_layer(LayerSpec::new(
+        "Background",
+        0,
+        0,
+        W,
+        H,
+        solid(W, H, [0, 0, 80, 255]),
+    ));
+    b.begin_group(GroupSpec::new("(+) Play"));
+    // (=1): a left half of soft orange and a right half of red; (=3): a blue square on top.
+    let mut first = Vec::new();
+    for _ in 0..10 {
+        for x in 0..20 {
+            first.extend_from_slice(if x < 10 {
+                &[250, 140, 0, 128]
+            } else {
+                &[255, 0, 0, 255]
+            });
+        }
+    }
+    b.push_layer(LayerSpec::new(
+        "(=1) frame",
+        10,
+        10,
+        20,
+        10,
+        PixelData::Rgba8(first),
+    ));
+    b.push_layer(LayerSpec::new(
+        "(=3) dot",
+        14,
+        12,
+        4,
+        4,
+        solid(4, 4, [0, 0, 255, 255]),
+    ));
+    b.end_group().unwrap();
+    b.composite(solid(W, H, [0, 0, 80, 255]));
+    let path = std::env::temp_dir().join(format!("disccraft-photo-own-{}.psd", std::process::id()));
+    std::fs::write(&path, b.to_bytes().unwrap()).unwrap();
+    let menu = load_psd_menu(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+
+    let play = &menu.buttons[0];
+    assert_eq!((play.x, play.y, play.width, play.height), (10, 10, 20, 10));
+    let sub = play.subpicture.as_ref().expect("subpicture");
+    let at = |rgba: &[u8], x: usize, y: usize| -> [u8; 4] {
+        let i = (y * 20 + x) * 4;
+        [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]]
+    };
+    let first = sub.layers[0].as_deref().expect("(=1) layer");
+    assert_eq!(first.len(), 20 * 10 * 4);
+    let soft = at(first, 2, 2);
+    assert!(
+        soft[0].abs_diff(250) <= 2 && soft[1].abs_diff(140) <= 2 && soft[3].abs_diff(128) <= 1,
+        "straight colour with its alpha: {soft:?}"
+    );
+    assert_eq!(at(first, 15, 0), [255, 0, 0, 255]);
+    assert_eq!(sub.colors[2], Some([0, 0, 255]));
+    // The (=3) layer alone, not laid over the (=1) layer.
+    assert!(sub.layers[1].is_none());
+    let third = sub.layers[2].as_deref().expect("(=3) layer");
+    assert_eq!(at(third, 5, 3), [0, 0, 255, 255]);
+    assert_eq!(at(third, 15, 0)[3], 0);
+}
+
+/// M6.336: a subpicture layer's colour (for Encore's automatic colour set) is its last opaque pixel, as Encore takes
+/// it: green then red gives red.
+#[test]
+fn a_layers_colour_is_its_last_opaque_pixel() {
+    let mut b = PsdBuilder::new(W, H);
+    b.push_layer(LayerSpec::new(
+        "Background",
+        0,
+        0,
+        W,
+        H,
+        solid(W, H, [0, 0, 80, 255]),
+    ));
+    b.begin_group(GroupSpec::new("(+) Play"));
+    let mut two = Vec::new();
+    for _ in 0..4 {
+        for x in 0..8 {
+            two.extend_from_slice(if x < 4 {
+                &[0, 200, 0, 255]
+            } else {
+                &[230, 20, 20, 255]
+            });
+        }
+    }
+    b.push_layer(LayerSpec::new("(=1)", 4, 4, 8, 4, PixelData::Rgba8(two)));
+    b.end_group().unwrap();
+    b.composite(solid(W, H, [0, 0, 80, 255]));
+    let path =
+        std::env::temp_dir().join(format!("disccraft-photo-last-{}.psd", std::process::id()));
+    std::fs::write(&path, b.to_bytes().unwrap()).unwrap();
+    let menu = load_psd_menu(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    let sub = menu.buttons[0].subpicture.as_ref().expect("subpicture");
+    assert_eq!(sub.colors, [Some([230, 20, 20]), None, None]);
+}
+
 /// A PhotoCraft document (`.pcraft`, PhotoCraft's own format) reads like the PSD it was made from: the same
 /// buttons, highlight and background. The document is written by PhotoCraft's own writer.
 #[test]

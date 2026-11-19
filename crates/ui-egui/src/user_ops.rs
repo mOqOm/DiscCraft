@@ -74,6 +74,20 @@ impl DiscCraftApp {
         });
     }
 
+    /// Timeline ▸ Set Timeline User Operations…: the dialog for the timeline in the viewer.
+    pub(crate) fn open_timeline_user_ops(&mut self) {
+        let Some(id) = self.viewer_timeline() else {
+            return;
+        };
+        let Some(timeline) = self.session.project.timeline(id) else {
+            return;
+        };
+        self.user_ops_dialog = Some(UserOpsDialog {
+            target: UserOpsTarget::Timeline(id),
+            prohibited: timeline.prohibited_ops.clone(),
+        });
+    }
+
     /// プロパティの「ユーザー操作:」の行（要約と 設定… ボタン）。
     pub(crate) fn user_ops_row(&mut self, ui: &mut Ui, target: UserOpsTarget, current: &[UserOp]) {
         ui.horizontal(|ui| {

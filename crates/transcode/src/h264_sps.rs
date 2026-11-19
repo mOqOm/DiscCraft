@@ -1,25 +1,112 @@
-//! The few fields of an H.264 sequence parameter set (ITU-T H.264 7.3.2.1.1) that decide whether a stream can go on a
-//! Blu-ray as it is.
+//! The few fields of an H.264 sequence parameter set (ITU-T H.264 7.3.2.1.1, and its VUI parameters: E.1.1) that
+//! decide whether a stream can go on a Blu-ray as it is, and that tell a stream's picture without decoding it.
 
 /// What a sequence parameter set says about its stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Sps {
+pub struct Sps {
     /// profile_idc (77 Main, 100 High).
-    pub(crate) profile: u8,
+    pub profile: u8,
     /// level_idc (41 is level 4.1).
-    pub(crate) level: u8,
+    pub level: u8,
     /// Coded width, pixels (whole macroblocks).
-    pub(crate) width: u32,
+    pub width: u32,
     /// Coded height, pixels (whole macroblocks of a frame).
-    pub(crate) height: u32,
+    pub height: u32,
     /// Every picture is a frame of frame macroblocks (progressive coding); else fields or MBAFF may be used.
-    pub(crate) frame_mbs_only: bool,
+    pub frame_mbs_only: bool,
     /// 4:2:0 at 8 bits.
-    pub(crate) yuv420_8bit: bool,
+    pub yuv420_8bit: bool,
+    /// The size shown: the coded size less its cropping (1080 lines of a coded 1088).
+    pub shown: (u32, u32),
+    /// The shape of a pixel (width : height), when the stream says it.
+    pub pixel_aspect: Option<(u32, u32)>,
+    /// `num_units_in_tick` and `time_scale`, when the stream says them: a frame lasts two ticks.
+    pub timing: Option<(u32, u32)>,
+}
+
+impl Sps {
+    /// Frames a second, when the stream says its timing.
+    #[must_use]
+    pub fn frame_rate(&self) -> Option<f64> {
+        let (tick, scale) = self.timing?;
+        (tick > 0 && scale > 0).then(|| f64::from(scale) / (2.0 * f64::from(tick)))
+    }
+}
+
+/// What follows `frame_mbs_only_flag`: the cropping and, of the VUI parameters, the pixel shape and the timing.
+/// Each is `None` (the size: uncropped) when the stream leaves it out or the bytes end first.
+#[derive(Default)]
+struct Extras {
+    crop: Option<(u32, u32, u32, u32)>,
+    pixel_aspect: Option<(u32, u32)>,
+    timing: Option<(u32, u32)>,
+}
+
+/// The pixel shapes of `aspect_ratio_idc` 1 to 16 (Table E-1).
+const PIXEL_ASPECTS: [(u32, u32); 16] = [
+    (1, 1),
+    (12, 11),
+    (10, 11),
+    (16, 11),
+    (40, 33),
+    (24, 11),
+    (20, 11),
+    (32, 11),
+    (80, 33),
+    (18, 11),
+    (15, 11),
+    (64, 33),
+    (160, 99),
+    (4, 3),
+    (3, 2),
+    (2, 1),
+];
+
+/// Reads on from `frame_mbs_only_flag` (already read), filling `extras` as far as the bytes go.
+fn read_extras(bits: &mut Bits<'_>, frame_mbs_only: bool, extras: &mut Extras) -> Option<()> {
+    if !frame_mbs_only {
+        let _mbaff = bits.read(1)?;
+    }
+    let _direct_8x8 = bits.read(1)?;
+    if bits.read(1)? == 1 {
+        extras.crop = Some((bits.ue()?, bits.ue()?, bits.ue()?, bits.ue()?));
+    }
+    if bits.read(1)? == 0 {
+        return Some(());
+    }
+    // VUI parameters.
+    if bits.read(1)? == 1 {
+        let idc = bits.read(8)?;
+        extras.pixel_aspect = if idc == 255 {
+            Some((bits.read(16)?, bits.read(16)?)).filter(|(w, h)| *w > 0 && *h > 0)
+        } else {
+            usize::try_from(idc)
+                .ok()
+                .and_then(|idc| idc.checked_sub(1))
+                .and_then(|index| PIXEL_ASPECTS.get(index).copied())
+        };
+    }
+    if bits.read(1)? == 1 {
+        let _overscan_appropriate = bits.read(1)?;
+    }
+    if bits.read(1)? == 1 {
+        let _format_and_range = bits.read(4)?;
+        if bits.read(1)? == 1 {
+            let _colour = bits.read(24)?;
+        }
+    }
+    if bits.read(1)? == 1 {
+        let _top = bits.ue()?;
+        let _bottom = bits.ue()?;
+    }
+    if bits.read(1)? == 1 {
+        extras.timing = Some((bits.read(32)?, bits.read(32)?));
+    }
+    Some(())
 }
 
 /// The first sequence parameter set (NAL type 7) in Annex B `data`.
-pub(crate) fn first_in_annex_b(data: &[u8]) -> Option<Sps> {
+pub fn first_in_annex_b(data: &[u8]) -> Option<Sps> {
     let start = data
         .array_windows()
         .position(|&[a, b, c, nal]| [a, b, c] == [0, 0, 1] && nal & 0x1F == 7)?;
@@ -33,7 +120,7 @@ pub(crate) fn first_in_annex_b(data: &[u8]) -> Option<Sps> {
 }
 
 /// Parses a sequence parameter set's payload (the bytes after its NAL header, emulation prevention still in).
-pub(crate) fn parse(payload: &[u8]) -> Option<Sps> {
+pub fn parse(payload: &[u8]) -> Option<Sps> {
     let mut bits = Bits::new(payload);
     let profile = u8::try_from(bits.read(8)?).ok()?;
     let _constraints = bits.read(8)?;
@@ -58,6 +145,23 @@ pub(crate) fn parse(payload: &[u8]) -> Option<Sps> {
     let height = height_units
         .checked_mul(16)?
         .checked_mul(if frame_mbs_only { 1 } else { 2 })?;
+    let mut extras = Extras::default();
+    let _ = read_extras(&mut bits, frame_mbs_only, &mut extras);
+    // Cropping counts chroma samples: two pixels across, and two lines (four of an interlaced frame) down, in
+    // 4:2:0. Other chroma formats are left uncropped.
+    let shown = extras
+        .crop
+        .filter(|_| yuv420_8bit)
+        .and_then(|(left, right, top, bottom)| {
+            let lines = if frame_mbs_only { 2 } else { 4 };
+            let across = left.checked_add(right)?.checked_mul(2)?;
+            let down = top.checked_add(bottom)?.checked_mul(lines)?;
+            Some((
+                width.checked_sub(across).filter(|shown| *shown > 0)?,
+                height.checked_sub(down).filter(|shown| *shown > 0)?,
+            ))
+        })
+        .unwrap_or((width, height));
     Some(Sps {
         profile,
         level,
@@ -65,6 +169,9 @@ pub(crate) fn parse(payload: &[u8]) -> Option<Sps> {
         height,
         frame_mbs_only,
         yuv420_8bit,
+        shown,
+        pixel_aspect: extras.pixel_aspect,
+        timing: extras.timing,
     })
 }
 
@@ -219,14 +326,19 @@ mod tests {
                 height: 1088,
                 frame_mbs_only: false,
                 yuv420_8bit: true,
+                shown: (1920, 1080),
+                pixel_aspect: Some((1, 1)),
+                timing: Some((1001, 60_000)),
             })
         );
+        let rate = sps.and_then(|sps| sps.frame_rate()).unwrap_or_default();
+        assert!((rate - 30_000.0 / 1001.0).abs() < 1e-9, "{rate}");
     }
 
     #[test]
     fn finds_the_sps_in_annex_b() {
         let mut data = vec![0, 0, 0, 1, 9, 0xF0, 0, 0, 0, 1, 0x67];
-        data.extend_from_slice(&SPS_1080I[..24]);
+        data.extend_from_slice(SPS_1080I.get(..24).unwrap_or_default());
         data.extend_from_slice(&[0, 0, 1, 0x68, 0xEE]);
         let sps = first_in_annex_b(&data);
         assert_eq!(sps.map(|sps| (sps.width, sps.height)), Some((1920, 1088)));
@@ -235,7 +347,7 @@ mod tests {
     #[test]
     fn hostile_bytes_do_not_panic() {
         for len in 0..SPS_1080I.len() {
-            let _ = parse(&SPS_1080I[..len]);
+            let _ = parse(SPS_1080I.get(..len).unwrap_or_default());
         }
         let _ = parse(&[0xFF; 64]);
         let _ = parse(&[0x00; 64]);

@@ -75,6 +75,28 @@ fn run_transcode_status(session: &mut Session, params: &Value) -> CommandResult 
             object(&[
                 ("asset", Value::from(asset.0)),
                 ("status", Value::from(status_name(status))),
+                // A video that fits the disc as it is (whether or not a preset of its own transcodes it).
+                (
+                    "fits",
+                    Value::from(disccraft_build::video_fits_as_is(&session.project, asset)),
+                ),
+                // And on each kind of disc (for the column of the other kind).
+                (
+                    "fitsDvd",
+                    Value::from(disccraft_build::video_fits_disc(
+                        &session.project,
+                        asset,
+                        disccraft_project::DiscKind::Dvd,
+                    )),
+                ),
+                (
+                    "fitsBluray",
+                    Value::from(disccraft_build::video_fits_disc(
+                        &session.project,
+                        asset,
+                        disccraft_project::DiscKind::BluRay,
+                    )),
+                ),
             ])
         })
         .collect();

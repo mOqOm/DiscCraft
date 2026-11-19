@@ -20,7 +20,9 @@ pub(crate) struct Target {
 
 pub(crate) const FOUR_THREE: Target = Target { num: 4, den: 3 };
 pub(crate) const SIXTEEN_NINE: Target = Target { num: 16, den: 9 };
+#[cfg(test)]
 const FIXED_POINT_SHIFT: u32 = 16;
+#[cfg(test)]
 const FIXED_POINT_ONE: u64 = 1 << FIXED_POINT_SHIFT;
 
 /// Rectangle where source content is placed in the DVD frame.
@@ -32,13 +34,13 @@ pub(crate) struct Geometry {
     height: u32,
 }
 
-/// Compute the number of output frames for `duration`.
-pub(crate) fn frame_count(duration: Tick, standard: Standard) -> Option<u64> {
+/// Compute the number of output frames for `duration` (film's 23.976 a second with `film`).
+pub(crate) fn frame_count(duration: Tick, standard: Standard, film: bool) -> Option<u64> {
     let ticks = u64::try_from(duration.0).ok()?;
-    let (fps_num, fps_den) = if standard == Standard::Ntsc {
-        (30_000u64, 1_001u64)
-    } else {
-        (25u64, 1u64)
+    let (fps_num, fps_den) = match (standard, film) {
+        (Standard::Ntsc, true) => (24_000u64, 1_001u64),
+        (Standard::Ntsc, false) => (30_000u64, 1_001u64),
+        (Standard::Pal, _) => (25u64, 1u64),
     };
 
     let ticks_per_second = u64::try_from(TICKS_PER_SECOND).ok()?;
@@ -52,7 +54,8 @@ pub(crate) fn frame_count(duration: Tick, standard: Standard) -> Option<u64> {
     u64::try_from(numerator.checked_add(denominator / 2)? / denominator).ok()
 }
 
-/// Encode all output frames into an MPEG-2 video elementary stream.
+/// Encode all output frames into an MPEG-2 video elementary stream. VBR 2 pass ([`crate::RateMode::Vbr2Pass`])
+/// goes over the pictures twice: the first pass only measures them, the second codes them by what it measured.
 pub(crate) fn encode_video(
     source: &Source,
     output_path: &Path,
@@ -61,68 +64,49 @@ pub(crate) fn encode_video(
     frames: u64,
     progress: &mut dyn FnMut(f32),
 ) -> Result<(), TranscodeError> {
-    let standard = options.standard;
-    let target = if options.wide {
-        SIXTEEN_NINE
+    let config = encoder_config(options, max_bitrate);
+    let two_pass = options.mode == crate::RateMode::Vbr2Pass && frames > 1;
+    let first = if two_pass {
+        let mut encoder =
+            Encoder::new(config.clone()).map_err(|e| TranscodeError::Encode(e.to_string()))?;
+        encoder.set_quality(options.quality);
+        let mut stats = Vec::new();
+        encode_pass(
+            source,
+            options,
+            frames,
+            &mut encoder,
+            &mut |encoder, _| {
+                stats.extend(encoder.last_picture());
+                Ok(())
+            },
+            &mut |fraction| progress(fraction * 0.5),
+        )?;
+        Some(stats)
     } else {
-        FOUR_THREE
+        None
     };
+
     let file = File::create(output_path).map_err(|error| io_error(output_path, error))?;
     let mut writer = BufWriter::new(file);
-    let mut encoder = Encoder::new(encoder_config(options, max_bitrate))
-        .map_err(|e| TranscodeError::Encode(e.to_string()))?;
-
-    let output_height = output_height(standard);
-    let rate = frame_rate(standard);
-    let out_width = u16::try_from(OUTPUT_WIDTH)
-        .map_err(|_| TranscodeError::Unsupported("output width too large".to_string()))?;
-    let out_height = u16::try_from(output_height)
-        .map_err(|_| TranscodeError::Unsupported("output height too large".to_string()))?;
-
-    // The pictures are decoded, scaled and converted on a thread of their own, a few ahead of the encoder (which
-    // runs here, its slices on threads of their own), so the two overlap.
-    let (sender, receiver) = std::sync::mpsc::sync_channel::<
-        Result<disccraft_mpeg2venc::Frame420, TranscodeError>,
-    >(PIPELINE_DEPTH);
-    std::thread::scope(|scope| -> Result<(), TranscodeError> {
-        let _ = scope.spawn(move || {
-            for index in 0..frames {
-                let picture = (|| {
-                    let time = rate.tick_of(frame_index_to_i64(index)?);
-                    let frame = source.video_frame(time)?;
-                    let rgb = render_source_frame(&frame, output_height, target)?;
-                    rgb_to_frame420(out_width, out_height, &rgb)
-                        .map_err(|error| TranscodeError::Encode(error.to_string()))
-                })();
-                let failed = picture.is_err();
-                // A closed channel: the encoder stopped (an error); nothing more to do.
-                if sender.send(picture).is_err() || failed {
-                    break;
-                }
-            }
-        });
-        // Owned by this closure, so an early return (an encode or write error) drops it: a decoding thread blocked
-        // on a full channel then sees it closed and stops, instead of `scope` waiting for it forever.
-        let receiver = receiver;
-        let mut gops = GopPlanner::new(
-            u64::from(encoder_config(options, max_bitrate).gop_size),
-            disccraft_mpeg2venc::encoder::max_gop_frames(standard),
-            &options.gop_starts,
-        );
-        for index in 0..frames {
-            let frame420 = receiver
-                .recv()
-                .map_err(|_| TranscodeError::Encode("the decoder stopped early".to_string()))??;
-            let access_unit = encoder
-                .encode_frame_gop(&frame420, gops.starts(index))
-                .map_err(|error| TranscodeError::Encode(error.to_string()))?;
+    let mut encoder = Encoder::new(config).map_err(|e| TranscodeError::Encode(e.to_string()))?;
+    encoder.set_quality(options.quality);
+    if let Some(first) = &first {
+        encoder.plan_second_pass(first);
+    }
+    let (from, span) = if two_pass { (0.5, 0.5) } else { (0.0, 1.0) };
+    encode_pass(
+        source,
+        options,
+        frames,
+        &mut encoder,
+        &mut |_, access_unit| {
             writer
-                .write_all(&access_unit)
-                .map_err(|error| io_error(output_path, error))?;
-            report_progress(progress, index, frames);
-        }
-        Ok(())
-    })?;
+                .write_all(access_unit)
+                .map_err(|error| io_error(output_path, error))
+        },
+        &mut |fraction| progress(from + fraction * span),
+    )?;
 
     let tail = encoder.finish();
     writer
@@ -137,6 +121,82 @@ pub(crate) fn encode_video(
     }
 
     Ok(())
+}
+
+/// One pass over the output frames: each is decoded, scaled and converted on a thread of its own, a few ahead of
+/// `encoder` (which runs here, its slices on threads of their own), and each access unit goes to `sink`.
+fn encode_pass(
+    source: &Source,
+    options: &crate::TranscodeOptions,
+    frames: u64,
+    encoder: &mut Encoder,
+    sink: &mut dyn FnMut(&Encoder, &[u8]) -> Result<(), TranscodeError>,
+    progress: &mut dyn FnMut(f32),
+) -> Result<(), TranscodeError> {
+    let standard = options.standard;
+    let target = if options.wide {
+        SIXTEEN_NINE
+    } else {
+        FOUR_THREE
+    };
+    let output_height = output_height(standard);
+    let film = options.film && standard == Standard::Ntsc;
+    let rate = if film {
+        FrameRate::FPS_23_976
+    } else {
+        frame_rate(standard)
+    };
+    let out_width = u16::try_from(OUTPUT_WIDTH)
+        .map_err(|_| TranscodeError::Unsupported("output width too large".to_string()))?;
+    let out_height = u16::try_from(output_height)
+        .map_err(|_| TranscodeError::Unsupported("output height too large".to_string()))?;
+    let gop_size = u64::from(encoder_config(options, options.max_bitrate).gop_size);
+
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<
+        Result<disccraft_mpeg2venc::Frame420, TranscodeError>,
+    >(PIPELINE_DEPTH);
+    std::thread::scope(|scope| -> Result<(), TranscodeError> {
+        let _ = scope.spawn(move || {
+            for index in 0..frames {
+                let picture = (|| {
+                    let time = rate.tick_of(frame_index_to_i64(index)?);
+                    let rendering = options.rendering;
+                    let rgb =
+                        crate::blend::picture_at(source, time, rendering.frame_blend, &|frame| {
+                            render_frame_with(frame, output_height, target, rendering.max_quality)
+                        })?;
+                    rgb_to_frame420(out_width, out_height, &rgb)
+                        .map_err(|error| TranscodeError::Encode(error.to_string()))
+                })();
+                let failed = picture.is_err();
+                // A closed channel: the encoder stopped (an error); nothing more to do.
+                if sender.send(picture).is_err() || failed {
+                    break;
+                }
+            }
+        });
+        // Owned by this closure, so an early return (an encode or write error) drops it: a decoding thread blocked
+        // on a full channel then sees it closed and stops, instead of `scope` waiting for it forever.
+        let receiver = receiver;
+        let most = if film {
+            disccraft_mpeg2venc::encoder::MAX_FILM_GOP_FRAMES
+        } else {
+            disccraft_mpeg2venc::encoder::max_gop_frames(standard)
+        };
+        let mut gops = GopPlanner::new(gop_size, most, &options.gop_starts);
+        for index in 0..frames {
+            let frame420 = receiver
+                .recv()
+                .map_err(|_| TranscodeError::Encode("the decoder stopped early".to_string()))??;
+            let access_unit = encoder
+                .encode_frame_gop(&frame420, gops.starts(index))
+                .map_err(|error| TranscodeError::Encode(error.to_string()))?;
+            sink(encoder, &access_unit)?;
+            report_progress(progress, index, frames);
+            crate::check_stop()?;
+        }
+        Ok(())
+    })
 }
 
 /// Where the GOPs start: every `gop` frames, and at each frame of `forced` (a chapter or a layer break) so a DVD
@@ -302,17 +362,26 @@ fn frame_rate(standard: Standard) -> FrameRate {
 }
 
 fn encoder_config(options: &crate::TranscodeOptions, max_bitrate: u32) -> EncoderConfig {
+    // CBR: the target is also the maximum.
+    let max_bitrate = if options.mode == crate::RateMode::Cbr {
+        options.video_bitrate.clamp(1, max_bitrate.max(1))
+    } else {
+        max_bitrate
+    };
+    let film = options.film && options.standard == Standard::Ntsc;
     EncoderConfig {
         standard: options.standard,
-        gop_size: if options.standard == Standard::Ntsc {
-            15
-        } else {
-            12
+        // Film: 12 pictures (half a second, 30 fields), as film DVDs commonly have.
+        gop_size: match (options.standard, film) {
+            (Standard::Ntsc, true) => 12,
+            (Standard::Ntsc, false) => 15,
+            (Standard::Pal, _) => 12,
         },
         bitrate: options.video_bitrate,
         max_bitrate,
         wide: options.wide,
         format: disccraft_mpeg2venc::encoder::Format::Sd,
+        pulldown: film,
     }
 }
 
@@ -337,15 +406,55 @@ fn render_source_frame(
     output_height: u32,
     target: Target,
 ) -> Result<Vec<u8>, TranscodeError> {
+    render_frame_with(frame, output_height, target, false)
+}
+
+/// `frame` in the DVD frame: scaled bilinearly, or with `max_quality` (Encore's "Use Maximum Render Quality")
+/// by [`crate::resample`]'s filters.
+fn render_frame_with(
+    frame: &VideoFrame,
+    output_height: u32,
+    target: Target,
+    max_quality: bool,
+) -> Result<Vec<u8>, TranscodeError> {
     let geometry = target_geometry(frame.width, frame.height, frame.par, output_height, target)
         .ok_or_else(|| TranscodeError::Unsupported("invalid frame geometry".to_string()))?;
     let rgba = frame.to_rgba8();
 
-    render_rgb(&rgba, frame.width, frame.height, geometry, output_height)
-        .ok_or_else(|| TranscodeError::Unsupported("failed to render frame".to_string()))
+    let rendered = if max_quality {
+        crate::resample::render_rgb_filtered(
+            &rgba,
+            (frame.width, frame.height),
+            (geometry.x, geometry.y, geometry.width, geometry.height),
+            (OUTPUT_WIDTH, output_height),
+        )
+    } else {
+        render_rgb(&rgba, frame.width, frame.height, geometry, output_height)
+    };
+    rendered.ok_or_else(|| TranscodeError::Unsupported("failed to render frame".to_string()))
 }
 
+/// The source picture scaled into `geometry` of the DVD frame, black around it. The work is the HD transcode's
+/// scaler's (the same arithmetic as [`render_rgb_one_by_one`], with the columns' and rows' positions worked out
+/// once and the rows shared between the cores): scaling was most of the time of a transcode to DVD.
 fn render_rgb(
+    rgba: &[u8],
+    source_width: u32,
+    source_height: u32,
+    geometry: Geometry,
+    output_height: u32,
+) -> Option<Vec<u8>> {
+    crate::hd::render_rgb_at(
+        rgba,
+        (source_width, source_height),
+        (geometry.x, geometry.y, geometry.width, geometry.height),
+        (OUTPUT_WIDTH, output_height),
+    )
+}
+
+/// [`render_rgb`] a pixel at a time: what its result is checked against.
+#[cfg(test)]
+fn render_rgb_one_by_one(
     rgba: &[u8],
     source_width: u32,
     source_height: u32,
@@ -372,6 +481,7 @@ fn render_rgb(
     Some(rgb)
 }
 
+#[cfg(test)]
 fn source_coordinate(output_pos: u32, origin: u32, content_size: u32, source_size: u32) -> u64 {
     if content_size <= 1 || source_size <= 1 {
         return 0;
@@ -392,6 +502,7 @@ fn source_coordinate(output_pos: u32, origin: u32, content_size: u32, source_siz
     scaled / u64::from(denom)
 }
 
+#[cfg(test)]
 fn sample_bilinear(
     rgba: &[u8],
     source_width: u32,
@@ -433,6 +544,7 @@ fn sample_bilinear(
     Some(interpolate_rgb(c00, c01, c10, c11, fx, fy))
 }
 
+#[cfg(test)]
 fn pixel_at(rgba: &[u8], width: usize, x: usize, y: usize) -> Option<[u8; 4]> {
     let index = y.checked_mul(width)?.checked_add(x)?.checked_mul(4)?;
     let end = index.checked_add(4)?;
@@ -446,6 +558,7 @@ fn pixel_at(rgba: &[u8], width: usize, x: usize, y: usize) -> Option<[u8; 4]> {
     Some(pixel)
 }
 
+#[cfg(test)]
 fn composite_pixel(pixel: [u8; 4]) -> [u8; 3] {
     let [r, g, b, a] = pixel;
     [
@@ -455,11 +568,13 @@ fn composite_pixel(pixel: [u8; 4]) -> [u8; 3] {
     ]
 }
 
+#[cfg(test)]
 fn composite_channel(color: u8, alpha: u8) -> u8 {
     let value = (u32::from(color) * u32::from(alpha) + 127) / 255;
     u8::try_from(value).unwrap_or(255)
 }
 
+#[cfg(test)]
 fn interpolate_rgb(
     c00: [u8; 3],
     c01: [u8; 3],
@@ -480,6 +595,7 @@ fn interpolate_rgb(
     ]
 }
 
+#[cfg(test)]
 fn interpolate_channel(c00: u8, c01: u8, c10: u8, c11: u8, fx: u32, fy: u32) -> u8 {
     let top =
         (u32::from(c00) * (FIXED_POINT_ONE as u32 - fx) + u32::from(c01) * fx) >> FIXED_POINT_SHIFT;
@@ -490,6 +606,7 @@ fn interpolate_channel(c00: u8, c01: u8, c10: u8, c11: u8, fx: u32, fy: u32) -> 
     u8::try_from(value).unwrap_or(255)
 }
 
+#[cfg(test)]
 fn write_rgb(rgb: &mut [u8], output_width: usize, y: u32, x: u32, pixel: [u8; 3]) -> Option<()> {
     let row = usize::try_from(y).ok()?.checked_mul(output_width)?;
     let col = usize::try_from(x).ok()?;
@@ -628,5 +745,55 @@ mod tests {
         assert_eq!(geometry.x, (720 - geometry.width) / 2);
         assert_eq!(geometry.y, 0);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod scaler_tests {
+    use super::{Geometry, OUTPUT_WIDTH, render_rgb, render_rgb_one_by_one};
+
+    /// M12.24: the scaler the DVD transcode uses now gives, byte for byte, what the one-pixel-at-a-time scaler
+    /// gave: enlarged, reduced, letterboxed, pillarboxed, with see-through pixels, and one pixel large.
+    #[test]
+    fn the_shared_scaler_gives_the_same_picture() {
+        let mut seed = 0x2545_F491_u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed >> 24) as u8
+        };
+        for (sw, sh, height, geometry) in [
+            (
+                1920_u32,
+                1080_u32,
+                480_u32,
+                (0_u32, 60_u32, 720_u32, 360_u32),
+            ),
+            (720, 480, 480, (0, 0, 720, 480)),
+            (640, 480, 576, (0, 0, 720, 576)),
+            (352, 240, 480, (90, 0, 540, 480)),
+            (3, 2, 480, (10, 20, 700, 440)),
+            (1, 1, 576, (0, 0, 720, 576)),
+            (1440, 1080, 480, (0, 0, 720, 480)),
+        ] {
+            let pixels = usize::try_from(sw * sh * 4).unwrap_or(0);
+            let rgba: Vec<u8> = (0..pixels).map(|_| next()).collect();
+            let (x, y, width, height_in) = geometry;
+            let geometry = Geometry {
+                x,
+                y,
+                width,
+                height: height_in,
+            };
+            let fast = render_rgb(&rgba, sw, sh, geometry, height);
+            let slow = render_rgb_one_by_one(&rgba, sw, sh, geometry, height);
+            assert!(fast.is_some(), "{sw}x{sh}");
+            assert_eq!(
+                fast.as_ref().map(Vec::len),
+                usize::try_from(OUTPUT_WIDTH * height * 3).ok()
+            );
+            assert!(fast == slow, "{sw}x{sh} into 720x{height} at {geometry:?}");
+        }
     }
 }

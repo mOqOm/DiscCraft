@@ -64,6 +64,14 @@ pub enum AudioSource<'a> {
     },
     /// DVD LPCM stream parsed from WAV.
     Lpcm(&'a LpcmStream),
+    /// MPEG-1 Layer II stream and its elementary-stream bytes (MPEG audio streams 0xC0 to 0xC7: the frames go
+    /// in the PES packets as they are, without a private-stream header).
+    Mpeg {
+        /// Parsed MPEG audio stream.
+        stream: &'a crate::es::MpaStream,
+        /// MPEG audio elementary stream bytes.
+        data: &'a [u8],
+    },
 }
 
 /// One complete DVD subpicture unit.
@@ -285,7 +293,12 @@ pub struct MuxExtra<'a> {
     pub highlight: Option<&'a hli::Hli>,
     /// Sector at which this VOBS starts in `sink` (several menu VOBs share one VIDEO_TS.VOB); NAV LBNs and the layout are absolute.
     pub base_sector: u32,
+    /// Asked before each VOBU (a build's Stop): `true` ends the multiplexing with [`STOPPED`] (M6.340).
+    pub stop: Option<fn() -> bool>,
 }
+
+/// The message of the error the multiplexing ends with when [`MuxExtra::stop`] asks it to.
+pub const STOPPED: &str = "multiplexing stopped";
 
 /// Multiplex `input` into `sink`. Equivalent to [`mux_vobs_with`] with default [`MuxExtra`].
 pub fn mux_vobs(input: &MuxInput<'_>, sink: &mut dyn SectorSink) -> Result<VobsLayout, MuxError> {
@@ -319,6 +332,9 @@ pub fn mux_vobs_with(
     for (cell_idx, cell) in cells.iter().enumerate() {
         let cell_id = u8::try_from(cell_idx + 1).map_err(|_| invalid("too many cells"))?;
         for gop_idx in cell.start_gop..cell.end_gop {
+            if extra.stop.is_some_and(|stop| stop()) {
+                return Err(invalid(STOPPED));
+            }
             let next_gop_dts = gops.get(gop_idx + 1).map(|next| next.first_dts);
             let append_seq_end = gop_idx + 1 == gops.len() && !input.video.has_sequence_end;
             let (record, new_total, new_prev, new_rem) = schedule::mux_vobu(
@@ -688,7 +704,8 @@ fn build_layout(
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioSource, CellLayout, MuxError, MuxInput, SubpictureUnit, VobsLayout, mux_vobs,
+        AudioSource, CellLayout, MuxError, MuxExtra, MuxInput, STOPPED, SubpictureUnit, VobsLayout,
+        mux_vobs, mux_vobs_with,
     };
     use crate::es::ac3::parse_ac3;
     use crate::es::mpeg2v::parse_video;
@@ -1258,6 +1275,31 @@ mod tests {
         Ok((video_data, ac3_data, video, layout, sink))
     }
 
+    /// M6.340: a stop asked for ends the multiplexing before the next VOBU.
+    #[test]
+    fn a_stop_ends_the_multiplexing() -> Result<(), MuxError> {
+        let video_data = build_test_video();
+        let video = parse_video_data(&video_data)?;
+        let input = basic_input(&video, &video_data, Vec::new(), vec![0, GOP2_RELATIVE]);
+        let mut sink = MemorySink::default();
+        let extra = MuxExtra {
+            stop: Some(|| true),
+            ..MuxExtra::default()
+        };
+        let stopped = mux_vobs_with(&input, &extra, &mut sink);
+        assert!(
+            matches!(&stopped, Err(MuxError::Invalid(message)) if message == STOPPED),
+            "{stopped:?}"
+        );
+        assert!(sink.sectors.is_empty());
+        let going = MuxExtra {
+            stop: Some(|| false),
+            ..MuxExtra::default()
+        };
+        assert!(mux_vobs_with(&input, &going, &mut MemorySink::default()).is_ok());
+        Ok(())
+    }
+
     #[test]
     fn sectors_are_packs_and_vobus_start_with_nav() -> Result<(), MuxError> {
         let (_video_data, _ac3_data, _video, layout, sink) = mux_basic()?;
@@ -1545,6 +1587,7 @@ mod tests {
             bits: 16,
             data: vec![0u8; 320 * 10],
             frame_bytes: 320,
+            channel_mask: 0,
         };
         let input = basic_input(&video, &video_data, vec![AudioSource::Lpcm(&lpcm)], vec![0]);
         let mut sink = MemorySink::default();
