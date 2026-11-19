@@ -19,9 +19,19 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "テキストを追加",
         menu: &["メニュー"],
         shortcut: None,
-        params: r##"{"menu": id, "text": string, "x": n, "y": n, "size"?: 8..200, "color"?: "#RRGGBB", "vertical"?: bool (縦書き)}"##,
+        params: r##"{"menu": id, "text": string, "x": n, "y": n, "size"?: 8..200, "color"?: "#RRGGBB", "vertical"?: bool (縦書き), "boxWidth"?: 16..4096 (段落テキストの幅), "font"?: string | null, "fontStyle"?: string | null, and the character settings of menu.setText (bold, align, tracking, …)}"##,
         enabled: always_enabled,
         run: run_add_text,
+        journal: true,
+    },
+    CommandSpec {
+        id: "menu.placeText",
+        label: "テキストを配置",
+        menu: &["メニュー"],
+        shortcut: None,
+        params: r##"{"menu": id, "text": MenuText (a text object as a project keeps it: a Library text item), "x"?: n, "y"?: n (its top left corner; else its own)}"##,
+        enabled: always_enabled,
+        run: run_place_text,
         journal: true,
     },
     CommandSpec {
@@ -29,7 +39,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "テキストを変更",
         menu: &["メニュー"],
         shortcut: None,
-        params: r##"{"menu": id, "index": n, "text"?: string, "x"?: n, "y"?: n, "size"?: 8..200, "color"?: "#RRGGBB" | null, "font"?: string | null, "fontStyle"?: string | null, "bold"?: bool, "italic"?: bool, "underline"?: bool, "strikethrough"?: bool, "caps"?: "normal" | "all" | "small", "align"?: "left" | "center" | "right", "tracking"?: -1000..1000, "leading"?: -100..200, "kerning"?: bool, "baseline"?: -100..100, "verticalScale"?: 1..1000, "horizontalScale"?: 1..1000, "script"?: "normal" | "superscript" | "subscript", "antialias"?: "none" | "crisp" | "strong" | "smooth" | "sharp", "vertical"?: bool}"##,
+        params: r##"{"menu": id, "index": n, "text"?: string, "x"?: n, "y"?: n, "size"?: 8..200, "color"?: "#RRGGBB" | null, "font"?: string | null, "fontStyle"?: string | null, "bold"?: bool, "italic"?: bool, "underline"?: bool, "strikethrough"?: bool, "caps"?: "normal" | "all" | "small", "align"?: "left" | "center" | "right" | "justify", "tracking"?: -1000..1000, "linePitch"?: 1..1000 | null (auto, 120 % of the size), "leading"?: -100..200, "kerning"?: true (メトリクス) | false | -1000..1000 (1/1000 em), "baseline"?: -100..100, "verticalScale"?: 1..1000, "horizontalScale"?: 1..1000, "script"?: "normal" | "superscript" | "subscript", "antialias"?: "none" | "crisp" | "strong" | "smooth" | "sharp", "tsume"?: 0..100, "mojikumi"?: "none" | "punctuationHalf" | "lineEndHalf" | "lineEndFull" | "punctuationFull", "kinsoku"?: "none" | "weak" | "strong", "kinsokuMethod"?: "pushInFirst" | "pushOutFirst" | "pushOutOnly", "hangingPunctuation"?: bool, "vertical"?: bool, "boxWidth"?: 16..4096 | null, "boxHeight"?: 16..4096 | null (a paragraph text's height: the lines past it are not drawn)}"##,
         enabled: always_enabled,
         run: run_set_text,
         journal: true,
@@ -39,7 +49,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "ボタンの文字の書式を設定",
         menu: &["ボタン"],
         shortcut: None,
-        params: r##"{"menu": id, "button": index, "fontStyle"?: string | null, "bold"?: bool, "italic"?: bool, "underline"?: bool, "strikethrough"?: bool, "caps"?: "normal" | "all" | "small", "align"?: "left" | "center" | "right", "tracking"?: -1000..1000, "leading"?: -100..200, "kerning"?: bool, "baseline"?: -100..100, "verticalScale"?: 1..1000, "horizontalScale"?: 1..1000, "script"?: "normal" | "superscript" | "subscript", "antialias"?: "none" | "crisp" | "strong" | "smooth" | "sharp"}"##,
+        params: r##"{"menu": id, "button": index, "fontStyle"?: string | null, "bold"?: bool, "italic"?: bool, "underline"?: bool, "strikethrough"?: bool, "caps"?: "normal" | "all" | "small", "align"?: "left" | "center" | "right" | "justify", "tracking"?: -1000..1000, "linePitch"?: 1..1000 | null (auto, 120 % of the size), "leading"?: -100..200, "kerning"?: true (メトリクス) | false | -1000..1000 (1/1000 em), "baseline"?: -100..100, "verticalScale"?: 1..1000, "horizontalScale"?: 1..1000, "script"?: "normal" | "superscript" | "subscript", "antialias"?: "none" | "crisp" | "strong" | "smooth" | "sharp", "tsume"?: 0..100, "mojikumi"?: "none" | "punctuationHalf" | "lineEndHalf" | "lineEndFull" | "punctuationFull", "kinsoku"?: "none" | "weak" | "strong", "kinsokuMethod"?: "pushInFirst" | "pushOutFirst" | "pushOutOnly", "hangingPunctuation"?: bool}"##,
         enabled: always_enabled,
         run: run_set_label_format,
         journal: true,
@@ -122,6 +132,20 @@ fn checked_size(value: u64) -> Result<u16, String> {
         .ok_or_else(|| format!("\"size\" must be {MIN_TEXT_SIZE} to {MAX_TEXT_SIZE}"))
 }
 
+/// The width of a paragraph text's box, frame pixels.
+fn checked_box(width: u64) -> Result<u16, String> {
+    checked_box_side(width, "boxWidth")
+}
+
+/// A side of a paragraph text's box (parameter `name`), frame pixels.
+fn checked_box_side(side: u64, name: &str) -> Result<u16, String> {
+    use disccraft_project::{MAX_TEXT_BOX, MIN_TEXT_BOX};
+    u16::try_from(side)
+        .ok()
+        .filter(|side| (MIN_TEXT_BOX..=MAX_TEXT_BOX).contains(side))
+        .ok_or_else(|| format!("\"{name}\" must be {MIN_TEXT_BOX} to {MAX_TEXT_BOX}"))
+}
+
 fn run_add_text(session: &mut Session, params: &Value) -> CommandResult {
     let menu_id = MenuId(req_u64(params, "menu")?);
     let (width, height) = frame_size(&session.project.settings);
@@ -136,6 +160,13 @@ fn run_add_text(session: &mut Session, params: &Value) -> CommandResult {
         .map(|color| parse_color(&color))
         .transpose()?;
     let vertical = opt_flag(params, "vertical")?.unwrap_or(false);
+    let box_width = opt_u64(params, "boxWidth")?.map(checked_box).transpose()?;
+    // The characters of the next text (Encore: the Character panel with nothing selected): its font, style and
+    // format, as menu.setText takes them.
+    let font = font_param(params)?.flatten();
+    let font_style = name_param(params, "fontStyle")?.flatten();
+    let mut format = TextFormat::default();
+    FormatPatch::parse(params)?.apply(&mut format);
     let Some(menu) = session.project.menu_mut(menu_id) else {
         return Err(format!("menu {} does not exist", menu_id.0));
     };
@@ -143,20 +174,74 @@ fn run_add_text(session: &mut Session, params: &Value) -> CommandResult {
         return Err(format!("a menu holds at most {MAX_MENU_TEXTS} texts"));
     }
     menu.texts.push(MenuText {
+        effects: Default::default(),
+        box_width,
+        box_height: None,
         text,
         x,
         y,
         size,
         color,
-        font: None,
-        font_style: None,
-        format: TextFormat::default(),
+        font,
+        font_style,
+        format,
         shadow: None,
         orientation: Default::default(),
         hidden: false,
         locked: false,
         vertical,
     });
+    let index = u64::try_from(menu.texts.len().saturating_sub(1))
+        .map_err(|_| "text index is too large".to_string())?;
+    Ok(object(&[("index", Value::from(index))]))
+}
+
+/// Places a whole text object (Encore: a Library text item placed in a menu): its text, look and box as kept,
+/// at `x`, `y` when given, inside the frame; shown and unlocked.
+fn run_place_text(session: &mut Session, params: &Value) -> CommandResult {
+    use disccraft_project::MAX_FONT_NAME_CHARS;
+    let menu_id = MenuId(req_u64(params, "menu")?);
+    let (width, height) = frame_size(&session.project.settings);
+    let value = params
+        .get("text")
+        .ok_or_else(|| "parameter \"text\" is missing".to_string())?;
+    let mut text: MenuText = serde_json::from_value(value.clone())
+        .map_err(|error| format!("parameter \"text\" must be a text object: {error}"))?;
+    text.text = checked_text(std::mem::take(&mut text.text))?;
+    text.size = checked_size(u64::from(text.size))?;
+    text.x = match opt_u64(params, "x")? {
+        Some(x) => checked_position(x, "x", width)?,
+        None => text.x.min(width.saturating_sub(1)),
+    };
+    text.y = match opt_u64(params, "y")? {
+        Some(y) => checked_position(y, "y", height)?,
+        None => text.y.min(height.saturating_sub(1)),
+    };
+    text.box_width = text
+        .box_width
+        .map(|side| checked_box(u64::from(side)))
+        .transpose()?;
+    text.box_height = match text.box_width {
+        Some(_) => text
+            .box_height
+            .map(|side| checked_box_side(u64::from(side), "boxHeight"))
+            .transpose()?,
+        None => None,
+    };
+    for name in [&mut text.font, &mut text.font_style] {
+        if let Some(found) = name.as_mut() {
+            *found = found.chars().take(MAX_FONT_NAME_CHARS).collect();
+        }
+    }
+    text.hidden = false;
+    text.locked = false;
+    let Some(menu) = session.project.menu_mut(menu_id) else {
+        return Err(format!("menu {} does not exist", menu_id.0));
+    };
+    if menu.texts.len() >= MAX_MENU_TEXTS {
+        return Err(format!("a menu holds at most {MAX_MENU_TEXTS} texts"));
+    }
+    menu.texts.push(text);
     let index = u64::try_from(menu.texts.len().saturating_sub(1))
         .map_err(|_| "text index is too large".to_string())?;
     Ok(object(&[("index", Value::from(index))]))
@@ -185,6 +270,22 @@ fn run_set_text(session: &mut Session, params: &Value) -> CommandResult {
     let font_style = name_param(params, "fontStyle")?;
     let patch = FormatPatch::parse(params)?;
     let vertical = opt_flag(params, "vertical")?;
+    // "boxWidth": null makes it point text again; leaving it out keeps the box.
+    let box_width = match params.get("boxWidth") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(_) => Some(opt_u64(params, "boxWidth")?.map(checked_box).transpose()?),
+    };
+    // "boxHeight": null lets the box be as tall as its lines; leaving it out keeps the height.
+    let box_height = match params.get("boxHeight") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(_) => Some(
+            opt_u64(params, "boxHeight")?
+                .map(|side| checked_box_side(side, "boxHeight"))
+                .transpose()?,
+        ),
+    };
     let Some(menu) = session.project.menu_mut(menu_id) else {
         return Err(format!("menu {} does not exist", menu_id.0));
     };
@@ -196,6 +297,16 @@ fn run_set_text(session: &mut Session, params: &Value) -> CommandResult {
     }
     if let Some(vertical) = vertical {
         target.vertical = vertical;
+    }
+    if let Some(box_width) = box_width {
+        target.box_width = box_width;
+    }
+    if let Some(box_height) = box_height {
+        target.box_height = box_height;
+    }
+    // Point text has no box, so no height either.
+    if target.box_width.is_none() {
+        target.box_height = None;
     }
     patch.apply(&mut target.format);
     if let Some(x) = x {
@@ -219,6 +330,26 @@ fn run_set_text(session: &mut Session, params: &Value) -> CommandResult {
     Ok(empty_object())
 }
 
+/// Encore's カーニング (M6.344): `true` the font's metric kerning; `false` none; a number (1/1000 em) the room
+/// between every two characters changed by that much. (metric kerning, the number), each `None` when left out.
+fn kerning_param(params: &Value) -> Result<(Option<bool>, Option<i16>), String> {
+    match params.get("kerning") {
+        None => Ok((None, None)),
+        Some(Value::Bool(true)) => Ok((Some(true), None)),
+        Some(Value::Bool(false)) => Ok((Some(false), Some(0))),
+        Some(value) => value
+            .as_i64()
+            .and_then(|number| i16::try_from(number).ok())
+            .filter(|number| (MIN_TRACKING..=MAX_TRACKING).contains(number))
+            .map(|number| (Some(false), Some(number)))
+            .ok_or_else(|| {
+                format!(
+                    "parameter \"kerning\" must be true (metrics), false or {MIN_TRACKING} to {MAX_TRACKING}"
+                )
+            }),
+    }
+}
+
 /// The Character panel fields of `menu.setText` / `button.setLabelFormat` (each optional: left out keeps it).
 #[derive(Clone, Copy, Default)]
 struct FormatPatch {
@@ -229,13 +360,22 @@ struct FormatPatch {
     caps: Option<TextCaps>,
     align: Option<TextAlign>,
     tracking: Option<i16>,
+    /// Encore's 行送り: `Some(None)` 自動.
+    line_pitch: Option<Option<u16>>,
     leading: Option<i16>,
     kerning: Option<bool>,
+    /// Encore's カーニング as a number (M6.344).
+    manual_kerning: Option<i16>,
     baseline: Option<i16>,
     vertical_scale: Option<u16>,
     horizontal_scale: Option<u16>,
     script: Option<TextScript>,
     antialias: Option<TextAntialias>,
+    tsume: Option<u8>,
+    mojikumi: Option<disccraft_project::TextMojikumi>,
+    kinsoku: Option<disccraft_project::TextKinsoku>,
+    kinsoku_method: Option<disccraft_project::TextKinsokuMethod>,
+    hanging_punctuation: Option<bool>,
 }
 
 impl FormatPatch {
@@ -255,13 +395,35 @@ impl FormatPatch {
             align: opt_str(params, "align")?
                 .map(|text| {
                     TextAlign::parse(&text).ok_or_else(|| {
-                        "parameter \"align\" must be \"left\", \"center\" or \"right\"".to_string()
+                        "parameter \"align\" must be \"left\", \"center\", \"right\" or \"justify\""
+                            .to_string()
                     })
                 })
                 .transpose()?,
             tracking: opt_i16(params, "tracking", MIN_TRACKING, MAX_TRACKING)?,
+            line_pitch: match params.get("linePitch") {
+                None => None,
+                Some(Value::Null) => Some(None),
+                Some(value) => Some(Some(
+                    value
+                        .as_u64()
+                        .and_then(|value| u16::try_from(value).ok())
+                        .filter(|value| {
+                            (disccraft_project::MIN_LINE_PITCH..=disccraft_project::MAX_LINE_PITCH)
+                                .contains(value)
+                        })
+                        .ok_or_else(|| {
+                            format!(
+                                "parameter \"linePitch\" must be null (auto) or {} to {}",
+                                disccraft_project::MIN_LINE_PITCH,
+                                disccraft_project::MAX_LINE_PITCH
+                            )
+                        })?,
+                )),
+            },
             leading: opt_i16(params, "leading", MIN_LEADING, MAX_LEADING)?,
-            kerning: opt_flag(params, "kerning")?,
+            kerning: kerning_param(params)?.0,
+            manual_kerning: kerning_param(params)?.1,
             baseline: opt_i16(params, "baseline", MIN_BASELINE, MAX_BASELINE)?,
             vertical_scale: opt_scale(params, "verticalScale")?,
             horizontal_scale: opt_scale(params, "horizontalScale")?,
@@ -281,6 +443,40 @@ impl FormatPatch {
                     })
                 })
                 .transpose()?,
+            tsume: match params.get("tsume") {
+                None => None,
+                Some(value) => Some(
+                    value
+                        .as_u64()
+                        .and_then(|value| u8::try_from(value).ok())
+                        .filter(|value| *value <= disccraft_project::MAX_TSUME)
+                        .ok_or_else(|| "parameter \"tsume\" must be 0 to 100".to_string())?,
+                ),
+            },
+            mojikumi: opt_str(params, "mojikumi")?
+                .map(|text| {
+                    disccraft_project::TextMojikumi::parse(&text).ok_or_else(|| {
+                        "parameter \"mojikumi\" must be \"none\", \"punctuationHalf\", \"lineEndHalf\", \"lineEndFull\" or \"punctuationFull\""
+                            .to_string()
+                    })
+                })
+                .transpose()?,
+            kinsoku: opt_str(params, "kinsoku")?
+                .map(|text| {
+                    disccraft_project::TextKinsoku::parse(&text).ok_or_else(|| {
+                        "parameter \"kinsoku\" must be \"none\", \"weak\" or \"strong\"".to_string()
+                    })
+                })
+                .transpose()?,
+            kinsoku_method: opt_str(params, "kinsokuMethod")?
+                .map(|text| {
+                    disccraft_project::TextKinsokuMethod::parse(&text).ok_or_else(|| {
+                        "parameter \"kinsokuMethod\" must be \"pushInFirst\", \"pushOutFirst\" or \"pushOutOnly\""
+                            .to_string()
+                    })
+                })
+                .transpose()?,
+            hanging_punctuation: opt_flag(params, "hangingPunctuation")?,
         })
     }
 
@@ -293,14 +489,39 @@ impl FormatPatch {
             caps,
             align,
             tracking,
+            line_pitch,
             leading,
             kerning,
+            manual_kerning,
             baseline,
             vertical_scale,
             horizontal_scale,
             script,
             antialias,
+            tsume,
+            mojikumi,
+            kinsoku,
+            kinsoku_method,
+            hanging_punctuation,
         } = *self;
+        if let Some(value) = line_pitch {
+            format.line_pitch = value;
+        }
+        if let Some(value) = kinsoku {
+            format.kinsoku = value;
+        }
+        if let Some(value) = kinsoku_method {
+            format.kinsoku_method = value;
+        }
+        if let Some(value) = hanging_punctuation {
+            format.hanging_punctuation = value;
+        }
+        if let Some(value) = tsume {
+            format.tsume = value;
+        }
+        if let Some(value) = mojikumi {
+            format.mojikumi = value;
+        }
         if let Some(value) = bold {
             format.bold = value;
         }
@@ -327,6 +548,9 @@ impl FormatPatch {
         }
         if let Some(value) = kerning {
             format.kerning = value;
+        }
+        if let Some(value) = manual_kerning {
+            format.manual_kerning = value;
         }
         if let Some(value) = baseline {
             format.baseline = value;
@@ -548,6 +772,259 @@ mod tests {
         Ok(())
     }
 
+    /// M6.266: a text gets a box to wrap in, loses it with null, and takes a kinsoku set; widths out of range
+    /// and unknown sets are refused.
+    #[test]
+    fn a_text_gets_a_box_and_a_kinsoku_set() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::TextKinsoku;
+        let (mut session, menu) = session_with_menu()?;
+        session.execute(
+            "menu.addText",
+            &json!({"menu": menu, "text": "Welcome", "x": 40, "y": 30, "boxWidth": 300}),
+        )?;
+        let text = |session: &Session| {
+            session
+                .project
+                .menus
+                .values()
+                .next()
+                .and_then(|menu| menu.texts.first().cloned())
+        };
+        let added = text(&session).ok_or("no text")?;
+        assert_eq!(added.box_width, Some(300));
+        assert_eq!(added.format.kinsoku, TextKinsoku::Strong);
+        session.execute(
+            "menu.setText",
+            &json!({"menu": menu, "index": 0, "boxWidth": 120, "kinsoku": "weak"}),
+        )?;
+        let changed = text(&session).ok_or("no text")?;
+        assert_eq!(changed.box_width, Some(120));
+        assert_eq!(changed.format.kinsoku, TextKinsoku::Weak);
+        // Leaving the box out keeps it; null takes it away.
+        session.execute("menu.setText", &json!({"menu": menu, "index": 0, "x": 50}))?;
+        assert_eq!(text(&session).ok_or("no text")?.box_width, Some(120));
+        session.execute(
+            "menu.setText",
+            &json!({"menu": menu, "index": 0, "boxWidth": null}),
+        )?;
+        assert_eq!(text(&session).ok_or("no text")?.box_width, None);
+        session.execute("edit.undo", &json!({}))?;
+        assert_eq!(text(&session).ok_or("no text")?.box_width, Some(120));
+        for bad in [
+            json!({"menu": menu, "index": 0, "boxWidth": 3}),
+            json!({"menu": menu, "index": 0, "boxWidth": 70000}),
+            json!({"menu": menu, "index": 0, "boxWidth": "wide"}),
+            json!({"menu": menu, "index": 0, "kinsoku": "none at all"}),
+        ] {
+            assert!(session.execute("menu.setText", &bad).is_err(), "{bad}");
+        }
+        Ok(())
+    }
+
+    /// M6.298: a paragraph text's box gets a height and loses it with null; point text has none (taking the box
+    /// away takes the height too); heights out of range are refused.
+    #[test]
+    fn a_text_box_gets_a_height() -> Result<(), Box<dyn Error>> {
+        let (mut session, menu) = session_with_menu()?;
+        session.execute(
+            "menu.addText",
+            &json!({"menu": menu, "text": "Welcome", "x": 40, "y": 30, "boxWidth": 300}),
+        )?;
+        let height = |session: &Session| {
+            session
+                .project
+                .menus
+                .values()
+                .next()
+                .and_then(|menu| menu.texts.first().map(|text| text.box_height))
+        };
+        assert_eq!(height(&session), Some(None));
+        session.execute(
+            "menu.setText",
+            &json!({"menu": menu, "index": 0, "boxHeight": 80}),
+        )?;
+        assert_eq!(height(&session), Some(Some(80)));
+        session.execute("menu.setText", &json!({"menu": menu, "index": 0, "x": 50}))?;
+        assert_eq!(height(&session), Some(Some(80)));
+        session.execute(
+            "menu.setText",
+            &json!({"menu": menu, "index": 0, "boxHeight": null}),
+        )?;
+        assert_eq!(height(&session), Some(None));
+        session.execute("edit.undo", &json!({}))?;
+        assert_eq!(height(&session), Some(Some(80)));
+        session.execute(
+            "menu.setText",
+            &json!({"menu": menu, "index": 0, "boxWidth": null}),
+        )?;
+        assert_eq!(height(&session), Some(None));
+        for bad in [3, 70000] {
+            assert!(
+                session
+                    .execute(
+                        "menu.setText",
+                        &json!({"menu": menu, "index": 0, "boxWidth": 200, "boxHeight": bad}),
+                    )
+                    .is_err()
+            );
+        }
+        Ok(())
+    }
+
+    /// M6.304: a whole text object is placed (a Library text item): its look and box come with it, it lands where
+    /// asked inside the frame, shown and unlocked; a text of nothing, or no text object at all, is refused.
+    #[test]
+    fn a_text_object_is_placed_whole() -> Result<(), Box<dyn Error>> {
+        let (mut session, menu) = session_with_menu()?;
+        session.execute(
+            "menu.addText",
+            &json!({"menu": menu, "text": "Chapters", "x": 40, "y": 30, "size": 36, "boxWidth": 200}),
+        )?;
+        session.execute(
+            "menu.setText",
+            &json!({"menu": menu, "index": 0, "bold": true, "align": "center", "boxHeight": 90}),
+        )?;
+        let mut saved = session
+            .project
+            .menus
+            .values()
+            .next()
+            .and_then(|found| found.texts.first().cloned())
+            .ok_or("no text")?;
+        saved.hidden = true;
+        saved.locked = true;
+        let placed = session.execute(
+            "menu.placeText",
+            &json!({"menu": menu, "text": saved, "x": 300, "y": 200}),
+        )?;
+        assert_eq!(
+            placed.get("index").and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        let copy = session
+            .project
+            .menus
+            .values()
+            .next()
+            .and_then(|found| found.texts.get(1).cloned())
+            .ok_or("no copy")?;
+        assert_eq!((copy.x, copy.y, copy.size), (300, 200, 36));
+        assert_eq!((copy.box_width, copy.box_height), (Some(200), Some(90)));
+        assert!(copy.format.bold && !copy.hidden && !copy.locked);
+        assert_eq!(copy.text, "Chapters");
+        // Undone: gone.
+        session.execute("edit.undo", &json!({}))?;
+        assert_eq!(
+            session
+                .project
+                .menus
+                .values()
+                .next()
+                .map(|found| found.texts.len()),
+            Some(1)
+        );
+        let mut empty = saved.clone();
+        empty.text = String::new();
+        for bad in [
+            json!({"menu": menu, "text": empty}),
+            json!({"menu": menu, "text": 3}),
+        ] {
+            assert!(session.execute("menu.placeText", &bad).is_err(), "{bad}");
+        }
+        Ok(())
+    }
+
+    /// M6.311: a new text takes the characters it is given (the Character panel's for the next text): its font,
+    /// style and format, in the one step that adds it.
+    #[test]
+    fn a_new_text_takes_its_characters() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::{TextAlign, TextKinsokuMethod};
+        let (mut session, menu) = session_with_menu()?;
+        session.execute(
+            "menu.addText",
+            &json!({"menu": menu, "text": "Chapters", "x": 40, "y": 30, "size": 48, "font": "Serif",
+                "fontStyle": "Bold", "bold": true, "align": "center", "tracking": 50,
+                "kinsokuMethod": "pushOutOnly"}),
+        )?;
+        let added = session
+            .project
+            .menus
+            .values()
+            .next()
+            .and_then(|found| found.texts.first().cloned())
+            .ok_or("no text")?;
+        assert_eq!(added.size, 48);
+        assert_eq!(
+            (added.font.as_deref(), added.font_style.as_deref()),
+            (Some("Serif"), Some("Bold"))
+        );
+        assert!(added.format.bold);
+        assert_eq!(added.format.align, TextAlign::Center);
+        assert_eq!(added.format.tracking, 50);
+        assert_eq!(added.format.kinsoku_method, TextKinsokuMethod::PushOutOnly);
+        // One step: undone, the menu has no text.
+        session.execute("edit.undo", &json!({}))?;
+        assert_eq!(
+            session
+                .project
+                .menus
+                .values()
+                .next()
+                .map(|found| found.texts.len()),
+            Some(0)
+        );
+        assert!(
+            session
+                .execute(
+                    "menu.addText",
+                    &json!({"menu": menu, "text": "x", "x": 1, "y": 1, "align": "sideways"}),
+                )
+                .is_err()
+        );
+        Ok(())
+    }
+
+    /// M6.296: Encore's 禁則方法 and ぶら下がり: 追い込み優先 and no hanging at first, set by name, undone; a
+    /// method of another name is refused.
+    #[test]
+    fn a_text_gets_a_kinsoku_method_and_hanging_punctuation() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::TextKinsokuMethod;
+        let (mut session, menu) = session_with_menu()?;
+        session.execute(
+            "menu.addText",
+            &json!({"menu": menu, "text": "ようこそ。", "x": 40, "y": 30, "boxWidth": 60}),
+        )?;
+        let format = |session: &Session| {
+            session
+                .project
+                .menus
+                .values()
+                .next()
+                .and_then(|menu| menu.texts.first().map(|text| text.format))
+        };
+        let added = format(&session).ok_or("no text")?;
+        assert_eq!(added.kinsoku_method, TextKinsokuMethod::PushInFirst);
+        assert!(!added.hanging_punctuation);
+        session.execute(
+            "menu.setText",
+            &json!({"menu": menu, "index": 0, "kinsokuMethod": "pushOutOnly", "hangingPunctuation": true}),
+        )?;
+        let changed = format(&session).ok_or("no text")?;
+        assert_eq!(changed.kinsoku_method, TextKinsokuMethod::PushOutOnly);
+        assert!(changed.hanging_punctuation);
+        session.execute("edit.undo", &json!({}))?;
+        assert_eq!(format(&session), Some(added));
+        assert!(
+            session
+                .execute(
+                    "menu.setText",
+                    &json!({"menu": menu, "index": 0, "kinsokuMethod": "pushAround"}),
+                )
+                .is_err()
+        );
+        Ok(())
+    }
+
     #[test]
     fn texts_are_added_changed_and_removed() -> Result<(), Box<dyn Error>> {
         let (mut session, menu) = session_with_menu()?;
@@ -640,6 +1117,53 @@ mod tests {
         Ok(())
     }
 
+    /// M6.344: Encore's カーニング: metrics, none, or a number between every two characters; the style read of the
+    /// text gives it back the same way.
+    #[test]
+    fn kerning_is_metrics_or_a_number() -> Result<(), Box<dyn Error>> {
+        let (mut session, menu) = session_with_menu()?;
+        session.execute(
+            "menu.addText",
+            &json!({"menu": menu, "text": "AV", "x": 10, "y": 10}),
+        )?;
+        let kerning = |session: &Session| {
+            session
+                .project
+                .menu(MenuId(menu))
+                .and_then(|menu| menu.texts.first())
+                .map(|text| (text.format.kerning, text.format.manual_kerning))
+        };
+        assert_eq!(kerning(&session), Some((true, 0)));
+        session.execute(
+            "menu.setText",
+            &json!({"menu": menu, "index": 0, "kerning": -50}),
+        )?;
+        assert_eq!(kerning(&session), Some((false, -50)));
+        let style = session.execute("menu.styleOf", &json!({"menu": menu, "text": 0}))?;
+        assert_eq!(style.pointer("/style/kerning"), Some(&json!(-50)));
+        session.execute(
+            "menu.setText",
+            &json!({"menu": menu, "index": 0, "kerning": false}),
+        )?;
+        assert_eq!(kerning(&session), Some((false, 0)));
+        session.execute(
+            "menu.setText",
+            &json!({"menu": menu, "index": 0, "kerning": true}),
+        )?;
+        assert_eq!(kerning(&session), Some((true, 0)));
+        for bad in [json!(5000), json!("tight")] {
+            assert!(
+                session
+                    .execute(
+                        "menu.setText",
+                        &json!({"menu": menu, "index": 0, "kerning": bad})
+                    )
+                    .is_err()
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn text_formatting_is_set_and_undone() -> Result<(), Box<dyn Error>> {
         let (mut session, menu) = session_with_menu()?;
@@ -681,6 +1205,49 @@ mod tests {
         }
         session.undo()?;
         assert_eq!(format(&session), Some(TextFormat::default()));
+        Ok(())
+    }
+
+    /// M6.313: Encore's 行送り — a pitch in pixels, null for 自動; out of range is refused; left out keeps it.
+    #[test]
+    fn the_line_pitch_is_set_or_automatic() -> Result<(), Box<dyn Error>> {
+        let (mut session, menu) = session_with_menu()?;
+        session.execute(
+            "menu.addText",
+            &json!({"menu": menu, "text": "Title", "x": 10, "y": 10}),
+        )?;
+        let pitch = |session: &Session| {
+            session
+                .project
+                .menu(MenuId(menu))
+                .and_then(|menu| menu.texts.first())
+                .map(|text| (text.format.line_pitch, text.format.leading))
+        };
+        assert_eq!(pitch(&session), Some((None, 0)));
+        session.execute(
+            "menu.setText",
+            &json!({"menu": menu, "index": 0, "linePitch": 60, "leading": 0}),
+        )?;
+        assert_eq!(pitch(&session), Some((Some(60), 0)));
+        session.execute(
+            "menu.setText",
+            &json!({"menu": menu, "index": 0, "bold": true}),
+        )?;
+        assert_eq!(pitch(&session), Some((Some(60), 0)));
+        for bad in [json!(0), json!(1001), json!(-5), json!("tall")] {
+            let params = json!({"menu": menu, "index": 0, "linePitch": bad});
+            assert!(
+                session.execute("menu.setText", &params).is_err(),
+                "{params}"
+            );
+        }
+        session.execute(
+            "menu.setText",
+            &json!({"menu": menu, "index": 0, "linePitch": null}),
+        )?;
+        assert_eq!(pitch(&session), Some((None, 0)));
+        session.undo()?;
+        assert_eq!(pitch(&session), Some((Some(60), 0)));
         Ok(())
     }
 

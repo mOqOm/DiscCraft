@@ -103,7 +103,20 @@ impl DiscCraftApp {
             }
             ui.close();
         }
-        let _ = ui.add_enabled(false, egui::Button::new(tl!("Interpret Footage…")));
+        // Interpret Footage…: the pixel aspect ratio a video asset's pictures are taken to have (M6.252).
+        let interpreted = asset.filter(|id| self.can_interpret_footage(*id));
+        if ui
+            .add_enabled(
+                interpreted.is_some(),
+                egui::Button::new(tl!("Interpret Footage…")),
+            )
+            .clicked()
+        {
+            if let Some(id) = interpreted {
+                self.open_interpret_footage(id);
+            }
+            ui.close();
+        }
 
         ui.separator();
         ui.menu_button(tl!("New"), |ui| self.new_items(ui, asset, timeline));
@@ -159,8 +172,20 @@ impl DiscCraftApp {
     /// Locate Transcoded File ▸. Transcode Now makes the asset's transcodes ahead of the build, in the background.
     fn transcode_items(&mut self, ui: &mut Ui, asset: Option<disccraft_project::AssetId>) {
         use crate::project_panel::TranscodeState;
-        // Not there yet: a transcode setting per asset (the build chooses the bitrate for the whole disc).
-        let _ = ui.add_enabled(false, egui::Button::new(tl!("Transcode Settings…")));
+        // The asset's own bit rate (M6.251); automatic leaves it to the build.
+        let settable = asset.filter(|id| self.has_transcode_settings(*id));
+        if ui
+            .add_enabled(
+                settable.is_some(),
+                egui::Button::new(tl!("Transcode Settings…")),
+            )
+            .clicked()
+        {
+            if let Some(id) = settable {
+                self.open_transcode_settings(id);
+            }
+            ui.close();
+        }
         let untranscoded = asset
             .and_then(|id| self.transcode_state(id))
             .is_some_and(|state| state == TranscodeState::Untranscoded);
@@ -191,10 +216,24 @@ impl DiscCraftApp {
             }
             ui.close();
         }
-        // Not there yet: pointing at a file transcoded elsewhere.
+        // Locate Transcoded File ▸ DVD… / Blu-ray…: files transcoded elsewhere (or by an earlier build whose source
+        // is gone) take the video's place in a build of that kind.
+        let video = asset.filter(|id| self.is_video_asset(*id));
         let _ = ui.menu_button(tl!("Locate Transcoded File"), |ui| {
-            let _ = ui.add_enabled(false, egui::Button::new(tl!("DVD…")));
-            let _ = ui.add_enabled(false, egui::Button::new(tl!("Blu-ray…")));
+            for (kind, label) in [
+                (disccraft_project::DiscKind::Dvd, tl!("DVD…")),
+                (disccraft_project::DiscKind::BluRay, tl!("Blu-ray…")),
+            ] {
+                if ui
+                    .add_enabled(video.is_some(), egui::Button::new(label))
+                    .clicked()
+                {
+                    if let Some(id) = video {
+                        self.locate_transcoded(id, kind);
+                    }
+                    ui.close();
+                }
+            }
         });
     }
 
@@ -356,6 +395,150 @@ impl DiscCraftApp {
         if ui.button(tl!("Preview from Here")).clicked() {
             self.preview_from(selection);
             ui.close();
+        }
+    }
+
+    /// The right-click menu of a row of the Menus or Timelines panel, as Encore has it (M6.338): ファーストプレイに
+    /// 設定 (を解除) / コピー / 消去 / 名前の変更… / (a menu: メニューを PhotoCraft で編集) / 開く / ここからプレビューする.
+    pub(crate) fn tab_item_menu(&mut self, ui: &mut Ui, selection: Selection) {
+        self.first_play_items(ui, selection);
+        ui.separator();
+        if ui.button(tl!("Copy")).clicked() {
+            self.copy_item(ui.ctx(), selection);
+            ui.close();
+        }
+        if ui.button(tl!("Clear")).clicked() {
+            self.remove_object(selection);
+            ui.close();
+        }
+        if ui.button(tl!("Rename…")).clicked() {
+            self.select(selection);
+            self.start_rename();
+            ui.close();
+        }
+        ui.separator();
+        if let Selection::Menu(id) = selection
+            && crate::actions::menu_item(ui, crate::actions::Action::EditMenuInPhotoCraft, true)
+        {
+            self.edit_menu_in_photocraft(id);
+            ui.close();
+        }
+        if ui.button(tl!("Open")).clicked() {
+            self.select(selection);
+            ui.close();
+        }
+        ui.separator();
+        if ui.button(tl!("Preview from Here")).clicked() {
+            self.preview_from(selection);
+            ui.close();
+        }
+    }
+
+    /// The right-click menu of a button in the Menus panel's lower table (Encore, M6.338): 消去 / メニュービューアで
+    /// 開く / リンクを開く / ここからプレビューする (the menu with that button selected).
+    pub(crate) fn tab_button_menu(
+        &mut self,
+        ui: &mut Ui,
+        menu: disccraft_project::MenuId,
+        index: usize,
+    ) {
+        if ui.button(tl!("Clear")).clicked() {
+            self.select_only_button(menu, index);
+            self.remove_selected_buttons();
+            ui.close();
+        }
+        ui.separator();
+        if ui.button(tl!("Open in Menu Viewer")).clicked() {
+            self.select_only_button(menu, index);
+            self.show_panel(crate::workspace::Panel::MenuViewer);
+            ui.close();
+        }
+        let link = self
+            .session
+            .project
+            .menu(menu)
+            .and_then(|found| found.buttons.get(index))
+            .map(|button| button.link.clone())
+            .filter(|link| link_to_item(link).is_some());
+        if ui
+            .add_enabled(link.is_some(), egui::Button::new(tl!("Open Link")))
+            .clicked()
+        {
+            if let Some(link) = link {
+                self.follow_link(ui.ctx(), &link);
+            }
+            ui.close();
+        }
+        ui.separator();
+        if ui.button(tl!("Preview from Here")).clicked() {
+            self.preview_from_button(menu, index);
+            ui.close();
+        }
+    }
+
+    /// The right-click menu of a chapter in the Timelines panel's lower table (Encore, M6.338): 消去 / 開く /
+    /// ここからプレビューする (the title from that chapter). The first chapter cannot be removed.
+    pub(crate) fn tab_chapter_menu(&mut self, ui: &mut Ui, timeline: TimelineId, chapter: usize) {
+        if ui
+            .add_enabled(chapter > 0, egui::Button::new(tl!("Clear")))
+            .clicked()
+        {
+            let _ = self.run_command(
+                "timeline.removeChapter",
+                serde_json::json!({"timeline": timeline.0, "chapter": chapter}),
+            );
+            ui.close();
+        }
+        ui.separator();
+        if ui.button(tl!("Open")).clicked() {
+            self.open_chapter(ui.ctx(), timeline, chapter);
+            ui.close();
+        }
+        ui.separator();
+        if ui.button(tl!("Preview from Here")).clicked() {
+            self.chapter_focus = Some((timeline, chapter));
+            self.preview_from(Selection::Timeline(timeline));
+            ui.close();
+        }
+    }
+
+    /// Opens a chapter: its timeline in the Timeline viewer with the playhead on it, and its sheet in the
+    /// properties.
+    pub(crate) fn open_chapter(&mut self, ctx: &Context, timeline: TimelineId, chapter: usize) {
+        let Some(time) = self
+            .session
+            .project
+            .timeline(timeline)
+            .and_then(|found| found.chapters.get(chapter))
+            .map(|point| point.time.seconds())
+        else {
+            return;
+        };
+        self.focus_chapter(timeline, Some(chapter));
+        crate::timeline_view::set_selected_chapter(ctx, timeline, Some(chapter));
+        crate::timeline_view::set_playhead_seconds(ctx, timeline, time);
+        self.show_panel(crate::workspace::Panel::TimelineViewer);
+    }
+
+    /// Encore's リンクを開く: what a link leads to, opened (a chapter of a timeline, a menu with its button, a
+    /// slideshow, a playlist or a chapter playlist).
+    pub(crate) fn follow_link(&mut self, ctx: &Context, link: &disccraft_project::Link) {
+        match link {
+            disccraft_project::Link::Timeline { id, chapter } => {
+                self.open_chapter(ctx, *id, usize::try_from(*chapter).unwrap_or(0));
+            }
+            disccraft_project::Link::Menu { id, button } => {
+                match button.and_then(|button| usize::try_from(button).ok()) {
+                    Some(index) => self.select_only_button(*id, index),
+                    None => self.select(Selection::Menu(*id)),
+                }
+                self.show_panel(crate::workspace::Panel::MenuViewer);
+            }
+            other => {
+                if let Some(selection) = link_to_item(other) {
+                    self.select(selection);
+                }
+            }
         }
     }
 
@@ -778,6 +961,19 @@ pub(crate) fn interval_times(duration: f64, minutes: f64) -> Vec<f64> {
     times
 }
 
+/// The item a link leads to, as a selection (`None` for stop, the last menu, or no link).
+pub(crate) fn link_to_item(link: &disccraft_project::Link) -> Option<Selection> {
+    use disccraft_project::Link;
+    match link {
+        Link::Timeline { id, .. } => Some(Selection::Timeline(*id)),
+        Link::Menu { id, .. } => Some(Selection::Menu(*id)),
+        Link::Slideshow { id } => Some(Selection::Slideshow(*id)),
+        Link::Playlist { id } => Some(Selection::Playlist(*id)),
+        Link::ChapterPlaylist { id } => Some(Selection::ChapterPlaylist(*id)),
+        Link::NotSet | Link::Stop | Link::LastMenu => None,
+    }
+}
+
 /// Whether two links go to the same place (a menu link with or without a button counts as the menu).
 fn same_target(a: &disccraft_project::Link, b: &disccraft_project::Link) -> bool {
     use disccraft_project::Link;
@@ -799,6 +995,26 @@ mod tests {
         assert!(interval_times(60.0, 5.0).is_empty());
         assert!(interval_times(f64::NAN, 5.0).is_empty());
         assert!(interval_times(600.0, 0.0).is_empty());
+    }
+
+    /// M6.338: リンクを開く opens what the link leads to; stop and the last menu have nothing to open.
+    #[test]
+    fn a_link_leads_to_its_item() {
+        use crate::app::Selection;
+        use disccraft_project::{Link, MenuId, TimelineId};
+        let timeline = Link::Timeline {
+            id: TimelineId(3),
+            chapter: 2,
+        };
+        assert!(super::link_to_item(&timeline) == Some(Selection::Timeline(TimelineId(3))));
+        let menu = Link::Menu {
+            id: MenuId(4),
+            button: Some(1),
+        };
+        assert!(super::link_to_item(&menu) == Some(Selection::Menu(MenuId(4))));
+        for nothing in [Link::Stop, Link::LastMenu, Link::NotSet] {
+            assert!(super::link_to_item(&nothing).is_none());
+        }
     }
 
     #[test]

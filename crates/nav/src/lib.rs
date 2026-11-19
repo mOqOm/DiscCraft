@@ -18,7 +18,8 @@ mod compile;
 
 pub use cmd::{
     Cmd, add_gprm, call_ss_vmgm_pgcn, exit, if_eq_goto, if_eq_link_pgcn, if_eq_link_pgn,
-    jump_ss_vmgm_pgcn, jump_tt, link_pgcn, link_pgn, mov_gprm, set_gprm, set_hl_btnn,
+    if_sprm_ge_goto, jump_ss_vmgm_pgcn, jump_tt, link_pgcn, link_pgn, mov_gprm, set_gprm,
+    set_hl_btnn, set_tmp_pml,
 };
 pub use compile::{
     ChapterPlaylistNav, CompiledNav, HiddenKind, HiddenPgc, MenuNav, NavError, TitleNav, compile,

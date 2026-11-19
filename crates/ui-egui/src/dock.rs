@@ -33,10 +33,13 @@ const TAB_TEXT_INSET: f32 = 12.0;
 impl DiscCraftApp {
     /// メニューバーの下のすべてを描く。
     pub(crate) fn draw_groups(&mut self, ui: &mut Ui) {
-        egui::Panel::top("toolbar")
-            .frame(bar_frame())
-            .show_separator_line(false)
-            .show(ui, |ui| self.toolbar(ui));
+        // Encore's Tools panel; Window ▸ Tools (Ctrl+F4) hides it.
+        if self.show_tools {
+            egui::Panel::top("toolbar")
+                .frame(bar_frame())
+                .show_separator_line(false)
+                .show(ui, |ui| self.toolbar(ui));
+        }
 
         egui::Panel::bottom("status_bar")
             .frame(bar_frame())
@@ -190,8 +193,13 @@ impl DiscCraftApp {
                 .collect(),
             Panel::MenuViewer => project
                 .menus
-                .iter()
-                .map(|(id, menu)| (Selection::Menu(*id), menu.name.clone()))
+                .keys()
+                .map(|id| {
+                    (
+                        Selection::Menu(*id),
+                        crate::menu_editor::menu_title(project, *id),
+                    )
+                })
                 .collect(),
             Panel::SlideshowViewer => project
                 .slideshows
@@ -381,6 +389,18 @@ impl DiscCraftApp {
             Panel::Layers => {
                 fill_scroll("layers_tab").show(ui, |ui| self.layers_tab(ui));
             }
+            Panel::Progress => {
+                fill_scroll("progress_tab").show(ui, |ui| self.progress_panel(ui));
+            }
+            Panel::Character => {
+                fill_scroll("character_tab").show(ui, |ui| self.character_panel(ui));
+            }
+            Panel::Metadata => {
+                fill_scroll("metadata_tab").show(ui, |ui| self.metadata_panel(ui));
+            }
+            Panel::Styles => {
+                fill_scroll("styles_tab").show(ui, |ui| self.styles_panel(ui));
+            }
             // タイムラインビューアは自分でスクロールする（下にズームのバー）。
             Panel::TimelineViewer => match self.viewer_timeline() {
                 Some(id) => self.timeline_view(ui, id),
@@ -403,7 +423,8 @@ impl DiscCraftApp {
     pub(crate) fn panel_label(&self, panel: Panel) -> String {
         match panel {
             Panel::MenuViewer => match self.viewer_menu() {
-                Some(id) => self.menu_name(id),
+                // A later page says which page it is.
+                Some(id) => crate::menu_editor::menu_title(&self.session.project, id),
                 None => tl!("(No menu)").to_owned(),
             },
             Panel::TimelineViewer => match self.viewer_timeline() {
@@ -450,6 +471,19 @@ impl DiscCraftApp {
             .filter(|id| self.session.project.menu(*id).is_some())
     }
 
+    /// File ▸ Close: the viewer of the selected kind of item shows nothing any more (the item stays in the
+    /// project; opening it again brings it back).
+    pub(crate) fn close_viewer(&mut self) {
+        match self.selection {
+            Selection::Menu(_) => self.last_menu = None,
+            Selection::Timeline(_) => self.last_timeline = None,
+            Selection::Slideshow(_) => self.last_slideshow = None,
+            Selection::ChapterPlaylist(_) => self.last_chapter_playlist = None,
+            Selection::Asset(_) | Selection::Playlist(_) | Selection::None => return,
+        }
+        self.select(Selection::None);
+    }
+
     /// タイムラインビューアに出すタイムライン。
     pub(crate) fn viewer_timeline(&self) -> Option<TimelineId> {
         if let Selection::Timeline(id) = self.selection {
@@ -475,14 +509,6 @@ impl DiscCraftApp {
         }
         self.last_slideshow
             .filter(|id| self.session.project.slideshows.contains_key(id))
-    }
-
-    fn menu_name(&self, id: MenuId) -> String {
-        self.session
-            .project
-            .menu(id)
-            .map(|menu| menu.name.clone())
-            .unwrap_or_default()
     }
 
     fn timeline_name(&self, id: TimelineId) -> String {

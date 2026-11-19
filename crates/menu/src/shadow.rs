@@ -75,7 +75,7 @@ pub(crate) fn shadow_mask(
 }
 
 /// Grows every covered pixel by `radius` pixels in each direction (a square maximum filter, run as two passes).
-fn dilate(mask: &mut Mask, radius: usize) {
+pub(crate) fn dilate(mask: &mut Mask, radius: usize) {
     let w = mask.w;
     let h = mask.h;
     let mut temp = vec![0.0f32; mask.a.len()];
@@ -130,7 +130,7 @@ fn dilate(mask: &mut Mask, radius: usize) {
 }
 
 /// Averages every pixel with its neighbours within `radius` (a box blur, run as two passes over prefix sums).
-fn box_blur(mask: &mut Mask, radius: usize) {
+pub(crate) fn box_blur(mask: &mut Mask, radius: usize) {
     let w = mask.w;
     let h = mask.h;
     let mut temp = vec![0.0f32; mask.a.len()];

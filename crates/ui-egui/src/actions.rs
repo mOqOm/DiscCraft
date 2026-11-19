@@ -26,6 +26,10 @@ pub(crate) enum Action {
     ConvertToButton,
     /// Turn the selected buttons back into plain objects (Object ▸ Convert to Object).
     ConvertToObject,
+    /// Object ▸ Convert to Replacement Layer: the selected graphic becomes a `(!)` layer a dropped still replaces.
+    ConvertToReplacementLayer,
+    /// Give the selected buttons a subpicture in the shape of their artwork (Encore: Object ▸ Create Subpicture).
+    CreateSubpicture,
     /// Open the Specify Link dialog for the selected buttons or the selected object's end action.
     SpecifyLink,
     /// Open the Drop Shadow dialog for the selected text, graphic or buttons (Object ▸ Drop Shadow…).
@@ -90,6 +94,8 @@ pub(crate) enum Action {
     Copy,
     /// Paste buttons into the open menu.
     Paste,
+    /// Edit ▸ Paste as Subpicture: the copied layer's shape becomes the selected button's subpicture.
+    PasteAsSubpicture,
     /// Duplicate the selected buttons.
     Duplicate,
     /// Clear the selected item.
@@ -102,6 +108,8 @@ pub(crate) enum Action {
     EditMenuInPhotoCraft,
     /// Edit the selected asset in the app that makes it (Encore: Edit Original).
     EditOriginal,
+    /// Set the selected asset's transcode bit rate (Encore: File ▸ Transcode ▸ Transcode Settings…).
+    TranscodeSettings,
     /// Convert the selected asset ahead of the build (Encore: File ▸ Transcode ▸ Transcode Now).
     TranscodeNow,
     /// Convert everything the project's build would convert.
@@ -174,6 +182,14 @@ pub(crate) enum Action {
     RemoveSubtitleTrack,
     /// Read a subtitle file (SRT, WebVTT, text script) and add it as a subtitle track.
     ImportSubtitles,
+    /// Timeline ▸ Import Subtitles ▸ FAB Image Script…: picture subtitles, each with its own place.
+    ImportFabImageScript,
+    /// File ▸ Locate Transcoded File ▸ DVD…: the files the selected video was transcoded to for a DVD.
+    LocateTranscodedDvd,
+    /// File ▸ Locate Transcoded File ▸ Blu-ray…: the same for a Blu-ray disc.
+    LocateTranscodedBluray,
+    /// Timeline ▸ Import Subtitles ▸ Image Script…: picture subtitles in one place, from a folder the script names.
+    ImportImageScript,
     /// Read a FilmCraft project and turn a sequence's markers into chapter points.
     ImportFilmCraftMarkers,
     /// Take the chapters the timeline's video files carry as chapter points.
@@ -238,6 +254,40 @@ pub(crate) enum Action {
     WindowFlowchart,
     /// Show or hide the Layers panel.
     WindowLayers,
+    /// File ▸ Replace Asset… (Encore: the same; the selected asset's file is exchanged).
+    ReplaceAsset,
+    /// File ▸ Locate Asset… (Encore: the same; for an asset whose file is missing).
+    LocateAsset,
+    /// File ▸ Interpret Footage… (Encore: the same; the selected video asset's pixel aspect ratio).
+    InterpretFootage,
+    /// File ▸ Select DVD-ROM Folder… (Encore: the same; the files a computer sees beside the video).
+    ChooseRomFolder,
+    /// File ▸ Close (Encore: Ctrl+W; what the viewer in use shows is closed, the item itself stays).
+    CloseViewer,
+    /// File ▸ Transcode ▸ Edit Quality Presets… (Encore: File ▸ Edit Quality Presets…).
+    EditQualityPresets,
+    /// Edit ▸ Update Markers from Source (Replace All Markers) (Encore: Ctrl+F).
+    UpdateMarkersFromSource,
+    /// Timeline ▸ Edit Timeline Color Set… (Encore: the same; here the timeline's Properties, where it is).
+    EditTimelineColorSet,
+    /// Edit ▸ Ripple Delete (Encore: Shift+Delete; the clip under the playhead goes and the rest closes up).
+    RippleDelete,
+    /// Timeline ▸ Set Poster Frame (Encore: Shift+*; the current chapter's poster frame at the playhead).
+    SetPosterFrame,
+    /// Timeline ▸ Move Track to View (Encore: Alt+Ctrl+T; the timeline scrolls to the track that is heard).
+    MoveTrackToView,
+    /// Timeline ▸ Set Timeline User Operations… (Encore: the same).
+    SetTimelineUserOps,
+    /// Timeline ▸ Save Frame as File… (Encore: Shift+Ctrl+F; the frame at the playhead as a picture file).
+    SaveFrameAsFile,
+    /// Show or hide the Progress panel (Encore: Window ▸ Progress, F10).
+    WindowProgress,
+    /// Show or hide the Character panel (Encore: Window ▸ Character, F3).
+    WindowCharacter,
+    /// Show or hide the Styles panel (Encore: Window ▸ Styles, Ctrl+F2).
+    WindowStyles,
+    /// Show or hide the Metadata panel (Encore: Window ▸ Metadata).
+    WindowMetadata,
     /// Show or hide the Library panel.
     WindowLibrary,
     /// Show or hide the Menus window.
@@ -250,6 +300,8 @@ pub(crate) enum Action {
     WindowProperties,
     /// Show or hide the Timelines window.
     WindowTimelines,
+    /// Show or hide the Tools panel (the toolbar under the menu bar; Encore: ウィンドウ ▸ ツール, Ctrl+F4, M6.339).
+    WindowTools,
     /// Bring the Menu Viewer forward.
     WindowMenuViewer,
     /// Show or hide the Slideshow Viewer.
@@ -265,11 +317,16 @@ pub(crate) enum Trigger {
     Key(KeyboardShortcut),
     /// A typed character (for keys egui has no `Key` for, such as `*` on the numeric keypad).
     Text(&'static str),
+    /// A character typed on the numeric keypad with Shift held (Encore's Shift+* for the poster frame). egui has
+    /// no key for the keypad's `*`: it sends only the character, while the main keys' `*` (Shift+8, or Shift+:
+    /// on a Japanese keyboard) also send a key press. A character with Shift held and no key press with it is
+    /// taken to be the keypad's.
+    KeypadShifted(&'static str),
 }
 
 impl Action {
     /// Every action, in menu order.
-    pub(crate) const ALL: [Action; 123] = [
+    pub(crate) const ALL: [Action; 149] = [
         Action::NewProject,
         Action::NewMenu,
         Action::NewTimeline,
@@ -278,6 +335,8 @@ impl Action {
         Action::NewChapterPlaylist,
         Action::ConvertToButton,
         Action::ConvertToObject,
+        Action::ConvertToReplacementLayer,
+        Action::CreateSubpicture,
         Action::SpecifyLink,
         Action::DropShadow,
         Action::FlipHorizontal,
@@ -310,12 +369,14 @@ impl Action {
         Action::Cut,
         Action::Copy,
         Action::Paste,
+        Action::PasteAsSubpicture,
         Action::Duplicate,
         Action::Clear,
         Action::SelectAll,
         Action::DeselectAll,
         Action::EditMenuInPhotoCraft,
         Action::EditOriginal,
+        Action::TranscodeSettings,
         Action::TranscodeNow,
         Action::TranscodeAll,
         Action::RevertToOriginal,
@@ -352,6 +413,10 @@ impl Action {
         Action::RemoveAudioTrack,
         Action::RemoveSubtitleTrack,
         Action::ImportSubtitles,
+        Action::ImportFabImageScript,
+        Action::ImportImageScript,
+        Action::LocateTranscodedDvd,
+        Action::LocateTranscodedBluray,
         Action::ImportFilmCraftMarkers,
         Action::ImportSourceChapters,
         Action::NewTimelineFromFilmCraft,
@@ -384,12 +449,30 @@ impl Action {
         Action::WindowDisc,
         Action::WindowFlowchart,
         Action::WindowLayers,
+        Action::ReplaceAsset,
+        Action::LocateAsset,
+        Action::InterpretFootage,
+        Action::ChooseRomFolder,
+        Action::CloseViewer,
+        Action::EditQualityPresets,
+        Action::UpdateMarkersFromSource,
+        Action::EditTimelineColorSet,
+        Action::RippleDelete,
+        Action::SetPosterFrame,
+        Action::MoveTrackToView,
+        Action::SetTimelineUserOps,
+        Action::SaveFrameAsFile,
+        Action::WindowProgress,
+        Action::WindowCharacter,
+        Action::WindowStyles,
+        Action::WindowMetadata,
         Action::WindowLibrary,
         Action::WindowMenus,
         Action::WindowMonitor,
         Action::WindowProject,
         Action::WindowProperties,
         Action::WindowTimelines,
+        Action::WindowTools,
         Action::WindowMenuViewer,
         Action::WindowSlideshowViewer,
         Action::WindowTimelineViewer,
@@ -406,6 +489,8 @@ impl Action {
             Self::NewChapterPlaylist => tl!("Chapter Playlist"),
             Self::ConvertToButton => tl!("Convert to Button"),
             Self::ConvertToObject => tl!("Convert to Object"),
+            Self::ConvertToReplacementLayer => tl!("Convert to Replacement Layer"),
+            Self::CreateSubpicture => tl!("Create Subpicture"),
             Self::SpecifyLink => tl!("Specify Link…"),
             Self::DropShadow => tl!("Drop Shadow…"),
             Self::FlipHorizontal => tl!("Flip Horizontal"),
@@ -439,12 +524,14 @@ impl Action {
             Self::Cut => tl!("Cut"),
             Self::Copy => tl!("Copy"),
             Self::Paste => tl!("Paste"),
+            Self::PasteAsSubpicture => tl!("Paste as Subpicture"),
             Self::Duplicate => tl!("Duplicate"),
             Self::Clear => tl!("Clear"),
             Self::SelectAll => tl!("Select All"),
             Self::DeselectAll => tl!("Deselect All"),
             Self::EditMenuInPhotoCraft => tl!("Edit Menu in PhotoCraft"),
             Self::EditOriginal => tl!("Edit Original"),
+            Self::TranscodeSettings => tl!("Transcode Settings…"),
             Self::TranscodeNow => tl!("Transcode Now"),
             Self::TranscodeAll => tl!("Transcode All"),
             Self::RevertToOriginal => tl!("Revert to Original"),
@@ -481,6 +568,10 @@ impl Action {
             Self::RemoveAudioTrack => tl!("Delete Audio Track"),
             Self::RemoveSubtitleTrack => tl!("Delete Subtitle Track"),
             Self::ImportSubtitles => tl!("Import Subtitles…"),
+            Self::ImportFabImageScript => tl!("FAB Image Script…"),
+            Self::LocateTranscodedDvd => tl!("Locate Transcoded File for DVD…"),
+            Self::LocateTranscodedBluray => tl!("Locate Transcoded File for Blu-ray…"),
+            Self::ImportImageScript => tl!("Image Script…"),
             Self::ImportFilmCraftMarkers => tl!("Import FilmCraft Markers…"),
             Self::ImportSourceChapters => tl!("Import Chapters from Source"),
             Self::NewTimelineFromFilmCraft => tl!("New Timeline from FilmCraft Sequence…"),
@@ -516,7 +607,27 @@ impl Action {
             Self::WindowMonitor => tl!("Monitor"),
             Self::WindowProperties => tl!("Properties"),
             Self::WindowTimelines => tl!("Timelines"),
+            Self::WindowTools => tl!("Tools"),
             Self::WindowLayers => tl!("Layers"),
+            Self::ReplaceAsset => tl!("Replace Asset…"),
+            Self::LocateAsset => tl!("Locate Asset…"),
+            Self::InterpretFootage => tl!("Interpret Footage…"),
+            Self::ChooseRomFolder => tl!("Select DVD-ROM Folder…"),
+            Self::UpdateMarkersFromSource => {
+                tl!("Update Markers from Source (Replace All Markers)")
+            }
+            Self::CloseViewer => tl!("Close"),
+            Self::EditQualityPresets => tl!("Edit Quality Presets…"),
+            Self::EditTimelineColorSet => tl!("Edit Timeline Color Set…"),
+            Self::RippleDelete => tl!("Ripple Delete"),
+            Self::SetPosterFrame => tl!("Set Poster Frame"),
+            Self::MoveTrackToView => tl!("Move Track to View"),
+            Self::SetTimelineUserOps => tl!("Set Timeline User Operations…"),
+            Self::SaveFrameAsFile => tl!("Save Frame as File…"),
+            Self::WindowProgress => tl!("Progress"),
+            Self::WindowCharacter => tl!("Character"),
+            Self::WindowStyles => tl!("Styles"),
+            Self::WindowMetadata => tl!("Metadata"),
             Self::WindowLibrary => tl!("Library"),
             Self::WindowMenuViewer => tl!("Menu Viewer"),
             Self::WindowSlideshowViewer => tl!("Slideshow Viewer"),
@@ -533,6 +644,7 @@ impl Action {
             Self::NewSlideshow => key_shortcut(Modifiers::COMMAND, Key::G),
             Self::Help => key_shortcut(Modifiers::NONE, Key::F1),
             Self::NewPlaylist
+            | Self::TranscodeSettings
             | Self::TranscodeNow
             | Self::TranscodeAll
             | Self::RevertToOriginal
@@ -545,6 +657,7 @@ impl Action {
             | Self::SystemReport
             | Self::CheckForUpdates
             | Self::ConvertToObject
+            | Self::WindowMetadata
             | Self::BuildFolder
             | Self::BuildImage
             | Self::AddButton
@@ -558,6 +671,10 @@ impl Action {
             | Self::RemoveAudioTrack
             | Self::RemoveSubtitleTrack
             | Self::ImportSubtitles
+            | Self::ImportFabImageScript
+            | Self::ImportImageScript
+            | Self::LocateTranscodedDvd
+            | Self::LocateTranscodedBluray
             | Self::ImportFilmCraftMarkers
             | Self::ImportSourceChapters
             | Self::NewTimelineFromFilmCraft
@@ -601,6 +718,9 @@ impl Action {
             Self::Cut => key_shortcut(Modifiers::COMMAND, Key::X),
             Self::Copy => key_shortcut(Modifiers::COMMAND, Key::C),
             Self::Paste => key_shortcut(Modifiers::COMMAND, Key::V),
+            Self::PasteAsSubpicture => {
+                key_shortcut(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::V)
+            }
             Self::Duplicate => key_shortcut(Modifiers::COMMAND, Key::D),
             Self::Clear => key_shortcut(Modifiers::NONE, Key::Delete),
             Self::SelectAll => key_shortcut(Modifiers::COMMAND, Key::A),
@@ -618,6 +738,8 @@ impl Action {
             }
             Self::EditOriginal => key_shortcut(Modifiers::COMMAND, Key::E),
             Self::ConvertToButton => key_shortcut(Modifiers::COMMAND, Key::B),
+            Self::ConvertToReplacementLayer => key_shortcut(Modifiers::COMMAND, Key::J),
+            Self::CreateSubpicture => key_shortcut(Modifiers::COMMAND.plus(Modifiers::ALT), Key::B),
             Self::SpecifyLink => key_shortcut(Modifiers::COMMAND, Key::L),
             Self::DropShadow => key_shortcut(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::O),
             Self::FlipHorizontal => key_shortcut(Modifiers::COMMAND.plus(Modifiers::ALT), Key::H),
@@ -630,7 +752,29 @@ impl Action {
             }
             Self::SetMenuUserOps | Self::SaveMenuAsFile | Self::SetMenuEnd => None,
             Self::DiscUserOps => None,
+            Self::ReplaceAsset => key_shortcut(
+                Modifiers::COMMAND
+                    .plus(Modifiers::ALT)
+                    .plus(Modifiers::SHIFT),
+                Key::R,
+            ),
+            Self::LocateAsset => key_shortcut(
+                Modifiers::COMMAND
+                    .plus(Modifiers::ALT)
+                    .plus(Modifiers::SHIFT),
+                Key::H,
+            ),
+            Self::UpdateMarkersFromSource => key_shortcut(Modifiers::COMMAND, Key::F),
+            Self::CloseViewer => key_shortcut(Modifiers::COMMAND, Key::W),
+            Self::EditTimelineColorSet | Self::EditQualityPresets => None,
+            Self::RippleDelete => key_shortcut(Modifiers::SHIFT, Key::Delete),
+            Self::MoveTrackToView => key_shortcut(Modifiers::COMMAND.plus(Modifiers::ALT), Key::T),
+            Self::SaveFrameAsFile => {
+                key_shortcut(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::F)
+            }
+            Self::InterpretFootage | Self::ChooseRomFolder | Self::SetTimelineUserOps => None,
             Self::AddChapterPoint => Some(Trigger::Text("*")),
+            Self::SetPosterFrame => Some(Trigger::KeypadShifted("*")),
             Self::Play => key_shortcut(Modifiers::NONE, Key::Space),
             Self::ZoomIn => key_shortcut(Modifiers::NONE, Key::Plus),
             Self::ZoomOut => key_shortcut(Modifiers::NONE, Key::Minus),
@@ -659,12 +803,16 @@ impl Action {
             Self::WindowCheck => key_shortcut(Modifiers::NONE, Key::F4),
             Self::WindowFlowchart => key_shortcut(Modifiers::NONE, Key::F5),
             Self::WindowLayers => key_shortcut(Modifiers::NONE, Key::F6),
+            Self::WindowProgress => key_shortcut(Modifiers::NONE, Key::F10),
+            Self::WindowCharacter => key_shortcut(Modifiers::NONE, Key::F3),
+            Self::WindowStyles => key_shortcut(Modifiers::COMMAND, Key::F2),
             Self::WindowLibrary => key_shortcut(Modifiers::NONE, Key::F7),
             Self::WindowMenus => key_shortcut(Modifiers::NONE, Key::F8),
             Self::WindowMonitor => key_shortcut(Modifiers::NONE, Key::F9),
             Self::WindowProject => key_shortcut(Modifiers::NONE, Key::F11),
             Self::WindowProperties => key_shortcut(Modifiers::NONE, Key::F12),
             Self::WindowTimelines => key_shortcut(Modifiers::COMMAND, Key::F3),
+            Self::WindowTools => key_shortcut(Modifiers::COMMAND, Key::F4),
         }
     }
 
@@ -674,7 +822,7 @@ impl Action {
     pub(crate) fn while_typing(self) -> bool {
         match self.trigger() {
             Some(Trigger::Key(shortcut)) => while_typing_key(self, shortcut),
-            Some(Trigger::Text(_)) | None => false,
+            Some(Trigger::Text(_) | Trigger::KeypadShifted(_)) | None => false,
         }
     }
 
@@ -691,6 +839,7 @@ impl Action {
                 .replace("Plus", "+")
                 .replace("Minus", "-"),
             Some(Trigger::Text(text)) => text.to_owned(),
+            Some(Trigger::KeypadShifted(text)) => format!("Shift+{text}"),
             None => String::new(),
         }
     }
@@ -710,6 +859,7 @@ fn while_typing_key(action: Action, shortcut: KeyboardShortcut) -> bool {
             | Action::Cut
             | Action::Copy
             | Action::Paste
+            | Action::PasteAsSubpicture
             | Action::Duplicate
             | Action::SelectAll
             | Action::DeselectAll
@@ -750,6 +900,7 @@ fn modifier_count(trigger: Trigger) -> usize {
                 + usize::from(shortcut.modifiers.alt)
         }
         Trigger::Text(_) => 0,
+        Trigger::KeypadShifted(_) => 1,
     }
 }
 
@@ -763,8 +914,14 @@ pub(crate) fn match_order() -> Vec<Action> {
         .collect();
 
     actions.sort_by(|left, right| match (left.trigger(), right.trigger()) {
-        (Some(Trigger::Key(_)), Some(Trigger::Text(_))) => Ordering::Less,
-        (Some(Trigger::Text(_)), Some(Trigger::Key(_))) => Ordering::Greater,
+        // Keys first, then the keypad's shifted characters (before the plain characters they also are), then
+        // the plain characters.
+        (Some(Trigger::Key(_)), Some(Trigger::Text(_) | Trigger::KeypadShifted(_))) => {
+            Ordering::Less
+        }
+        (Some(Trigger::Text(_) | Trigger::KeypadShifted(_)), Some(Trigger::Key(_))) => {
+            Ordering::Greater
+        }
         (Some(left_trigger), Some(right_trigger)) => {
             modifier_count(right_trigger).cmp(&modifier_count(left_trigger))
         }
@@ -792,8 +949,13 @@ pub(crate) fn pressed_actions(ctx: &Context) -> Vec<Action> {
 
         match trigger {
             // The window turns Ctrl+X / C / V into clipboard events instead of key presses.
-            Trigger::Key(_) if is_clipboard(action) => {
-                if !wants_keyboard && take_clipboard_event(ctx, action) {
+            Trigger::Key(shortcut) if is_clipboard(action) => {
+                // Paste as Subpicture copies nothing from the system clipboard, and the window sends a paste only
+                // when it holds text: its key press counts too.
+                // Ripple Delete's Shift+Delete is a key press elsewhere, and a cut on Windows.
+                let key = matches!(action, Action::PasteAsSubpicture | Action::RippleDelete)
+                    && ctx.input_mut(|input| input.consume_shortcut(&shortcut));
+                if !wants_keyboard && (take_clipboard_event(ctx, action) || key) {
                     pressed.push(action);
                 }
             }
@@ -831,10 +993,42 @@ pub(crate) fn pressed_actions(ctx: &Context) -> Vec<Action> {
                     }
                 }
             }
+            Trigger::KeypadShifted(text) => {
+                if !wants_keyboard && take_keypad_shifted(ctx, text) {
+                    pressed.push(action);
+                }
+            }
         }
     }
 
     pressed
+}
+
+/// Removes this frame's `text` typed on the numeric keypad with Shift held (see [`Trigger::KeypadShifted`]);
+/// returns whether there was one.
+fn take_keypad_shifted(ctx: &Context, text: &str) -> bool {
+    ctx.input_mut(|input| {
+        if !input.modifiers.shift {
+            return false;
+        }
+        // A key press with it: the main keys typed it.
+        let keyed = input
+            .events
+            .iter()
+            .any(|event| matches!(event, Event::Key { pressed: true, .. }));
+        if keyed {
+            return false;
+        }
+        let mut found = false;
+        input.events.retain(|event| match event {
+            Event::Text(typed) if !found && typed.as_str() == text => {
+                found = true;
+                false
+            }
+            _ => true,
+        });
+        found
+    })
 }
 
 /// With Shift held, the bracket keys type `{` and `}`, and the window reports those characters as the key. The
@@ -851,17 +1045,31 @@ fn shifted_alternate(shortcut: KeyboardShortcut) -> Option<KeyboardShortcut> {
     Some(KeyboardShortcut::new(shortcut.modifiers, key))
 }
 
-/// Cut, Copy and Paste, which arrive as clipboard events rather than key presses.
+/// Cut, Copy and Paste, which arrive as clipboard events rather than key presses (and Ripple Delete: Windows makes
+/// its Shift+Delete a cut).
 fn is_clipboard(action: Action) -> bool {
-    matches!(action, Action::Cut | Action::Copy | Action::Paste)
+    matches!(
+        action,
+        Action::Cut
+            | Action::Copy
+            | Action::Paste
+            | Action::PasteAsSubpicture
+            | Action::RippleDelete
+    )
 }
 
 /// Removes this frame's clipboard event for `action`; returns whether there was one.
 fn take_clipboard_event(ctx: &Context, action: Action) -> bool {
+    let shift = ctx.input(|input| input.modifiers.shift);
+    // A cut with Shift and without Ctrl is Windows' Shift+Delete: Ripple Delete's key, not a cut.
+    let shift_delete = shift && !ctx.input(|input| input.modifiers.command);
     let wanted = |event: &Event| match action {
-        Action::Cut => matches!(event, Event::Cut),
+        Action::Cut => matches!(event, Event::Cut) && !shift_delete,
+        Action::RippleDelete => matches!(event, Event::Cut) && shift_delete,
         Action::Copy => matches!(event, Event::Copy),
-        Action::Paste => matches!(event, Event::Paste(_)),
+        // Shift+Ctrl+V comes as a paste too: with Shift held it is Paste as Subpicture.
+        Action::Paste => matches!(event, Event::Paste(_)) && !shift,
+        Action::PasteAsSubpicture => matches!(event, Event::Paste(_)) && shift,
         _ => false,
     };
     ctx.input_mut(|input| {
@@ -949,7 +1157,7 @@ fn paint_check(ui: &Ui, response: &egui::Response, enabled: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, Trigger, match_order};
+    use super::{Action, Trigger, match_order, pressed_actions};
     use egui::{Key, KeyboardShortcut, Modifiers};
 
     /// Position of an action in an order, if present.
@@ -963,11 +1171,85 @@ mod tests {
             Some(Trigger::Key(shortcut)) => {
                 shortcut.modifiers.command && !shortcut.modifiers.shift && !shortcut.modifiers.alt
             }
-            Some(Trigger::Text(_)) | None => false,
+            Some(Trigger::Text(_) | Trigger::KeypadShifted(_)) | None => false,
         }
     }
 
     /// No two actions share a trigger.
+    /// The actions `events` press, typed with `shift` held or not.
+    fn pressed_by(events: Vec<egui::Event>, shift: bool) -> Vec<Action> {
+        let ctx = egui::Context::default();
+        let modifiers = egui::Modifiers {
+            shift,
+            ..egui::Modifiers::NONE
+        };
+        let events = std::iter::once(egui::Event::ModifiersChanged(modifiers))
+            .chain(events)
+            .collect();
+        let input = egui::RawInput {
+            events,
+            ..egui::RawInput::default()
+        };
+        let mut pressed = Vec::new();
+        let mut output = ctx.run_ui(input, |ui| pressed = pressed_actions(ui.ctx()));
+        // No renderer here: the font atlas upload is dropped on purpose.
+        output.textures_delta.clear();
+        pressed
+    }
+
+    /// M6.279: Shift with the keypad's `*` (a character with no key press) sets the poster frame, as Encore's
+    /// Shift+*; the keypad's `*` alone, and the main keys' `*` (Shift+8, Shift+: on a Japanese keyboard), add a
+    /// chapter point as before.
+    /// M6.284: the window sends Ctrl+V and Shift+Ctrl+V as a paste (when the system clipboard holds text); with
+    /// Shift held it is Paste as Subpicture, which the key press alone also gives.
+    #[test]
+    fn shift_turns_a_paste_into_paste_as_subpicture() {
+        let paste = || vec![egui::Event::Paste("x".to_owned())];
+        let plain = pressed_by(paste(), false);
+        assert!(plain.contains(&Action::Paste), "{plain:?}");
+        assert!(!plain.contains(&Action::PasteAsSubpicture), "{plain:?}");
+        let shifted = pressed_by(paste(), true);
+        assert!(shifted.contains(&Action::PasteAsSubpicture), "{shifted:?}");
+        assert!(!shifted.contains(&Action::Paste), "{shifted:?}");
+        let key = pressed_by(
+            vec![egui::Event::Key {
+                key: Key::V,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::COMMAND.plus(Modifiers::SHIFT),
+            }],
+            true,
+        );
+        assert_eq!(key, vec![Action::PasteAsSubpicture]);
+    }
+
+    #[test]
+    fn shift_with_the_keypads_star_sets_the_poster_frame() {
+        let star = || egui::Event::Text("*".to_owned());
+        let key = |key: egui::Key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::SHIFT,
+        };
+        assert_eq!(pressed_by(vec![star()], true), [Action::SetPosterFrame]);
+        assert_eq!(pressed_by(vec![star()], false), [Action::AddChapterPoint]);
+        assert_eq!(
+            pressed_by(vec![key(egui::Key::Colon), star()], true),
+            [Action::AddChapterPoint]
+        );
+        assert_eq!(
+            pressed_by(vec![key(egui::Key::Num8), star()], true),
+            [Action::AddChapterPoint]
+        );
+        assert_eq!(
+            Action::SetPosterFrame.trigger(),
+            Some(Trigger::KeypadShifted("*"))
+        );
+    }
+
     #[test]
     fn triggers_are_unique() {
         for (i, left) in Action::ALL.iter().enumerate() {
@@ -1059,6 +1341,14 @@ mod tests {
             Some(Trigger::Key(KeyboardShortcut::new(
                 Modifiers::COMMAND,
                 Key::F3
+            )))
+        );
+
+        assert_eq!(
+            Action::WindowTools.trigger(),
+            Some(Trigger::Key(KeyboardShortcut::new(
+                Modifiers::COMMAND,
+                Key::F4
             )))
         );
 

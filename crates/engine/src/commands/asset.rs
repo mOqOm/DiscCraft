@@ -1,4 +1,4 @@
-use crate::params::{req_str, req_u64};
+use crate::params::{opt_str, req_str, req_u64};
 use crate::{CommandResult, CommandSpec, Session};
 use disccraft_project::{AssetId, AssetKind};
 use serde_json::{Map, Number, Value};
@@ -59,6 +59,86 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "asset.locateTranscoded",
+        label: "トランスコードされたファイルを検索",
+        menu: &["ファイル", "トランスコードされたファイルを検索"],
+        shortcut: None,
+        params: r#"{"asset": id, "disc": "dvd" | "bluray", "video": string | null (null: forget), "audio"?: string}"#,
+        enabled: always_enabled,
+        run: run_locate_transcoded,
+        journal: true,
+    },
+    CommandSpec {
+        id: "asset.setTranscode",
+        label: "トランスコード設定",
+        menu: &["アセット"],
+        shortcut: None,
+        params: r#"{"asset": id, "kbps": number | null (null: 自動), "mode"?: "vbr" | "vbr2Pass" | "cbr" (VBR 1 パス / VBR 2 パス / CBR), "audio"?: "dolbyDigital" | "pcm" (DVD の音声), "preset"?: string | null (選んだ DVD の品質プリセットの名前), "film"?: bool (23.976 のフィルムで、3:2 プルダウンで見せる。NTSC の DVD の Encore の 23.976 のプリセット。自分のレートのときだけ), "quality"?: 1〜5 (Encore の品質。動きの探し方。High quality のプリセットは 5、Low quality は 2。自分のレートのときだけ。省略で今のまま、自動では 5)}"#,
+        enabled: always_enabled,
+        run: run_set_transcode,
+        journal: true,
+    },
+    CommandSpec {
+        id: "asset.setBlurayTranscode",
+        label: "トランスコード設定（Blu-ray）",
+        menu: &["アセット"],
+        shortcut: None,
+        params: r#"{"asset": id, "kbps": number | null (null: 自動), "maxKbps"?: number (最大。省略で kbps), "preset"?: string (品質プリセットの名前), "video"?: "1080p23.976" | "1080p24" | "1080i59.94" | "1080i50" | "720p59.94" | "720p50" | "720p23.976" | "720p24" | null (HD の Blu-ray でこのビデオのタイトルを作る形式。null: プロジェクト設定を使用。省略で今のまま), "quality"?: 1〜5 (MPEG-2 の品質。Long Form の MPEG-2 のプリセットは 3。省略で 5), "mode"?: "vbr" | "vbr2Pass" | "cbr" (レートの保ち方。Encore の Blu-ray のプリセットは VBR 1 パス。省略で vbr)}"#,
+        enabled: always_enabled,
+        run: run_set_bluray_transcode,
+        journal: true,
+    },
+    CommandSpec {
+        id: "asset.fitsBluray",
+        label: "Blu-ray の形式にそのまま入るか",
+        menu: &["アセット"],
+        shortcut: None,
+        params: r#"{"asset": id, "video": "sd" | "1080p23.976" | "1080p24" | "1080i59.94" | "1080i50" | "720p59.94" | "720p50" | "720p23.976" | "720p24"} → {"fits": bool (このビデオがその形式のタイトルにトランスコードせずに入るか)}"#,
+        enabled: always_enabled,
+        run: run_fits_bluray,
+        journal: false,
+    },
+    CommandSpec {
+        id: "asset.setRendering",
+        label: "レンダリングの設定（最高のレンダリング品質・フレームブレンド）",
+        menu: &["アセット"],
+        shortcut: None,
+        params: r#"{"asset": id, "maxRenderQuality"?: bool (最高のレンダリング品質を使用: 縮めるときは覆う画素の平均、広げるときは画素の中心のあいだで補間), "frameBlend"?: bool (フレームブレンドを使用: 出力の絵が素材の 2 つのフレームのあいだにあるときは近さで混ぜる)} (省略したものは今のまま)"#,
+        enabled: always_enabled,
+        run: run_set_rendering,
+        journal: true,
+    },
+    CommandSpec {
+        id: "asset.setIgnoreAlpha",
+        label: "フッテージを変換（アルファチャンネルを無視）",
+        menu: &["アセット"],
+        shortcut: None,
+        params: r#"{"asset": id, "ignore": bool}"#,
+        enabled: always_enabled,
+        run: run_set_ignore_alpha,
+        journal: true,
+    },
+    CommandSpec {
+        id: "asset.setPixelAspect",
+        label: "フッテージを変換",
+        menu: &["アセット"],
+        shortcut: None,
+        params: r#"{"asset": id, "aspect": [width, height] | null (null: ファイルのピクセル縦横比)}"#,
+        enabled: always_enabled,
+        run: run_set_pixel_aspect,
+        journal: true,
+    },
+    CommandSpec {
+        id: "asset.pixelAspect",
+        label: "ピクセル縦横比",
+        menu: &["アセット"],
+        shortcut: None,
+        params: r#"{"asset": id}"#,
+        enabled: always_enabled,
+        run: run_pixel_aspect,
+        journal: false,
+    },
+    CommandSpec {
         id: "asset.pending",
         label: "読み込み中のアセットを調べる",
         menu: &["アセット"],
@@ -83,9 +163,19 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "アセットのサムネールを作る",
         menu: &["アセット"],
         shortcut: None,
-        params: r#"{"asset": id}"#,
+        params: r#"{"asset": id, "edge"?: 16..=1920 (長辺の上限。既定 128)}"#,
         enabled: always_enabled,
         run: run_thumbnail,
+        journal: false,
+    },
+    CommandSpec {
+        id: "asset.saveFrame",
+        label: "フレームをファイルとして保存",
+        menu: &["アセット"],
+        shortcut: None,
+        params: r#"{"asset": id, "seconds": f64, "path": "….png"}"#,
+        enabled: always_enabled,
+        run: run_save_frame,
         journal: false,
     },
     CommandSpec {
@@ -102,6 +192,62 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
 
 /// モニターに映すフレームの最大辺（ピクセル）。
 const FRAME_EDGE: u32 = 720;
+
+/// Saves the frame of a video asset at `seconds` as a PNG file (Encore: Timeline ▸ Save Frame as File…): the
+/// picture at its own size, in square pixels (a DVD-sized picture at 640 or 854 by its height, by its shape).
+/// `{"width", "height"}` of the file written.
+fn run_save_frame(session: &mut Session, params: &Value) -> CommandResult {
+    let id = req_u64(params, "asset")?;
+    let seconds = params
+        .get("seconds")
+        .and_then(Value::as_f64)
+        .filter(|seconds| seconds.is_finite())
+        .ok_or_else(|| "parameter \"seconds\" must be a number".to_string())?;
+    let out = req_str(params, "path")?;
+    let asset = session
+        .project
+        .assets
+        .get(&AssetId(id))
+        .ok_or_else(|| format!("asset.saveFrame: unknown asset: {id}"))?;
+    if asset.kind != AssetKind::Video {
+        return Err("asset.saveFrame: not a video asset".to_string());
+    }
+    let media = asset.media_file();
+    let path: &Path = &media;
+    let probe = disccraft_transcode::probe_video(path).map_err(|error| error.to_string())?;
+    // Square pixels: a picture of a DVD's sizes is as wide as its shape makes it.
+    let standard_definition =
+        matches!(probe.width, 352 | 704 | 720) && matches!(probe.height, 480 | 576);
+    let (width, height) = if standard_definition {
+        let width = if probe.wide {
+            probe.height.saturating_mul(16) / 9
+        } else {
+            probe.height.saturating_mul(4) / 3
+        };
+        (width, probe.height)
+    } else {
+        (probe.width, probe.height)
+    };
+    let reader = disccraft_transcode::FrameReader::open(path).map_err(|error| error.to_string())?;
+    let (width, height, rgb) = reader
+        .frame_sized(seconds.max(0.0), width.max(16), height.max(16))
+        .map_err(|error| error.to_string())?;
+    let file = std::fs::File::create(&out).map_err(|error| format!("{out}: {error}"))?;
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder
+        .write_header()
+        .map_err(|error| format!("{out}: {error}"))?;
+    writer
+        .write_image_data(&rgb)
+        .map_err(|error| format!("{out}: {error}"))?;
+    writer.finish().map_err(|error| format!("{out}: {error}"))?;
+    Ok(object(&[
+        ("width", Value::from(width)),
+        ("height", Value::from(height)),
+    ]))
+}
 
 fn run_frame(session: &mut Session, params: &Value) -> CommandResult {
     let id = req_u64(params, "asset")?;
@@ -236,7 +382,22 @@ fn run_thumbnail(session: &mut Session, params: &Value) -> CommandResult {
 
     let media = asset.media_file();
     let path: &Path = &media;
-    let video = asset.kind == AssetKind::Video;
+    // A larger picture than a thumbnail (a slide shown in the preview) is made each time: only thumbnails are
+    // remembered between runs.
+    let edge = params
+        .get("edge")
+        .and_then(Value::as_u64)
+        .and_then(|edge| u32::try_from(edge).ok())
+        .map_or(THUMBNAIL_EDGE, |edge| edge.clamp(16, 1920));
+    let video = asset.kind == AssetKind::Video && edge == THUMBNAIL_EDGE;
+    if asset.kind == AssetKind::Video
+        && !video
+        && !wait(params)
+        && !disccraft_transcode::media_open(path)
+    {
+        disccraft_transcode::warm(path);
+        return Ok(pending(id));
+    }
     if video {
         // Made once and remembered between runs (a long file takes seconds to open). A failure is remembered
         // too, but only as this build's: a newer build's decoder may read the file, so it tries again.
@@ -256,7 +417,9 @@ fn run_thumbnail(session: &mut Session, params: &Value) -> CommandResult {
     let (width, height, data, stride) = match asset.kind {
         AssetKind::Video => {
             let (width, height, rgb) = disccraft_transcode::first_frame(path).map_err(|error| {
-                disccraft_transcode::store_blob(THUMBNAIL_BLOB, path, &no_thumbnail_mark());
+                if video {
+                    disccraft_transcode::store_blob(THUMBNAIL_BLOB, path, &no_thumbnail_mark());
+                }
                 error.to_string()
             })?;
             (width, height, rgb, 3_usize)
@@ -264,18 +427,23 @@ fn run_thumbnail(session: &mut Session, params: &Value) -> CommandResult {
         AssetKind::Image => {
             // A vector drawing is rendered at thumbnail size instead of being scaled from its own size.
             let image = if disccraft_photo::is_svg(path) {
-                let edge = THUMBNAIL_EDGE.saturating_mul(2);
+                let edge = edge.saturating_mul(2);
                 disccraft_photo::render_svg_fit(path, edge, edge)
             } else {
                 disccraft_photo::load_image(path)
             }
             .map_err(|error| error.to_string())?;
-            (image.width, image.height, image.rgba, 4_usize)
+            let mut rgba = image.rgba;
+            // A slide shown in the preview is as the disc shows it: over black (its alpha ignored: as it is).
+            if edge != THUMBNAIL_EDGE && !asset.ignore_alpha {
+                over_black(&mut rgba);
+            }
+            (image.width, image.height, rgba, 4_usize)
         }
         _ => return Err("asset.thumbnail: not a video or image asset".to_string()),
     };
 
-    let (width, height, rgb) = downscale_rgb(width, height, &data, stride, THUMBNAIL_EDGE)
+    let (width, height, rgb) = downscale_rgb(width, height, &data, stride, edge)
         .ok_or_else(|| "asset.thumbnail: cannot downscale the frame".to_string())?;
     if video {
         let mut blob = Vec::with_capacity(rgb.len().saturating_add(8));
@@ -292,6 +460,17 @@ fn run_thumbnail(session: &mut Session, params: &Value) -> CommandResult {
         ("height", Value::from(height)),
         ("rgb", Value::Array(bytes)),
     ]))
+}
+
+/// RGBA `rgba` laid over black: each colour scaled by its alpha, every pixel opaque.
+fn over_black(rgba: &mut [u8]) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        let alpha = u16::from(pixel[3]);
+        for channel in pixel.iter_mut().take(3) {
+            *channel = u8::try_from((u16::from(*channel) * alpha + 127) / 255).unwrap_or(u8::MAX);
+        }
+        pixel[3] = 255;
+    }
 }
 
 /// 最近傍で `max_edge` に収まるよう縮小した RGB24（拡大はしない）。`stride` は 3 (RGB) か 4 (RGBA)。
@@ -400,6 +579,18 @@ fn run_list(session: &mut Session, _params: &Value) -> CommandResult {
             Value::String(kind_name(asset.kind).to_string()),
         );
         map.insert("offline".to_string(), Value::Bool(asset.offline));
+        // Transcoded files located for each kind of disc (Locate Transcoded File).
+        for (key, located) in [
+            ("locatedDvd", &asset.located_dvd),
+            ("locatedBluray", &asset.located_bluray),
+        ] {
+            if let Some(value) = located
+                .as_ref()
+                .and_then(|located| serde_json::to_value(located).ok())
+            {
+                map.insert(key.to_string(), value);
+            }
+        }
         assets.push(Value::Object(map));
     }
 
@@ -452,6 +643,339 @@ fn run_set_composition(session: &mut Session, params: &Value) -> CommandResult {
     Ok(empty_object())
 }
 
+/// Sets the pixel aspect ratio an asset's pictures are taken to have (Encore's Interpret Footage), or the
+/// file's own with `null`.
+fn run_set_pixel_aspect(session: &mut Session, params: &Value) -> CommandResult {
+    let id = AssetId(req_u64(params, "asset")?);
+    let aspect = match params.get("aspect") {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            let part = |index: usize| {
+                value
+                    .get(index)
+                    .and_then(Value::as_u64)
+                    .and_then(|part| u32::try_from(part).ok())
+            };
+            Some(part(0).zip(part(1)).ok_or_else(|| {
+                "parameter \"aspect\" must be [width, height] in whole numbers, or null".to_string()
+            })?)
+        }
+    };
+    session
+        .project
+        .set_asset_pixel_aspect(id, aspect)
+        .map_err(|error| error.to_string())?;
+    session.sync_compositions();
+    Ok(empty_object())
+}
+
+/// The pixel aspect ratio of an asset's pictures: `{"file": [width, height] | null, "chosen": [width, height] |
+/// null}` (the file's own, `null` when the file cannot be opened as video, and the project's choice).
+fn run_pixel_aspect(session: &mut Session, params: &Value) -> CommandResult {
+    let id = AssetId(req_u64(params, "asset")?);
+    let asset = session
+        .project
+        .assets
+        .get(&id)
+        .ok_or_else(|| format!("asset {} does not exist", id.0))?;
+    let pair = |(width, height): (u32, u32)| serde_json::json!([width, height]);
+    // A picture's own: what its file says, else Encore's for its size (a DVD-sized still has SD pixels).
+    let own = if asset.kind == AssetKind::Image {
+        disccraft_transcode::still_pixel_aspect(&asset.media_file())
+    } else {
+        disccraft_transcode::pixel_aspect(&asset.media_file())
+    };
+    let file = own.ok().map_or(Value::Null, pair);
+    Ok(object(&[
+        ("file", file),
+        ("chosen", asset.pixel_aspect.map_or(Value::Null, pair)),
+        ("ignoreAlpha", Value::Bool(asset.ignore_alpha)),
+    ]))
+}
+
+/// Encore's Interpret Footage ▸ Ignore Alpha Channel for a picture: its pixels are all opaque in menus and slides.
+fn run_set_ignore_alpha(session: &mut Session, params: &Value) -> CommandResult {
+    let id = AssetId(req_u64(params, "asset")?);
+    let ignore = params
+        .get("ignore")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "parameter \"ignore\" must be true or false".to_string())?;
+    let asset = session
+        .project
+        .assets
+        .get_mut(&id)
+        .ok_or_else(|| format!("asset {} does not exist", id.0))?;
+    if asset.kind != AssetKind::Image {
+        return Err(format!("asset {} is not a picture", id.0));
+    }
+    asset.ignore_alpha = ignore;
+    Ok(empty_object())
+}
+
+/// Sets the video bit rate an asset is transcoded at (Encore's Transcode Settings), or automatic with `null`.
+fn run_set_transcode(session: &mut Session, params: &Value) -> CommandResult {
+    let id = AssetId(req_u64(params, "asset")?);
+    let kbps = match params.get("kbps") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|kbps| u32::try_from(kbps).ok())
+                .ok_or_else(|| "parameter \"kbps\" must be a whole number or null".to_string())?,
+        ),
+    };
+    let mode = opt_str(params, "mode")?
+        .map(|text| {
+            disccraft_project::TranscodeMode::parse(&text).ok_or_else(|| {
+                "parameter \"mode\" must be \"vbr\", \"vbr2Pass\" or \"cbr\"".to_string()
+            })
+        })
+        .transpose()?;
+    session
+        .project
+        .set_asset_transcode(id, kbps)
+        .map_err(|error| error.to_string())?;
+    let audio = opt_str(params, "audio")?
+        .map(|text| {
+            disccraft_project::TranscodeAudio::parse(&text).ok_or_else(|| {
+                "parameter \"audio\" must be \"dolbyDigital\" or \"pcm\"".to_string()
+            })
+        })
+        .transpose()?;
+    if let (Some(mode), Some(asset)) = (mode, session.project.assets.get_mut(&id)) {
+        asset.transcode_mode = mode;
+    }
+    if let (Some(audio), Some(asset)) = (audio, session.project.assets.get_mut(&id)) {
+        asset.transcode_audio = audio;
+    }
+    // The preset it was chosen as (Encore's DVD quality preset), only with a rate of its own; so is film.
+    let preset = preset_name(params)?;
+    let film = match params.get("film") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(film)) => Some(*film),
+        Some(_) => return Err("parameter \"film\" must be true or false".to_string()),
+    };
+    let quality = quality_param(params)?;
+    if let Some(asset) = session.project.assets.get_mut(&id) {
+        asset.transcode_preset = preset.filter(|_| asset.transcode_kbps.is_some());
+        asset.transcode_film =
+            film.unwrap_or(asset.transcode_film) && asset.transcode_kbps.is_some();
+        // The preset's quality (M6.326), only with a rate of its own: automatic is the best.
+        asset.transcode_quality = if asset.transcode_kbps.is_some() {
+            quality.unwrap_or(asset.transcode_quality)
+        } else {
+            disccraft_project::BEST_QUALITY
+        };
+    }
+    Ok(empty_object())
+}
+
+/// The `quality` parameter: Encore's quality, [`disccraft_project::MIN_QUALITY`] to
+/// [`disccraft_project::BEST_QUALITY`]; `None` when it is left out or null.
+fn quality_param(params: &Value) -> Result<Option<u8>, String> {
+    use disccraft_project::{BEST_QUALITY, MIN_QUALITY};
+    match params.get("quality") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .and_then(|quality| u8::try_from(quality).ok())
+            .filter(|quality| (MIN_QUALITY..=BEST_QUALITY).contains(quality))
+            .map(Some)
+            .ok_or_else(|| {
+                format!("parameter \"quality\" must be {MIN_QUALITY} to {BEST_QUALITY}, or null")
+            }),
+    }
+}
+
+/// The longest quality preset name, in characters.
+const MAX_PRESET_NAME: usize = 120;
+
+/// The `preset` parameter: a quality preset's name (trimmed, at most [`MAX_PRESET_NAME`] characters), `None`
+/// when it is left out, null or empty.
+fn preset_name(params: &Value) -> Result<Option<String>, String> {
+    match params.get("preset") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(name)) => {
+            let name: String = name.trim().chars().take(MAX_PRESET_NAME).collect();
+            Ok((!name.is_empty()).then_some(name))
+        }
+        Some(_) => Err("parameter \"preset\" must be a name or null".to_string()),
+    }
+}
+
+/// Encore's Transcode Settings ▸ Blu-ray ▸ Quality Preset: the rates a video asset is encoded at on a Blu-ray (its
+/// target and peak), or automatic with `null`.
+fn run_set_bluray_transcode(session: &mut Session, params: &Value) -> CommandResult {
+    use disccraft_project::{MAX_TRANSCODE_KBPS, MIN_TRANSCODE_KBPS};
+    let id = AssetId(req_u64(params, "asset")?);
+    let rate = |name: &str| -> Result<Option<u32>, String> {
+        match params.get(name) {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => value
+                .as_u64()
+                .and_then(|kbps| u32::try_from(kbps).ok())
+                .filter(|kbps| (MIN_TRANSCODE_KBPS..=MAX_TRANSCODE_KBPS).contains(kbps))
+                .map(Some)
+                .ok_or_else(|| {
+                    format!(
+                        "parameter \"{name}\" must be {MIN_TRANSCODE_KBPS} to {MAX_TRANSCODE_KBPS} kbit/s, or null"
+                    )
+                }),
+        }
+    };
+    let kbps = rate("kbps")?;
+    let max_kbps = rate("maxKbps")?;
+    let preset = preset_name(params)?;
+    let quality = quality_param(params)?.unwrap_or(disccraft_project::BEST_QUALITY);
+    // How the rate is kept (M6.328): a preset of the user's may take two passes or keep it constant.
+    let mode = opt_str(params, "mode")?
+        .map(|text| {
+            disccraft_project::TranscodeMode::parse(&text).ok_or_else(|| {
+                "parameter \"mode\" must be \"vbr\", \"vbr2Pass\" or \"cbr\"".to_string()
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
+    // Encore's Codec / Dimensions / Frame Rate (M6.325): an HD format of its own, or the project's with null.
+    let video = match params.get("video") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(name)) => Some(Some(
+            disccraft_project::BdVideo::from_id(name)
+                .filter(|video| video.hd().is_some())
+                .ok_or_else(|| format!("parameter \"video\": no HD Blu-ray format {name}"))?,
+        )),
+        Some(_) => return Err("parameter \"video\" must be an HD format or null".to_string()),
+    };
+    let asset = session
+        .project
+        .assets
+        .get_mut(&id)
+        .ok_or_else(|| format!("asset {} does not exist", id.0))?;
+    if asset.kind != AssetKind::Video {
+        return Err(format!("asset {} is not a video", id.0));
+    }
+    asset.bluray_transcode = kbps.map(|kbps| disccraft_project::BlurayTranscode {
+        kbps,
+        max_kbps: max_kbps.unwrap_or(kbps).max(kbps),
+        preset: preset.unwrap_or_default(),
+        quality,
+        mode,
+    });
+    if let Some(video) = video {
+        asset.bluray_video = video;
+    }
+    Ok(empty_object())
+}
+
+/// Encore's Transcode Settings ▸ Use Maximum Render Quality / Use Frame Blending (M6.327): how a video asset's
+/// transcodes make their pictures, for either kind of disc.
+fn run_set_rendering(session: &mut Session, params: &Value) -> CommandResult {
+    let id = AssetId(req_u64(params, "asset")?);
+    let flag = |name: &str| -> Result<Option<bool>, String> {
+        match params.get(name) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Bool(on)) => Ok(Some(*on)),
+            Some(_) => Err(format!("parameter \"{name}\" must be true or false")),
+        }
+    };
+    let max_quality = flag("maxRenderQuality")?;
+    let frame_blend = flag("frameBlend")?;
+    let asset = session
+        .project
+        .assets
+        .get_mut(&id)
+        .ok_or_else(|| format!("asset {} does not exist", id.0))?;
+    if asset.kind != AssetKind::Video {
+        return Err(format!("asset {} is not a video", id.0));
+    }
+    if let Some(on) = max_quality {
+        asset.max_render_quality = on;
+    }
+    if let Some(on) = frame_blend {
+        asset.frame_blend = on;
+    }
+    Ok(empty_object())
+}
+
+/// Whether a video asset would go on a Blu-ray title in a format as it is (M6.325: the Transcode Settings dialog
+/// shows "Don't Transcode" for a format being chosen only when it would).
+fn run_fits_bluray(session: &mut Session, params: &Value) -> CommandResult {
+    let id = AssetId(req_u64(params, "asset")?);
+    let name = req_str(params, "video")?;
+    let video = disccraft_project::BdVideo::from_id(&name)
+        .ok_or_else(|| format!("parameter \"video\": no Blu-ray format {name}"))?;
+    if !session.project.assets.contains_key(&id) {
+        return Err(format!("asset {} does not exist", id.0));
+    }
+    let fits = disccraft_build::video_fits_bluray_as(&session.project, id, video);
+    Ok(object(&[("fits", Value::from(fits))]))
+}
+
+/// Encore's Locate Transcoded File ▸ DVD… / Blu-ray…: the files a video asset was transcoded to for that kind of
+/// disc, which a build of that kind then takes in place of the asset's own file (whose source may be gone). The
+/// video must be a video file and the sound a sound file; `"video": null` forgets them (as Revert to Original).
+fn run_locate_transcoded(session: &mut Session, params: &Value) -> CommandResult {
+    let id = AssetId(req_u64(params, "asset")?);
+    let kind = match req_str(params, "disc")?.as_str() {
+        "dvd" => disccraft_project::DiscKind::Dvd,
+        "bluray" => disccraft_project::DiscKind::BluRay,
+        other => {
+            return Err(format!(
+                "parameter \"disc\" must be dvd or bluray, not {other}"
+            ));
+        }
+    };
+    let located = match params.get("video") {
+        None => return Err("parameter \"video\" is required (a file, or null)".to_string()),
+        Some(Value::Null) => None,
+        Some(_) => {
+            let video = req_str(params, "video")?;
+            let file = |path: &str, wanted: AssetKind, what: &str| -> Result<String, String> {
+                let found = Path::new(path);
+                if !found.is_file() {
+                    return Err(format!("{what} file does not exist: {path}"));
+                }
+                if AssetKind::guess_from_path(found) != wanted {
+                    return Err(format!("not a {what} file: {path}"));
+                }
+                Ok(std::path::absolute(found)
+                    .unwrap_or_else(|_| found.to_path_buf())
+                    .to_string_lossy()
+                    .into_owned())
+            };
+            Some(disccraft_project::LocatedTranscode {
+                video: file(&video, AssetKind::Video, "video")?,
+                audio: opt_str(params, "audio")?
+                    .filter(|audio| !audio.trim().is_empty())
+                    .map(|audio| file(&audio, AssetKind::Audio, "sound"))
+                    .transpose()?,
+            })
+        }
+    };
+    let asset = session
+        .project
+        .assets
+        .get_mut(&id)
+        .ok_or_else(|| format!("unknown asset: {}", id.0))?;
+    if asset.kind != AssetKind::Video {
+        return Err(format!("asset {} is not a video", id.0));
+    }
+    let result = match &located {
+        Some(found) => object(&[
+            ("asset", Value::from(id.0)),
+            ("video", Value::from(found.video.clone())),
+            (
+                "audio",
+                found.audio.clone().map_or(Value::Null, Value::from),
+            ),
+        ]),
+        None => object(&[("asset", Value::from(id.0)), ("video", Value::Null)]),
+    };
+    *asset.located_mut(kind) = located;
+    Ok(result)
+}
+
 /// Probes the duration of a video or audio asset.
 /// The length of a DTS file (`.dts`), which is not decoded but put on a DVD as it is: from its first frame and
 /// its size.
@@ -502,6 +1026,10 @@ fn run_probe(session: &mut Session, params: &Value) -> CommandResult {
                 if let Some(fps) = Number::from_f64(probe.fps).filter(|_| probe.fps > 0.0) {
                     let _ = fields.insert("fps".to_string(), Value::Number(fps));
                 }
+                // Encore's field type: progressive, or which field comes first (when the headers say).
+                if let Some(field) = disccraft_transcode::field_type(&asset.media_file()) {
+                    let _ = fields.insert("fieldType".to_string(), Value::from(field.as_str()));
+                }
             }
         }
         AssetKind::Audio => {
@@ -527,7 +1055,140 @@ mod tests {
     use disccraft_project::{Asset, AssetId, AssetKind};
     use serde_json::{Value, json};
 
+    /// Locate Transcoded File: a video asset takes a video and a sound file for one kind of disc, listed with the
+    /// asset; files that are not there or of the wrong kind, other assets and other discs are refused; `null`
+    /// forgets them.
+    #[test]
+    fn transcoded_files_are_located_and_forgotten() -> Result<(), Box<dyn std::error::Error>> {
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-engine-locate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let (source, video, sound, picture) = (
+            dir.join("source.mp4"),
+            dir.join("movie.m2v"),
+            dir.join("movie.ac3"),
+            dir.join("still.png"),
+        );
+        for file in [&source, &video, &sound, &picture] {
+            std::fs::write(file, b"x")?;
+        }
+        let mut session = Session::default();
+        let asset = session
+            .execute("asset.import", &json!({ "path": source }))?
+            .get("asset")
+            .and_then(Value::as_u64)
+            .ok_or("asset")?;
+        let still = session
+            .execute("asset.import", &json!({ "path": picture }))?
+            .get("asset")
+            .and_then(Value::as_u64)
+            .ok_or("asset")?;
+        let locate = |session: &mut Session, params: Value| {
+            session.execute("asset.locateTranscoded", &params)
+        };
+        for bad in [
+            json!({ "asset": asset, "disc": "dvd", "video": dir.join("none.m2v") }),
+            json!({ "asset": asset, "disc": "dvd", "video": sound }),
+            json!({ "asset": asset, "disc": "dvd", "video": video, "audio": picture }),
+            json!({ "asset": asset, "disc": "hd-dvd", "video": video }),
+            json!({ "asset": still, "disc": "dvd", "video": video }),
+            json!({ "asset": asset, "disc": "dvd" }),
+        ] {
+            assert!(locate(&mut session, bad.clone()).is_err(), "{bad}");
+        }
+        locate(
+            &mut session,
+            json!({ "asset": asset, "disc": "dvd", "video": video, "audio": sound }),
+        )?;
+        let listed = session.execute("asset.list", &json!({}))?;
+        let entry = listed
+            .as_array()
+            .and_then(|list| {
+                list.iter()
+                    .find(|entry| entry.get("id").and_then(Value::as_u64) == Some(asset))
+            })
+            .ok_or("listed")?;
+        assert!(
+            entry
+                .pointer("/locatedDvd/video")
+                .and_then(Value::as_str)
+                .is_some_and(|path| path.ends_with("movie.m2v"))
+        );
+        assert!(entry.get("locatedBluray").is_none());
+        locate(
+            &mut session,
+            json!({ "asset": asset, "disc": "dvd", "video": null }),
+        )?;
+        let id = AssetId(asset);
+        assert!(
+            session
+                .project
+                .assets
+                .get(&id)
+                .is_some_and(|asset| asset.located_dvd.is_none())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
     /// An asset can be pointed at another file of the same kind; the name stays and it is online again.
+    /// M6.273: the frame of a video asset is saved as a PNG in square pixels (a 720 x 480 4:3 picture as
+    /// 640 x 480); what is not a video, and a place that cannot be written, are refused.
+    #[test]
+    fn a_frame_is_saved_as_a_picture_file() {
+        let video = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/fixtures/ntsc.m2v");
+        if !video.is_file() {
+            eprintln!("ntsc.m2v fixture not found; skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("disccraft-save-frame-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(std::fs::create_dir_all(&dir).is_ok());
+        let mut session = crate::Session::new();
+        let asset = session
+            .execute(
+                "asset.import",
+                &serde_json::json!({"path": video.to_string_lossy()}),
+            )
+            .ok()
+            .and_then(|value| value.get("asset").and_then(serde_json::Value::as_u64));
+        let out = dir.join("frame.png");
+        let saved = session.execute(
+            "asset.saveFrame",
+            &serde_json::json!({"asset": asset, "seconds": 1.0, "path": out.to_string_lossy()}),
+        );
+        assert!(saved.is_ok(), "{saved:?}");
+        let size = saved.ok().map(|value| {
+            (
+                value.get("width").and_then(serde_json::Value::as_u64),
+                value.get("height").and_then(serde_json::Value::as_u64),
+            )
+        });
+        assert_eq!(size, Some((Some(640), Some(480))));
+        // A PNG of that size: its signature and the size in its header.
+        let bytes = std::fs::read(&out).unwrap_or_default();
+        assert_eq!(bytes.get(..8), Some(&[137, 80, 78, 71, 13, 10, 26, 10][..]));
+        assert_eq!(bytes.get(16..24), Some(&[0, 0, 2, 128, 0, 0, 1, 224][..]));
+        assert!(
+            session
+                .execute(
+                    "asset.saveFrame",
+                    &serde_json::json!({"asset": asset, "seconds": 1.0, "path": dir.join("no/such/dir/f.png").to_string_lossy()}),
+                )
+                .is_err()
+        );
+        assert!(
+            session
+                .execute(
+                    "asset.saveFrame",
+                    &serde_json::json!({"asset": 9999, "seconds": 1.0, "path": out.to_string_lossy()}),
+                )
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn assets_are_relinked_to_files_of_the_same_kind() -> Result<(), Box<dyn std::error::Error>> {
         let dir = std::env::temp_dir().join(format!("disccraft-relink-{}", std::process::id()));
@@ -603,6 +1264,521 @@ mod tests {
     }
 
     /// Checks that probing an image asset returns a null duration.
+    /// M6.253: a picture larger than a thumbnail is made when an edge is asked for (a slide shown in the preview).
+    #[test]
+    fn a_thumbnail_is_made_at_the_edge_asked_for() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = std::env::temp_dir().join(format!("disccraft-thumb-edge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let drawing = dir.join("wide.svg");
+        std::fs::write(
+            &drawing,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200"><rect width="400" height="200" fill="#c04020"/></svg>"##,
+        )?;
+        let mut session = Session::default();
+        let imported =
+            session.execute("asset.import", &json!({"path": drawing.to_string_lossy()}))?;
+        let id = imported
+            .get("asset")
+            .and_then(Value::as_u64)
+            .ok_or("no asset id")?;
+        let size = |session: &mut Session, params: Value| -> Result<(u64, u64, usize), String> {
+            let made = session.execute("asset.thumbnail", &params)?;
+            Ok((
+                made.get("width").and_then(Value::as_u64).unwrap_or(0),
+                made.get("height").and_then(Value::as_u64).unwrap_or(0),
+                made.get("rgb")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len),
+            ))
+        };
+        // A thumbnail: 128 on its long edge.
+        assert_eq!(
+            size(&mut session, json!({"asset": id}))?,
+            (128, 64, 128 * 64 * 3)
+        );
+        // For the preview: 720.
+        assert_eq!(
+            size(&mut session, json!({"asset": id, "edge": 720}))?,
+            (720, 360, 720 * 360 * 3)
+        );
+        // Outside what is made: the nearest.
+        assert_eq!(size(&mut session, json!({"asset": id, "edge": 4}))?.0, 16);
+        assert_eq!(
+            size(&mut session, json!({"asset": id, "edge": 99_999}))?.0,
+            1920
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M6.325: whether a video goes on a title of a Blu-ray format as it is, asked of any format (SD too); an unknown
+    /// format or asset is refused.
+    #[test]
+    fn a_video_is_asked_whether_it_fits_a_format() -> Result<(), Box<dyn std::error::Error>> {
+        let mut session = Session::default();
+        let video = session
+            .project
+            .add_asset(std::path::Path::new("missing-clip.mp4"))?;
+        // Its file is not there: it fits none.
+        for format in ["sd", "720p59.94"] {
+            let fits = session.execute(
+                "asset.fitsBluray",
+                &json!({"asset": video.0, "video": format}),
+            )?;
+            assert_eq!(fits.get("fits"), Some(&Value::Bool(false)), "{format}");
+        }
+        for bad in [
+            json!({"asset": video.0, "video": "1080p30"}),
+            json!({"asset": 99, "video": "sd"}),
+            json!({"asset": video.0}),
+        ] {
+            assert!(session.execute("asset.fitsBluray", &bad).is_err(), "{bad}");
+        }
+        Ok(())
+    }
+
+    /// M6.326: a preset's quality (Encore's: "Low quality" 2, "Long Form" MPEG-2 3, the others 5) is kept with
+    /// the DVD setting while it has a rate of its own (kept when left out, the best for automatic) and with the
+    /// Blu-ray one (the best when left out); outside 1 to 5 it is refused.
+    #[test]
+    fn a_transcode_setting_has_its_quality() -> Result<(), Box<dyn std::error::Error>> {
+        use disccraft_project::BEST_QUALITY;
+        let mut session = Session::default();
+        let video = session
+            .project
+            .add_asset(std::path::Path::new("clip.mp4"))?;
+        let dvd = |session: &Session| {
+            session
+                .project
+                .assets
+                .get(&video)
+                .map(|asset| asset.transcode_quality)
+        };
+        let bluray = |session: &Session| {
+            session
+                .project
+                .assets
+                .get(&video)
+                .and_then(|asset| asset.bluray_transcode.as_ref())
+                .map(|setting| setting.quality)
+        };
+        assert_eq!(dvd(&session), Some(BEST_QUALITY));
+        let _ = session.execute(
+            "asset.setTranscode",
+            &json!({"asset": video.0, "kbps": 4000, "mode": "cbr", "quality": 2}),
+        )?;
+        assert_eq!(dvd(&session), Some(2));
+        let _ = session.execute(
+            "asset.setTranscode",
+            &json!({"asset": video.0, "kbps": 5000}),
+        )?;
+        assert_eq!(dvd(&session), Some(2));
+        let _ = session.execute(
+            "asset.setTranscode",
+            &json!({"asset": video.0, "kbps": null}),
+        )?;
+        assert_eq!(dvd(&session), Some(BEST_QUALITY));
+        let _ = session.execute(
+            "asset.setBlurayTranscode",
+            &json!({"asset": video.0, "kbps": 9000, "maxKbps": 11000, "quality": 3}),
+        )?;
+        assert_eq!(bluray(&session), Some(3));
+        let _ = session.execute(
+            "asset.setBlurayTranscode",
+            &json!({"asset": video.0, "kbps": 25000, "maxKbps": 30000}),
+        )?;
+        assert_eq!(bluray(&session), Some(BEST_QUALITY));
+        // M6.328: and how its rate is kept (one-pass VBR when left out).
+        let mode = |session: &Session| {
+            session
+                .project
+                .assets
+                .get(&video)
+                .and_then(|asset| asset.bluray_transcode.as_ref())
+                .map(|setting| setting.mode)
+        };
+        assert_eq!(mode(&session), Some(disccraft_project::TranscodeMode::Vbr));
+        let _ = session.execute(
+            "asset.setBlurayTranscode",
+            &json!({"asset": video.0, "kbps": 20000, "maxKbps": 30000, "mode": "vbr2Pass"}),
+        )?;
+        assert_eq!(
+            mode(&session),
+            Some(disccraft_project::TranscodeMode::Vbr2Pass)
+        );
+        assert!(
+            session
+                .execute(
+                    "asset.setBlurayTranscode",
+                    &json!({"asset": video.0, "kbps": 20000, "mode": "twice"}),
+                )
+                .is_err()
+        );
+        for (command, bad) in [
+            ("asset.setTranscode", json!(0)),
+            ("asset.setTranscode", json!(6)),
+            ("asset.setBlurayTranscode", json!("high")),
+        ] {
+            let params = json!({"asset": video.0, "kbps": 4000, "quality": bad});
+            assert!(
+                session.execute(command, &params).is_err(),
+                "{command} {params}"
+            );
+        }
+        Ok(())
+    }
+
+    /// M6.327: Encore's rendering checkboxes are kept per video (each left as it was when left out); a still or a
+    /// flag that is not true or false is refused.
+    #[test]
+    fn a_video_keeps_its_rendering() -> Result<(), Box<dyn std::error::Error>> {
+        let mut session = Session::default();
+        let video = session
+            .project
+            .add_asset(std::path::Path::new("clip.mp4"))?;
+        let still = session
+            .project
+            .add_asset(std::path::Path::new("cover.png"))?;
+        let flags = |session: &Session| {
+            session
+                .project
+                .assets
+                .get(&video)
+                .map(|asset| (asset.max_render_quality, asset.frame_blend))
+        };
+        assert_eq!(flags(&session), Some((false, false)));
+        let _ = session.execute(
+            "asset.setRendering",
+            &json!({"asset": video.0, "maxRenderQuality": true}),
+        )?;
+        assert_eq!(flags(&session), Some((true, false)));
+        let _ = session.execute(
+            "asset.setRendering",
+            &json!({"asset": video.0, "frameBlend": true}),
+        )?;
+        assert_eq!(flags(&session), Some((true, true)));
+        let _ = session.execute(
+            "asset.setRendering",
+            &json!({"asset": video.0, "maxRenderQuality": false, "frameBlend": false}),
+        )?;
+        assert_eq!(flags(&session), Some((false, false)));
+        for bad in [
+            json!({"asset": still.0, "frameBlend": true}),
+            json!({"asset": video.0, "frameBlend": "yes"}),
+            json!({"asset": 99, "frameBlend": true}),
+        ] {
+            assert!(
+                session.execute("asset.setRendering", &bad).is_err(),
+                "{bad}"
+            );
+        }
+        Ok(())
+    }
+
+    /// M6.300: Transcode Settings keeps how the rate is kept beside it (VBR 1 pass, VBR 2 pass, CBR): set with the
+    /// rate or alone, kept when left out, undone; another name is refused.
+    #[test]
+    fn a_transcode_setting_has_its_encoding() -> Result<(), Box<dyn std::error::Error>> {
+        use disccraft_project::TranscodeMode;
+        let mut session = Session::default();
+        let video = Asset {
+            id: AssetId(5),
+            name: "clip".to_string(),
+            path: "clip.mp4".to_string(),
+            kind: AssetKind::Video,
+            offline: false,
+            cues: None,
+            composition: None,
+            description: String::new(),
+            transcode_kbps: None,
+            pixel_aspect: None,
+            located_dvd: None,
+            located_bluray: None,
+            ignore_alpha: false,
+            transcode_mode: Default::default(),
+            transcode_audio: Default::default(),
+            transcode_preset: None,
+            bluray_transcode: None,
+            transcode_film: false,
+            bluray_video: None,
+            transcode_quality: disccraft_project::BEST_QUALITY,
+            max_render_quality: false,
+            frame_blend: false,
+        };
+        let _ = session.project.assets.insert(AssetId(5), video);
+        let setting = |session: &Session| {
+            session
+                .project
+                .assets
+                .get(&AssetId(5))
+                .map(|asset| (asset.transcode_kbps, asset.transcode_mode))
+        };
+        assert_eq!(setting(&session), Some((None, TranscodeMode::Vbr)));
+        let _ = session.execute(
+            "asset.setTranscode",
+            &json!({"asset": 5, "kbps": 7000, "mode": "vbr2Pass"}),
+        )?;
+        assert_eq!(
+            setting(&session),
+            Some((Some(7000), TranscodeMode::Vbr2Pass))
+        );
+        // Left out: kept.
+        let _ = session.execute("asset.setTranscode", &json!({"asset": 5, "kbps": 8000}))?;
+        assert_eq!(
+            setting(&session),
+            Some((Some(8000), TranscodeMode::Vbr2Pass))
+        );
+        let _ = session.execute(
+            "asset.setTranscode",
+            &json!({"asset": 5, "kbps": 8000, "mode": "cbr"}),
+        )?;
+        assert_eq!(setting(&session), Some((Some(8000), TranscodeMode::Cbr)));
+        let _ = session.execute("edit.undo", &json!({}))?;
+        assert_eq!(
+            setting(&session),
+            Some((Some(8000), TranscodeMode::Vbr2Pass))
+        );
+        // M6.307: the DVD preset's name is kept with a rate, forgotten without one.
+        let _ = session.execute(
+            "asset.setTranscode",
+            &json!({"asset": 5, "kbps": 7000, "mode": "vbr2Pass", "preset": "NTSC DV High quality 7Mb VBR 2 Pass"}),
+        )?;
+        assert_eq!(
+            session
+                .project
+                .assets
+                .get(&AssetId(5))
+                .and_then(|asset| asset.transcode_preset.clone()),
+            Some("NTSC DV High quality 7Mb VBR 2 Pass".to_owned())
+        );
+        let _ = session.execute(
+            "asset.setTranscode",
+            &json!({"asset": 5, "kbps": null, "preset": "x"}),
+        )?;
+        assert_eq!(
+            session
+                .project
+                .assets
+                .get(&AssetId(5))
+                .and_then(|asset| asset.transcode_preset.clone()),
+            None
+        );
+        // M6.314: film (a 23.976 preset) with a rate of its own; kept when left out, gone without a rate.
+        let film = |session: &Session| {
+            session
+                .project
+                .assets
+                .get(&AssetId(5))
+                .map(|asset| asset.transcode_film)
+        };
+        let _ = session.execute(
+            "asset.setTranscode",
+            &json!({"asset": 5, "kbps": 7000, "film": true, "preset": "NTSC DV 23.976 High quality 7Mb VBR 2 Pass"}),
+        )?;
+        assert_eq!(film(&session), Some(true));
+        let _ = session.execute("asset.setTranscode", &json!({"asset": 5, "kbps": 4000}))?;
+        assert_eq!(film(&session), Some(true));
+        assert!(
+            session
+                .execute(
+                    "asset.setTranscode",
+                    &json!({"asset": 5, "kbps": 4000, "film": 1})
+                )
+                .is_err()
+        );
+        let _ = session.execute(
+            "asset.setTranscode",
+            &json!({"asset": 5, "kbps": null, "film": true}),
+        )?;
+        assert_eq!(film(&session), Some(false));
+        // The Blu-ray setting: its own target, peak and preset; automatic with null.
+        let _ = session.execute(
+            "asset.setBlurayTranscode",
+            &json!({"asset": 5, "kbps": 25000, "maxKbps": 30000, "preset": "1920x1080i 29.97 High Quality MPEG-2"}),
+        )?;
+        assert_eq!(
+            session
+                .project
+                .assets
+                .get(&AssetId(5))
+                .and_then(|asset| asset.bluray_transcode.clone()),
+            Some(disccraft_project::BlurayTranscode {
+                kbps: 25000,
+                max_kbps: 30000,
+                preset: "1920x1080i 29.97 High Quality MPEG-2".to_owned(),
+                quality: disccraft_project::BEST_QUALITY,
+                mode: disccraft_project::TranscodeMode::Vbr,
+            })
+        );
+        for bad in [
+            json!({"asset": 5, "kbps": 50}),
+            json!({"asset": 5, "kbps": 9000, "maxKbps": 90000}),
+        ] {
+            assert!(
+                session.execute("asset.setBlurayTranscode", &bad).is_err(),
+                "{bad}"
+            );
+        }
+        let _ = session.execute(
+            "asset.setBlurayTranscode",
+            &json!({"asset": 5, "kbps": null}),
+        )?;
+        assert_eq!(
+            session
+                .project
+                .assets
+                .get(&AssetId(5))
+                .and_then(|asset| asset.bluray_transcode.clone()),
+            None
+        );
+        // M6.325: an HD format of its own (kept when left out), the project's with null; SD and unknown ones
+        // refused.
+        let format = |session: &Session| {
+            session
+                .project
+                .assets
+                .get(&AssetId(5))
+                .and_then(|asset| asset.bluray_video)
+        };
+        let _ = session.execute(
+            "asset.setBlurayTranscode",
+            &json!({"asset": 5, "kbps": null, "video": "720p59.94"}),
+        )?;
+        assert_eq!(format(&session), Some(disccraft_project::BdVideo::Hd720p59));
+        let _ = session.execute(
+            "asset.setBlurayTranscode",
+            &json!({"asset": 5, "kbps": 8000}),
+        )?;
+        assert_eq!(format(&session), Some(disccraft_project::BdVideo::Hd720p59));
+        for bad in [json!("sd"), json!("1080p30"), json!(7)] {
+            let params = json!({"asset": 5, "kbps": null, "video": bad});
+            assert!(
+                session
+                    .execute("asset.setBlurayTranscode", &params)
+                    .is_err(),
+                "{params}"
+            );
+        }
+        let _ = session.execute(
+            "asset.setBlurayTranscode",
+            &json!({"asset": 5, "kbps": null, "video": null}),
+        )?;
+        assert_eq!(format(&session), None);
+        let _ = session.execute("asset.setTranscode", &json!({"asset": 5, "kbps": 8000}))?;
+        // M6.306: the sound's format beside them.
+        let _ = session.execute(
+            "asset.setTranscode",
+            &json!({"asset": 5, "kbps": 8000, "audio": "pcm"}),
+        )?;
+        assert_eq!(
+            session
+                .project
+                .assets
+                .get(&AssetId(5))
+                .map(|asset| asset.transcode_audio),
+            Some(disccraft_project::TranscodeAudio::Pcm)
+        );
+        assert!(
+            session
+                .execute(
+                    "asset.setTranscode",
+                    &json!({"asset": 5, "kbps": 8000, "audio": "mp3"})
+                )
+                .is_err()
+        );
+        assert!(
+            session
+                .execute(
+                    "asset.setTranscode",
+                    &json!({"asset": 5, "kbps": null, "mode": "fast"}),
+                )
+                .is_err()
+        );
+        Ok(())
+    }
+
+    /// M6.294: Interpret Footage ▸ Ignore Alpha Channel is a picture's: the preview's slide is then its colours
+    /// as they are, otherwise laid over black (as the disc shows it); a video asset has none.
+    #[test]
+    fn a_pictures_alpha_channel_can_be_ignored() -> Result<(), Box<dyn std::error::Error>> {
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-ignore-alpha-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("half.png");
+        let file = std::io::BufWriter::new(std::fs::File::create(&path)?);
+        let mut encoder = png::Encoder::new(file, 1, 1);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()?
+            .write_image_data(&[200, 100, 50, 128])?;
+        let mut session = Session::default();
+        let id = session
+            .execute("asset.import", &json!({"path": path.to_string_lossy()}))?
+            .get("asset")
+            .and_then(Value::as_u64)
+            .ok_or("no asset id")?;
+        let first = |session: &mut Session| -> Result<Vec<u64>, String> {
+            let made = session.execute("asset.thumbnail", &json!({"asset": id, "edge": 720}))?;
+            Ok(made
+                .get("rgb")
+                .and_then(Value::as_array)
+                .map(|rgb| rgb.iter().take(3).filter_map(Value::as_u64).collect())
+                .unwrap_or_default())
+        };
+        let ignored = |session: &mut Session| -> Result<Option<bool>, String> {
+            let found = session.execute("asset.pixelAspect", &json!({"asset": id}))?;
+            Ok(found.get("ignoreAlpha").and_then(Value::as_bool))
+        };
+        assert_eq!(ignored(&mut session)?, Some(false));
+        assert_eq!(first(&mut session)?, vec![100, 50, 25]);
+        let _ = session.execute(
+            "asset.setIgnoreAlpha",
+            &json!({"asset": id, "ignore": true}),
+        )?;
+        assert_eq!(ignored(&mut session)?, Some(true));
+        assert_eq!(first(&mut session)?, vec![200, 100, 50]);
+        // Undone: as it was.
+        let _ = session.execute("edit.undo", &json!({}))?;
+        assert_eq!(ignored(&mut session)?, Some(false));
+        // Only a picture.
+        let video = Asset {
+            id: AssetId(99),
+            name: "clip".to_string(),
+            path: "clip.mp4".to_string(),
+            kind: AssetKind::Video,
+            offline: false,
+            cues: None,
+            composition: None,
+            description: String::new(),
+            transcode_kbps: None,
+            pixel_aspect: None,
+            located_dvd: None,
+            located_bluray: None,
+            ignore_alpha: false,
+            transcode_mode: Default::default(),
+            transcode_audio: Default::default(),
+            transcode_preset: None,
+            bluray_transcode: None,
+            transcode_film: false,
+            bluray_video: None,
+            transcode_quality: disccraft_project::BEST_QUALITY,
+            max_render_quality: false,
+            frame_blend: false,
+        };
+        let _ = session.project.assets.insert(AssetId(99), video);
+        assert!(
+            session
+                .execute(
+                    "asset.setIgnoreAlpha",
+                    &json!({"asset": 99, "ignore": true})
+                )
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
     #[test]
     fn probe_image_asset_is_null() {
         let mut session = Session::default();
@@ -615,6 +1791,20 @@ mod tests {
             cues: None,
             composition: None,
             description: String::new(),
+            transcode_kbps: None,
+            pixel_aspect: None,
+            located_dvd: None,
+            located_bluray: None,
+            ignore_alpha: false,
+            transcode_mode: Default::default(),
+            transcode_audio: Default::default(),
+            transcode_preset: None,
+            bluray_transcode: None,
+            transcode_film: false,
+            bluray_video: None,
+            transcode_quality: disccraft_project::BEST_QUALITY,
+            max_render_quality: false,
+            frame_blend: false,
         };
         let _ = session.project.assets.insert(AssetId(7), asset);
 

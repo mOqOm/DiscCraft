@@ -117,6 +117,13 @@ pub struct Button {
     /// A drop shadow behind the button's text (Encore's Object ▸ Drop Shadow…).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadow: Option<DropShadow>,
+    /// The layer effects of the button's text (M6.342: a stroke, glows, a bevel, a colour over it), as an image's
+    /// or a shape's.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::effects::LayerEffects::is_empty"
+    )]
+    pub effects: crate::effects::LayerEffects,
     /// What the button is for (Encore's button 種類: normal / chapter / next / previous / main).
     #[serde(default, skip_serializing_if = "ButtonKind::is_normal")]
     pub kind: ButtonKind,
@@ -169,7 +176,7 @@ pub struct Button {
 }
 
 /// A button's content box relative to its rectangle's top-left corner (see [`Button::body`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContentBox {
     /// Left edge from the rectangle's left edge (negative: to the left of it).
     pub x: i16,
@@ -287,10 +294,14 @@ pub struct Menu {
     /// the smooth edges of their shapes, instead of two-bit subpicture colours. DVD highlights stay two-bit.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rich_highlights: bool,
-    /// The colours of a PSD menu's subpicture layers (`(=1)` to `(=3)`): Encore's automatic colour set draws
-    /// highlight group 1 in them (see [`Menu::color_set_or_default`]).
+    /// The colours of a PSD menu's subpicture layers (`(=1)` to `(=3)`) of its first button that has them: Encore's
+    /// automatic colour set draws highlight group 1 in them (see [`Menu::color_set_or_default`]).
     #[serde(default, skip_serializing_if = "no_colors")]
     pub subpicture_colors: [Option<[u8; 3]>; 3],
+    /// The layer colours of the next button whose colours differ (M6.336): Encore's automatic colour set draws
+    /// highlight group 2 in them, and that button and those with the same colours are in group 2.
+    #[serde(default, skip_serializing_if = "no_colors")]
+    pub second_subpicture_colors: [Option<[u8; 3]>; 3],
     /// Encore's menu pages: the first page this menu is a later page of (`None` for a menu of its own).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_of: Option<MenuId>,
@@ -432,6 +443,12 @@ pub struct MenuText {
     /// A drop shadow behind the text (Encore's Object ▸ Drop Shadow…).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadow: Option<DropShadow>,
+    /// Its layer effects (M6.342: a stroke, glows, a bevel, a colour over it), as an image's or a shape's.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::effects::LayerEffects::is_empty"
+    )]
+    pub effects: crate::effects::LayerEffects,
     /// Mirrored or turned (Encore's Object ▸ Flip / Rotate).
     #[serde(default, skip_serializing_if = "Orientation::is_identity")]
     pub orientation: Orientation,
@@ -439,6 +456,16 @@ pub struct MenuText {
     /// digits) turned a quarter clockwise; each line is a column, the columns run right to left.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub vertical: bool,
+    /// Paragraph text (Encore: a box drawn with the text tool): the width in frame pixels at which the lines
+    /// wrap ([`MIN_TEXT_BOX`] to [`MAX_TEXT_BOX`]); for vertical text, the height at which the columns do.
+    /// `None` is point text: lines break only where the text has line breaks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub box_width: Option<u16>,
+    /// A paragraph text's box height in frame pixels ([`MIN_TEXT_BOX`] to [`MAX_TEXT_BOX`]; for vertical text, how
+    /// wide its columns may reach): the lines (columns) that do not fit are not drawn (Encore's overset text).
+    /// `None`: as tall as its lines. Only a text with a [`MenuText::box_width`] has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub box_height: Option<u16>,
     /// Hidden (Encore's eye in the Layers panel): not drawn in the menu viewer nor on the disc.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
@@ -446,6 +473,11 @@ pub struct MenuText {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub locked: bool,
 }
+
+/// The narrowest and the widest box of a paragraph text, frame pixels.
+pub const MIN_TEXT_BOX: u16 = 16;
+/// See [`MIN_TEXT_BOX`].
+pub const MAX_TEXT_BOX: u16 = 4096;
 
 /// Character and paragraph formatting of a [`MenuText`] (the parts of Encore's Character panel DiscCraft draws):
 /// faux bold / italic, underline, strikethrough, caps, alignment, tracking, leading, kerning and baseline shift.
@@ -466,10 +498,18 @@ pub struct TextFormat {
     pub align: TextAlign,
     /// Tracking in 1/1000 em ([`MIN_TRACKING`] to [`MAX_TRACKING`]).
     pub tracking: i16,
-    /// Extra line spacing in pixels ([`MIN_LEADING`] to [`MAX_LEADING`]).
+    /// Encore's 行送り: the baselines of the lines (the columns of a vertical text) this many pixels apart
+    /// ([`MIN_LINE_PITCH`] to [`MAX_LINE_PITCH`]); `None`: 自動, [`AUTO_LEADING`] of the size.
+    pub line_pitch: Option<u16>,
+    /// Extra line spacing in pixels on top of the line pitch ([`MIN_LEADING`] to [`MAX_LEADING`]; from before the
+    /// line pitch, M6.313).
     pub leading: i16,
-    /// Metric kerning from the font (Encore's カーニング: メトリクス); off = none.
+    /// Metric kerning from the font (Encore's カーニング: メトリクス); off: [`TextFormat::manual_kerning`].
     pub kerning: bool,
+    /// Encore's カーニング set to a number (M6.344): with metric kerning off, the room between every two characters
+    /// changed by this many 1/1000 em ([`MIN_TRACKING`] to [`MAX_TRACKING`]; 0: none).
+    #[serde(skip_serializing_if = "is_zero_i16")]
+    pub manual_kerning: i16,
     /// Baseline shift in pixels, positive up ([`MIN_BASELINE`] to [`MAX_BASELINE`]).
     pub baseline: i16,
     /// Vertical scale in per cent ([`MIN_TEXT_SCALE`] to [`MAX_TEXT_SCALE`]; Encore's 垂直比率).
@@ -480,6 +520,136 @@ pub struct TextFormat {
     pub script: TextScript,
     /// How the text's edges are smoothed (Encore's アンチエイリアス).
     pub antialias: TextAntialias,
+    /// Encore's 詰め (tsume), 0 to [`MAX_TSUME`] per cent: how much of the blank around Japanese characters is
+    /// taken out.
+    pub tsume: u8,
+    /// Encore's 文字組み (mojikumi): how wide full-width punctuation is set.
+    pub mojikumi: TextMojikumi,
+    /// Encore's 禁則処理 (kinsoku): where the lines of a paragraph text may not break.
+    pub kinsoku: TextKinsoku,
+    /// Encore's 禁則方法: how a line that would break where kinsoku forbids is set instead.
+    pub kinsoku_method: TextKinsokuMethod,
+    /// Encore's ぶら下がり: a full-width comma or full stop that does not fit at the end of a line hangs past it
+    /// instead of going to the next line.
+    pub hanging_punctuation: bool,
+}
+
+/// Encore's 禁則方法: how a paragraph text keeps a forbidden character off the head of a line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextKinsokuMethod {
+    /// The characters are taken into the line above when their blank room makes way for them, else the
+    /// character before them goes down with them (追い込み優先; Encore's default).
+    #[default]
+    PushInFirst,
+    /// The character before them goes down with them; only when the line has no place to break are they taken
+    /// into it (追い出し優先).
+    PushOutFirst,
+    /// The character before them always goes down with them (追い出しのみ).
+    PushOutOnly,
+}
+
+impl TextKinsokuMethod {
+    /// Every choice, in Encore's order.
+    pub const ALL: [TextKinsokuMethod; 3] = [
+        TextKinsokuMethod::PushInFirst,
+        TextKinsokuMethod::PushOutFirst,
+        TextKinsokuMethod::PushOutOnly,
+    ];
+
+    /// The name in command parameters.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TextKinsokuMethod::PushInFirst => "pushInFirst",
+            TextKinsokuMethod::PushOutFirst => "pushOutFirst",
+            TextKinsokuMethod::PushOutOnly => "pushOutOnly",
+        }
+    }
+
+    /// Parses a command parameter.
+    pub fn parse(text: &str) -> Option<TextKinsokuMethod> {
+        Self::ALL.into_iter().find(|mode| mode.as_str() == text)
+    }
+}
+
+/// Encore's 禁則処理 (kinsoku) sets: the characters a line of a paragraph text does not start or end with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextKinsoku {
+    /// No such rule (なし).
+    None,
+    /// No line starts with a closing bracket or a punctuation mark, none ends with an opening bracket (弱い禁則).
+    Weak,
+    /// As [`TextKinsoku::Weak`], and no line starts with a small kana or the long vowel mark (強い禁則; Encore's
+    /// default).
+    #[default]
+    Strong,
+}
+
+impl TextKinsoku {
+    /// Every choice, in Encore's order.
+    pub const ALL: [TextKinsoku; 3] = [TextKinsoku::None, TextKinsoku::Strong, TextKinsoku::Weak];
+
+    /// The name in command parameters.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TextKinsoku::None => "none",
+            TextKinsoku::Weak => "weak",
+            TextKinsoku::Strong => "strong",
+        }
+    }
+
+    /// Parses a command parameter.
+    pub fn parse(text: &str) -> Option<TextKinsoku> {
+        Self::ALL.into_iter().find(|mode| mode.as_str() == text)
+    }
+}
+
+/// The most tsume, per cent.
+pub const MAX_TSUME: u8 = 100;
+
+/// Encore's 文字組み (mojikumi) sets: how much room full-width punctuation (、。「」（） and the like) takes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextMojikumi {
+    /// As the font sets it (なし).
+    #[default]
+    None,
+    /// Every full-width punctuation mark at half width (約物半角).
+    PunctuationHalf,
+    /// A punctuation mark that ends a line at half width (行末約物半角).
+    LineEndHalf,
+    /// A punctuation mark that ends a line at full width (行末約物全角): as the font sets it.
+    LineEndFull,
+    /// Every punctuation mark at full width (約物全角): as the font sets it.
+    PunctuationFull,
+}
+
+impl TextMojikumi {
+    /// Every choice, in Encore's order.
+    pub const ALL: [TextMojikumi; 5] = [
+        TextMojikumi::None,
+        TextMojikumi::PunctuationHalf,
+        TextMojikumi::LineEndHalf,
+        TextMojikumi::LineEndFull,
+        TextMojikumi::PunctuationFull,
+    ];
+
+    /// The name in command parameters.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TextMojikumi::None => "none",
+            TextMojikumi::PunctuationHalf => "punctuationHalf",
+            TextMojikumi::LineEndHalf => "lineEndHalf",
+            TextMojikumi::LineEndFull => "lineEndFull",
+            TextMojikumi::PunctuationFull => "punctuationFull",
+        }
+    }
+
+    /// Parses a command parameter.
+    pub fn parse(text: &str) -> Option<TextMojikumi> {
+        Self::ALL.into_iter().find(|mode| mode.as_str() == text)
+    }
 }
 
 impl Default for TextFormat {
@@ -492,14 +662,30 @@ impl Default for TextFormat {
             caps: TextCaps::Normal,
             align: TextAlign::Left,
             tracking: 0,
+            line_pitch: None,
             leading: 0,
             kerning: true,
+            manual_kerning: 0,
             baseline: 0,
             vertical_scale: 100,
             horizontal_scale: 100,
             script: TextScript::Normal,
             antialias: TextAntialias::Crisp,
+            tsume: 0,
+            mojikumi: TextMojikumi::None,
+            kinsoku: TextKinsoku::Strong,
+            kinsoku_method: TextKinsokuMethod::PushInFirst,
+            hanging_punctuation: false,
         }
+    }
+}
+
+impl TextFormat {
+    /// How far apart the baselines of the lines (the columns of a vertical text) are at `size` pixels: Encore's
+    /// 行送り (自動: [`AUTO_LEADING`] of the size), with the extra leading; never less than nothing.
+    pub fn line_pitch_at(&self, size: f32) -> f32 {
+        let pitch = self.line_pitch.map_or(size * AUTO_LEADING, f32::from);
+        (pitch + f32::from(self.leading)).max(0.0)
     }
 }
 
@@ -603,6 +789,10 @@ pub struct Orientation {
     /// box's centre.
     #[serde(skip_serializing_if = "is_zero_angle")]
     pub angle: i16,
+}
+
+fn is_zero_i16(value: &i16) -> bool {
+    *value == 0
 }
 
 fn is_zero_angle(angle: &i16) -> bool {
@@ -771,6 +961,15 @@ pub const MAX_BASELINE: i16 = 100;
 pub const MIN_TRACKING: i16 = -1000;
 /// Loosest tracking (1/1000 em).
 pub const MAX_TRACKING: i16 = 1000;
+/// Encore's 自動 行送り: the lines 120 % of the size apart (measured in Encore CS6: 100 px text, baselines 120 px
+/// apart).
+pub const AUTO_LEADING: f32 = 1.2;
+/// The nearest line pitch (pixels between the baselines).
+pub const MIN_LINE_PITCH: u16 = 1;
+/// The farthest line pitch.
+pub const MAX_LINE_PITCH: u16 = 1000;
+/// The line pitches Encore's 行送り list offers, after 自動.
+pub const LINE_PITCHES: [u16; 14] = [6, 8, 9, 10, 11, 12, 14, 18, 24, 30, 36, 48, 60, 72];
 /// Smallest leading (pixels added to the line height).
 pub const MIN_LEADING: i16 = -100;
 /// Largest leading (pixels added to the line height).
@@ -826,11 +1025,19 @@ pub enum TextAlign {
     Center,
     /// Lines end at the right.
     Right,
+    /// A paragraph text's lines reach from one side of its box to the other, the last line of each paragraph
+    /// starting at the left (Encore's 均等配置（最終行左揃え）); a text without a box starts at the left.
+    Justify,
 }
 
 impl TextAlign {
     /// Every choice, in the Character panel's order.
-    pub const ALL: [TextAlign; 3] = [TextAlign::Left, TextAlign::Center, TextAlign::Right];
+    pub const ALL: [TextAlign; 4] = [
+        TextAlign::Left,
+        TextAlign::Center,
+        TextAlign::Right,
+        TextAlign::Justify,
+    ];
 
     /// The name in command parameters.
     pub fn as_str(self) -> &'static str {
@@ -838,6 +1045,7 @@ impl TextAlign {
             TextAlign::Left => "left",
             TextAlign::Center => "center",
             TextAlign::Right => "right",
+            TextAlign::Justify => "justify",
         }
     }
 
@@ -915,6 +1123,23 @@ pub fn tint(color: [u8; 3], n: u8) -> [u8; 3] {
     let (part, whole) = match n {
         2 => (1_u16, 2_u16),
         3 => (4, 5),
+        _ => return color,
+    };
+    color.map(|channel| {
+        let rest = u16::from(u8::MAX - channel);
+        channel.saturating_add(u8::try_from(rest * part / whole).unwrap_or(u8::MAX))
+    })
+}
+
+/// The opacity of a colour that Encore's automatic colour set makes up for a PSD menu (M6.336).
+const AUTOMATIC_TINT_OPACITY: u8 = 47;
+
+/// Colour `n` (2 or 3) that Encore's automatic colour set makes up from `color` when a PSD button has no layer for
+/// it (M6.336): halfway to white for 2, thirteen sixteenths of the way for 3 (as Encore's colour set shows them).
+fn automatic_tint(color: [u8; 3], n: u8) -> [u8; 3] {
+    let (part, whole) = match n {
+        2 => (1_u16, 2_u16),
+        3 => (13, 16),
         _ => return color,
     };
     color.map(|channel| {
@@ -1151,26 +1376,45 @@ impl Menu {
     }
 
     /// The menu's colour set: its own, or the automatic one: the highlight colour (selected) and white (activated)
-    /// for all three groups, except that a PSD menu's group 1 is in the colours of its subpicture layers, selected
-    /// and activated, fully opaque (Encore's 自動).
+    /// for all three groups, except that a PSD menu's groups 1 and 2 are in the colours of its buttons' subpicture
+    /// layers, selected and activated, fully opaque (Encore's 自動). A colour without a layer is Encore's: a tint of
+    /// the group's own colours (group 1 yellow when selected and red when activated, group 2 magenta and blue) at
+    /// 47 % (M6.336).
     pub fn color_set_or_default(&self) -> ColorSet {
         self.color_set.unwrap_or_else(|| {
             let mut groups =
                 [HighlightGroup::new(self.highlight_color, DEFAULT_ACTIVATED_COLOR); 3];
-            if !no_colors(&self.subpicture_colors) {
-                let [first, second, third] = self.subpicture_colors;
-                let base = groups[0];
+            for (index, (colors, (selected_base, activated_base))) in [
+                (self.subpicture_colors, ([255, 255, 0], [255, 0, 0])),
+                (self.second_subpicture_colors, ([255, 0, 255], [0, 0, 255])),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let Some(slot) = groups.get_mut(index).filter(|_| !no_colors(&colors)) else {
+                    continue;
+                };
+                let [first, second, third] = colors;
+                let base = *slot;
                 let mut group = HighlightGroup::new(
                     first.unwrap_or(base.selected),
                     first.unwrap_or(base.activated),
                 );
-                group.more = Some([(2, second), (3, third)].map(|(n, own)| GroupColor {
-                    selected: own.unwrap_or_else(|| tint(group.selected, n)),
-                    selected_opacity: 100,
-                    activated: own.unwrap_or_else(|| tint(group.activated, n)),
-                    activated_opacity: 100,
+                group.more = Some([(2, second), (3, third)].map(|(n, own)| match own {
+                    Some(own) => GroupColor {
+                        selected: own,
+                        selected_opacity: 100,
+                        activated: own,
+                        activated_opacity: 100,
+                    },
+                    None => GroupColor {
+                        selected: automatic_tint(selected_base, n),
+                        selected_opacity: AUTOMATIC_TINT_OPACITY,
+                        activated: automatic_tint(activated_base, n),
+                        activated_opacity: AUTOMATIC_TINT_OPACITY,
+                    },
                 }));
-                groups[0] = group;
+                *slot = group;
             }
             ColorSet {
                 groups,
@@ -1444,6 +1688,7 @@ impl Default for Menu {
             animate_buttons: false,
             rich_highlights: false,
             subpicture_colors: [None; 3],
+            second_subpicture_colors: [None; 3],
             page_of: None,
         }
     }
@@ -1583,6 +1828,7 @@ impl Project {
             .ok_or_else(|| ProjectError::Invalid("menu does not exist".to_string()))?;
 
         menu.buttons.push(Button {
+            effects: Default::default(),
             name,
             label,
             rect,
@@ -1694,11 +1940,23 @@ mod color_set_tests {
         let group = set.groups[0];
         assert_eq!(group.selected_color(1), ([255, 255, 0], 100));
         assert_eq!(group.activated_color(1), ([255, 255, 0], 100));
-        // Colour 2 has no layer: a tint of colour 1.
-        assert_eq!(group.selected_color(2), (tint([255, 255, 0], 2), 100));
+        // M6.336: colour 2 has no layer: Encore's tint of group 1's yellow / red at 47 %.
+        assert_eq!(group.selected_color(2), ([255, 255, 127], 47));
+        assert_eq!(group.activated_color(2), ([255, 127, 127], 47));
         assert_eq!(group.activated_color(3), ([255, 0, 255], 100));
-        // The other groups stay as they were.
+        // Without a second button's colours the other groups stay as they were.
         assert_eq!(set.groups[1], plain.groups[1]);
+        // A second button's colours are group 2, its missing colours tints of magenta / blue.
+        menu.second_subpicture_colors = [Some([0, 0, 230]), None, None];
+        let set = menu.color_set_or_default();
+        let second = set.groups[1];
+        assert_eq!(second.selected_color(1), ([0, 0, 230], 100));
+        assert_eq!(second.selected_color(2), ([255, 127, 255], 47));
+        assert_eq!(second.selected_color(3), ([255, 207, 255], 47));
+        assert_eq!(second.activated_color(2), ([127, 127, 255], 47));
+        assert_eq!(second.activated_color(3), ([207, 207, 255], 47));
+        assert_eq!(set.groups[0], group);
+        assert_eq!(set.groups[2], plain.groups[2]);
         // A set of the menu's own wins.
         menu.color_set = Some(plain);
         assert_eq!(menu.color_set_or_default(), plain);

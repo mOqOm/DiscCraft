@@ -104,10 +104,12 @@ pub struct Registers {
 impl Default for Registers {
     fn default() -> Self {
         let mut sprm = [0; 24];
-        // The player's start values: no audio stream chosen (15), no subpicture (62) and hidden, angle 1.
+        // The player's start values: no audio stream chosen (15), no subpicture (62) and hidden, angle 1, no
+        // parental level set (15).
         sprm[1] = 15;
         sprm[2] = 62;
         sprm[3] = 1;
+        sprm[13] = 15;
         Self {
             gprm: [0; 16],
             sprm,
@@ -129,12 +131,31 @@ pub struct Vm<'a> {
     /// The title and chapter the MENU or TITLE key was pressed in, for the MENU key to go back to from a menu
     /// (the player's resume).
     resume: Option<(u8, u16)>,
+    /// Whether the viewer lets the disc raise the parental level when it asks (`SetTmpPML`).
+    parental_accept: bool,
 }
 
 impl<'a> Vm<'a> {
     /// Start playback by running the first play PGC.
     pub fn start(model: &'a DiscModel) -> Result<Self, VmError> {
-        let registers = Registers::default();
+        Self::start_with_parental_level(model, 15, true)
+    }
+
+    /// [`Vm::start`] on a player whose parental level is `level` (1 to 8; 15: none set), whose viewer gives
+    /// the password when the disc asks to raise it (`accept`) or does not.
+    ///
+    /// # Errors
+    ///
+    /// As [`Vm::start`].
+    pub fn start_with_parental_level(
+        model: &'a DiscModel,
+        level: u8,
+        accept: bool,
+    ) -> Result<Self, VmError> {
+        let mut registers = Registers::default();
+        if let Some(slot) = registers.sprm.get_mut(13) {
+            *slot = u16::from(level);
+        }
         let mut vm = Vm {
             model,
             gprm: registers.gprm,
@@ -145,6 +166,7 @@ impl<'a> Vm<'a> {
             context: Context::FirstPlay,
             ip: 0,
             resume: None,
+            parental_accept: accept,
         };
         vm.run()?;
         Ok(vm)
@@ -171,6 +193,7 @@ impl<'a> Vm<'a> {
             context: Context::FirstPlay,
             ip: 0,
             resume: None,
+            parental_accept: true,
         };
 
         vm.validate_location()?;
@@ -757,6 +780,9 @@ impl<'a> Vm<'a> {
             (0x20, 0xA6) => self.exec_cond_link_pgn(&cmd),
             (0x20, 0xA4) => self.exec_cond_link_pgcn(&cmd),
             (0x00, 0xA1) => self.exec_goto_line(&cmd),
+            (0x00, 0xC1) => self.exec_goto_if_at_least(&cmd),
+            (0x00, 0x03) => self.exec_set_tmp_pml(&cmd),
+            (0x00, 0x00) => Ok(Exec::Continue),
             (0x71, 0x00) => self.exec_mov_imm(&cmd),
             (0x73, 0x00) => self.exec_add_imm(&cmd),
             (0x61, 0x00) => self.exec_mov_reg(&cmd),
@@ -885,7 +911,41 @@ impl<'a> Vm<'a> {
             return Ok(Exec::Continue);
         }
 
-        let line = byte(cmd, 7)?;
+        self.goto_line(byte(cmd, 7)?)
+    }
+
+    /// `if (reg >= value) Goto line`; the register is a GPRM (0 to 15) or an SPRM (0x80 + its number).
+    fn exec_goto_if_at_least(&mut self, cmd: &Cmd) -> Result<Exec, VmError> {
+        let r = byte(cmd, 3)?;
+        let value = if r & 0x80 != 0 {
+            self.sprm
+                .get(usize::from(r & 0x7F))
+                .copied()
+                .ok_or_else(|| invalid("SPRM out of range"))?
+        } else {
+            self.gprm_value(r)?
+        };
+        if value < u16_be(cmd, 4)? {
+            return Ok(Exec::Continue);
+        }
+        self.goto_line(byte(cmd, 7)?)
+    }
+
+    /// `SetTmpPML level, line`: when the viewer agrees, the player's parental level becomes `level` and the
+    /// commands go on at `line`; else they go on at the next command.
+    fn exec_set_tmp_pml(&mut self, cmd: &Cmd) -> Result<Exec, VmError> {
+        if !self.parental_accept {
+            return Ok(Exec::Continue);
+        }
+        let level = byte(cmd, 6)? & 0x0F;
+        if let Some(slot) = self.sprm.get_mut(13) {
+            *slot = u16::from(level);
+        }
+        self.goto_line(byte(cmd, 7)?)
+    }
+
+    /// Goes on at `line` (from 1) of the commands being run.
+    fn goto_line(&mut self, line: u8) -> Result<Exec, VmError> {
         if line == 0 {
             return Err(invalid("Goto line is zero"));
         }
@@ -1442,6 +1502,50 @@ mod tests {
                 chapter: 1
             }
         ); // enters pgcn 2 → JumpTT 1
+        Ok(())
+    }
+
+    #[test]
+    fn a_parental_level_stops_a_player_set_lower() -> Result<(), VmError> {
+        // if (SPRM13 >= 5) Goto 4; SetTmpPML 5, 4; Exit; JumpTT 1 (the first play), and the same before the title.
+        let guard = [
+            [0x00, 0xC1, 0x00, 0x8D, 0x00, 0x05, 0x00, 0x04],
+            [0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x05, 0x04],
+            [0x30, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        ];
+        let mut first_play = guard.to_vec();
+        first_play.push([0x30, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00]);
+        let model = DiscModel {
+            title_menu: None,
+            first_play,
+            vmgm: vec![],
+            titles: vec![TitleModel {
+                prohibited_ops: 0,
+                pre: [guard.as_slice(), &[[0x00; 8]]].concat(),
+                post: vec![],
+                chapters: 1,
+                menu_remote: Vec::new(),
+            }],
+        };
+        let playing = Location::Title {
+            title: 1,
+            chapter: 1,
+        };
+        // No level set (15), the disc's own level, a higher one: plays.
+        assert_eq!(*Vm::start(&model)?.location(), playing);
+        for level in [5, 8, 15] {
+            let vm = Vm::start_with_parental_level(&model, level, false)?;
+            assert_eq!(*vm.location(), playing, "level {level}");
+            assert_eq!(vm.registers().sprm[13], u16::from(level));
+        }
+        // A lower one: stops when the password is not given, plays at the disc's level when it is.
+        for level in [1, 4] {
+            let vm = Vm::start_with_parental_level(&model, level, false)?;
+            assert_eq!(*vm.location(), Location::Stopped, "level {level}");
+            let vm = Vm::start_with_parental_level(&model, level, true)?;
+            assert_eq!(*vm.location(), playing, "level {level}");
+            assert_eq!(vm.registers().sprm[13], 5);
+        }
         Ok(())
     }
 

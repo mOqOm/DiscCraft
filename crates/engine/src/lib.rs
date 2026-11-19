@@ -18,6 +18,7 @@ use serde_json::Value;
 
 mod commands;
 mod gop;
+pub mod metadata;
 mod params;
 mod player;
 mod session;
@@ -30,9 +31,21 @@ pub fn enable_media_cache(dir: &std::path::Path) {
     disccraft_transcode::enable_probe_cache(dir);
 }
 
+/// The folder of the media cache ([`enable_media_cache`]), when one is kept.
+#[must_use]
+pub fn media_cache_dir() -> Option<std::path::PathBuf> {
+    disccraft_transcode::probe_cache_dir()
+}
+
+/// Empties the media cache (Encore's Preferences ▸ Media ▸ Media Cache Database ▸ Clean): what was remembered of
+/// media files is forgotten and read again when next needed. Returns how many files went.
+pub fn clear_media_cache() -> usize {
+    disccraft_transcode::clear_probe_cache()
+}
+
 pub use player::{
-    AudioFeed, FrameLoader, FrameRequest, FrameSource, Player, PlayerAudio, PlayerFrame,
-    PlayerStatus,
+    AudioFeed, FrameLoader, FrameRequest, FrameSource, Player, PlayerAudio, PlayerAudioPart,
+    PlayerFrame, PlayerStatus, audio_track_parts,
 };
 pub use session::{Session, UNDO_LIMIT};
 

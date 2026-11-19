@@ -193,6 +193,44 @@ fn run_menu_test(
     if !report.dead_ends.is_empty() || !report.loops.is_empty() {
         return Err(format!("dead ends {:?}, loops {:?}", report.dead_ends, report.loops).into());
     }
+
+    // The same disc with a parental level: a player with none set, or set as high, starts as before; one set
+    // lower stops unless its viewer lets the level be raised. Every chapter is still reached.
+    let mut rated = project.clone();
+    rated.settings.parental_level = 6;
+    let rated_dir = dir.join("rated");
+    build_video_ts(&rated, &rated_dir)?;
+    let model = load_video_ts(&rated_dir.join("VIDEO_TS"))?;
+    if disccraft_dvd::preview_model(&rated)? != model {
+        return Err("preview model of the rated disc differs from the disc".into());
+    }
+    let menu = Location::Menu { pgcn: 1, button: 1 };
+    expect_location(Vm::start(&model)?.location(), &menu)?;
+    expect_location(
+        Vm::start_with_parental_level(&model, 6, false)?.location(),
+        &menu,
+    )?;
+    expect_location(
+        Vm::start_with_parental_level(&model, 5, false)?.location(),
+        &Location::Stopped,
+    )?;
+    let mut vm = Vm::start_with_parental_level(&model, 5, true)?;
+    expect_location(vm.location(), &menu)?;
+    let at = *vm.press(Key::Enter)?;
+    expect_location(
+        &at,
+        &Location::Title {
+            title: 1,
+            chapter: 1,
+        },
+    )?;
+    let report = explore(&model);
+    if report.chapters_reached != expected
+        || !report.dead_ends.is_empty()
+        || !report.loops.is_empty()
+    {
+        return Err(format!("rated disc: {report:?}").into());
+    }
     Ok(())
 }
 
@@ -213,9 +251,12 @@ fn build_project(video: &Path, audio: &Path) -> Result<Project, Box<dyn Error>> 
     project.add_chapter(t, Tick(10 * TICKS_PER_SECOND), None)?;
     let tl = project.timeline_mut(t).ok_or("timeline")?;
     tl.audio.push(AudioTrack {
+        more: Vec::new(),
         asset: a,
         language: "ja".to_string(),
         start: 0,
+        trim_start: 0,
+        trim_end: None,
     });
     tl.end_action = Link::LastMenu;
     let menu = project.add_menu(Some("Main menu".to_string()))?;

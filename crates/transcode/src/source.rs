@@ -19,7 +19,12 @@ pub(crate) struct Source {
     /// The real display times of MPEG-2 video whose frames FilmCraft spaces evenly but the stream does not (soft
     /// pulldown), with the media info corrected to its real length; `None` for everything else.
     timing: Option<Arc<(Timeline, MediaInfo)>>,
+    /// The file, to find the pixel aspect ratio the project chose for it (`crate::pixel_aspect`).
+    path: Arc<std::path::PathBuf>,
 }
+
+/// A time this near (in 256ths of a frame) to a frame shows that frame alone when frames are blended.
+const BLEND_EDGE: u32 = 32;
 
 impl Source {
     /// Open a media file and require a bounded-duration video stream.
@@ -71,9 +76,40 @@ impl Source {
             }
             _ => time,
         };
-        self.media
+        let frame = self
+            .media
             .video_frame(FrameRequest::full(time))
-            .map_err(|error| TranscodeError::Decode(error.to_string()))
+            .map_err(|error| TranscodeError::Decode(error.to_string()))?;
+        // Interpret Footage: the pixels are as wide as the project says, not as the file does.
+        Ok(match crate::pixel_aspect::chosen_pixel_aspect(&self.path) {
+            Some(aspect) if aspect != frame.par => {
+                let mut frame = (*frame).clone();
+                frame.par = aspect;
+                Arc::new(frame)
+            }
+            _ => frame,
+        })
+    }
+
+    /// Where `time` falls between two of the video's frames (Encore's frame blending, M6.327): the time of the
+    /// frame after it and how near it is to that one, in 256ths. `None` when it is (within an eighth of a frame)
+    /// on a frame, past the last, or the frames are not evenly spaced (soft pulldown).
+    pub(crate) fn between(&self, time: Tick) -> Option<(Tick, u32)> {
+        if self.timing.is_some() {
+            return None;
+        }
+        let rate = self.media.info().video.as_ref()?.frame_rate;
+        let index = rate.frame_at(time);
+        let (before, after) = (rate.tick_of(index), rate.tick_of(index.checked_add(1)?));
+        let span = after.0.checked_sub(before.0).filter(|span| *span > 0)?;
+        if after.0 >= self.info().duration.0 {
+            return None;
+        }
+        let into = time.0.checked_sub(before.0)?;
+        let weight = u32::try_from(i128::from(into) * 256 / i128::from(span)).ok()?;
+        (BLEND_EDGE..=256 - BLEND_EDGE)
+            .contains(&weight)
+            .then_some((after, weight))
     }
 
     /// Request decoded audio starting at `start` sample frames.
@@ -146,6 +182,7 @@ impl Source {
         let source = Self {
             media,
             timing: timing.map(Arc::new),
+            path: Arc::new(std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())),
         };
         validate_duration(source.info().duration)?;
         Ok(source)

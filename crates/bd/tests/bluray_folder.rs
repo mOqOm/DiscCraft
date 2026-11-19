@@ -70,9 +70,12 @@ fn project(video: &Path, audio: &Path) -> Project {
     let a = p.add_asset(audio).unwrap();
     let t = p.add_timeline(v, Some("Main".to_string())).unwrap();
     p.timeline_mut(t).unwrap().audio.push(AudioTrack {
+        more: Vec::new(),
         asset: a,
         language: "ja".to_string(),
         start: 0,
+        trim_start: 0,
+        trim_end: None,
     });
     let srt = fixtures().join("bd_sub.srt");
     std::fs::write(
@@ -1022,6 +1025,241 @@ fn interlaced_h264_goes_on_a_1080i_disc_as_it_is(container: &str, width: u32) {
     assert!(
         text.contains("H264Video { video_format: 4, frame_rate: 4, aspect: 3 }"),
         "{text}"
+    );
+    if std::env::var_os("DISCCRAFT_KEEP_OUTPUT").is_none() {
+        let _ = std::fs::remove_dir_all(&out);
+    }
+}
+
+/// A 24-bit WAV (`WAVE_FORMAT_EXTENSIBLE`, speakers `mask`) of `channels` at `rate` for `seconds`: channel n a
+/// tone of 200 + 100 n Hz.
+fn tone_wav(rate: u32, channels: u16, mask: u32, seconds: u32) -> Vec<u8> {
+    let frames = rate * seconds;
+    let mut samples = Vec::with_capacity((frames * u32::from(channels) * 3) as usize);
+    for frame in 0..frames {
+        for channel in 0..channels {
+            let hz = 200.0 + 100.0 * f64::from(channel);
+            let phase = std::f64::consts::TAU * hz * f64::from(frame) / f64::from(rate);
+            let value = (phase.sin() * 4_000_000.0) as i32;
+            samples.extend_from_slice(&value.to_le_bytes()[..3]);
+        }
+    }
+    let block = channels * 3;
+    let mut fmt = Vec::new();
+    fmt.extend_from_slice(&0xFFFEu16.to_le_bytes());
+    fmt.extend_from_slice(&channels.to_le_bytes());
+    fmt.extend_from_slice(&rate.to_le_bytes());
+    fmt.extend_from_slice(&(rate * u32::from(block)).to_le_bytes());
+    fmt.extend_from_slice(&block.to_le_bytes());
+    fmt.extend_from_slice(&24u16.to_le_bytes());
+    fmt.extend_from_slice(&22u16.to_le_bytes());
+    fmt.extend_from_slice(&24u16.to_le_bytes());
+    fmt.extend_from_slice(&mask.to_le_bytes());
+    fmt.extend_from_slice(&[
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b,
+        0x71,
+    ]);
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&(4 + 8 + fmt.len() as u32 + 8 + samples.len() as u32).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+    out.extend_from_slice(&fmt);
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+    out.extend_from_slice(&samples);
+    out
+}
+
+/// M6.347: a 5.1 WAV of 24 bits at 192 kHz goes on a Blu-ray as LPCM as it is (not converted to stereo Dolby
+/// Digital): ffmpeg (a black box) reads 5.1 at 192 kHz, and hears each speaker's tone on that speaker.
+#[test]
+fn a_5_1_wav_at_192_khz_keeps_its_speakers() {
+    let (Some(ffmpeg), Some(ffprobe)) = (
+        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
+        tool("DISCCRAFT_FFPROBE", "ffprobe"),
+    ) else {
+        eprintln!("skipping: ffmpeg/ffprobe not found");
+        return;
+    };
+    let video = short_video(&ffmpeg);
+    // 5.1 with side surrounds: FL FR FC LFE SL SR.
+    let wav = fixtures().join("bd_lpcm51.wav");
+    std::fs::write(&wav, tone_wav(192_000, 6, 0x60F, 3)).unwrap();
+    let mut p = Project::default();
+    p.settings.kind = DiscKind::BluRay;
+    let v = p.add_asset(&video).unwrap();
+    let a = p.add_asset(&wav).unwrap();
+    let t = p.add_timeline(v, Some("Main".to_string())).unwrap();
+    p.timeline_mut(t).unwrap().audio.push(AudioTrack::of(a));
+    p.settings.first_play = Link::Timeline { id: t, chapter: 0 };
+    let out = fixtures().join("bd_lpcm51_out");
+    build_bdmv(&p, &out).unwrap();
+
+    let clip = out.join("BDMV/STREAM/00001.m2ts");
+    let probe = Command::new(&ffprobe)
+        .args(["-v", "error", "-select_streams", "a"])
+        .args([
+            "-show_entries",
+            "stream=codec_name,sample_rate,channels,channel_layout",
+        ])
+        .args(["-of", "compact=p=0:nk=1"])
+        .arg(&clip)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&probe.stdout);
+    // The stream (listed again under its program).
+    assert_eq!(
+        text.lines().next().map(str::trim),
+        Some("pcm_bluray|192000|6|5.1(side)"),
+        "{text}"
+    );
+    let decode = Command::new(&ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(&clip)
+        .args(["-map", "0:a:0", "-f", "s16le", "-c:a", "pcm_s16le", "-"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&decode.stderr);
+    assert!(
+        decode.status.success() && stderr.trim().is_empty(),
+        "{stderr}"
+    );
+    let samples: Vec<i16> = decode
+        .stdout
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| i16::from_le_bytes(*pair))
+        .collect();
+    // A second from half a second in: each channel crosses zero twice a cycle of its tone.
+    for channel in 0..6 {
+        let tone: Vec<i16> = samples
+            .as_chunks::<6>()
+            .0
+            .iter()
+            .skip(96_000)
+            .take(192_000)
+            .map(|frame| frame[channel])
+            .collect();
+        let crossings = tone
+            .windows(2)
+            .filter(|pair| (pair[0] < 0) != (pair[1] < 0))
+            .count();
+        let hz = 200 + 100 * channel;
+        assert!(
+            crossings.abs_diff(2 * hz) <= 4,
+            "channel {channel}: {crossings} crossings, {hz} Hz wanted"
+        );
+    }
+    if std::env::var_os("DISCCRAFT_KEEP_OUTPUT").is_none() {
+        let _ = std::fs::remove_dir_all(&out);
+    }
+}
+
+/// Three seconds of DVD-compliant MPEG-2 (an SD Blu-ray takes it as it is).
+fn short_video(ffmpeg: &Path) -> PathBuf {
+    std::fs::create_dir_all(fixtures()).unwrap();
+    let video = fixtures().join("bd_lpcm51.m2v");
+    if !video.is_file() {
+        let ok = Command::new(ffmpeg)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .args(["testsrc=size=720x480:rate=30000/1001", "-t", "3"])
+            .args(["-vf", "setdar=4/3", "-c:v", "mpeg2video", "-b:v", "1500k"])
+            .args([
+                "-maxrate", "6M", "-bufsize", "1835k", "-g", "15", "-bf", "0",
+            ])
+            .args(["-pix_fmt", "yuv420p", "-f", "mpeg2video"])
+            .arg(&video)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "ffmpeg could not create the video");
+    }
+    video
+}
+
+/// M6.348: a DTS file goes on a Blu-ray as it is: the clip and the playlist list a DTS stream (0x82, multi-channel,
+/// 48 kHz), and ffmpeg (a black box) reads the frames as the file's 5.1 DTS and decodes them without errors.
+#[test]
+fn a_dts_file_goes_on_a_blu_ray_as_it_is() {
+    let (Some(ffmpeg), Some(ffprobe)) = (
+        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
+        tool("DISCCRAFT_FFPROBE", "ffprobe"),
+    ) else {
+        eprintln!("skipping: ffmpeg/ffprobe not found");
+        return;
+    };
+    let video = short_video(&ffmpeg);
+    let dts = fixtures().join("bd_dts51.dts");
+    if !dts.is_file() {
+        let ok = Command::new(&ffmpeg)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("sine=frequency=440:sample_rate=48000:duration=3")
+            .args(["-ac", "6", "-c:a", "dca", "-strict", "-2", "-b:a", "1509k"])
+            .arg(&dts)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "ffmpeg could not create the DTS file");
+    }
+    let mut p = Project::default();
+    p.settings.kind = DiscKind::BluRay;
+    let v = p.add_asset(&video).unwrap();
+    let a = p.add_asset(&dts).unwrap();
+    let t = p.add_timeline(v, Some("Main".to_string())).unwrap();
+    let mut track = AudioTrack::of(a);
+    track.language = "en".to_string();
+    p.timeline_mut(t).unwrap().audio.push(track);
+    p.settings.first_play = Link::Timeline { id: t, chapter: 0 };
+    let out = fixtures().join("bd_dts_out");
+    build_bdmv(&p, &out).unwrap();
+
+    let bdmv = out.join("BDMV");
+    let info =
+        disccraft_bdmv::clpi::read_clpi(&std::fs::read(bdmv.join("CLIPINF/00001.clpi")).unwrap())
+            .unwrap();
+    let dts_stream = disccraft_bdmv::StreamCoding::Dts {
+        audio_format: 6,
+        sample_rate: 1,
+        language: *b"eng",
+    };
+    assert!(
+        info.streams
+            .iter()
+            .any(|stream| stream.coding == dts_stream),
+        "{info:?}"
+    );
+    let playlist =
+        disccraft_bdmv::mpls::read_mpls(&std::fs::read(bdmv.join("PLAYLIST/00001.mpls")).unwrap())
+            .unwrap();
+    let audio = &playlist.items.first().unwrap().streams.audio;
+    assert_eq!(audio.len(), 1);
+    assert_eq!(audio[0].coding, dts_stream);
+
+    let clip = bdmv.join("STREAM/00001.m2ts");
+    let probe = Command::new(&ffprobe)
+        .args(["-v", "error", "-select_streams", "a"])
+        .args(["-show_entries", "stream=codec_name,sample_rate,channels"])
+        .args(["-of", "compact=p=0:nk=1"])
+        .arg(&clip)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&probe.stdout);
+    assert_eq!(
+        text.lines().next().map(str::trim),
+        Some("dts|48000|6"),
+        "{text}"
+    );
+    let decode = Command::new(&ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(&clip)
+        .args(["-map", "0:a:0", "-f", "null", "-"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&decode.stderr);
+    assert!(
+        decode.status.success() && stderr.trim().is_empty(),
+        "{stderr}"
     );
     if std::env::var_os("DISCCRAFT_KEEP_OUTPUT").is_none() {
         let _ = std::fs::remove_dir_all(&out);

@@ -56,7 +56,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "ビデオクリップを削除",
         menu: &["タイムライン"],
         shortcut: None,
-        params: r#"{"timeline": id, "clip": index (1 = the second clip)}"#,
+        params: r#"{"timeline": id, "clip": index (1 = the second clip), "ripple"?: bool (false: その場所を空ける)}"#,
         enabled: always_enabled,
         run: run_remove_video,
         journal: true,
@@ -186,7 +186,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "ソースのチャプターをチャプターポイントに",
         menu: &["タイムライン"],
         shortcut: None,
-        params: r#"{"timeline": id} → {"added", "skipped"} (mkv / mp4 に入っているチャプター)"#,
+        params: r#"{"timeline": id, "replace"?: bool (今のチャプターポイントを置き換える)} → {"added", "skipped"} (mkv / mp4 に入っているチャプター)"#,
         enabled: always_enabled,
         run: run_import_source_chapters,
         journal: true,
@@ -322,11 +322,21 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "timeline.trimAudio",
+        label: "オーディオクリップをトリム",
+        menu: &["タイムライン"],
+        shortcut: None,
+        params: r#"{"timeline": id, "track": index, "clip"?: number (0 = 最初のクリップ), "edge": "in" | "out", "timecode"?: "HH:MM:SS;FF", "time"?: ticks}"#,
+        enabled: always_enabled,
+        run: run_trim_audio,
+        journal: true,
+    },
+    CommandSpec {
         id: "timeline.moveAudio",
         label: "オーディオクリップを移動",
         menu: &["タイムライン"],
         shortcut: None,
-        params: r#"{"timeline": id, "track": index, "timecode"?: "HH:MM:SS;FF", "time"?: ticks}"#,
+        params: r#"{"timeline": id, "track": index, "clip"?: number (0 = 最初のクリップ), "timecode"?: "HH:MM:SS;FF", "time"?: ticks}"#,
         enabled: always_enabled,
         run: run_move_audio,
         journal: true,
@@ -339,6 +349,26 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         params: r#"{"timeline": id, "kind": "audio"|"subtitle", "track": index, "language": "ja" (ISO 639-1, or "")}"#,
         enabled: always_enabled,
         run: run_set_track_language,
+        journal: true,
+    },
+    CommandSpec {
+        id: "timeline.addAudioClip",
+        label: "オーディオクリップを追加",
+        menu: &["タイムライン"],
+        shortcut: None,
+        params: r#"{"timeline": id, "track": index, "asset": id, "timecode"?: "HH:MM:SS;FF", "time"?: ticks (省略: 最後のクリップの後ろ)}"#,
+        enabled: always_enabled,
+        run: run_add_audio_clip,
+        journal: true,
+    },
+    CommandSpec {
+        id: "timeline.removeAudioClip",
+        label: "オーディオクリップを消去",
+        menu: &["タイムライン"],
+        shortcut: None,
+        params: r#"{"timeline": id, "track": index, "clip": number (0 = 最初のクリップ)}"#,
+        enabled: always_enabled,
+        run: run_remove_audio_clip,
         journal: true,
     },
     CommandSpec {
@@ -451,9 +481,12 @@ fn take_source_streams(session: &mut Session, timeline: TimelineId) {
         timeline.widescreen = Some(probe.wide);
         if probe.has_audio && timeline.audio.is_empty() {
             timeline.audio.push(disccraft_project::AudioTrack {
+                more: Vec::new(),
                 asset: video,
                 language: String::new(),
                 start: 0,
+                trim_start: 0,
+                trim_end: None,
             });
         }
     }
@@ -582,10 +615,25 @@ fn run_remove_video(session: &mut Session, params: &Value) -> CommandResult {
         Tick(start.0.saturating_sub(gap.0)),
         Tick(length.0.saturating_add(gap.0)),
     );
-    session
-        .project
-        .remove_timeline_video(timeline, clip, (start, length))
-        .map_err(|error| error.to_string())?;
+    // "ripple": false leaves the clip's place empty (Encore's Clear); the clips after it stay where they are.
+    let ripple = match params.get("ripple") {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(ripple)) => *ripple,
+        Some(_) => return Err("parameter \"ripple\" must be a boolean".to_string()),
+    };
+    if ripple {
+        session
+            .project
+            .remove_timeline_video(timeline, clip, (start, length))
+    } else {
+        let rate = session.project.settings.frame_rate();
+        let frames = u32::try_from(rate.frame_at(rate.snap_nearest(length)))
+            .map_err(|_| "the clip is too long".to_string())?;
+        session
+            .project
+            .clear_timeline_video(timeline, clip, (start, length), frames)
+    }
+    .map_err(|error| error.to_string())?;
     Ok(empty_object())
 }
 
@@ -644,7 +692,10 @@ fn run_move_video(session: &mut Session, params: &Value) -> CommandResult {
 /// Trims a video clip's in or out point to the time given on the timeline, as Encore CS6 does: the point goes to
 /// the nearest GOP start of the clip's file (the out point also to its end), and at least one GOP stays. The clips
 /// stay butted: what follows the trimmed part moves up, the chapters in it go, and the chapter at the clip's head
-/// stays. Only an MPEG-2 elementary stream, which is used as it is, can be trimmed.
+/// stays. Video that is used as it is is cut where it can be: an MPEG-2 elementary stream at its GOPs, and
+/// (M10.21) H.264 that goes on an HD Blu-ray as it is with its in point on an IDR picture and its out point on a
+/// key picture. Other video of an HD Blu-ray is encoded clip by clip, so it is trimmed to the frame asked for; on
+/// a DVD (and an SD Blu-ray) video that is transcoded cannot be trimmed.
 ///
 /// Encore leaves a gap where a clip's head was and, on a head trim, also shortens the clip's end; neither is
 /// copied (a gap cannot be built, and the end did not ask to move).
@@ -672,10 +723,41 @@ fn run_trim_video(session: &mut Session, params: &Value) -> CommandResult {
         .get(&asset)
         .map(|asset| asset.media_file().into_owned())
         .ok_or_else(|| format!("asset {} does not exist", asset.0))?;
-    let gops = session.gops.starts(&path).ok_or_else(|| {
-        "only an MPEG-2 video stream that needs no transcode can be trimmed".to_string()
-    })?;
     let rate = session.project.settings.frame_rate();
+    // Where the clip can be cut, how long its file is, and (H.264) which of the points a clip can start on.
+    let mut any_frame = false;
+    let (starts, pictures, h264) = match session.gops.starts(&path) {
+        Some(gops) => (gops.starts.clone(), gops.pictures, None),
+        None => {
+            if disccraft_dvd::BdVideoFormat::of(&session.project).is_none() {
+                return Err(
+                    "only video that needs no transcode can be trimmed on this disc: an MPEG-2 video \
+                     stream"
+                        .to_string(),
+                );
+            }
+            let cut = disccraft_dvd::bd_cut_points(&session.project, &path, &cut_index_dir())
+                .map_err(|error| error.to_string())?;
+            let probe = disccraft_transcode::probe_video(&path)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            // `as` saturates; a clip's length is far inside the range.
+            let pictures = (probe.seconds * rate.as_f64()).round() as i64;
+            // Video that is encoded for the disc is cut on any frame.
+            any_frame = cut.is_none();
+            (
+                cut.as_ref()
+                    .map(disccraft_dvd::CutPoints::frames)
+                    .unwrap_or_default(),
+                pictures,
+                cut,
+            )
+        }
+    };
+    struct Points {
+        starts: Vec<i64>,
+        pictures: i64,
+    }
+    let gops = Points { starts, pictures };
     let old = session
         .project
         .timeline(timeline)
@@ -694,12 +776,30 @@ fn run_trim_video(session: &mut Session, params: &Value) -> CommandResult {
     if out_edge {
         points.push(gops.pictures);
     }
+    if any_frame {
+        // The frame asked for, with at least one frame left of the clip.
+        points = vec![if out_edge {
+            asked.max(old_start.saturating_add(1)).min(gops.pictures)
+        } else {
+            asked.min(old_end.saturating_sub(1)).max(0)
+        }];
+    }
     let nearest = |allowed: &dyn Fn(i64) -> bool| {
-        points
+        let mut near: Vec<i64> = points
             .iter()
             .copied()
-            .filter(|point| allowed(*point))
-            .min_by_key(|point| (point.saturating_sub(asked).abs(), *point))
+            .filter(|point| allowed(*point) && *point <= gops.pictures)
+            .collect();
+        near.sort_by_key(|point| (point.saturating_sub(asked).abs(), *point));
+        match &h264 {
+            // An H.264 clip starts on an IDR picture: the nearest of the key pictures that is one (a few are
+            // read from the file to tell).
+            Some(cut) if !out_edge => near
+                .into_iter()
+                .take(MAX_IDR_TRIES)
+                .find(|point| cut.can_start(*point)),
+            _ => near.first().copied(),
+        }
     };
     let (new_start, new_end) = if out_edge {
         let end = nearest(&|point| point > old_start)
@@ -753,6 +853,14 @@ fn run_trim_video(session: &mut Session, params: &Value) -> CommandResult {
         ("start", Value::from(trim.start)),
         ("end", trim.end.map_or(Value::Null, Value::from)),
     ]))
+}
+
+/// The most key pictures near an in point that are read to find an IDR picture.
+const MAX_IDR_TRIES: usize = 64;
+
+/// Where the small indexes of files asked for their cut points are kept (a build keeps its own in its cache).
+fn cut_index_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join("disccraft-cut-index")
 }
 
 /// The clips of the video track, in order: `{"clips": [{"asset", "start", "duration", "sourceStart"}],
@@ -1271,7 +1379,30 @@ fn source_chapters(session: &mut Session, timeline: TimelineId) -> Result<(u64, 
 
 fn run_import_source_chapters(session: &mut Session, params: &Value) -> CommandResult {
     let timeline = TimelineId(req_u64(params, "timeline")?);
+    // "replace": the chapter points there are go first (Encore's Update Markers from Source (Replace All
+    // Markers)); the first chapter, at the start, always stays.
+    let replace = matches!(params.get("replace"), Some(Value::Bool(true)));
+    if replace {
+        let count = session
+            .project
+            .timeline(timeline)
+            .ok_or_else(|| format!("timeline {} does not exist", timeline.0))?
+            .chapters
+            .len();
+        for at in (1..count).rev() {
+            session
+                .project
+                .remove_chapter(timeline, at)
+                .map_err(|error| error.to_string())?;
+        }
+    }
     let (added, skipped) = source_chapters(session, timeline)?;
+    if replace && added == 0 {
+        // Nothing to put in their place: the command fails, and the chapter points stay as they were.
+        return Err(
+            "the source has no chapter markers to replace the chapter points with".to_string(),
+        );
+    }
     Ok(object(&[
         ("added", Value::from(added)),
         ("skipped", Value::from(skipped)),
@@ -1432,9 +1563,12 @@ fn run_add_audio_track(session: &mut Session, params: &Value) -> CommandResult {
     }
 
     timeline.audio.push(AudioTrack {
+        more: Vec::new(),
         asset: asset_id,
         language,
         start: 0,
+        trim_start: 0,
+        trim_end: None,
     });
 
     let index = u64::try_from(timeline.audio.len().saturating_sub(1))
@@ -1490,23 +1624,213 @@ fn run_set_user_ops(session: &mut Session, params: &Value) -> CommandResult {
 }
 
 /// Change the language of an audio or subtitle track (Encore's language list in the track header).
-/// Moves an audio track's clip along the track (Encore: dragging an audio clip): its sound starts at the frame
-/// nearest the time given, and the track is silent before it.
+/// The length of an audio clip's file in frames of the disc's standard rate, when it can be told.
+fn audio_file_frames(session: &Session, asset: AssetId) -> Option<i64> {
+    let rate = session.project.settings.frame_rate();
+    session
+        .project
+        .assets
+        .get(&asset)
+        .and_then(|asset| disccraft_transcode::probe_audio_seconds(&asset.media_file()).ok())
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+        // `as` saturates; a clip's length is far inside the range.
+        .map(|seconds| ((seconds * rate.as_f64()).round() as i64).max(1))
+}
+
+/// Where a clip sounds on the timeline, frames: its start and its end (`None`: its file's length is not known,
+/// so it is taken to go on to the end of the timeline).
+fn audio_clip_span(session: &Session, clip: &disccraft_project::AudioClip) -> (i64, Option<i64>) {
+    let start = i64::from(clip.start);
+    let file_end = clip
+        .trim_end
+        .map(i64::from)
+        .or_else(|| audio_file_frames(session, clip.asset));
+    let length = file_end.map(|end| end.saturating_sub(i64::from(clip.trim_start)).max(1));
+    (start, length.map(|length| start.saturating_add(length)))
+}
+
+/// The room clip `number` of `track` has on its track, frames: where the clip before it ends (0 without one)
+/// and where the clip after it starts (`None` without one).
+fn audio_clip_room(
+    session: &Session,
+    track: &disccraft_project::AudioTrack,
+    number: usize,
+) -> (i64, Option<i64>) {
+    let clips = track.clips();
+    let at = clips.iter().position(|(other, _)| *other == number);
+    let before = at
+        .and_then(|at| at.checked_sub(1))
+        .and_then(|at| clips.get(at))
+        .map(|(_, clip)| {
+            let (start, end) = audio_clip_span(session, clip);
+            // A clip of unknown length: at least its first frame is its own.
+            end.unwrap_or_else(|| start.saturating_add(1))
+        });
+    let after = at
+        .and_then(|at| clips.get(at.saturating_add(1)))
+        .map(|(_, clip)| i64::from(clip.start));
+    (before.unwrap_or(0), after)
+}
+
+/// The optional "clip" parameter: which clip of the track (0, the first, when left out).
+fn clip_param(params: &Value) -> Result<usize, String> {
+    match params.get("clip") {
+        None | Some(Value::Null) => Ok(0),
+        Some(_) => req_usize(params, "clip"),
+    }
+}
+
+/// Adds a clip to an audio track (Encore: a sound file dropped on a track that has a clip): at the time given,
+/// or right after the track's last clip. A clip does not go over another: one that would is refused.
+fn run_add_audio_clip(session: &mut Session, params: &Value) -> CommandResult {
+    let timeline = TimelineId(req_u64(params, "timeline")?);
+    let track = req_usize(params, "track")?;
+    let asset = AssetId(req_u64(params, "asset")?);
+    let kind = session
+        .project
+        .assets
+        .get(&asset)
+        .map(|asset| asset.kind)
+        .ok_or_else(|| format!("asset {} does not exist", asset.0))?;
+    if !matches!(kind, AssetKind::Audio | AssetKind::Video) {
+        return Err(format!("asset {} has no sound", asset.0));
+    }
+    let rate = session.project.settings.frame_rate();
+    let found = session
+        .project
+        .timeline(timeline)
+        .ok_or_else(|| format!("timeline {} does not exist", timeline.0))?;
+    let old = found
+        .audio
+        .get(track)
+        .cloned()
+        .ok_or_else(|| format!("audio track {track} does not exist"))?;
+    if old.more.len().saturating_add(1) >= disccraft_project::MAX_AUDIO_CLIPS {
+        return Err(format!(
+            "an audio track holds at most {} clips",
+            disccraft_project::MAX_AUDIO_CLIPS
+        ));
+    }
+    let spans: Vec<(i64, Option<i64>)> = old
+        .clips()
+        .iter()
+        .map(|(_, clip)| audio_clip_span(session, clip))
+        .collect();
+    let asked = if params.get("time").is_some() || params.get("timecode").is_some() {
+        let time = time_param(params, &session.project.settings)?;
+        Some(rate.frame_at(rate.snap_nearest(Tick(time.0.max(0)))))
+    } else {
+        None
+    };
+    let start = match asked {
+        Some(start) => start,
+        // Right after the last clip.
+        None => spans
+            .iter()
+            .map(|(start, end)| end.unwrap_or_else(|| start.saturating_add(1)))
+            .max()
+            .unwrap_or(0),
+    };
+    let length = audio_file_frames(session, asset);
+    let end = length.map(|length| start.saturating_add(length));
+    let overlaps = spans.iter().any(|(other_start, other_end)| {
+        let ends_before = end.is_some_and(|end| end <= *other_start);
+        let starts_after = other_end.is_some_and(|other_end| start >= other_end);
+        !(ends_before || starts_after)
+    });
+    if overlaps {
+        return Err(
+            "the clip would lie over another clip of the track; put it where there is room"
+                .to_string(),
+        );
+    }
+    let clip = disccraft_project::AudioClip {
+        asset,
+        start: u32::try_from(start).map_err(|_| "the clip is too far along".to_string())?,
+        trim_start: 0,
+        trim_end: None,
+    };
+    let Some(slot) = session
+        .project
+        .timeline_mut(timeline)
+        .and_then(|found| found.audio.get_mut(track))
+    else {
+        return Err(format!("audio track {track} does not exist"));
+    };
+    slot.more.push(clip);
+    Ok(object(&[
+        ("clip", Value::from(slot.more.len())),
+        ("start", Value::from(clip.start)),
+    ]))
+}
+
+/// Takes a clip off an audio track (Encore: Clear on an audio clip). The track's only clip stays: the track
+/// itself is removed with `timeline.removeAudioTrack`.
+fn run_remove_audio_clip(session: &mut Session, params: &Value) -> CommandResult {
+    let timeline = TimelineId(req_u64(params, "timeline")?);
+    let track = req_usize(params, "track")?;
+    let clip = req_usize(params, "clip")?;
+    let Some(slot) = session
+        .project
+        .timeline_mut(timeline)
+        .ok_or_else(|| format!("timeline {} does not exist", timeline.0))?
+        .audio
+        .get_mut(track)
+    else {
+        return Err(format!("audio track {track} does not exist"));
+    };
+    if slot.clip(clip).is_none() {
+        return Err(format!("audio clip {clip} does not exist"));
+    }
+    if !slot.remove_clip(clip) {
+        return Err("an audio track's only clip cannot be removed; remove the track".to_string());
+    }
+    Ok(empty_object())
+}
+
+/// Moves an audio clip along its track (Encore: dragging an audio clip): its sound starts at the frame nearest
+/// the time given, and the track is silent before it. On a track of several clips the clip stays between its
+/// neighbours: it stops where the one before it ends and where the one after it starts.
 fn run_move_audio(session: &mut Session, params: &Value) -> CommandResult {
     let timeline = TimelineId(req_u64(params, "timeline")?);
     let track = req_usize(params, "track")?;
+    let number = clip_param(params)?;
     let time = time_param(params, &session.project.settings)?;
     let rate = session.project.settings.frame_rate();
     let frame = rate.frame_at(rate.snap_nearest(Tick(time.0.max(0))));
-    let start = u32::try_from(frame.max(0)).map_err(|_| "the clip is too far along".to_string())?;
-    let at = rate.tick_of(i64::from(start));
-    let Some(found) = session.project.timeline_mut(timeline) else {
-        return Err(format!("timeline {} does not exist", timeline.0));
+    let found = session
+        .project
+        .timeline(timeline)
+        .ok_or_else(|| format!("timeline {} does not exist", timeline.0))?;
+    let old_track = found
+        .audio
+        .get(track)
+        .cloned()
+        .ok_or_else(|| format!("audio track {track} does not exist"))?;
+    let mut clip = old_track
+        .clip(number)
+        .ok_or_else(|| format!("audio clip {number} does not exist"))?;
+    let (earliest, next_start) = audio_clip_room(session, &old_track, number);
+    let (old_start, old_end) = audio_clip_span(session, &clip);
+    let length = old_end.map(|end| end.saturating_sub(old_start));
+    // No later than where it still ends in front of the next clip (when its length is known).
+    let latest = match (next_start, length) {
+        (Some(next), Some(length)) => next.saturating_sub(length).max(earliest),
+        (Some(next), None) => next.saturating_sub(1).max(earliest),
+        (None, _) => i64::MAX,
     };
-    let Some(slot) = found.audio.get_mut(track) else {
+    let start = frame.max(0).clamp(earliest, latest);
+    let start = u32::try_from(start).map_err(|_| "the clip is too far along".to_string())?;
+    clip.start = start;
+    let at = rate.tick_of(i64::from(start));
+    let Some(slot) = session
+        .project
+        .timeline_mut(timeline)
+        .and_then(|found| found.audio.get_mut(track))
+    else {
         return Err(format!("audio track {track} does not exist"));
     };
-    slot.start = start;
+    let _ = slot.set_clip(number, clip);
     Ok(object(&[
         ("start", Value::from(at.0)),
         (
@@ -1514,6 +1838,101 @@ fn run_move_audio(session: &mut Session, params: &Value) -> CommandResult {
             Value::String(format_time(at, &session.project.settings)),
         ),
         ("frame", Value::from(start)),
+    ]))
+}
+
+/// Trims an audio clip's in or out point to the time given on the timeline (M6.254). The sound that stays keeps
+/// its place: trimming the in point moves the clip's start along with it. At least one frame stays; an out point
+/// at or past the file's end plays to the end. On a track of several clips an edge does not pass the clip next
+/// to it. `{"start", "trimStart", "trimEnd"}` in frames (`trimEnd` null: to the end of the file).
+fn run_trim_audio(session: &mut Session, params: &Value) -> CommandResult {
+    let timeline = TimelineId(req_u64(params, "timeline")?);
+    let track = req_usize(params, "track")?;
+    let number = clip_param(params)?;
+    let out_edge = match req_str(params, "edge")?.as_str() {
+        "in" => false,
+        "out" => true,
+        other => {
+            return Err(format!(
+                "parameter \"edge\" must be \"in\" or \"out\", not \"{other}\""
+            ));
+        }
+    };
+    let time = time_param(params, &session.project.settings)?;
+    let rate = session.project.settings.frame_rate();
+    let asked = rate.frame_at(rate.snap_nearest(time));
+    let found = session
+        .project
+        .timeline(timeline)
+        .ok_or_else(|| format!("timeline {} does not exist", timeline.0))?;
+    let old_track = found
+        .audio
+        .get(track)
+        .cloned()
+        .ok_or_else(|| format!("audio track {track} does not exist"))?;
+    let old = old_track
+        .clip(number)
+        .ok_or_else(|| format!("audio clip {number} does not exist"))?;
+    let (earliest, next_start) = audio_clip_room(session, &old_track, number);
+    // The file's length in frames, when it can be told.
+    let length = audio_file_frames(session, old.asset);
+    let (start, trim_start) = (i64::from(old.start), i64::from(old.trim_start));
+    let old_end = old
+        .trim_end
+        .map(i64::from)
+        .or(length)
+        .map(|end| length.map_or(end, |length| end.min(length)));
+    let narrow = |frame: i64| u32::try_from(frame).map_err(|_| "the clip is too long".to_string());
+    let mut new = old;
+    if out_edge {
+        // No further than where the next clip starts.
+        let asked = next_start.map_or(asked, |next| asked.min(next));
+        // The frame of the file under the time; at least one frame past the in point.
+        let end = trim_start
+            .saturating_add(asked.saturating_sub(start))
+            .max(trim_start.saturating_add(1));
+        new.trim_end = match length {
+            Some(length) if end >= length => {
+                // To the end of the file, unless that would run into the next clip.
+                match next_start {
+                    Some(next)
+                        if start.saturating_add(length.saturating_sub(trim_start)) > next =>
+                    {
+                        Some(narrow(
+                            trim_start
+                                .saturating_add(next.saturating_sub(start))
+                                .max(trim_start.saturating_add(1)),
+                        )?)
+                    }
+                    _ => None,
+                }
+            }
+            _ => Some(narrow(end)?),
+        };
+    } else {
+        // No further back than where the clip before it ends.
+        let asked = asked.max(earliest);
+        // The in point moves by as much as the clip's head does; no further back than the file's head or
+        // the timeline's, and one frame before the out point at most.
+        let mut by = asked.saturating_sub(start).max(-trim_start).max(-start);
+        if let Some(end) = old_end {
+            by = by.min(end.saturating_sub(1).saturating_sub(trim_start));
+        }
+        new.trim_start = narrow(trim_start.saturating_add(by))?;
+        new.start = narrow(start.saturating_add(by))?;
+    }
+    let Some(slot) = session
+        .project
+        .timeline_mut(timeline)
+        .and_then(|found| found.audio.get_mut(track))
+    else {
+        return Err(format!("audio track {track} does not exist"));
+    };
+    let _ = slot.set_clip(number, new);
+    Ok(object(&[
+        ("start", Value::from(new.start)),
+        ("trimStart", Value::from(new.trim_start)),
+        ("trimEnd", new.trim_end.map_or(Value::Null, Value::from)),
     ]))
 }
 
@@ -1698,6 +2117,39 @@ mod tests {
         let found = session.project.timeline(timeline).ok_or("timeline")?;
         assert_eq!(found.more_video.len(), 1);
         assert_eq!(found.chapters.len(), 6);
+        // M6.267: Clear ("ripple": false) leaves the clip's place empty: the second clip stays where it plays,
+        // with the first one's 130 frames of empty track in front of it, and so do its chapters.
+        session.execute(
+            "timeline.removeVideo",
+            &serde_json::json!({ "timeline": timeline.0, "clip": 0, "ripple": false }),
+        )?;
+        let found = session.project.timeline(timeline).ok_or("timeline")?;
+        assert!(found.more_video.is_empty());
+        assert_eq!(found.video_gap(0), 130);
+        let frames: Vec<i64> = found
+            .chapters
+            .iter()
+            .map(|chapter| session.project.settings.frame_rate().frame_at(chapter.time))
+            .collect();
+        assert_eq!(frames, vec![0, 130, 143]);
+        let clips = session.execute(
+            "timeline.clips",
+            &serde_json::json!({ "timeline": timeline.0 }),
+        )?;
+        assert_eq!(
+            clips.get("duration").and_then(Value::as_i64),
+            Some(rate_tick(260))
+        );
+        session.undo()?;
+        let found = session.project.timeline(timeline).ok_or("timeline")?;
+        assert_eq!((found.more_video.len(), found.chapters.len()), (1, 6));
+        // Clearing the last clip is a plain removal: nothing follows it.
+        session.execute(
+            "timeline.removeVideo",
+            &serde_json::json!({ "timeline": timeline.0, "clip": 1, "ripple": false }),
+        )?;
+        let found = session.project.timeline(timeline).ok_or("timeline")?;
+        assert!(found.more_video.is_empty() && !found.has_video_gaps());
         let _ = fs::remove_dir_all(&dir);
         Ok(())
     }
@@ -1782,6 +2234,58 @@ mod tests {
             .frame_rate()
             .tick_of(frame)
             .0
+    }
+
+    /// M10.21: H.264 that goes on an HD Blu-ray as it is is trimmed at its key pictures (the fixture, made by the
+    /// Blu-ray tests with ffmpeg, has an IDR picture every 30 frames of its 90); on a DVD, where it is
+    /// transcoded, it cannot be trimmed.
+    #[test]
+    fn h264_kept_as_it_is_is_trimmed_at_its_key_pictures() -> Result<(), Box<dyn Error>> {
+        let video =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/h264_1080i.mkv");
+        if !video.is_file() {
+            println!("skipped: no target/fixtures/h264_1080i.mkv");
+            return Ok(());
+        }
+        let mut session = Session::new();
+        let asset = session.project.add_asset(&video)?;
+        let timeline = session.project.add_timeline(asset, None)?;
+        let trim = |session: &mut Session, edge: &str, frame: i64| {
+            session.execute(
+                "timeline.trimVideo",
+                &serde_json::json!({ "timeline": timeline.0, "clip": 0, "edge": edge, "time": rate_tick(frame) }),
+            )
+        };
+        // A DVD project: the file would be transcoded.
+        assert!(trim(&mut session, "in", 40).is_err());
+        // An HD Blu-ray of another format: the clip is encoded for it, and cut on the frame asked for.
+        session.project.settings.kind = disccraft_project::DiscKind::BluRay;
+        session.project.settings.bd_video = disccraft_project::BdVideo::Hd720p59;
+        let trimmed = trim(&mut session, "in", 40)?;
+        assert_eq!(trimmed.get("start").and_then(Value::as_u64), Some(40));
+        let trimmed = trim(&mut session, "out", 5)?;
+        assert_eq!(trimmed.get("end").and_then(Value::as_u64), Some(45));
+        let trimmed = trim(&mut session, "out", 500)?;
+        assert_eq!(trimmed.get("end"), Some(&Value::Null));
+        let trimmed = trim(&mut session, "in", -500)?;
+        assert_eq!(trimmed.get("start").and_then(Value::as_u64), Some(0));
+        session.project.settings.kind = disccraft_project::DiscKind::BluRay;
+        session.project.settings.bd_video = disccraft_project::BdVideo::Hd1080i59;
+        // The in point asked for at frame 40 goes to the key picture on frame 30; the out point at frame 70
+        // to the one on frame 60 (counted in the file: the clip now starts 30 frames in).
+        let trimmed = trim(&mut session, "in", 40)?;
+        assert_eq!(trimmed.get("start").and_then(Value::as_u64), Some(30));
+        assert_eq!(trimmed.get("end"), Some(&Value::Null));
+        let trimmed = trim(&mut session, "out", 40)?;
+        assert_eq!(trimmed.get("start").and_then(Value::as_u64), Some(30));
+        assert_eq!(trimmed.get("end").and_then(Value::as_u64), Some(60));
+        // The out point taken back past the last key picture: the end of the file.
+        let trimmed = trim(&mut session, "out", 58)?;
+        assert_eq!(trimmed.get("end"), Some(&Value::Null));
+        // The in point taken back to the head.
+        let trimmed = trim(&mut session, "in", -30)?;
+        assert_eq!(trimmed.get("start").and_then(Value::as_u64), Some(0));
+        Ok(())
     }
 
     /// A new timeline takes its video's aspect, as in Encore: 16:9 for a 16:9 source, 4:3 for a 4:3 one, whatever
@@ -2527,6 +3031,270 @@ mod tests {
         assert!(text.contains("\"start\":300"), "{text}");
         session.execute("edit.undo", &Value::Null)?;
         assert!(!serde_json::to_string(&session.project)?.contains("\"start\""));
+        let _ = fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M6.269: an audio track takes several clips. A clip is added behind the last one or where there is room,
+    /// moves and trims between its neighbours, and goes; the track's only clip stays.
+    #[test]
+    fn an_audio_track_takes_several_clips() -> Result<(), Box<dyn Error>> {
+        let dir = temp_dir("audio_clips")?;
+        let video = dir.join("movie.mp4");
+        let audio = dir.join("audio.wav");
+        fs::write(&video, b"fake")?;
+        // Ten seconds of 16-bit mono silence at 48 kHz: 300 frames of the NTSC rate.
+        let samples = 48_000_u32 * 10;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + samples * 2).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&48_000_u32.to_le_bytes());
+        wav.extend_from_slice(&96_000_u32.to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(samples * 2).to_le_bytes());
+        wav.resize(wav.len() + (samples * 2) as usize, 0);
+        fs::write(&audio, wav)?;
+
+        let mut session = Session::new();
+        let video_id = value_u64(
+            &session.execute("asset.import", &obj(&[("path", string_value(&video))]))?,
+            "asset",
+        )?;
+        let audio_id = value_u64(
+            &session.execute("asset.import", &obj(&[("path", string_value(&audio))]))?,
+            "asset",
+        )?;
+        let timeline_id = value_u64(
+            &session.execute("timeline.create", &obj(&[("asset", Value::from(video_id))]))?,
+            "timeline",
+        )?;
+        session.execute(
+            "timeline.addAudioTrack",
+            &obj(&[
+                ("timeline", Value::from(timeline_id)),
+                ("asset", Value::from(audio_id)),
+            ]),
+        )?;
+        // Each clip as (start, trim start, trim end), the first clip first.
+        let clips = |session: &Session| -> Vec<(u32, u32, Option<u32>)> {
+            session
+                .project
+                .timeline(disccraft_project::TimelineId(timeline_id))
+                .and_then(|timeline| timeline.audio.first())
+                .map(|track| {
+                    (0..=track.more.len())
+                        .filter_map(|number| track.clip(number))
+                        .map(|clip| (clip.start, clip.trim_start, clip.trim_end))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let run = |session: &mut Session, command: &str, fields: serde_json::Value| {
+            let mut params = serde_json::json!({"timeline": timeline_id, "track": 0});
+            if let (Some(params), Some(fields)) = (params.as_object_mut(), fields.as_object()) {
+                params.extend(fields.clone());
+            }
+            session.execute(command, &params)
+        };
+
+        // Without a time the clip goes behind the last one: the file is 300 frames long.
+        let added = run(
+            &mut session,
+            "timeline.addAudioClip",
+            serde_json::json!({"asset": audio_id}),
+        )?;
+        assert_eq!(added.get("clip").and_then(Value::as_u64), Some(1));
+        assert_eq!(clips(&session), [(0, 0, None), (300, 0, None)]);
+        // Over another clip it is refused.
+        assert!(
+            run(
+                &mut session,
+                "timeline.addAudioClip",
+                serde_json::json!({"asset": audio_id, "time": rate_tick(100)})
+            )
+            .is_err()
+        );
+        // It does not move in front of where the first clip ends.
+        run(
+            &mut session,
+            "timeline.moveAudio",
+            serde_json::json!({"clip": 1, "time": rate_tick(50)}),
+        )?;
+        assert_eq!(clips(&session), [(0, 0, None), (300, 0, None)]);
+        // The first clip trimmed to 100 frames makes room: the second moves up to frame 150.
+        run(
+            &mut session,
+            "timeline.trimAudio",
+            serde_json::json!({"clip": 0, "edge": "out", "time": rate_tick(100)}),
+        )?;
+        run(
+            &mut session,
+            "timeline.moveAudio",
+            serde_json::json!({"clip": 1, "time": rate_tick(150)}),
+        )?;
+        assert_eq!(clips(&session), [(0, 0, Some(100)), (150, 0, None)]);
+        // The first clip moves no further than where it still ends in front of the second.
+        run(
+            &mut session,
+            "timeline.moveAudio",
+            serde_json::json!({"clip": 0, "time": rate_tick(500)}),
+        )?;
+        assert_eq!(clips(&session), [(50, 0, Some(100)), (150, 0, None)]);
+        // Its out point does not pass the second clip's start, nor the second's in point the first's end.
+        run(
+            &mut session,
+            "timeline.trimAudio",
+            serde_json::json!({"clip": 0, "edge": "out", "time": rate_tick(400)}),
+        )?;
+        run(
+            &mut session,
+            "timeline.trimAudio",
+            serde_json::json!({"clip": 1, "edge": "in", "time": rate_tick(100)}),
+        )?;
+        assert_eq!(clips(&session), [(50, 0, Some(100)), (150, 0, None)]);
+        // The first clip goes: the second is the track's clip now, and stays as the only one.
+        run(
+            &mut session,
+            "timeline.removeAudioClip",
+            serde_json::json!({"clip": 0}),
+        )?;
+        assert_eq!(clips(&session), [(150, 0, None)]);
+        assert!(
+            run(
+                &mut session,
+                "timeline.removeAudioClip",
+                serde_json::json!({"clip": 0})
+            )
+            .is_err()
+        );
+        assert!(
+            run(
+                &mut session,
+                "timeline.removeAudioClip",
+                serde_json::json!({"clip": 3})
+            )
+            .is_err()
+        );
+        session.undo()?;
+        assert_eq!(clips(&session), [(50, 0, Some(100)), (150, 0, None)]);
+        // The file is in use by both clips: it cannot be removed while one is left.
+        assert!(
+            session
+                .execute("asset.remove", &obj(&[("asset", Value::from(audio_id))]))
+                .is_err()
+        );
+        let _ = fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M6.254: an audio clip's in and out points are trimmed on the timeline; the sound that stays keeps its
+    /// place.
+    #[test]
+    fn an_audio_clip_is_trimmed_at_its_edges() -> Result<(), Box<dyn Error>> {
+        let dir = temp_dir("trim_audio")?;
+        let video = dir.join("movie.mp4");
+        let audio = dir.join("audio.wav");
+        fs::write(&video, b"fake")?;
+        // Ten seconds of 16-bit mono silence at 48 kHz: 300 frames of the NTSC rate (299.7).
+        let samples = 48_000_u32 * 10;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + samples * 2).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&48_000_u32.to_le_bytes());
+        wav.extend_from_slice(&96_000_u32.to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(samples * 2).to_le_bytes());
+        wav.resize(wav.len() + (samples * 2) as usize, 0);
+        fs::write(&audio, wav)?;
+
+        let mut session = Session::new();
+        let video_id = value_u64(
+            &session.execute("asset.import", &obj(&[("path", string_value(&video))]))?,
+            "asset",
+        )?;
+        let audio_id = value_u64(
+            &session.execute("asset.import", &obj(&[("path", string_value(&audio))]))?,
+            "asset",
+        )?;
+        let timeline_id = value_u64(
+            &session.execute("timeline.create", &obj(&[("asset", Value::from(video_id))]))?,
+            "timeline",
+        )?;
+        session.execute(
+            "timeline.addAudioTrack",
+            &obj(&[
+                ("timeline", Value::from(timeline_id)),
+                ("asset", Value::from(audio_id)),
+            ]),
+        )?;
+        let track = |session: &Session| -> Option<(u32, u32, Option<u32>)> {
+            session
+                .project
+                .timeline(disccraft_project::TimelineId(timeline_id))
+                .and_then(|timeline| timeline.audio.first())
+                .map(|track| (track.start, track.trim_start, track.trim_end))
+        };
+        let trim = |session: &mut Session, edge: &str, frame: i64| {
+            session.execute(
+                "timeline.trimAudio",
+                &serde_json::json!({"timeline": timeline_id, "track": 0, "edge": edge, "time": rate_tick(frame)}),
+            )
+        };
+        assert_eq!(track(&session), Some((0, 0, None)));
+        // The out point at frame 200 of the timeline: the file's frame 200.
+        let trimmed = trim(&mut session, "out", 200)?;
+        assert_eq!(trimmed.get("trimEnd"), Some(&Value::from(200)));
+        assert_eq!(track(&session), Some((0, 0, Some(200))));
+        // The in point at frame 60: the clip starts there, with the file's frame 60.
+        trim(&mut session, "in", 60)?;
+        assert_eq!(track(&session), Some((60, 60, Some(200))));
+        // Moved 100 frames along: the same part of the file.
+        session.execute(
+            "timeline.moveAudio",
+            &serde_json::json!({"timeline": timeline_id, "track": 0, "time": rate_tick(160)}),
+        )?;
+        assert_eq!(track(&session), Some((160, 60, Some(200))));
+        // The in point taken back by 30 frames, then by more than there is of the file: its head.
+        trim(&mut session, "in", 130)?;
+        assert_eq!(track(&session), Some((130, 30, Some(200))));
+        trim(&mut session, "in", 0)?;
+        assert_eq!(track(&session), Some((100, 0, Some(200))));
+        // The in point cannot pass the out point: one frame stays.
+        trim(&mut session, "in", 5000)?;
+        assert_eq!(track(&session), Some((299, 199, Some(200))));
+        trim(&mut session, "in", 100)?;
+        // The out point cannot pass the in point either, and past the file's end it is the end.
+        trim(&mut session, "out", 0)?;
+        assert_eq!(track(&session), Some((100, 0, Some(1))));
+        trim(&mut session, "out", 5000)?;
+        assert_eq!(track(&session), Some((100, 0, None)));
+        // Undone step by step; the file leaves the trims out when there are none.
+        session.execute("edit.undo", &Value::Null)?;
+        assert_eq!(track(&session), Some((100, 0, Some(1))));
+        let text = serde_json::to_string(&session.project)?;
+        assert!(text.contains("\"trimEnd\":1"), "{text}");
+        session.execute("edit.undo", &Value::Null)?;
+        assert_eq!(track(&session), Some((100, 0, Some(200))));
+        assert!(
+            session
+                .execute(
+                    "timeline.trimAudio",
+                    &serde_json::json!({"timeline": timeline_id, "track": 4, "edge": "in", "time": 0}),
+                )
+                .is_err()
+        );
         let _ = fs::remove_dir_all(&dir);
         Ok(())
     }

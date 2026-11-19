@@ -79,6 +79,15 @@ pub enum StreamCoding {
         /// ISO 639-2 language code.
         language: [u8; 3],
     },
+    /// DTS audio (`stream_coding_type` 0x82, M6.348): its core frames.
+    Dts {
+        /// Audio format (channel layout) code.
+        audio_format: u8,
+        /// Sample rate code.
+        sample_rate: u8,
+        /// ISO 639-2 language code.
+        language: [u8; 3],
+    },
     /// Presentation graphics (`stream_coding_type` 0x90).
     Pgs {
         /// ISO 639-2 language code.
@@ -100,6 +109,7 @@ impl StreamCoding {
             Self::H264Video { .. } => 0x1B,
             Self::Lpcm { .. } => 0x80,
             Self::Ac3 { .. } => 0x81,
+            Self::Dts { .. } => 0x82,
             Self::Pgs { .. } => 0x90,
             Self::Igs { .. } => 0x91,
         }

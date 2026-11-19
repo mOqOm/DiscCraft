@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata of DiscCraft. packaging/linux/package.sh fills in @VERSION@ and @DATE@. -->
+<component type="desktop-application">
+  <id>io.github.mOqOm.DiscCraft</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>DiscCraft</name>
+  <summary>Author DVDs and Blu-ray discs with menus</summary>
+  <summary xml:lang="ja">メニューのある DVD と Blu-ray を作る</summary>
+  <description>
+    <p>
+      DiscCraft makes DVD-Video and Blu-ray (BDMV) discs from video, audio, images and subtitles: titles with
+      chapters, still and motion menus with buttons, slideshows, playlists, several audio and subtitle tracks. It
+      writes VIDEO_TS / BDMV folders and ISO images.
+    </p>
+    <p xml:lang="ja">
+      DiscCraft は、映像・音声・画像・字幕から DVD-Video と Blu-ray（BDMV）のディスクを作る。チャプターのあるタイトル、
+      ボタンのある静止メニューとモーションメニュー、スライドショー、プレイリスト、複数の音声と字幕。VIDEO_TS / BDMV の
+      フォルダーと ISO イメージを書き出す。
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.mOqOm.DiscCraft.desktop</launchable>
+  <url type="homepage">https://github.com/mOqOm/DiscCraft</url>
+  <url type="bugtracker">https://github.com/mOqOm/DiscCraft/issues</url>
+  <developer id="io.github.moqom">
+    <name>mOqOm</name>
+  </developer>
+  <provides>
+    <binary>disccraft</binary>
+    <binary>disccraft-cli</binary>
+    <mediatype>application/x-disccraft-project</mediatype>
+  </provides>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Video</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+</component>

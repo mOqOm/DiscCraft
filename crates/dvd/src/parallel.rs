@@ -3,6 +3,25 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 
+/// The most transcodes run at a time; 0: one for every core of the CPU.
+static MOST_AT_A_TIME: AtomicUsize = AtomicUsize::new(0);
+
+/// Sets how many transcodes run at a time (Preferences ▸ Memory: each takes memory of its own); 0 runs one for
+/// every core of the CPU, as before.
+pub fn set_parallel_transcodes(most: usize) {
+    MOST_AT_A_TIME.store(most, Ordering::Relaxed);
+}
+
+/// How many of `jobs` run at a time: one a core, no more than was set, and at least one.
+fn workers_for(jobs: usize) -> usize {
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    let most = match MOST_AT_A_TIME.load(Ordering::Relaxed) {
+        0 => cores,
+        most => most.min(cores),
+    };
+    most.min(jobs).max(1)
+}
+
 /// What a worker tells the calling thread.
 enum Message<R> {
     /// A job's progress: its label and how far it is (0 to 1).
@@ -18,9 +37,7 @@ pub(crate) fn run<T: Sync, R: Send>(
     progress: &mut dyn FnMut(&str, f32),
     work: impl Fn(&T, &mut dyn FnMut(&str, f32)) -> R + Sync,
 ) -> Vec<R> {
-    let workers = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZero::get)
-        .min(items.len());
+    let workers = workers_for(items.len());
     if workers <= 1 {
         return items.iter().map(|item| work(item, progress)).collect();
     }

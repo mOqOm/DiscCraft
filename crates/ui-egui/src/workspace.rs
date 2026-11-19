@@ -18,7 +18,7 @@ use crate::i18n::{self, Language, t};
 
 use craft_ui::docking::{Action, Node, Permissions};
 use craft_ui::layout::{SplitAxis, SplitSize};
-use disccraft_project::VideoStandard;
+use disccraft_project::{TranscodeAudio, TranscodeMode, VideoStandard};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -61,12 +61,20 @@ pub(crate) enum Panel {
     TimelineViewer,
     /// スライドショービューア。
     SlideshowViewer,
+    /// Progress (Encore: Window ▸ Progress, F10): what is being transcoded and what media is being read.
+    Progress,
+    /// Character (Encore: Window ▸ Character, F3): the characters of the selected text or button.
+    Character,
+    /// Metadata (Encore: Window ▸ Metadata): the XMP metadata of the selected asset's file.
+    Metadata,
+    /// Styles (Encore: Window ▸ Styles, Ctrl+F2): text looks put on the selected text or buttons.
+    Styles,
 }
 
 impl Panel {
     /// すべてのパネル。
     #[cfg(test)]
-    pub(crate) const ALL: [Panel; 14] = [
+    pub(crate) const ALL: [Panel; 18] = [
         Panel::Project,
         Panel::Menus,
         Panel::Timelines,
@@ -81,6 +89,10 @@ impl Panel {
         Panel::Layers,
         Panel::TimelineViewer,
         Panel::SlideshowViewer,
+        Panel::Progress,
+        Panel::Character,
+        Panel::Metadata,
+        Panel::Styles,
     ];
 
     /// パネルの名前（ウィンドウメニューと同じ）。文字列は英語で書き、`i18n/ja.tsv` で日本語に引く。
@@ -100,6 +112,10 @@ impl Panel {
             Panel::Layers => "Layers",
             Panel::TimelineViewer => "Timeline Viewer",
             Panel::SlideshowViewer => "Slideshow Viewer",
+            Panel::Progress => "Progress",
+            Panel::Character => "Character",
+            Panel::Metadata => "Metadata",
+            Panel::Styles => "Styles",
         })
     }
 
@@ -112,8 +128,11 @@ impl Panel {
             Monitor | MenuViewer | Flowchart | ChapterPlaylist => {
                 &[Monitor, MenuViewer, Flowchart, ChapterPlaylist, Project]
             }
-            Properties | Disc => &[Properties, Disc, Library, Layers],
-            Library | Layers => &[Library, Layers, Properties, Disc],
+            // As in Encore: with the properties.
+            Properties | Disc | Progress | Character | Metadata => {
+                &[Properties, Disc, Library, Layers]
+            }
+            Library | Layers | Styles => &[Library, Layers, Properties, Disc],
             TimelineViewer | SlideshowViewer => &[TimelineViewer, SlideshowViewer, Monitor],
         }
     }
@@ -206,8 +225,8 @@ pub(crate) fn standard_layout() -> DockLayout {
     // Encore と同じく、右下はライブラリが前。
     let right = above(
         0.51,
-        tabs(&[Properties, Disc], 0),
-        tabs(&[Library, Layers], 0),
+        tabs(&[Properties, Disc, Character, Metadata], 0),
+        tabs(&[Library, Styles, Layers], 0),
     );
     let bottom = tabs(&[TimelineViewer, SlideshowViewer], 0);
     // 左は全体の 35%: 右の列を除いた 78% のうちの 0.45。
@@ -444,6 +463,10 @@ pub(crate) struct TimelinePrefs {
     /// 新しい字幕トラックの言語（空はディスクのオーディオの言語か表示言語）。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) subtitle_language: String,
+    /// 字幕クリップをスナップ（Encore の初期値は無効）: タイムラインで動かす字幕クリップの端が、近くの字幕クリップの端、
+    /// チャプターポイント、再生ヘッドに吸い付く。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) snap_subtitles: bool,
 }
 
 fn default_still_seconds() -> u32 {
@@ -461,6 +484,7 @@ impl Default for TimelinePrefs {
             subtitle_seconds: default_subtitle_seconds(),
             audio_language: String::new(),
             subtitle_language: String::new(),
+            snap_subtitles: false,
         }
     }
 }
@@ -481,6 +505,394 @@ impl TimelinePrefs {
         }
         self
     }
+}
+
+/// Preferences ▸ Preview (Encore: TV mode, player region code, audio language): the player the previews stand
+/// for. The defaults are a widescreen player of every region with no language of its own and no parental level,
+/// which plays any disc as it is.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PreviewPrefs {
+    /// A 4:3 television: a 16:9 title is letterboxed on it (Encore's TV mode "4:3 Letterbox").
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) tv_4x3: bool,
+    /// On the 4:3 television, a 16:9 title is panned and scanned instead (its middle fills the screen; Encore's TV
+    /// mode "4:3 Pan & Scan").
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) pan_scan: bool,
+    /// The player's region (1 to 8); 0 plays every region.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) region: u8,
+    /// The audio language the player prefers (a code such as `ja`); empty: none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) audio_language: String,
+    /// The subtitle language the player prefers (Encore's Subtitle Language): a title with subtitles in it shows
+    /// them; empty: none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) subtitle_language: String,
+    /// The player's parental level (1 to 8); 0: none set.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) parental_level: u8,
+    /// Encore's 再生画質をプレビュー (M6.341): how large the previews make a playing title's pictures. `None`:
+    /// high, as Encore starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) quality: Option<PlaybackQuality>,
+}
+
+/// Encore's 再生画質 (Preferences ▸ General, for the Monitor) and 再生画質をプレビュー (Preferences ▸ Preview): how large
+/// the pictures of a playing title are made (M6.341).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum PlaybackQuality {
+    /// The picture at its full size (the disc's frame).
+    High,
+    /// Half its size each way: quicker on a slow computer.
+    Draft,
+    /// Full size up to 1280 x 720; a larger (1080-line) picture at half its size, so that HD plays smoothly.
+    #[default]
+    Automatic,
+}
+
+impl PlaybackQuality {
+    /// All of them, in Encore's order.
+    pub(crate) const ALL: [PlaybackQuality; 3] = [Self::High, Self::Draft, Self::Automatic];
+
+    /// The size the pictures of a title whose frame is `width` x `height` are played at.
+    pub(crate) fn size(self, (width, height): (u32, u32)) -> (u32, u32) {
+        let half = ((width / 2).max(1), (height / 2).max(1));
+        match self {
+            Self::High => (width, height),
+            Self::Draft => half,
+            Self::Automatic if width > 1280 || height > 720 => half,
+            Self::Automatic => (width, height),
+        }
+    }
+
+    /// The name shown in the preferences.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::High => crate::i18n::t("High"),
+            Self::Draft => crate::i18n::t("Draft"),
+            Self::Automatic => crate::i18n::t("Automatic"),
+        }
+    }
+}
+
+impl PreviewPrefs {
+    /// The previews' playback quality (high unless chosen otherwise).
+    pub(crate) fn quality(&self) -> PlaybackQuality {
+        self.quality.unwrap_or(PlaybackQuality::High)
+    }
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(value: &u8) -> bool {
+    *value == 0
+}
+
+impl PreviewPrefs {
+    /// Kept inside what can be chosen (region and level 0 to 8, the language two or three letters or empty).
+    pub(crate) fn sane(mut self) -> Self {
+        self.region = self.region.min(8);
+        self.parental_level = self.parental_level.min(8);
+        let language = |text: &str| {
+            let code: String = text
+                .chars()
+                .filter(char::is_ascii_alphabetic)
+                .take(3)
+                .collect::<String>()
+                .to_ascii_lowercase();
+            if code.len() >= 2 { code } else { String::new() }
+        };
+        self.audio_language = language(&self.audio_language);
+        self.subtitle_language = language(&self.subtitle_language);
+        self.pan_scan &= self.tv_4x3;
+        self
+    }
+}
+
+/// Reads the audio output device of Preferences ▸ Audio/Video Output (`None`: the system's default).
+pub(crate) fn load_audio_device() -> Option<String> {
+    load_settings().audio_device.filter(|name| !name.is_empty())
+}
+
+/// Saves the audio output device (the other settings stay).
+pub(crate) fn save_audio_device(name: Option<&str>) -> Result<(), String> {
+    let mut settings = load_settings();
+    settings.audio_device = name.filter(|name| !name.is_empty()).map(str::to_owned);
+    save(&settings)
+}
+
+/// The folder the library content (`library.json`) is kept in: the one chosen in Preferences ▸ Media, else
+/// `disccraft` beside the settings. `None` when the system has no settings folder and none is chosen.
+pub(crate) fn library_dir() -> Option<PathBuf> {
+    chosen_dir(load_settings().library_dir).or_else(default_library_dir)
+}
+
+/// The library's folder when none is chosen.
+pub(crate) fn default_library_dir() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("disccraft"))
+}
+
+/// The folder what is remembered of media files is kept in: the one chosen in Preferences ▸ Media, else
+/// `disccraft/media-cache` beside the settings.
+pub(crate) fn media_cache_dir() -> Option<PathBuf> {
+    chosen_dir(load_settings().media_cache_dir).or_else(default_media_cache_dir)
+}
+
+/// The media cache's folder when none is chosen.
+pub(crate) fn default_media_cache_dir() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("disccraft").join("media-cache"))
+}
+
+/// A chosen folder that can be used: a full path (a relative one would move with the working directory).
+fn chosen_dir(dir: Option<PathBuf>) -> Option<PathBuf> {
+    dir.filter(|dir| dir.is_absolute())
+}
+
+/// Saves the library's folder (`None`: back beside the settings); the other settings stay.
+pub(crate) fn save_library_dir(dir: Option<&Path>) -> Result<(), String> {
+    let mut settings = load_settings();
+    settings.library_dir = dir.map(Path::to_path_buf);
+    save(&settings)
+}
+
+/// Saves the media cache's folder (`None`: back beside the settings); the other settings stay.
+pub(crate) fn save_media_cache_dir(dir: Option<&Path>) -> Result<(), String> {
+    let mut settings = load_settings();
+    settings.media_cache_dir = dir.map(Path::to_path_buf);
+    save(&settings)
+}
+
+/// Reads where the video goes out (Preferences ▸ Audio/Video Output) and whether it stays up in the background.
+pub(crate) fn load_video_output() -> (Option<u32>, bool) {
+    let settings = load_settings();
+    (settings.video_output, settings.video_output_in_background)
+}
+
+/// Saves where the video goes out and whether it stays up in the background (the other settings stay).
+pub(crate) fn save_video_output(output: Option<u32>, in_background: bool) -> Result<(), String> {
+    let mut settings = load_settings();
+    settings.video_output = output;
+    settings.video_output_in_background = in_background;
+    save(&settings)
+}
+
+/// Reads Preferences ▸ General ▸ Playback quality.
+pub(crate) fn load_playback_quality() -> PlaybackQuality {
+    load_settings().playback_quality.unwrap_or_default()
+}
+
+/// Saves Preferences ▸ General ▸ Playback quality (the other settings stay).
+pub(crate) fn save_playback_quality(quality: PlaybackQuality) -> Result<(), String> {
+    let mut settings = load_settings();
+    settings.playback_quality = (quality != PlaybackQuality::default()).then_some(quality);
+    save(&settings)
+}
+
+/// Reads whether the toolbar is hidden (Window ▸ Tools off).
+pub(crate) fn load_hide_tools() -> bool {
+    load_settings().hide_tools
+}
+
+/// Saves whether the toolbar is hidden (the other settings stay).
+pub(crate) fn save_hide_tools(hide: bool) -> Result<(), String> {
+    let mut settings = load_settings();
+    settings.hide_tools = hide;
+    save(&settings)
+}
+
+/// Reads how many transcodes run at a time (Preferences ▸ Memory); 0: one for every core.
+pub(crate) fn load_parallel_transcodes() -> u32 {
+    load_settings().parallel_transcodes.unwrap_or(0).min(256)
+}
+
+/// Saves how many transcodes run at a time (the other settings stay); 0: one for every core.
+pub(crate) fn save_parallel_transcodes(most: u32) -> Result<(), String> {
+    let mut settings = load_settings();
+    settings.parallel_transcodes = (most > 0).then_some(most.min(256));
+    save(&settings)
+}
+
+/// The most quality presets kept.
+pub(crate) const MAX_QUALITY_PRESETS: usize = 32;
+
+/// A quality preset (File ▸ Edit Quality Presets…): its name, its video bit rate (kbit/s), how the rate is kept
+/// (Encore's presets name it: "… 7Mb VBR 2 Pass"), what the sound is made (Encore's preset's audio format), its
+/// quality (Encore's quality slider, 1 to 5: how hard the encoder searches for motion) and, for a Blu-ray preset
+/// (M6.328), its peak rate (kbit/s); a DVD preset has none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct QualityPreset {
+    pub(crate) name: String,
+    pub(crate) kbps: u32,
+    pub(crate) mode: TranscodeMode,
+    pub(crate) audio: TranscodeAudio,
+    pub(crate) quality: u8,
+    /// A Blu-ray preset's peak rate (kbit/s); `None`: a DVD preset.
+    pub(crate) bluray_max_kbps: Option<u32>,
+}
+
+impl QualityPreset {
+    /// A DVD preset.
+    pub(crate) fn dvd(
+        name: &str,
+        kbps: u32,
+        mode: TranscodeMode,
+        audio: TranscodeAudio,
+        quality: u8,
+    ) -> Self {
+        Self {
+            name: name.to_owned(),
+            kbps,
+            mode,
+            audio,
+            quality,
+            bluray_max_kbps: None,
+        }
+    }
+}
+
+/// A preset as the settings file keeps it: its name and rate, and how the rate is kept unless it is one-pass VBR
+/// (the files of older versions have none).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum StoredPreset {
+    /// A Blu-ray preset: its name, rate, peak, encoding, quality and the word "bluray".
+    Bluray(String, u32, u32, TranscodeMode, u8, BlurayTag),
+    /// With its encoding, sound and a quality below the best.
+    Rated(String, u32, TranscodeMode, TranscodeAudio, u8),
+    /// With its encoding and sound.
+    Full(String, u32, TranscodeMode, TranscodeAudio),
+    /// With its encoding.
+    Encoded(String, u32, TranscodeMode),
+    /// One-pass VBR.
+    Plain(String, u32),
+}
+
+/// The word that ends a stored Blu-ray preset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum BlurayTag {
+    Bluray,
+}
+
+impl From<StoredPreset> for QualityPreset {
+    fn from(stored: StoredPreset) -> Self {
+        let best = disccraft_project::BEST_QUALITY;
+        let dd = TranscodeAudio::DolbyDigital;
+        match stored {
+            StoredPreset::Bluray(name, kbps, max_kbps, mode, quality, BlurayTag::Bluray) => Self {
+                name,
+                kbps,
+                mode,
+                audio: dd,
+                quality,
+                bluray_max_kbps: Some(max_kbps),
+            },
+            StoredPreset::Rated(name, kbps, mode, audio, quality) => {
+                Self::dvd(&name, kbps, mode, audio, quality)
+            }
+            StoredPreset::Full(name, kbps, mode, audio) => {
+                Self::dvd(&name, kbps, mode, audio, best)
+            }
+            StoredPreset::Encoded(name, kbps, mode) => Self::dvd(&name, kbps, mode, dd, best),
+            StoredPreset::Plain(name, kbps) => Self::dvd(&name, kbps, TranscodeMode::Vbr, dd, best),
+        }
+    }
+}
+
+impl From<QualityPreset> for StoredPreset {
+    fn from(preset: QualityPreset) -> Self {
+        let QualityPreset {
+            name,
+            kbps,
+            mode,
+            audio,
+            quality,
+            bluray_max_kbps,
+        } = preset;
+        if let Some(max_kbps) = bluray_max_kbps {
+            StoredPreset::Bluray(name, kbps, max_kbps, mode, quality, BlurayTag::Bluray)
+        } else if quality != disccraft_project::BEST_QUALITY {
+            StoredPreset::Rated(name, kbps, mode, audio, quality)
+        } else if !audio.is_default() {
+            StoredPreset::Full(name, kbps, mode, audio)
+        } else if mode.is_default() {
+            StoredPreset::Plain(name, kbps)
+        } else {
+            StoredPreset::Encoded(name, kbps, mode)
+        }
+    }
+}
+
+/// Reads the user's quality presets (name, kbit/s, encoding): at most [`MAX_QUALITY_PRESETS`], names of at most 60
+/// characters, rates inside what a transcode setting takes.
+pub(crate) fn load_quality_presets() -> Vec<QualityPreset> {
+    sane_quality_presets(
+        load_settings()
+            .quality_presets
+            .into_iter()
+            .map(QualityPreset::from)
+            .collect(),
+    )
+}
+
+/// Saves the user's quality presets (the other settings stay).
+pub(crate) fn save_quality_presets(presets: &[QualityPreset]) -> Result<(), String> {
+    let mut settings = load_settings();
+    settings.quality_presets = sane_quality_presets(presets.to_vec())
+        .into_iter()
+        .map(StoredPreset::from)
+        .collect();
+    save(&settings)
+}
+
+/// Presets as they are kept: named, within the limits.
+pub(crate) fn sane_quality_presets(presets: Vec<QualityPreset>) -> Vec<QualityPreset> {
+    presets
+        .into_iter()
+        .map(|preset| {
+            let rate = |kbps: u32| {
+                kbps.clamp(
+                    disccraft_project::MIN_TRANSCODE_KBPS,
+                    disccraft_project::MAX_TRANSCODE_KBPS,
+                )
+            };
+            let kbps = rate(preset.kbps);
+            QualityPreset {
+                name: preset.name.trim().chars().take(60).collect::<String>(),
+                kbps,
+                mode: preset.mode,
+                audio: preset.audio,
+                quality: preset.quality.clamp(
+                    disccraft_project::MIN_QUALITY,
+                    disccraft_project::BEST_QUALITY,
+                ),
+                // A peak below the rate is the rate.
+                bluray_max_kbps: preset.bluray_max_kbps.map(|max| rate(max).max(kbps)),
+            }
+        })
+        .filter(|preset| !preset.name.is_empty())
+        .take(MAX_QUALITY_PRESETS)
+        .collect()
+}
+
+/// Reads Preferences ▸ Preview.
+pub(crate) fn load_preview_prefs() -> PreviewPrefs {
+    load_settings().preview_prefs.unwrap_or_default().sane()
+}
+
+/// Saves Preferences ▸ Preview (the other settings stay).
+pub(crate) fn save_preview_prefs(prefs: &PreviewPrefs) -> Result<(), String> {
+    let mut settings = load_settings();
+    let prefs = prefs.clone().sane();
+    settings.preview_prefs = (prefs != PreviewPrefs::default()).then_some(prefs);
+    save(&settings)
 }
 
 /// 環境設定 ▸ タイムライン を読む（未設定は Encore の初期値）。
@@ -574,6 +986,39 @@ pub(crate) struct Saved {
     /// 環境設定 ▸ タイムライン。`None` は Encore の初期値。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) timeline_prefs: Option<TimelinePrefs>,
+    /// Preferences ▸ Preview. `None`: the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) preview_prefs: Option<PreviewPrefs>,
+    /// Preferences ▸ Audio/Video Output: the audio output device's name. `None`: the system's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) audio_device: Option<String>,
+    /// Preferences ▸ Memory: how many transcodes run at a time. `None`: one for every core.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) parallel_transcodes: Option<u32>,
+    /// File ▸ Edit Quality Presets…: the user's named video bit rates (name, kbit/s, and the encoding when it is
+    /// not one-pass VBR).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) quality_presets: Vec<StoredPreset>,
+    /// Preferences ▸ Audio/Video Output: where the video goes out: 0 a window of its own, `n` full screen on
+    /// display `n`. `None`: nowhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) video_output: Option<u32>,
+    /// Preferences ▸ Audio/Video Output: the video output stays up while DiscCraft is in the background (Encore's
+    /// "Disable video output when in the background" is on by default: `false` here).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) video_output_in_background: bool,
+    /// Preferences ▸ Media: the folder of the library content. `None`: beside the settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) library_dir: Option<PathBuf>,
+    /// Preferences ▸ Media: the folder of the media cache. `None`: beside the settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) media_cache_dir: Option<PathBuf>,
+    /// Window ▸ Tools is off: the toolbar under the menu bar is hidden (M6.339).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) hide_tools: bool,
+    /// Preferences ▸ General ▸ Playback quality (M6.341). `None`: automatic, as Encore starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) playback_quality: Option<PlaybackQuality>,
 }
 
 #[cfg(test)]
@@ -593,16 +1038,43 @@ mod tests {
     /// Until the user chooses a language the system's is used at every start; a chosen one stays. A language an
     /// older version wrote without being asked does not count as chosen.
     /// The timeline preferences start at Encore's values and are kept within what can be typed.
+    /// M6.293: the preview's player settings are kept sane: both languages two or three letters, and pan and
+    /// scan only on a 4:3 television.
+    #[test]
+    fn preview_prefs_are_kept_sane() {
+        let prefs = super::PreviewPrefs {
+            tv_4x3: false,
+            pan_scan: true,
+            audio_language: "x".to_owned(),
+            subtitle_language: " JA ".to_owned(),
+            ..super::PreviewPrefs::default()
+        }
+        .sane();
+        assert!(!prefs.pan_scan);
+        assert_eq!(prefs.audio_language, "");
+        assert_eq!(prefs.subtitle_language, "ja");
+        let prefs = super::PreviewPrefs {
+            tv_4x3: true,
+            pan_scan: true,
+            ..super::PreviewPrefs::default()
+        }
+        .sane();
+        assert!(prefs.pan_scan);
+    }
+
     #[test]
     fn timeline_preferences_have_encores_defaults_and_stay_in_range() {
         let prefs = super::TimelinePrefs::default();
         assert_eq!((prefs.still_seconds, prefs.subtitle_seconds), (6, 2));
         assert!(prefs.audio_language.is_empty() && prefs.subtitle_language.is_empty());
+        // Encore: Snap subtitle clips is off.
+        assert!(!prefs.snap_subtitles);
         let odd = super::TimelinePrefs {
             still_seconds: 0,
             subtitle_seconds: 500,
             audio_language: "EN-us!".to_owned(),
             subtitle_language: "j".to_owned(),
+            snap_subtitles: true,
         }
         .sane();
         assert_eq!((odd.still_seconds, odd.subtitle_seconds), (1, 60));
@@ -639,10 +1111,11 @@ mod tests {
         assert!(layout.validate().is_ok());
         let dock = WorkspacePreset::Standard.dock();
         for panel in Panel::ALL {
-            // The chapter playlist viewer opens with a playlist (Encore opens one per playlist).
+            // The chapter playlist viewer opens with a playlist (Encore opens one per playlist), and the
+            // Progress panel when it is asked for (F10), as in Encore.
             assert_eq!(
                 dock.layout.contains(&panel),
-                panel != Panel::ChapterPlaylist,
+                !matches!(panel, Panel::ChapterPlaylist | Panel::Progress),
                 "{panel:?}"
             );
         }
@@ -771,6 +1244,43 @@ mod tests {
         assert_eq!(saved.workspace, WorkspacePreset::Menu);
         assert_eq!(saved.language, Some(Language::En));
         assert_eq!(saved.recent, vec![PathBuf::from("a.dcproj")]);
+    }
+
+    /// M6.341: the playback qualities' sizes, and the defaults (automatic for the Monitor, high for the previews)
+    /// are not written.
+    #[test]
+    fn playback_quality_sizes_the_pictures() {
+        use super::{PlaybackQuality, PreviewPrefs};
+        assert_eq!(PlaybackQuality::High.size((1920, 1080)), (1920, 1080));
+        assert_eq!(PlaybackQuality::Draft.size((720, 480)), (360, 240));
+        assert_eq!(PlaybackQuality::Automatic.size((1920, 1080)), (960, 540));
+        assert_eq!(PlaybackQuality::Automatic.size((1280, 720)), (1280, 720));
+        assert_eq!(PlaybackQuality::Automatic.size((853, 480)), (853, 480));
+        assert_eq!(PlaybackQuality::Draft.size((1, 1)), (1, 1));
+        assert_eq!(PreviewPrefs::default().quality(), PlaybackQuality::High);
+        let shown = serde_json::to_string(&Saved::default()).unwrap_or_default();
+        assert!(!shown.contains("playbackQuality"), "{shown}");
+        let draft = serde_json::to_string(&Saved {
+            playback_quality: Some(PlaybackQuality::Draft),
+            ..Saved::default()
+        })
+        .unwrap_or_default();
+        assert!(draft.contains("\"playbackQuality\":\"draft\""), "{draft}");
+    }
+
+    /// M6.339: Window ▸ Tools off is kept; on (the default) is not written.
+    #[test]
+    fn a_hidden_toolbar_is_kept() {
+        let hidden = serde_json::to_string(&Saved {
+            hide_tools: true,
+            ..Saved::default()
+        })
+        .unwrap_or_default();
+        assert!(hidden.contains("\"hideTools\":true"), "{hidden}");
+        let saved: Saved = serde_json::from_str(&hidden).unwrap_or_default();
+        assert!(saved.hide_tools);
+        let shown = serde_json::to_string(&Saved::default()).unwrap_or_default();
+        assert!(!shown.contains("hideTools"), "{shown}");
     }
 
     #[test]

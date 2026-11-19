@@ -9,3 +9,9 @@
     clippy::todo,
     clippy::unreachable
 )]
+
+pub mod displays;
+pub mod memory;
+
+pub use displays::{Display, displays};
+pub use memory::installed_memory_bytes;

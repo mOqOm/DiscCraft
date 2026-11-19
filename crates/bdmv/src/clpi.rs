@@ -282,11 +282,19 @@ fn write_clip_info(buf: &mut Vec<u8>, clip: &ClipInfo) -> Result<(), BdmvError> 
     Ok(())
 }
 
+/// `TS_type_info_block`: its length (the 30 bytes behind the length), the validity flags (0x80: the format
+/// identifier is there), the format identifier `HDMV`, and the network information (9 bytes) and stream format
+/// name (16 bytes), unused.
+///
+/// Until M11.9 the length was left out and the flags came first (`80 00 'HDMV'` instead of `00 1E 80 'HDMV'`):
+/// readers that skip the block (libbluray, ffmpeg, this crate's own) did not mind, a reader that checks it
+/// would not take the clip.
 fn write_ts_type_info(buf: &mut Vec<u8>) -> Result<(), BdmvError> {
+    buf.extend_from_slice(&30_u16.to_be_bytes());
     buf.push(0x80);
-    buf.push(0);
     buf.extend_from_slice(b"HDMV");
-    buf.extend_from_slice(&[0; 26]);
+    buf.extend_from_slice(&[0; 9]);
+    buf.extend_from_slice(&[0; 16]);
     Ok(())
 }
 
@@ -359,6 +367,11 @@ fn write_stream_coding_info(buf: &mut Vec<u8>, coding: &StreamCoding) -> Result<
             audio_format,
             sample_rate,
             language,
+        }
+        | StreamCoding::Dts {
+            audio_format,
+            sample_rate,
+            language,
         } => {
             body.push(pack_nibble_pair(*audio_format, *sample_rate)?);
             body.extend_from_slice(language);
@@ -368,12 +381,21 @@ fn write_stream_coding_info(buf: &mut Vec<u8>, coding: &StreamCoding) -> Result<
         }
     }
 
-    let len = u8::try_from(body.len())
-        .map_err(|_| BdmvError("stream coding info too large".to_string()))?;
-    buf.push(len);
+    // The block is 21 bytes long whatever it carries (the rest is reserved, 0): a playlist's stream attributes
+    // are 5 bytes, a clip's coding information is not. Until M10.24 this block was written 5 bytes long; a
+    // reader that takes its length as told (libbluray, ffmpeg, this crate's own) read it all the same, and
+    // PowerDVD refused the disc.
+    if body.len() > STREAM_CODING_INFO_LEN {
+        return Err(BdmvError("stream coding info too large".to_string()));
+    }
+    body.resize(STREAM_CODING_INFO_LEN, 0);
+    buf.push(STREAM_CODING_INFO_LEN as u8);
     buf.extend_from_slice(&body);
     Ok(())
 }
+
+/// The length of a clip's `StreamCodingInfo` behind its length byte.
+const STREAM_CODING_INFO_LEN: usize = 21;
 
 fn write_cpi(buf: &mut Vec<u8>, clip: &ClipInfo) -> Result<(), BdmvError> {
     let fine_count = u32::try_from(clip.ep_map.len())
@@ -580,8 +602,7 @@ fn read_stream_coding_info(r: &mut Reader<'_>) -> Result<StreamCoding, BdmvError
     let (coding, consumed) = match coding_type {
         0x02 => read_video_coding_info(r, true)?,
         0x1B => read_video_coding_info(r, false)?,
-        0x80 => read_audio_coding_info(r, true)?,
-        0x81 => read_audio_coding_info(r, false)?,
+        0x80..=0x82 => read_audio_coding_info(r, coding_type)?,
         0x90 => read_lang_coding_info(r, true)?,
         0x91 => read_lang_coding_info(r, false)?,
         _ => return Err(BdmvError("unsupported stream coding type".to_string())),
@@ -624,9 +645,10 @@ fn read_video_coding_info(
     Ok((coding, 5))
 }
 
+/// The attributes of an audio stream of `coding_type` 0x80 (LPCM), 0x81 (AC-3) or 0x82 (DTS).
 fn read_audio_coding_info(
     r: &mut Reader<'_>,
-    lpcm: bool,
+    coding_type: u8,
 ) -> Result<(StreamCoding, usize), BdmvError> {
     let b = r.u8()?;
     let language = read_lang(r)?;
@@ -634,18 +656,22 @@ fn read_audio_coding_info(
     let audio_format = b >> 4;
     let sample_rate = b & 0x0F;
 
-    let coding = if lpcm {
-        StreamCoding::Lpcm {
+    let coding = match coding_type {
+        0x80 => StreamCoding::Lpcm {
             audio_format,
             sample_rate,
             language,
-        }
-    } else {
-        StreamCoding::Ac3 {
+        },
+        0x81 => StreamCoding::Ac3 {
             audio_format,
             sample_rate,
             language,
-        }
+        },
+        _ => StreamCoding::Dts {
+            audio_format,
+            sample_rate,
+            language,
+        },
     };
 
     Ok((coding, 5))
@@ -890,10 +916,58 @@ mod tests {
         assert_eq!(read_clpi(&bytes).unwrap(), clip);
     }
 
+    /// M6.348: a DTS stream's attributes (coding type 0x82, multi-channel, 48 kHz) read back.
+    #[test]
+    fn a_dts_stream_reads_back() {
+        let mut clip = sample_clip();
+        clip.streams.push(Stream {
+            pid: 0x1101,
+            coding: StreamCoding::Dts {
+                audio_format: 6,
+                sample_rate: 1,
+                language: *b"eng",
+            },
+        });
+        let bytes = write_clpi(&clip).unwrap();
+        assert!(bytes.windows(3).any(|window| window == [0x82, 0x61, b'e']));
+        assert_eq!(read_clpi(&bytes).unwrap(), clip);
+    }
+
     #[test]
     fn header() {
         let bytes = write_clpi(&sample_clip()).unwrap();
         assert_eq!(&bytes[0..8], b"HDMV0200");
+        // M11.9: the TS type information block ends the clip information: its length (30), the validity flags
+        // and the format identifier, in that order.
+        let clip_info = usize::try_from(u32::from_be_bytes([
+            bytes[40], bytes[41], bytes[42], bytes[43],
+        ]))
+        .unwrap();
+        let block = 44 + clip_info - 32;
+        assert_eq!(
+            &bytes[block..block + 7],
+            &[0x00, 0x1E, 0x80, b'H', b'D', b'M', b'V']
+        );
+        assert!(bytes[block + 7..block + 32].iter().all(|byte| *byte == 0));
+        // M10.24: every stream's coding information in the program information is 21 bytes long (0x15), the
+        // rest of it 0: the PID, the length, the coding type.
+        let program = usize::try_from(u32::from_be_bytes([
+            bytes[12], bytes[13], bytes[14], bytes[15],
+        ]))
+        .unwrap();
+        let streams = usize::from(bytes[program + 4 + 8]);
+        assert!(streams > 0);
+        let mut at = program + 4 + 10;
+        for _ in 0..streams {
+            assert_eq!(bytes[at + 2], 0x15, "the coding information's length");
+            at += 2 + 1 + 21;
+        }
+        // The CPI follows right behind the last of them.
+        let cpi = usize::try_from(u32::from_be_bytes([
+            bytes[16], bytes[17], bytes[18], bytes[19],
+        ]))
+        .unwrap();
+        assert_eq!(at, cpi);
     }
 
     #[test]

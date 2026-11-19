@@ -30,12 +30,16 @@ pub mod ac3;
 /// DTS elementary stream parser.
 pub mod dts;
 
+/// MPEG-1 Audio Layer II elementary stream parser.
+pub mod mpa;
+
 /// WAV to DVD LPCM parser.
 pub mod wav;
 
 pub use ac3::{Ac3Frame, Ac3Stream, parse_ac3};
 pub use dts::{DtsStream, parse_dts};
+pub use mpa::{MpaStream, parse_mpa};
 pub use mpeg2v::{
     Picture, PictureType, SequenceInfo, VideoStream, parse_video, parse_video_reader,
 };
-pub use wav::{LpcmStream, parse_wav};
+pub use wav::{BD_LPCM_MAX_BITRATE, LpcmStream, parse_wav, parse_wav_for_bd};

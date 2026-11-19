@@ -49,6 +49,8 @@ pub struct Cue {
     pub text: String,
     /// The cue's own colour group, stroke and place (the default for cues read from a file).
     pub look: disccraft_project::CueLook,
+    /// The picture the cue shows instead of its text (an image script's subtitle).
+    pub image: Option<disccraft_project::CueImage>,
 }
 
 /// A rendered 2-bit subpicture bitmap.
@@ -262,6 +264,227 @@ pub fn render_cue_styled(
     })
 }
 
+/// The most a channel of a picture subtitle's pixel may differ from a mapped colour and still be taken as that
+/// colour (pictures saved with a little noise, as JPEG pictures are).
+const IMAGE_COLOR_TOLERANCE: u8 = 24;
+
+/// A cue as a 2-bit subpicture: its picture when it has one ([`render_image_cue`]), else its text drawn in
+/// `style` ([`render_cue_styled`]).
+///
+/// # Errors
+///
+/// As those two.
+pub fn render_any_cue(
+    cue: &Cue,
+    frame_width: u16,
+    frame_height: u16,
+    style: CueStyle,
+) -> Result<CueBitmap, MenuError> {
+    match &cue.image {
+        Some(image) => render_image_cue(image, frame_width, frame_height),
+        None => render_cue_styled(&cue.text, frame_width, frame_height, style),
+    }
+}
+
+/// Whether a cue has something to show: a picture, or text that is not blank (a subtitle added in the Monitor and
+/// not typed yet has none).
+#[must_use]
+pub fn cue_shows(cue: &Cue) -> bool {
+    cue.image.is_some() || !cue.text.trim().is_empty()
+}
+
+/// Draws a picture subtitle (Encore's image script and FAB image script) as a 2-bit subpicture. The picture's
+/// top left corner stands at the left top of its area, and what runs past the area or the frame is cut. As in
+/// Encore's Map Colors, pixels of the background colour are transparent, those of the fill and the outline colour
+/// are drawn in the colour group's fill and stroke, and any other colour is transparent (so are pixels less than
+/// half opaque).
+///
+/// # Errors
+///
+/// When the frame size is zero, the picture cannot be read, or none of its pixels in the frame is the fill or the
+/// outline colour.
+pub fn render_image_cue(
+    image: &disccraft_project::CueImage,
+    frame_width: u16,
+    frame_height: u16,
+) -> Result<CueBitmap, MenuError> {
+    if frame_width == 0 || frame_height == 0 {
+        return Err(MenuError::Invalid(
+            "frame dimensions must be non-zero".to_string(),
+        ));
+    }
+    let picture = disccraft_photo::load_image(std::path::Path::new(&image.path))
+        .map_err(|error| MenuError::Invalid(format!("subtitle picture {}: {error}", image.path)))?;
+    let [left, top, right, bottom] = image.area;
+    let width = u32::from(right.min(frame_width).saturating_sub(left)).min(picture.width);
+    let height = u32::from(bottom.min(frame_height).saturating_sub(top)).min(picture.height);
+    // Each pixel of the part in the frame, and the box around the ones drawn.
+    let mut values = Vec::new();
+    let mut drawn: Option<(u32, u32, u32, u32)> = None;
+    for y in 0..height {
+        for x in 0..width {
+            let value = usize::try_from(u64::from(y) * u64::from(picture.width) + u64::from(x))
+                .ok()
+                .and_then(|index| index.checked_mul(4))
+                .and_then(|index| picture.rgba.get(index..index.saturating_add(4)))
+                .map_or(TRANSPARENT, |pixel| image_pixel_value(pixel, &image.colors));
+            values.push(value);
+            if value != TRANSPARENT {
+                drawn = Some(match drawn {
+                    None => (x, y, x, y),
+                    Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                });
+            }
+        }
+    }
+    let Some((x0, y0, x1, y1)) = drawn else {
+        return Err(MenuError::Invalid(format!(
+            "subtitle picture {}: none of its pixels in the frame is the fill or the outline colour",
+            image.path
+        )));
+    };
+    let too_big = || MenuError::Invalid(format!("subtitle picture {} is too large", image.path));
+    let box_width = u16::try_from(x1 - x0 + 1).map_err(|_| too_big())?;
+    let box_height = u16::try_from(y1 - y0 + 1).map_err(|_| too_big())?;
+    let x = left.saturating_add(u16::try_from(x0).map_err(|_| too_big())?);
+    let first_row = top.saturating_add(u16::try_from(y0).map_err(|_| too_big())?);
+    let (y, rows) = make_even_height(first_row, box_height, frame_height);
+    let mut pixels = Vec::with_capacity(usize::from(box_width) * usize::from(rows));
+    for row in 0..rows {
+        // The rows of the box in the picture; a row added to make the height even is transparent.
+        let source = i64::from(y) + i64::from(row) - i64::from(top);
+        let start = u64::try_from(source)
+            .ok()
+            .filter(|source| *source < u64::from(height))
+            .and_then(|source| usize::try_from(source * u64::from(width) + u64::from(x0)).ok());
+        match start
+            .and_then(|start| values.get(start..start.saturating_add(usize::from(box_width))))
+        {
+            Some(line) => pixels.extend_from_slice(line),
+            None => pixels.resize(
+                pixels.len().saturating_add(usize::from(box_width)),
+                TRANSPARENT,
+            ),
+        }
+    }
+    Ok(CueBitmap {
+        x,
+        y,
+        width: box_width,
+        height: rows,
+        pixels,
+    })
+}
+
+/// A picture subtitle's file as RGBA pixels (width, height, row-major RGBA), for Map Colors to show and sample.
+///
+/// # Errors
+///
+/// When the picture cannot be read.
+pub fn load_picture(path: &std::path::Path) -> Result<(u32, u32, Vec<u8>), MenuError> {
+    let picture = disccraft_photo::load_image(path)
+        .map_err(|error| MenuError::Invalid(format!("{}: {error}", path.display())))?;
+    Ok((picture.width, picture.height, picture.rgba))
+}
+
+/// The subpicture value of one RGBA pixel of a picture subtitle: the nearest of the three mapped colours within
+/// [`IMAGE_COLOR_TOLERANCE`] (the background first on a tie), transparent for any other colour: 0 transparent,
+/// 1 the fill, 2 the outline.
+#[must_use]
+pub fn image_pixel_value(pixel: &[u8], colors: &disccraft_project::ImageCueColors) -> u8 {
+    let (Some(&red), Some(&green), Some(&blue), Some(&alpha)) =
+        (pixel.first(), pixel.get(1), pixel.get(2), pixel.get(3))
+    else {
+        return TRANSPARENT;
+    };
+    if alpha < 128 {
+        return TRANSPARENT;
+    }
+    let distance = |color: [u8; 3]| {
+        red.abs_diff(color[0])
+            .max(green.abs_diff(color[1]))
+            .max(blue.abs_diff(color[2]))
+    };
+    [
+        (colors.background, TRANSPARENT),
+        (colors.fill, FILL),
+        (colors.outline, OUTLINE),
+    ]
+    .into_iter()
+    .map(|(color, value)| (distance(color), value))
+    .filter(|(distance, _)| *distance <= IMAGE_COLOR_TOLERANCE)
+    .min_by_key(|(distance, _)| *distance)
+    .map_or(TRANSPARENT, |(_, value)| value)
+}
+
+/// Encore's Map Colors before anything is picked: the picture's commonest colour is the background, the next the
+/// fill and the next the outline (colours closer than the tolerance count as one). In a picture with transparent
+/// pixels the commonest opaque colour is the fill and the next the outline, and the background is a colour the
+/// picture does not use. A missing colour is the fill's.
+///
+/// # Errors
+///
+/// When the picture cannot be read.
+pub fn guess_image_colors(
+    path: &std::path::Path,
+) -> Result<disccraft_project::ImageCueColors, MenuError> {
+    let picture = disccraft_photo::load_image(path)
+        .map_err(|error| MenuError::Invalid(format!("{}: {error}", path.display())))?;
+    let mut counts: std::collections::HashMap<[u8; 3], u64> = std::collections::HashMap::new();
+    let mut transparent = false;
+    for &[red, green, blue, alpha] in picture.rgba.as_chunks::<4>().0 {
+        if alpha < 128 {
+            transparent = true;
+        } else {
+            let count = counts.entry([red, green, blue]).or_insert(0);
+            *count = count.saturating_add(1);
+        }
+    }
+    let mut colors: Vec<([u8; 3], u64)> = counts.into_iter().collect();
+    colors.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let near = |a: [u8; 3], b: [u8; 3]| {
+        a.iter()
+            .zip(b)
+            .all(|(x, y)| x.abs_diff(y) <= IMAGE_COLOR_TOLERANCE)
+    };
+    let mut picked: Vec<[u8; 3]> = Vec::new();
+    for (color, _) in colors {
+        if picked.len() == 3 {
+            break;
+        }
+        if !picked.iter().any(|chosen| near(*chosen, color)) {
+            picked.push(color);
+        }
+    }
+    let at = |index: usize| picked.get(index).copied();
+    let (background, fill, outline) = if transparent {
+        let fill = at(0).unwrap_or([255, 255, 255]);
+        let outline = at(1).unwrap_or(fill);
+        // A colour far from both, so that no opaque pixel is taken for the background.
+        let unused = [
+            [0, 255, 0],
+            [255, 0, 255],
+            [0, 0, 255],
+            [255, 0, 0],
+            [0, 255, 255],
+            [255, 255, 0],
+        ]
+        .into_iter()
+        .find(|color| !near(*color, fill) && !near(*color, outline))
+        .unwrap_or([0, 255, 0]);
+        (unused, fill, outline)
+    } else {
+        let background = at(0).unwrap_or([0, 0, 0]);
+        let fill = at(1).unwrap_or(background);
+        (background, fill, at(2).unwrap_or(fill))
+    };
+    Ok(disccraft_project::ImageCueColors {
+        background,
+        fill,
+        outline,
+    })
+}
+
 pub(crate) fn process_block(
     lines: &[&str],
     block_no: usize,
@@ -297,6 +520,7 @@ pub(crate) fn process_block(
         end,
         text,
         look: disccraft_project::CueLook::default(),
+        image: None,
     });
 
     if cues.len() > MAX_CUES {
@@ -1025,6 +1249,155 @@ mod style_tests {
         let right_edge = right.x + right.width;
         assert!((644..=654).contains(&right_edge), "{right_edge}");
         assert!(left.x < usual.x && usual.x < right.x);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::{FILL, OUTLINE, TRANSPARENT, guess_image_colors, render_image_cue};
+    use disccraft_project::{CueImage, ImageCueColors};
+    use std::error::Error;
+    use std::path::{Path, PathBuf};
+
+    const BLUE: [u8; 3] = [0, 0, 255];
+    const WHITE: [u8; 3] = [255, 255, 255];
+    const BLACK: [u8; 3] = [0, 0, 0];
+
+    /// Writes a 40 x 20 picture subtitle: a blue background, a black box (the outline) at columns 9..=30 and rows
+    /// 3..=14 with a white box (the fill) inside it, and one red pixel (a colour not mapped) at (35, 17).
+    fn write_picture(path: &Path, alpha: u8) -> Result<(), Box<dyn Error>> {
+        let mut rgba = Vec::new();
+        for y in 0..20_u32 {
+            for x in 0..40_u32 {
+                let outline = (9..=30).contains(&x) && (3..=14).contains(&y);
+                let fill = (10..=29).contains(&x) && (4..=13).contains(&y);
+                let (color, opacity) = if fill {
+                    (WHITE, 255)
+                } else if outline {
+                    (BLACK, 255)
+                } else if (x, y) == (35, 17) {
+                    ([255, 0, 0], 255)
+                } else {
+                    (BLUE, alpha)
+                };
+                rgba.extend_from_slice(&color);
+                rgba.push(opacity);
+            }
+        }
+        let file = std::fs::File::create(path)?;
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), 40, 20);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(&rgba)?;
+        Ok(())
+    }
+
+    fn scratch(name: &str) -> Result<PathBuf, Box<dyn Error>> {
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-image-cue-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
+    /// The mapped colours become the fill and the outline, the background and any other colour transparent; the
+    /// bitmap is the box around what is drawn, at the picture's place in the frame, with an even height.
+    #[test]
+    fn a_picture_subtitle_is_drawn_in_its_mapped_colours() -> Result<(), Box<dyn Error>> {
+        let dir = scratch("draw")?;
+        let path = dir.join("sub.png");
+        write_picture(&path, 255)?;
+        let colors = guess_image_colors(&path)?;
+        // The commonest colour is the background, then the fill, then the outline.
+        assert_eq!(
+            colors,
+            ImageCueColors {
+                background: BLUE,
+                fill: WHITE,
+                outline: BLACK
+            }
+        );
+        let image = CueImage {
+            path: path.to_string_lossy().into_owned(),
+            area: [100, 400, 700, 470],
+            colors,
+        };
+        let bitmap = render_image_cue(&image, 720, 480)?;
+        assert_eq!((bitmap.x, bitmap.y), (109, 403));
+        // 12 rows drawn: already even.
+        assert_eq!((bitmap.width, bitmap.height), (22, 12));
+        let at = |x: usize, y: usize| bitmap.pixels.get(y * 22 + x).copied();
+        assert_eq!(at(0, 0), Some(OUTLINE));
+        assert_eq!(at(1, 1), Some(FILL));
+        assert_eq!(at(21, 11), Some(OUTLINE));
+        assert!(!bitmap.pixels.contains(&TRANSPARENT));
+
+        // Cut by the area: only the first 15 columns and 10 rows of the picture are shown; an odd height gets a
+        // transparent row.
+        let cut = render_image_cue(
+            &CueImage {
+                area: [0, 0, 15, 10],
+                ..image.clone()
+            },
+            720,
+            480,
+        )?;
+        assert_eq!((cut.x, cut.y, cut.width, cut.height), (9, 3, 6, 8));
+        assert_eq!(cut.pixels.get(7 * 6..), Some(&[TRANSPARENT; 6][..]));
+
+        // The red pixel is drawn only when it is mapped; a picture with nothing mapped is refused.
+        let red = render_image_cue(
+            &CueImage {
+                colors: ImageCueColors {
+                    outline: [255, 0, 0],
+                    ..colors
+                },
+                ..image.clone()
+            },
+            720,
+            480,
+        )?;
+        // The black border is not mapped then: the white box and the red pixel make the box.
+        assert_eq!((red.x, red.y, red.width, red.height), (110, 404, 26, 14));
+        let nothing = CueImage {
+            colors: ImageCueColors {
+                background: BLUE,
+                fill: [0, 255, 0],
+                outline: [0, 255, 0],
+            },
+            ..image.clone()
+        };
+        assert!(render_image_cue(&nothing, 720, 480).is_err());
+        assert!(render_image_cue(&image, 0, 480).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// A picture with a transparent background: the commonest opaque colour is the fill, and the background is
+    /// one the picture does not use.
+    #[test]
+    fn a_transparent_picture_takes_its_opaque_colours() -> Result<(), Box<dyn Error>> {
+        let dir = scratch("alpha")?;
+        let path = dir.join("sub.png");
+        write_picture(&path, 0)?;
+        let colors = guess_image_colors(&path)?;
+        assert_eq!((colors.fill, colors.outline), (WHITE, BLACK));
+        assert!(![WHITE, BLACK, [255, 0, 0]].contains(&colors.background));
+        let bitmap = render_image_cue(
+            &CueImage {
+                path: path.to_string_lossy().into_owned(),
+                area: [0, 0, 720, 480],
+                colors,
+            },
+            720,
+            480,
+        )?;
+        assert_eq!(
+            (bitmap.x, bitmap.y, bitmap.width, bitmap.height),
+            (9, 3, 22, 12)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 }

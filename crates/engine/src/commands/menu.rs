@@ -73,6 +73,16 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "menu.fillChapterIndexPages",
+        label: "複数ページのチャプターインデックスを作成",
+        menu: &["メニュー"],
+        shortcut: None,
+        params: r#"{"menu": id}"#,
+        enabled: always_enabled,
+        run: run_fill_chapter_index_pages,
+        journal: true,
+    },
+    CommandSpec {
         id: "menu.applyPsd",
         label: "PSD をメニューに反映",
         menu: &["メニュー"],
@@ -250,6 +260,26 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         params: r#"{"menu": id, "button": index, "on": bool}"#,
         enabled: always_enabled,
         run: run_set_text_subpicture,
+        journal: true,
+    },
+    CommandSpec {
+        id: "button.createSubpicture",
+        label: "サブピクチャを作成",
+        menu: &["ボタン"],
+        shortcut: None,
+        params: r#"{"menu": id, "buttons": [index, ...]}"#,
+        enabled: always_enabled,
+        run: run_create_subpicture,
+        journal: true,
+    },
+    CommandSpec {
+        id: "button.pasteSubpicture",
+        label: "サブピクチャとして貼り付け",
+        menu: &["編集"],
+        shortcut: Some("Shift+Ctrl+V"),
+        params: r#"{"menu": id, "button": index, "graphic": a menu graphic (as the project file holds it)}"#,
+        enabled: always_enabled,
+        run: run_paste_subpicture,
         journal: true,
     },
     CommandSpec {
@@ -626,6 +656,280 @@ fn run_set_text_subpicture(session: &mut Session, params: &Value) -> CommandResu
     Ok(empty_object())
 }
 
+/// Encore's Create Subpicture (M6.256): each button gets a subpicture (a `(=1)` layer) drawn in colour 1 of the
+/// colour set, in place of its text or frame highlight. A button of a menu made from a PSD takes the shape of its
+/// artwork (what its `(+)` set shows), found by its place or, when it was moved or resized since (M6.330), by its
+/// name, and stretched over it as it is now; any other button (made in DiscCraft, or a PSD button without artwork)
+/// takes the shape of its own text and video thumbnail (M6.330: as Encore makes a `(=1)` of a text button).
+/// `{"buttons": n}`: how many got one. Refused when none of them has anything to make one of.
+fn run_create_subpicture(session: &mut Session, params: &Value) -> CommandResult {
+    let menu_id = MenuId(req_u64(params, "menu")?);
+    let wanted: Vec<usize> = params
+        .get("buttons")
+        .and_then(Value::as_array)
+        .map(|buttons| {
+            buttons
+                .iter()
+                .filter_map(|index| index.as_u64().and_then(|index| usize::try_from(index).ok()))
+                .collect()
+        })
+        .ok_or_else(|| "parameter \"buttons\" must be a list of button numbers".to_string())?;
+    let menu = session
+        .project
+        .menu(menu_id)
+        .ok_or_else(|| format!("menu {} does not exist", menu_id.0))?;
+    // The menu's PSD artwork, when it is made from one.
+    let art = match menu.background {
+        disccraft_project::MenuBackground::Image { asset } => session
+            .project
+            .assets
+            .get(&asset)
+            .map(|asset| asset.media_file().into_owned())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("psd"))
+            })
+            .map(|path| disccraft_photo::psd_button_artwork(&path))
+            .transpose()
+            .map_err(|error| error.to_string())?,
+        _ => None,
+    };
+    let (frame_w, frame_h) = disccraft_project::frame_size(&session.project.settings);
+    // A set's place on the frame, as the import puts its button.
+    let scale = |value: u32, from: u32, to: u16| -> i64 {
+        i64::try_from(u64::from(value) * u64::from(to) / u64::from(from.max(1))).unwrap_or(i64::MAX)
+    };
+    let near = |a: u16, b: i64| (i64::from(a) - b).abs() <= 2;
+    let mut made = Vec::new();
+    for index in wanted {
+        let Some(button) = menu.buttons.get(index) else {
+            return Err(format!("button {index} does not exist"));
+        };
+        let rect = button.rect;
+        let artwork = art.as_ref().and_then(|art| {
+            let placed = art.buttons.iter().find(|found| {
+                let [x, y, w, h] = found.place;
+                near(rect.x, scale(x, art.size.0, frame_w))
+                    && near(rect.y, scale(y, art.size.1, frame_h))
+                    && near(rect.w, scale(w, art.size.0, frame_w))
+                    && near(rect.h, scale(h, art.size.1, frame_h))
+            });
+            // Moved or resized: its set by name, when only one has it.
+            let named = || {
+                let mut same = art
+                    .buttons
+                    .iter()
+                    .filter(|found| !found.name.is_empty() && found.name == button.name);
+                let first = same.next();
+                first.filter(|_| same.next().is_none())
+            };
+            placed.or_else(named)?.artwork.as_ref()
+        });
+        let subpicture = match artwork {
+            Some(artwork) => disccraft_project::Subpicture::from_values(
+                u16::try_from(artwork.width).ok().unwrap_or(0),
+                u16::try_from(artwork.height).ok().unwrap_or(0),
+                &artwork.values,
+            ),
+            None => own_subpicture(menu, button),
+        };
+        if let Some(subpicture) = subpicture {
+            made.push((index, subpicture));
+        }
+    }
+    if made.is_empty() {
+        return Err(
+            "none of the buttons has anything to make a subpicture of (no artwork, text or video thumbnail)"
+                .to_string(),
+        );
+    }
+    let count = made.len();
+    if let Some(menu) = session.project.menu_mut(menu_id) {
+        for (index, subpicture) in made {
+            replace_subpicture(menu, index, Some(subpicture), (frame_w, frame_h))?;
+        }
+    }
+    Ok(object(&[("buttons", Value::from(count))]))
+}
+
+/// A button's own subpicture of its text and video thumbnail ([`disccraft_menu::own_subpicture`]), placed relative
+/// to its content box.
+fn own_subpicture(
+    menu: &Menu,
+    button: &disccraft_project::Button,
+) -> Option<disccraft_project::Subpicture> {
+    let (area, values) = disccraft_menu::own_subpicture(menu, button)?;
+    let mut subpicture = disccraft_project::Subpicture::from_values(area.w, area.h, &values)?;
+    let content = button.content_box();
+    let relative =
+        |start: u16, from: u16| i16::try_from(i32::from(start) - i32::from(from)).unwrap_or(0);
+    subpicture.area = (area != content).then_some(disccraft_project::ContentBox {
+        x: relative(area.x, content.x),
+        y: relative(area.y, content.y),
+        w: area.w,
+        h: area.h,
+    });
+    Some(subpicture)
+}
+
+/// Gives button `index` `subpicture` in place of its own; when either reaches past the content box (a pasted layer,
+/// M6.329), the button's rectangle is fitted to its content again.
+fn replace_subpicture(
+    menu: &mut Menu,
+    index: usize,
+    subpicture: Option<disccraft_project::Subpicture>,
+    frame: (u16, u16),
+) -> Result<(), String> {
+    let Some(button) = menu.buttons.get_mut(index) else {
+        return Err(format!("button {index} does not exist"));
+    };
+    let reaching =
+        |sub: Option<&disccraft_project::Subpicture>| sub.is_some_and(|sub| sub.area.is_some());
+    let refit = reaching(button.subpicture.as_ref()) || reaching(subpicture.as_ref());
+    button.subpicture = subpicture;
+    if refit {
+        refit_button(menu, index, frame)?;
+    }
+    Ok(())
+}
+
+/// Encore's Edit ▸ Paste as Subpicture: the shape of a copied layer (an image or a shape) becomes colour 1 of the
+/// button's own subpicture (a `(=1)` layer), over what the subpicture had; a button without one gets one, so it is
+/// highlighted by that shape instead of its text or frame. Where the layer reaches past the button, the subpicture
+/// reaches as far and the button widens to it (M6.329: Encore's button set takes the layer in), its text and
+/// thumbnail staying where they are; a turned button keeps the part over it. Refused when the layer does not reach
+/// the button.
+fn run_paste_subpicture(session: &mut Session, params: &Value) -> CommandResult {
+    let menu_id = MenuId(req_u64(params, "menu")?);
+    let index = req_usize(params, "button")?;
+    let graphic: disccraft_project::MenuGraphic =
+        serde_json::from_value(req_value(params, "graphic")?.clone())
+            .map_err(|error| format!("parameter \"graphic\" is not a menu graphic: {error}"))?;
+    let frame = disccraft_project::frame_size(&session.project.settings);
+    let button = session
+        .project
+        .menu(menu_id)
+        .ok_or_else(|| format!("menu {} does not exist", menu_id.0))?
+        .buttons
+        .get(index)
+        .ok_or_else(|| format!("button {index} does not exist"))?
+        .clone();
+    let content = button.content_box();
+    if content.w == 0 || content.h == 0 {
+        return Err("the button has no size".to_string());
+    }
+    // Where the subpicture lies now (over the content box without one), and where the layer is.
+    let current = button.subpicture_rect().unwrap_or(content);
+    let turned = disccraft_project::normalized_angle(i32::from(button.orientation.angle)) != 0;
+    let layer = clip_to_frame(
+        disccraft_project::rotated_bounds(graphic.rect, graphic.orientation.angle),
+        frame,
+    );
+    let reaches_button = layer.is_some_and(|layer| overlaps(layer, content));
+    if !reaches_button {
+        return Err("the layer does not reach the button".to_string());
+    }
+    let area = match layer {
+        Some(layer) if !turned => union(current, layer),
+        _ => current,
+    };
+    let covered = disccraft_menu::graphic_coverage(&session.project, &graphic, area, frame)
+        .ok_or_else(|| "the button has no size".to_string())?;
+    let (width, height) = (usize::from(area.w), usize::from(area.h));
+    // What the subpicture had, stretched over where it lay, now inside the wider area.
+    let old = button.subpicture.as_ref().and_then(|old| {
+        Some((
+            old.values()?,
+            usize::from(old.width),
+            usize::from(old.height),
+        ))
+    });
+    let mut values = vec![0_u8; width * height];
+    if let Some((pixels, old_w, old_h)) = old {
+        let (cw, ch) = (usize::from(current.w).max(1), usize::from(current.h).max(1));
+        let (dx, dy) = (
+            usize::from(current.x.saturating_sub(area.x)),
+            usize::from(current.y.saturating_sub(area.y)),
+        );
+        for y in 0..ch {
+            let source_row = y * old_h / ch;
+            for x in 0..cw {
+                let value = pixels
+                    .get(source_row * old_w + x * old_w / cw)
+                    .copied()
+                    .unwrap_or(0);
+                if let Some(slot) = values.get_mut((y + dy) * width + x + dx) {
+                    *slot = value;
+                }
+            }
+        }
+    }
+    for (value, covers) in values.iter_mut().zip(&covered) {
+        if *covers {
+            *value = 1;
+        }
+    }
+    let mut subpicture = disccraft_project::Subpicture::from_values(area.w, area.h, &values)
+        .ok_or_else(|| "the subpicture would be too large".to_string())?;
+    let relative =
+        |start: u16, from: u16| i16::try_from(i32::from(start) - i32::from(from)).unwrap_or(0);
+    subpicture.area = (area != content).then_some(disccraft_project::ContentBox {
+        x: relative(area.x, content.x),
+        y: relative(area.y, content.y),
+        w: area.w,
+        h: area.h,
+    });
+    let menu = session
+        .project
+        .menu_mut(menu_id)
+        .ok_or_else(|| format!("menu {} does not exist", menu_id.0))?;
+    if let Some(button) = menu.buttons.get_mut(index) {
+        button.subpicture = Some(subpicture);
+    }
+    // The button's rectangle takes the subpicture in (its content box stays).
+    refit_button(menu, index, frame)?;
+    Ok(empty_object())
+}
+
+/// The part of `rect` inside a frame of `frame` pixels; `None` when none is.
+fn clip_to_frame(
+    rect: disccraft_project::Rect,
+    frame: (u16, u16),
+) -> Option<disccraft_project::Rect> {
+    let x0 = rect.x.min(frame.0);
+    let y0 = rect.y.min(frame.1);
+    let x1 = rect.x.saturating_add(rect.w).min(frame.0);
+    let y1 = rect.y.saturating_add(rect.h).min(frame.1);
+    (x1 > x0 && y1 > y0).then_some(disccraft_project::Rect {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
+    })
+}
+
+/// Whether two rectangles share a pixel.
+fn overlaps(a: disccraft_project::Rect, b: disccraft_project::Rect) -> bool {
+    u32::from(a.x) < u32::from(b.x) + u32::from(b.w)
+        && u32::from(b.x) < u32::from(a.x) + u32::from(a.w)
+        && u32::from(a.y) < u32::from(b.y) + u32::from(b.h)
+        && u32::from(b.y) < u32::from(a.y) + u32::from(a.h)
+}
+
+/// The smallest rectangle holding both.
+fn union(a: disccraft_project::Rect, b: disccraft_project::Rect) -> disccraft_project::Rect {
+    let x0 = a.x.min(b.x);
+    let y0 = a.y.min(b.y);
+    let x1 = a.x.saturating_add(a.w).max(b.x.saturating_add(b.w));
+    let y1 = a.y.saturating_add(a.h).max(b.y.saturating_add(b.h));
+    disccraft_project::Rect {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
+    }
+}
+
 /// A button's own subpicture (its highlight, as a PSD's `(=1)`–`(=3)` layers give it) from a PNG stretched over the
 /// button: transparent pixels none, the others colour 1 to 3 of the colour set by how light they are (null: none,
 /// back to the text or frame highlight).
@@ -648,13 +952,11 @@ fn run_set_subpicture(session: &mut Session, params: &Value) -> CommandResult {
         }
         Some(_) => return Err("parameter \"path\" must be a PNG path or null".to_string()),
     };
+    let frame = disccraft_project::frame_size(&session.project.settings);
     let Some(menu) = session.project.menu_mut(menu_id) else {
         return Err(format!("menu {} does not exist", menu_id.0));
     };
-    let Some(target) = menu.buttons.get_mut(button) else {
-        return Err(format!("button {button} does not exist"));
-    };
-    target.subpicture = subpicture;
+    replace_subpicture(menu, button, subpicture, frame)?;
     Ok(empty_object())
 }
 
@@ -1447,6 +1749,28 @@ fn run_fill_chapter_index(session: &mut Session, params: &Value) -> CommandResul
     Ok(object(&[("buttons", Value::from(linked))]))
 }
 
+/// Encore's 複数ページのチャプターインデックスを作成 on a template menu: the menu and copies of it, page after page,
+/// until every chapter has a button. `{"menus": [id, ...]}`, the menu itself first.
+fn run_fill_chapter_index_pages(session: &mut Session, params: &Value) -> CommandResult {
+    let menu_id = MenuId(req_u64(params, "menu")?);
+    let pages = session
+        .project
+        .fill_chapter_index_pages(menu_id)
+        .map_err(|error| match error {
+            disccraft_project::FillChapterIndexError::NoMenu => {
+                format!("menu {} does not exist", menu_id.0)
+            }
+            disccraft_project::FillChapterIndexError::NoChapterButtons => {
+                "the menu has no chapter buttons".to_string()
+            }
+            disccraft_project::FillChapterIndexError::NoLinkedChapterButton => {
+                "link at least one chapter button to a timeline first".to_string()
+            }
+        })?;
+    let menus: Vec<Value> = pages.iter().map(|page| Value::from(page.0)).collect();
+    Ok(object(&[("menus", Value::Array(menus))]))
+}
+
 /// Make a menu follow a PSD edited outside (Encore's "Edit Menu in Photoshop"): the PSD becomes the background, the
 /// `(+)` groups become the buttons (in order: the menu's buttons keep their links and get the new rectangles, new
 /// groups add buttons, buttons without a group are removed), and the button texts and the text objects are cleared,
@@ -1463,20 +1787,24 @@ fn run_apply_psd(session: &mut Session, params: &Value) -> CommandResult {
         return Err(format!("menu {} does not exist", menu_id.0));
     };
     menu.background = MenuBackground::Image { asset };
-    menu.subpicture_colors = subpicture_colors(&rects);
+    let groups = psd_groups(&rects);
+    menu.subpicture_colors = groups.first;
+    menu.second_subpicture_colors = groups.second;
     menu.texts.clear();
     for (index, found) in rects.iter().enumerate() {
+        let group = groups.groups.get(index).copied().unwrap_or(1);
         match menu.buttons.get_mut(index) {
             Some(button) => {
                 button.rect = found.rect;
                 button.thumbnail = found.thumbnail;
                 button.subpicture.clone_from(&found.subpicture);
+                button.highlight_group = group;
                 button.label.clear();
                 if !found.name.is_empty() {
                     button.name.clone_from(&found.name);
                 }
             }
-            None => menu.buttons.push(psd_button(found)),
+            None => menu.buttons.push(psd_button(found, group)),
         }
     }
     let extra: Vec<usize> = (rects.len()..menu.buttons.len()).collect();
@@ -1492,17 +1820,18 @@ fn run_apply_psd(session: &mut Session, params: &Value) -> CommandResult {
     ]))
 }
 
-/// A button made from a PSD's `(+)` group: its name, its place, video thumbnail and subpicture, no text (the text
-/// is in the picture) and no link.
-fn psd_button(found: &PsdMenuButton) -> disccraft_project::Button {
+/// A button made from a PSD's `(+)` group: its name, its place, video thumbnail and subpicture, its highlight group
+/// in the automatic colour set, no text (the text is in the picture) and no link.
+fn psd_button(found: &PsdMenuButton, highlight_group: u8) -> disccraft_project::Button {
     disccraft_project::Button {
+        effects: Default::default(),
         name: found.name.clone(),
         label: String::new(),
         rect: found.rect,
         link: Link::NotSet,
         auto_activate: false,
         override_link: None,
-        highlight_group: 1,
+        highlight_group,
         sync_name: true,
         name_from_link: false,
         routes: None,
@@ -1570,11 +1899,17 @@ fn run_import(session: &mut Session, params: &Value) -> CommandResult {
         return Err(format!("menu {} does not exist", menu_id.0));
     };
     menu.background = MenuBackground::Image { asset };
-    menu.subpicture_colors = subpicture_colors(&rects);
+    let groups = psd_groups(&rects);
+    menu.subpicture_colors = groups.first;
+    menu.second_subpicture_colors = groups.second;
     if popup {
         menu.popup = true;
     }
-    menu.buttons = rects.iter().map(psd_button).collect();
+    menu.buttons = rects
+        .iter()
+        .zip(groups.groups.iter().copied().chain(std::iter::repeat(1)))
+        .map(|(found, group)| psd_button(found, group))
+        .collect();
     menu.default_button = 0;
     Ok(object(&[
         ("menu", Value::from(menu_id.0)),
@@ -1597,16 +1932,44 @@ struct PsdMenuButton {
     subpicture_colors: [Option<[u8; 3]>; 3],
 }
 
-/// The colours of a PSD menu's subpicture layers: each the first button's that has the layer (for Encore's
-/// automatic colour set).
-fn subpicture_colors(buttons: &[PsdMenuButton]) -> [Option<[u8; 3]>; 3] {
-    let mut colors = [None; 3];
-    for (index, color) in colors.iter_mut().enumerate() {
-        *color = buttons
-            .iter()
-            .find_map(|button| button.subpicture_colors.get(index).copied().flatten());
+/// Encore's automatic colour set of a PSD menu (M6.336): the colours of highlight groups 1 and 2, and each button's
+/// group.
+struct PsdGroups {
+    /// Group 1's colours: the first button's with subpicture layers.
+    first: [Option<[u8; 3]>; 3],
+    /// Group 2's colours: the next button's whose colours differ.
+    second: [Option<[u8; 3]>; 3],
+    /// Each button's highlight group (1 or 2).
+    groups: Vec<u8>,
+}
+
+/// Groups a PSD menu's buttons by their subpicture layers' colours as Encore's automatic colour set does: the first
+/// button's colours are group 1, the next different ones group 2; a button with a group's colours is in it, any
+/// other (or one without layers) in group 1.
+fn psd_groups(buttons: &[PsdMenuButton]) -> PsdGroups {
+    let mut found: Vec<[Option<[u8; 3]>; 3]> = Vec::new();
+    let groups = buttons
+        .iter()
+        .map(|button| {
+            let colors = button.subpicture_colors;
+            if colors.iter().all(Option::is_none) {
+                return 1;
+            }
+            if let Some(index) = found.iter().position(|group| *group == colors) {
+                return u8::try_from(index + 1).unwrap_or(1);
+            }
+            if found.len() < 2 {
+                found.push(colors);
+                return u8::try_from(found.len()).unwrap_or(1);
+            }
+            1
+        })
+        .collect();
+    PsdGroups {
+        first: found.first().copied().unwrap_or([None; 3]),
+        second: found.get(1).copied().unwrap_or([None; 3]),
+        groups,
     }
-    colors
 }
 
 /// The buttons of a layered PSD menu (their names, places in the project's frame and video thumbnails) and the
@@ -1642,11 +2005,19 @@ fn psd_buttons(session: &mut Session, path: &str) -> Result<(Vec<PsdMenuButton>,
                 disccraft_project::ThumbnailArea::within(rect, area)
             });
             let subpicture = button.subpicture.as_ref().and_then(|sub| {
-                disccraft_project::Subpicture::from_values(
+                let (width, height) = (
                     u16::try_from(sub.width).ok()?,
                     u16::try_from(sub.height).ok()?,
-                    &sub.values,
-                )
+                );
+                let mut made =
+                    disccraft_project::Subpicture::from_values(width, height, &sub.values)?;
+                // M6.335: the layers in their own colours, for rich-colour Blu-ray highlights.
+                made.color_layers = sub.layers.each_ref().map(|layer| {
+                    layer.as_deref().and_then(|rgba| {
+                        disccraft_project::ColorLayer::from_rgba(width, height, rgba)
+                    })
+                });
+                Some(made)
             });
             PsdMenuButton {
                 name: button.name.clone(),
@@ -1710,19 +2081,23 @@ fn run_replace(session: &mut Session, params: &Value) -> CommandResult {
     ) {
         (Some(path), None, None) => {
             let (rects, asset) = psd_buttons(session, &path)?;
+            let groups = psd_groups(&rects);
             disccraft_project::MenuDesign {
                 background: MenuBackground::Image { asset },
                 colors: None,
-                subpicture_colors: subpicture_colors(&rects),
+                subpicture_colors: groups.first,
+                second_subpicture_colors: groups.second,
                 buttons: rects
                     .into_iter()
-                    .map(|found| disccraft_project::DesignButton {
+                    .zip(groups.groups.iter().copied().chain(std::iter::repeat(1)))
+                    .map(|(found, group)| disccraft_project::DesignButton {
                         rect: found.rect,
                         name: Some(found.name),
                         // The button texts are part of the picture.
                         label: Some(String::new()),
                         thumbnail: found.thumbnail,
                         subpicture: found.subpicture,
+                        highlight_group: Some(group),
                     })
                     .collect(),
             }
@@ -1894,6 +2269,124 @@ mod tests {
     use disccraft_project::{Link, MenuId};
     use serde_json::{Map, Value};
     use std::error::Error;
+
+    /// M6.284: Edit ▸ Paste as Subpicture — a copied layer's shape where it covers the button becomes colour 1 of
+    /// the button's subpicture, added to what it had; a layer that misses the button is refused. M6.329: a layer
+    /// that reaches past the button widens the subpicture and the button to it, the text staying where it was.
+    #[test]
+    fn a_layer_is_pasted_as_a_buttons_subpicture() -> Result<(), Box<dyn Error>> {
+        let mut session = Session::new();
+        let menu = session.project.add_menu(None)?;
+        let rect = disccraft_project::Rect {
+            x: 100,
+            y: 100,
+            w: 200,
+            h: 80,
+        };
+        let _ = session
+            .project
+            .add_button(menu, "Play".to_owned(), Some(rect), Link::NotSet)?;
+        let shape = |x: u16, y: u16, w: u16, h: u16| {
+            serde_json::json!({
+                "rect": { "x": x, "y": y, "w": w, "h": h },
+                "kind": { "shape": { "shape": "rectangle", "color": [0, 0, 255] } },
+                "opacity": 20,
+            })
+        };
+        // A 50 x 40 box over the button's left part, at 30 % into it.
+        session.execute(
+            "button.pasteSubpicture",
+            &serde_json::json!({ "menu": menu.0, "button": 0, "graphic": shape(150, 110, 50, 40) }),
+        )?;
+        let values = |session: &Session| {
+            session
+                .project
+                .menu(menu)
+                .and_then(|menu| menu.buttons.first())
+                .and_then(|button| button.subpicture.as_ref())
+                .and_then(|subpicture| {
+                    Some((subpicture.width, subpicture.height, subpicture.values()?))
+                })
+        };
+        let (width, height, pixels) = values(&session).ok_or("no subpicture")?;
+        assert_eq!((width, height), (200, 80));
+        let at = |pixels: &[u8], x: usize, y: usize| pixels.get(y * 200 + x).copied();
+        assert_eq!(at(&pixels, 50, 10), Some(1));
+        assert_eq!(at(&pixels, 99, 49), Some(1));
+        assert_eq!(at(&pixels, 100, 10), Some(0));
+        assert_eq!(at(&pixels, 49, 10), Some(0));
+        assert_eq!(pixels.iter().filter(|value| **value == 1).count(), 50 * 40);
+        let button = |session: &Session| {
+            session
+                .project
+                .menu(menu)
+                .and_then(|menu| menu.buttons.first())
+                .cloned()
+        };
+        assert_eq!(button(&session).ok_or("button")?.rect, rect);
+        // A second layer adds to it, reaching 50 past the button's right and 70 past its bottom: the subpicture
+        // covers both, the button widens to it and its content box (where the text is) stays.
+        session.execute(
+            "button.pasteSubpicture",
+            &serde_json::json!({ "menu": menu.0, "button": 0, "graphic": shape(250, 150, 100, 100) }),
+        )?;
+        let (width, height, pixels) = values(&session).ok_or("no subpicture")?;
+        assert_eq!((width, height), (250, 150));
+        let wide = |pixels: &[u8], x: usize, y: usize| pixels.get(y * 250 + x).copied();
+        // The first layer where it was, the second past the button's corner.
+        assert_eq!(wide(&pixels, 60, 20), Some(1));
+        assert_eq!(wide(&pixels, 100, 10), Some(0));
+        assert_eq!(wide(&pixels, 249, 149), Some(1));
+        assert_eq!(wide(&pixels, 149, 49), Some(0));
+        let widened = button(&session).ok_or("button")?;
+        assert_eq!(
+            widened.rect,
+            disccraft_project::Rect {
+                x: 100,
+                y: 100,
+                w: 250,
+                h: 150
+            }
+        );
+        assert_eq!(widened.content_box(), rect);
+        assert_eq!(
+            widened.subpicture_rect(),
+            Some(disccraft_project::Rect {
+                x: 100,
+                y: 100,
+                w: 250,
+                h: 150
+            })
+        );
+        // Taking the subpicture away fits the button to its content again.
+        session.execute(
+            "button.setSubpicture",
+            &serde_json::json!({ "menu": menu.0, "button": 0, "path": null }),
+        )?;
+        let fitted = button(&session).ok_or("button")?;
+        assert_eq!((fitted.rect, fitted.body), (rect, None));
+        session.execute(
+            "button.pasteSubpicture",
+            &serde_json::json!({ "menu": menu.0, "button": 0, "graphic": shape(250, 150, 100, 100) }),
+        )?;
+        assert!(
+            session
+                .execute(
+                    "button.pasteSubpicture",
+                    &serde_json::json!({ "menu": menu.0, "button": 0, "graphic": shape(0, 0, 50, 50) }),
+                )
+                .is_err()
+        );
+        assert!(
+            session
+                .execute(
+                    "button.pasteSubpicture",
+                    &serde_json::json!({ "menu": menu.0, "button": 0, "graphic": { "rect": 1 } }),
+                )
+                .is_err()
+        );
+        Ok(())
+    }
 
     #[test]
     fn a_popup_background_is_set_and_goes_with_its_timeline() -> Result<(), Box<dyn Error>> {
@@ -3019,6 +3512,158 @@ mod tests {
         Ok(())
     }
 
+    /// M6.256: Create Subpicture gives a PSD menu's button a highlight in the shape of its artwork; M6.330: a moved
+    /// one by its name, and a button made in DiscCraft the shape of its text.
+    #[test]
+    fn create_subpicture_takes_the_shape_of_a_psd_buttons_artwork() -> Result<(), Box<dyn Error>> {
+        let dir = std::env::temp_dir().join(format!(
+            "disccraft-create-subpicture-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir)?;
+        let (w, h) = (720_usize, 480_usize);
+        // A button's artwork: a bar over x 100..300, y 200..240 with a hole in its middle (x 180..220).
+        let mut art = vec![0u8; w * h * 4];
+        for y in 200..240 {
+            for x in (100..180).chain(220..300) {
+                let i = (y * w + x) * 4;
+                if let Some(pixel) = art.get_mut(i..i + 4) {
+                    pixel.copy_from_slice(&[240, 200, 40, 255]);
+                }
+            }
+        }
+        let path = dir.join("menu.psd");
+        disccraft_photo::write_layered_psd(
+            &path,
+            720,
+            480,
+            &[
+                disccraft_photo::PsdLayer::Raster {
+                    name: "背景".to_owned(),
+                    rgba: [0, 0, 80, 255].repeat(w * h),
+                    visible: true,
+                },
+                disccraft_photo::PsdLayer::Group {
+                    name: "(+) Play".to_owned(),
+                    children: vec![disccraft_photo::PsdLayer::Raster {
+                        name: "bar".to_owned(),
+                        rgba: art,
+                        visible: true,
+                    }],
+                },
+            ],
+        )?;
+        let mut session = Session::new();
+        let imported = session.execute(
+            "menu.import",
+            &obj(&[("path", Value::String(path.to_string_lossy().into_owned()))]),
+        )?;
+        let menu_id = MenuId(value_u64(&imported, "menu")?);
+        let button = |session: &Session| {
+            session
+                .project
+                .menu(menu_id)
+                .and_then(|menu| menu.buttons.first().cloned())
+        };
+        // No `(=1)` layer: the button has no subpicture of its own (a frame).
+        assert!(button(&session).ok_or("button")?.subpicture.is_none());
+        let made = session.execute(
+            "button.createSubpicture",
+            &serde_json::json!({"menu": menu_id.0, "buttons": [0]}),
+        )?;
+        assert_eq!(made.get("buttons"), Some(&Value::from(1)));
+        let subpicture = button(&session)
+            .and_then(|button| button.subpicture)
+            .ok_or("no subpicture")?;
+        assert_eq!((subpicture.width, subpicture.height), (200, 40));
+        // Each row: 80 pixels of colour 1, the hole of 40, 80 of colour 1.
+        let values = subpicture.values().ok_or("values")?;
+        let row = values.get(..200).ok_or("row")?;
+        assert!(row.iter().take(80).all(|value| *value == 1));
+        assert!(row.iter().skip(80).take(40).all(|value| *value == 0));
+        assert!(row.iter().skip(120).all(|value| *value == 1));
+        // One step back: the frame again.
+        session.execute("edit.undo", &Value::Null)?;
+        assert!(button(&session).ok_or("button")?.subpicture.is_none());
+
+        // M6.330: a button that was moved and resized finds its set by name: the same shape, stretched over it.
+        session.execute(
+            "button.setRect",
+            &serde_json::json!({"menu": menu_id.0, "button": 0, "rect": {"x": 300, "y": 100, "w": 400, "h": 40}}),
+        )?;
+        session.execute(
+            "button.createSubpicture",
+            &serde_json::json!({"menu": menu_id.0, "buttons": [0]}),
+        )?;
+        let moved = button(&session).ok_or("button")?;
+        assert_eq!(
+            moved.subpicture_rect().map(|rect| (rect.w, rect.h)),
+            Some((400, 40))
+        );
+        let values = moved
+            .subpicture
+            .as_ref()
+            .and_then(disccraft_project::Subpicture::values)
+            .ok_or("values")?;
+        assert_eq!(values.len(), 200 * 40);
+        assert_eq!(values.get(100), Some(&0));
+        assert_eq!(values.get(10), Some(&1));
+
+        // M6.330: a button made in DiscCraft takes the shape of its text (as Encore makes a `(=1)` of a text
+        // button); one with neither text nor a thumbnail has nothing to make one of.
+        let plain = value_u64(&session.execute("menu.create", &Value::Null)?, "menu")?;
+        session.execute(
+            "menu.addButton",
+            &serde_json::json!({"menu": plain, "label": "Play", "rect": {"x": 100, "y": 100, "w": 200, "h": 60}}),
+        )?;
+        session.execute(
+            "button.createSubpicture",
+            &serde_json::json!({"menu": plain, "buttons": [0]}),
+        )?;
+        let text = session
+            .project
+            .menu(MenuId(plain))
+            .and_then(|menu| menu.buttons.first().cloned())
+            .ok_or("button")?;
+        let sub = text.subpicture.as_ref().ok_or("no subpicture")?;
+        let lit = sub
+            .values()
+            .ok_or("values")?
+            .iter()
+            .filter(|value| **value == 1)
+            .count();
+        // The letters, not the whole box: some of it lit, most of it not.
+        let area = usize::from(sub.width) * usize::from(sub.height);
+        assert!(lit > 100 && lit < area / 3, "{lit} of {area}");
+        // The same shape as the text subpicture highlights.
+        let menu = session.project.menu(MenuId(plain)).ok_or("menu")?.clone();
+        let mut by_text = menu.clone();
+        if let Some(button) = by_text.buttons.first_mut() {
+            button.subpicture = None;
+            button.text_subpicture = true;
+        }
+        let ours = disccraft_menu::render_menu(&session.project, &menu)?.highlight;
+        let theirs = disccraft_menu::render_menu(&session.project, &by_text)?.highlight;
+        let lit_pixels = |highlight: &disccraft_menu::HighlightLayer| {
+            highlight.pixels.iter().filter(|value| **value == 1).count()
+        };
+        assert_eq!(lit_pixels(&ours), lit_pixels(&theirs));
+        session.execute(
+            "menu.addButton",
+            &serde_json::json!({"menu": plain, "label": "", "rect": {"x": 100, "y": 300, "w": 200, "h": 60}}),
+        )?;
+        assert!(
+            session
+                .execute(
+                    "button.createSubpicture",
+                    &serde_json::json!({"menu": plain, "buttons": [1]}),
+                )
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
     #[test]
     fn a_psds_subpictures_and_their_colours_come_in() -> Result<(), Box<dyn Error>> {
         let dir =
@@ -3125,6 +3770,73 @@ mod tests {
             [0, 0, 255]
         );
         let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M6.336: Encore's automatic colour set of a PSD menu: the first button's layer colours are group 1, the next
+    /// different ones group 2, a button with a group's colours is in it and any other in group 1 (red, blue, blue,
+    /// green: groups 1, 2, 2, 1).
+    #[test]
+    fn a_psds_buttons_get_highlight_groups_by_their_colours() -> Result<(), Box<dyn Error>> {
+        let dir = std::env::temp_dir().join(format!("disccraft-psd-groups-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let (w, h) = (720_usize, 480_usize);
+        let group = |index: usize, colour: [u8; 4]| {
+            let mut rgba = vec![0u8; w * h * 4];
+            for y in 200..220 {
+                for x in 20 + index * 150..120 + index * 150 {
+                    let i = (y * w + x) * 4;
+                    if let Some(pixel) = rgba.get_mut(i..i + 4) {
+                        pixel.copy_from_slice(&colour);
+                    }
+                }
+            }
+            disccraft_photo::PsdLayer::Group {
+                name: format!("(+) B{index}"),
+                children: vec![disccraft_photo::PsdLayer::Raster {
+                    name: "(=1)".to_owned(),
+                    rgba,
+                    visible: false,
+                }],
+            }
+        };
+        let (red, blue, green) = ([230, 20, 20, 255], [20, 20, 230, 255], [20, 200, 20, 255]);
+        let mut layers = vec![disccraft_photo::PsdLayer::Raster {
+            name: "背景".to_owned(),
+            rgba: [0, 0, 80, 255].repeat(w * h),
+            visible: true,
+        }];
+        layers.extend(
+            [red, blue, blue, green]
+                .into_iter()
+                .enumerate()
+                .map(|(i, c)| group(i, c)),
+        );
+        let path = dir.join("groups.psd");
+        disccraft_photo::write_layered_psd(&path, 720, 480, &layers)?;
+        let mut session = Session::new();
+        let imported = session.execute(
+            "menu.import",
+            &obj(&[("path", Value::String(path.to_string_lossy().into_owned()))]),
+        )?;
+        let _ = std::fs::remove_dir_all(&dir);
+        let menu = session
+            .project
+            .menu(MenuId(value_u64(&imported, "menu")?))
+            .ok_or("menu")?;
+        let groups: Vec<u8> = menu
+            .buttons
+            .iter()
+            .map(|button| button.highlight_group)
+            .collect();
+        assert_eq!(groups, vec![1, 2, 2, 1]);
+        assert_eq!(menu.subpicture_colors, [Some([230, 20, 20]), None, None]);
+        assert_eq!(
+            menu.second_subpicture_colors,
+            [Some([20, 20, 230]), None, None]
+        );
+        let set = menu.color_set_or_default();
+        assert_eq!(set.groups[1].selected_color(1), ([20, 20, 230], 100));
         Ok(())
     }
 

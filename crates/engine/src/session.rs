@@ -84,6 +84,8 @@ impl Session {
             })
             .collect();
         disccraft_transcode::set_compositions(chosen);
+        // And which files' pixels are as wide as the project says (Interpret Footage).
+        disccraft_transcode::set_pixel_aspects(self.project.pixel_aspects());
     }
 
     /// Executes a command by id.

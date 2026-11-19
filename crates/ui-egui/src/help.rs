@@ -148,9 +148,7 @@ fn prune_logs(dir: &Path) {
 /// the settings, so a project with long videos opens without reading them again. Called once by the application
 /// at start (not by tests, which leave the user's folders alone).
 pub fn enable_media_cache() {
-    if let Some(mut dir) = crate::workspace::config_dir() {
-        dir.push("disccraft");
-        dir.push("media-cache");
+    if let Some(dir) = crate::workspace::media_cache_dir() {
         disccraft_engine::enable_media_cache(&dir);
     }
 }

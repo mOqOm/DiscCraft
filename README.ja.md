@@ -54,7 +54,8 @@ DiscCraft は映像・音声・静止画から DVD-Video / Blu-ray（BDMV）を�
 
 できること:
 
-- DVD: MPEG-2 / LPCM / AC-3 のパススルーと MPEG-2 への再エンコード、VIDEO_TS フォルダと ISO イメージ（2 層のレイヤーブレイク）
+- DVD: MPEG-2（720 / 704 / 352 幅）/ MPEG-1 / LPCM（96 kHz・24 ビットまで）/ AC-3 / DTS / MPEG-1 Layer II（PAL）のパススルーと
+  MPEG-2 への再エンコード、VIDEO_TS フォルダと ISO イメージ（2 層のレイヤーブレイク）
 - DVD: タイトル（タイムライン 1 本に複数のビデオクリップをつないだものを含む）、チャプター、複数の音声トラック、字幕
   （カラーセットとカラーグループ）、16:9、リージョンコード、プレイリストとチャプター再生リスト
 - Blu-ray: BDMV フォルダと ISO イメージ、PG 字幕、IG メニュー（HDMV。常時表示 / ポップアップ、モーションメニュー）、
@@ -62,7 +63,7 @@ DiscCraft は映像・音声・静止画から DVD-Video / Blu-ray（BDMV）を�
   720p 59.94 / 50 / 23.976 / 24 は H.264、1080i 59.94 / 50 は MPEG-2。タイトル、字幕、メニューとポップアップも HD の大きさ。
   29.97 / 25 fps の素材は 1080i 59.94 / 50 でそのままの速さの HD になる。`.m2ts` / `.mkv` / `.mp4` / `.mov` の Blu-ray に合った H.264 は、
   インターレースの 1080i も含めて、変換せずにそのまま収録する。mkv / mp4 / mov は元のファイルから直接ディスクへ書くので、
-  映像の分の作業用の空きは要らない）
+  映像の分の作業用の空きは要らない）。音声は LPCM（7.1・192 kHz・24 ビットまで）、AC-3、DTS をそのまま収録する
 - メニュー: 静止メニュー、ボタンとハイライト、モーションメニュー、タイムアウト（デュレーションとエンドアクション）、
   自動アクティベート、PSD 読み込みとレイヤー名によるボタン認識、チャプターインデックス
 - 素材: 映像（MP4 / MOV / MKV / m2v など）、音声（WAV / AC-3 / MP3 / FLAC など）、画像（PNG / JPEG / PSD / TIFF）、
@@ -79,11 +80,20 @@ DiscCraft は映像・音声・静止画から DVD-Video / Blu-ray（BDMV）を�
 Rust stable 1.95 以上（rustup）。Windows を最優先、macOS / Linux も対象。Linux では再生の音（cpal）のために
 ALSA の開発用パッケージ（Debian / Ubuntu の `libasound2-dev`、Fedora の `alsa-lib-devel`）が要る。
 
-リリースには Windows（x64）のほかに、Linux（x86_64、aarch64 の `tar.gz`）と macOS（Apple シリコンと Intel を 1 つにした
-`zip`）のビルドも置いている。**Linux と macOS のビルドは動作を確認していない**: GitHub のランナーで自動でビルドしただけで、
-画面を出して使ったことも、作ったディスクを確かめたこともない。動作を確認しているのは Windows だけ。macOS のビルドは
-署名も公証もしていないので、初回は Gatekeeper に止められる（右クリックの「開く」か、`xattr -d com.apple.quarantine` で外す）。
-Linux のビルドの実行には ALSA（`libasound2`）と、X11 か Wayland のライブラリが要る。動いた / 動かなかったの報告を歓迎する。
+リリースには、GitHub のランナーでビルドしたパッケージを置いている:
+
+| システム | ファイル |
+|---|---|
+| Windows（x64、Arm64） | `.msi`（インストーラー）、`-portable.zip`（インストール不要） |
+| macOS（Apple シリコンと Intel を 1 つに） | `.dmg`（DiscCraft.app）、`disccraft-cli-…-macos-universal.zip`（コマンドライン） |
+| Linux（x86_64、aarch64） | `.AppImage`（更新用の `.zsync` つき）、`.flatpak`、`.deb`、`.rpm`、`.pkg.tar.zst`（Arch）、`.tar.gz` |
+| Linux（riscv64） | `.deb`、`.rpm`、`.tar.gz` |
+
+**動作を確認しているのは Windows（x64）のビルドだけ。** ほかは自動でビルドしてパッケージにしただけで、画面を出して使った
+ことも、作ったディスクを確かめたこともない。開発者の証明書での署名はしていないので、Windows ではインストーラーの初回に
+SmartScreen が確認を求め、macOS では初回に Gatekeeper に止められる（右クリックの「開く」か、
+`xattr -d com.apple.quarantine` で外す）。Linux のパッケージには ALSA（`libasound2`）と、X11 か Wayland のライブラリが要る。
+AppImage は最初の引数に `disccraft-cli` を付けるとコマンドラインが動く。動いた / 動かなかったの報告を歓迎する。
 
 ## ビルドと使い方
 

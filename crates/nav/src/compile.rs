@@ -383,6 +383,22 @@ pub fn compile(project: &Project) -> Result<CompiledNav, NavError> {
     }
     first_play.extend(compile_first_play(&mut ctx, &project.settings.first_play)?);
     check_pgc_limit(&ctx)?;
+    // The disc's parental level: asked at the first play, and again at each title (a title can be started from
+    // the remote without the first play).
+    let level = project.settings.parental_level;
+    let (mut titles, mut slideshows, mut chapter_playlists) =
+        (titles, slideshows, chapter_playlists);
+    if (1..=8).contains(&level) {
+        first_play = parental_guard(level, first_play)?;
+        for pre in titles
+            .iter_mut()
+            .map(|title| &mut title.pre)
+            .chain(slideshows.iter_mut().map(|show| &mut show.pre))
+            .chain(chapter_playlists.iter_mut().map(|list| &mut list.pre))
+        {
+            *pre = parental_guard(level, std::mem::take(pre))?;
+        }
+    }
 
     Ok(CompiledNav {
         first_play,
@@ -395,6 +411,39 @@ pub fn compile(project: &Project) -> Result<CompiledNav, NavError> {
         slideshows,
         chapter_playlists,
     })
+}
+
+/// The system parameter that holds the player's parental level (1 to 8; 15 when the player has none set).
+const SPRM_PARENTAL_LEVEL: u8 = 13;
+/// The lines of [`parental_guard`].
+const GUARD_LINES: u8 = 3;
+
+/// `commands` behind a check of the player's parental level: a player set to `level` or above (or to none) goes
+/// straight on; a lower one asks whether the level may be raised for this disc, and stops when it may not.
+fn parental_guard(level: u8, commands: Vec<Cmd>) -> Result<Vec<Cmd>, NavError> {
+    let first = GUARD_LINES + 1;
+    let mut out = vec![
+        // 1: allowed as the player is set.
+        cmd::if_sprm_ge_goto(SPRM_PARENTAL_LEVEL, u16::from(level), first),
+        // 2: ask; on to the commands when the level is raised.
+        cmd::set_tmp_pml(level, first),
+        // 3: refused.
+        cmd::exit(),
+    ];
+    for mut command in commands {
+        // A Goto (type 0, command 1, with or without a compare) names a line of this list: three further down now.
+        if command[0] == 0x00 && command[1] & 0x0F == 0x01 {
+            command[7] = command[7]
+                .checked_add(GUARD_LINES)
+                .ok_or_else(|| NavError::Invalid("too many commands".to_string()))?;
+        }
+        out.push(command);
+    }
+    // The Goto needs a line to go to.
+    if out.len() == usize::from(GUARD_LINES) {
+        out.push(cmd::nop());
+    }
+    Ok(out)
 }
 
 /// Builds menu id to VMGM PGCN mapping.
@@ -2210,6 +2259,34 @@ mod tests {
             nav.menus.first().map(|menu| menu.prohibited_ops),
             Some((1 << 10) | (1 << 9))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_parental_level_is_asked_at_the_first_play_and_at_each_title()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::default();
+        let asset = project.add_asset(std::path::Path::new("movie.mp4"))?;
+        let _ = project.add_timeline(asset, None)?;
+        let plain = compile(&project)?;
+        project.settings.parental_level = 5;
+        let nav = compile(&project)?;
+        // if (SPRM13 >= 5) Goto 4; SetTmpPML 5, 4; Exit; then what there was.
+        let guard = vec![
+            [0x00, 0xC1, 0x00, 0x8D, 0x00, 0x05, 0x00, 0x04],
+            [0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x05, 0x04],
+            cmd::exit(),
+        ];
+        assert_eq!(nav.first_play, [guard.clone(), plain.first_play].concat());
+        let title = nav.titles.first().ok_or("no title")?;
+        let plain_title = plain.titles.first().ok_or("no title")?;
+        assert_eq!(title.pre, [guard, plain_title.pre.clone()].concat());
+        assert_eq!(title.post, plain_title.post);
+        // A Goto of the guarded commands still names the same command.
+        let moved = super::parental_guard(1, vec![cmd::if_eq_goto(2, 0, 2), cmd::exit()])?;
+        assert_eq!(moved.get(3), Some(&cmd::if_eq_goto(2, 0, 5)));
+        // With nothing behind it, the guard goes to a NOP.
+        assert_eq!(super::parental_guard(1, Vec::new())?.get(3), Some(&[0; 8]));
         Ok(())
     }
 

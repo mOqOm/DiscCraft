@@ -39,6 +39,8 @@ pub(crate) enum CheckCategory {
     SubtitleOverflow,
     /// Subtitles too close to the one before on a Blu-ray disc (Encore: 字幕の間隔).
     SubtitleSpacing,
+    /// A chapter playlist's random or shuffle play that the disc cannot give in full (Encore: 再生の種類, M6.337).
+    PlaybackType,
     /// Track and title limits (DiscCraft).
     StreamLimits,
     /// Media files (DiscCraft).
@@ -50,8 +52,9 @@ pub(crate) enum CheckCategory {
 impl CheckCategory {
     /// All categories, in Encore's order (three columns: ボタンリンク / ファーストプレイ / 孤立, エンドアクション /
     /// タイトルボタン / 再生リスト, 上書き / リモートメニュー / 重なったボタン, メニューの合計サイズ / ディスク容量 /
-    /// チャプターおよびトリム, 高すぎるタイムラインビットレート / 字幕テキストのオーバーフロー), then DiscCraft's own.
-    pub(crate) const ALL: [CheckCategory; 18] = [
+    /// チャプターおよびトリム, 高すぎるタイムラインビットレート / 字幕テキストのオーバーフロー / 字幕の間隔 / 再生の種類),
+    /// then DiscCraft's own.
+    pub(crate) const ALL: [CheckCategory; 19] = [
         Self::ButtonLinks,
         Self::FirstPlay,
         Self::Orphans,
@@ -67,6 +70,7 @@ impl CheckCategory {
         Self::TimelineBitrate,
         Self::SubtitleOverflow,
         Self::SubtitleSpacing,
+        Self::PlaybackType,
         Self::StreamLimits,
         Self::Media,
         Self::Other,
@@ -91,6 +95,7 @@ impl CheckCategory {
             Self::TimelineBitrate => tl!("Timeline Bitrate Too High"),
             Self::SubtitleOverflow => tl!("Subtitle Text Overflow"),
             Self::SubtitleSpacing => tl!("Subtitle Spacing"),
+            Self::PlaybackType => tl!("Playback Type"),
             Self::StreamLimits => tl!("Track and title limits"),
             Self::Media => tl!("Media files"),
             Self::Other => tl!("Other"),
@@ -120,6 +125,7 @@ impl CheckCategory {
             "timelineBitrateTooHigh" => Self::TimelineBitrate,
             "subtitleTextOverflow" => Self::SubtitleOverflow,
             "subtitleSpacing" => Self::SubtitleSpacing,
+            "playbackType" => Self::PlaybackType,
             "assetOffline" | "missingAsset" | "unsupportedMedia" | "undecodableVideo" => {
                 Self::Media
             }
@@ -136,7 +142,7 @@ pub(crate) struct CheckWindow {
     /// The window is shown.
     pub(crate) open: bool,
     /// Which categories are checked, in `CheckCategory::ALL` order (all true by default).
-    pub(crate) enabled: [bool; 18],
+    pub(crate) enabled: [bool; 19],
 }
 
 /// Default state for the check window.
@@ -145,7 +151,7 @@ impl Default for CheckWindow {
     fn default() -> Self {
         Self {
             open: false,
-            enabled: [true; 18],
+            enabled: [true; 19],
         }
     }
 }
@@ -226,7 +232,7 @@ impl DiscCraftApp {
     }
 
     /// Draw the category checkboxes in a three-column grid.
-    fn draw_category_grid(ui: &mut egui::Ui, enabled: &mut [bool; 18]) {
+    fn draw_category_grid(ui: &mut egui::Ui, enabled: &mut [bool; 19]) {
         let _ = egui::Grid::new("check_categories")
             .num_columns(3)
             .show(ui, |ui| {
@@ -402,6 +408,9 @@ fn problem_text(problem: &ProblemView) -> String {
         "timelineBitrateTooHigh" => tl!("The timeline's bit rate is too high.").to_owned(),
         "subtitleTextOverflow" => overflow_text(&problem.message),
         "subtitleSpacing" => spacing_text(&problem.message),
+        "playbackType" => {
+            tl!("On a DVD, random and shuffle play pick from the first 64 entries only.").to_owned()
+        }
         _ => problem.message.clone(),
     }
 }

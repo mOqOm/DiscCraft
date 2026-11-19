@@ -238,6 +238,178 @@ impl Project {
         Ok(linked)
     }
 
+    /// Encore's 複数ページのチャプターインデックスを作成 on a menu that has chapter buttons (a template): the menu is
+    /// filled as [`Self::fill_chapter_index`] fills it, and copied for the chapters its buttons do not reach, as
+    /// pages of the menu (M6.333: Encore makes them pages of the same menu, "ページ 1", "ページ 2", not menus of their
+    /// own), each copy's chapter buttons going on where the page before stopped. A 次へ (Next) button links to the
+    /// page after and a 前へ (Previous) button to the page before. As in Encore, what a page has no use for is taken
+    /// off it: the chapter buttons past the last chapter, the Next button of the last page and the Previous button
+    /// of the first (Encore hides them and they stop being buttons; one of these that already links somewhere
+    /// outside the pages is kept). Returns the pages, the menu itself first.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::fill_chapter_index`]; also `NoMenu` when a copy cannot be made.
+    pub fn fill_chapter_index_pages(
+        &mut self,
+        menu: MenuId,
+    ) -> Result<Vec<MenuId>, FillChapterIndexError> {
+        use crate::menu::ButtonKind;
+        let _ = self.fill_chapter_index(menu)?;
+        let found = self.menu(menu).ok_or(FillChapterIndexError::NoMenu)?;
+        let chapter_buttons: Vec<usize> = found
+            .buttons
+            .iter()
+            .enumerate()
+            .filter(|(_, button)| button.kind == ButtonKind::Chapter)
+            .map(|(index, _)| index)
+            .collect();
+        // The timeline, and the chapter each page's first chapter button stands for (the first page's may be
+        // before the timeline's first chapter, when a later button was the one linked).
+        let (timeline, first) = chapter_buttons
+            .iter()
+            .enumerate()
+            .find_map(|(position, &index)| match found.buttons.get(index)?.link {
+                Link::Timeline { id, chapter } if self.timelines.contains_key(&id) => Some((
+                    id,
+                    i64::from(chapter) - i64::try_from(position).unwrap_or(i64::MAX),
+                )),
+                _ => None,
+            })
+            .ok_or(FillChapterIndexError::NoLinkedChapterButton)?;
+        let chapters = self
+            .timelines
+            .get(&timeline)
+            .map_or(1, |timeline| timeline.chapters.len().max(1));
+        let chapters = i64::try_from(chapters).unwrap_or(i64::MAX);
+        let per_page = i64::try_from(chapter_buttons.len())
+            .unwrap_or(i64::MAX)
+            .max(1);
+        // Pages until the last chapter has a button (at most as many as chapters).
+        let count = chapters
+            .saturating_sub(first)
+            .saturating_add(per_page - 1)
+            .checked_div(per_page)
+            .unwrap_or(1)
+            .clamp(1, chapters);
+        let mut pages = vec![menu];
+        // The copies are pages of the menu's first page, with its name, in no folder of their own.
+        let root = self.menu_root(menu);
+        let root_name = self.menu(root).map(|found| found.name.clone());
+        for _ in 1..count {
+            let crate::Duplicate::Menu(copy) = self
+                .duplicate(crate::Duplicate::Menu(menu))
+                .map_err(|_| FillChapterIndexError::NoMenu)?
+            else {
+                return Err(FillChapterIndexError::NoMenu);
+            };
+            if let Some(page) = self.menu_mut(copy) {
+                page.page_of = Some(root);
+                if let Some(name) = &root_name {
+                    page.name.clone_from(name);
+                }
+            }
+            let _ = self.placements.remove(&copy.0);
+            pages.push(copy);
+        }
+
+        for (number, &page) in pages.iter().enumerate() {
+            let page_first = i64::try_from(number)
+                .ok()
+                .and_then(|number| number.checked_mul(per_page))
+                .and_then(|offset| first.checked_add(offset))
+                .unwrap_or(i64::MAX);
+            let mut unused = Vec::new();
+            for (offset, &index) in chapter_buttons.iter().enumerate() {
+                let chapter = i64::try_from(offset)
+                    .ok()
+                    .and_then(|offset| page_first.checked_add(offset));
+                let Some(chapter) = chapter
+                    .filter(|chapter| (0..chapters).contains(chapter))
+                    .and_then(|chapter| u32::try_from(chapter).ok())
+                else {
+                    // Past the last chapter: the button goes. (Before the first, on the first page: it stays, as
+                    // the single page's does.)
+                    if chapter.is_none_or(|chapter| chapter >= chapters) {
+                        unused.push(index);
+                    }
+                    continue;
+                };
+                let link = Link::Timeline {
+                    id: timeline,
+                    chapter,
+                };
+                let name = crate::menu::Menu::link_target_name(self, &link);
+                if let Some(button) = self
+                    .menu_mut(page)
+                    .and_then(|menu| menu.buttons.get_mut(index))
+                {
+                    button.link = link;
+                    if button.name_from_link
+                        && let Some(name) = name
+                    {
+                        if button.sync_name {
+                            button.label.clone_from(&name);
+                        }
+                        button.name = name;
+                    }
+                }
+            }
+            // The page buttons: to the page after and the page before, or off the page that has neither.
+            let before = number.checked_sub(1).and_then(|at| pages.get(at)).copied();
+            let after = pages.get(number.saturating_add(1)).copied();
+            let turns: Vec<(usize, ButtonKind, Link)> = self
+                .menu(page)
+                .map(|menu| {
+                    menu.buttons
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, button)| {
+                            matches!(button.kind, ButtonKind::Next | ButtonKind::Previous)
+                        })
+                        .map(|(index, button)| (index, button.kind, button.link.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for (index, kind, link) in turns {
+                let to = if kind == ButtonKind::Next {
+                    after
+                } else {
+                    before
+                };
+                match to {
+                    Some(to) => {
+                        if let Some(button) = self
+                            .menu_mut(page)
+                            .and_then(|menu| menu.buttons.get_mut(index))
+                        {
+                            button.link = Link::Menu {
+                                id: to,
+                                button: None,
+                            };
+                        }
+                    }
+                    None => {
+                        // Kept when it leads somewhere of its own (a Previous that goes back to the main menu).
+                        let own = match link {
+                            Link::NotSet => false,
+                            Link::Menu { id, .. } => !pages.contains(&id),
+                            _ => true,
+                        };
+                        if !own {
+                            unused.push(index);
+                        }
+                    }
+                }
+            }
+            if !unused.is_empty() {
+                self.remove_buttons(page, &unused)
+                    .map_err(|_| FillChapterIndexError::NoMenu)?;
+            }
+        }
+        Ok(pages)
+    }
+
     /// Creates a chapter index for `timeline`. `per_page`: `None` = one page holding every chapter (error when the
     /// timeline has more than [`MAX_SINGLE_PAGE`] chapters); `Some(n)` = pages of `n` chapters (1..=18, else error)
     /// with previous / next buttons. Returns the new menus in page order.
@@ -529,6 +701,169 @@ mod tests {
             .and_then(|menu| menu.buttons.last())
             .map(|button| button.label.clone());
         assert_eq!(back.as_deref(), Some("Back"));
+        Ok(())
+    }
+
+    /// M6.255: a template menu with fewer chapter buttons than chapters becomes pages, as Encore's Create
+    /// Multi-Page Chapter Index makes them.
+    #[test]
+    fn a_template_menu_becomes_pages_for_all_the_chapters() -> Result<(), Box<dyn Error>> {
+        use crate::menu::ButtonKind;
+        let (mut project, timeline) = project_with_chapters(8)?;
+        let main = project.add_menu(Some("Main".to_owned()))?;
+        let menu = project.add_menu(Some("Scenes".to_owned()))?;
+        let at = |chapter: u32| Link::Timeline {
+            id: timeline,
+            chapter,
+        };
+        // Three chapter buttons (the first linked to chapter 1), Previous, Next, and a button back to the main
+        // menu.
+        let kinds = [
+            ("C1", ButtonKind::Chapter, at(0)),
+            ("C2", ButtonKind::Chapter, Link::NotSet),
+            ("C3", ButtonKind::Chapter, Link::NotSet),
+            ("Previous", ButtonKind::Previous, Link::NotSet),
+            ("Next", ButtonKind::Next, Link::NotSet),
+            (
+                "Main",
+                ButtonKind::Main,
+                Link::Menu {
+                    id: main,
+                    button: None,
+                },
+            ),
+        ];
+        for (name, kind, link) in kinds {
+            let index = project.add_button(menu, name.to_owned(), None, link)?;
+            if let Some(button) = project
+                .menu_mut(menu)
+                .and_then(|menu| menu.buttons.get_mut(index))
+            {
+                button.kind = kind;
+            }
+        }
+        let pages = project
+            .fill_chapter_index_pages(menu)
+            .map_err(|error| format!("{error:?}"))?;
+        // Eight chapters on three buttons a page: three pages, the menu itself first.
+        assert_eq!(pages.len(), 3);
+        assert_eq!(pages.first(), Some(&menu));
+        let shape = |project: &Project, page: MenuId| -> Vec<(ButtonKind, Link)> {
+            project
+                .menu(page)
+                .map(|menu| {
+                    menu.buttons
+                        .iter()
+                        .map(|button| (button.kind, button.link.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let to = |page: usize| Link::Menu {
+            id: pages[page],
+            button: None,
+        };
+        let home = Link::Menu {
+            id: main,
+            button: None,
+        };
+        // The first page has no Previous, the last no Next and no button for a ninth chapter.
+        assert_eq!(
+            shape(&project, pages[0]),
+            vec![
+                (ButtonKind::Chapter, at(0)),
+                (ButtonKind::Chapter, at(1)),
+                (ButtonKind::Chapter, at(2)),
+                (ButtonKind::Next, to(1)),
+                (ButtonKind::Main, home.clone()),
+            ]
+        );
+        assert_eq!(
+            shape(&project, pages[1]),
+            vec![
+                (ButtonKind::Chapter, at(3)),
+                (ButtonKind::Chapter, at(4)),
+                (ButtonKind::Chapter, at(5)),
+                (ButtonKind::Previous, to(0)),
+                (ButtonKind::Next, to(2)),
+                (ButtonKind::Main, home.clone()),
+            ]
+        );
+        assert_eq!(
+            shape(&project, pages[2]),
+            vec![
+                (ButtonKind::Chapter, at(6)),
+                (ButtonKind::Chapter, at(7)),
+                (ButtonKind::Previous, to(1)),
+                (ButtonKind::Main, home.clone()),
+            ]
+        );
+        // M6.333: the copies are pages of the menu (Encore's ページ 1, ページ 2), with its name, not menus of their own.
+        let names: Vec<String> = pages
+            .iter()
+            .filter_map(|page| project.menu(*page).map(|menu| menu.name.clone()))
+            .collect();
+        assert_eq!(names, ["Scenes", "Scenes", "Scenes"]);
+        assert_eq!(project.menu_pages(menu), pages);
+        assert_eq!(project.menu_page_number(pages[2]), 2);
+        assert!(project.is_menu_page(pages[1]) && !project.is_menu_page(menu));
+
+        // A Previous that already goes somewhere of its own stays on the first page; chapters that fit one page
+        // make no copy.
+        let (mut project, timeline) = project_with_chapters(2)?;
+        let main = project.add_menu(None)?;
+        let menu = project.add_menu(None)?;
+        for (name, kind, link) in [
+            (
+                "C1",
+                ButtonKind::Chapter,
+                Link::Timeline {
+                    id: timeline,
+                    chapter: 0,
+                },
+            ),
+            ("C2", ButtonKind::Chapter, Link::NotSet),
+            ("C3", ButtonKind::Chapter, Link::NotSet),
+            (
+                "Back",
+                ButtonKind::Previous,
+                Link::Menu {
+                    id: main,
+                    button: None,
+                },
+            ),
+            ("Next", ButtonKind::Next, Link::NotSet),
+        ] {
+            let index = project.add_button(menu, name.to_owned(), None, link)?;
+            if let Some(button) = project
+                .menu_mut(menu)
+                .and_then(|menu| menu.buttons.get_mut(index))
+            {
+                button.kind = kind;
+            }
+        }
+        let pages = project
+            .fill_chapter_index_pages(menu)
+            .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(pages, vec![menu]);
+        let kinds: Vec<ButtonKind> = shape(&project, menu)
+            .into_iter()
+            .map(|(kind, _)| kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ButtonKind::Chapter,
+                ButtonKind::Chapter,
+                ButtonKind::Previous
+            ]
+        );
+        // A menu without a linked chapter button is refused, as the single page is.
+        let empty = project.add_menu(None)?;
+        assert_eq!(
+            project.fill_chapter_index_pages(empty),
+            Err(FillChapterIndexError::NoChapterButtons)
+        );
         Ok(())
     }
 

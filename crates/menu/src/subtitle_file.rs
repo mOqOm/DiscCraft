@@ -4,6 +4,10 @@
 //! The formats follow their public descriptions: SRT (numbered blocks, `HH:MM:SS,mmm --> HH:MM:SS,mmm`), WebVTT
 //! (W3C WebVTT: a `WEBVTT` header, optional cue identifiers, `[HH:]MM:SS.mmm --> ...`, `NOTE` / `STYLE` /
 //! `REGION` blocks), and a plain script with two timecodes and the text on each line.
+//!
+//! Picture subtitles (Encore's image script and FAB image script) follow the Adobe Encore DVD 2.0 User Guide
+//! (2005), "Structure of image scripts", "Structure of FAB image scripts" and "Importing image-based subtitle
+//! scripts" (the colour mapping); no other reader of these scripts was looked at (AGENTS.md rule 3).
 
 use std::path::Path;
 
@@ -64,6 +68,7 @@ pub fn asset_cues(
                 end: cue.end,
                 text: cue.text.clone(),
                 look: cue.look,
+                image: cue.image.clone(),
             })
             .collect()),
         None => read_subtitles(Path::new(&asset.path), settings),
@@ -177,6 +182,7 @@ pub fn parse_text_script(text: &str, settings: &DiscSettings) -> Result<Vec<Cue>
                         end,
                         text,
                         look: disccraft_project::CueLook::default(),
+                        image: None,
                     });
                 }
             }
@@ -233,10 +239,221 @@ fn script_time(token: &str, settings: &DiscSettings) -> Option<Tick> {
     parse_time(token, settings).ok()
 }
 
-/// Writes cues as SRT (subtitle export).
+/// One subtitle of an image script or a FAB image script: when it is shown, its picture, and where it stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageScriptCue {
+    /// First tick at which it is shown.
+    pub start: Tick,
+    /// First tick at which it is no longer shown.
+    pub end: Tick,
+    /// The picture file.
+    pub picture: std::path::PathBuf,
+    /// Left, top, right and bottom in the frame's pixels.
+    pub area: [u16; 4],
+}
+
+/// Where a picture stands when an image script has no `Display_Area`: from the frame's top left corner, as far as
+/// the frame goes.
+const WHOLE_FRAME: [u16; 4] = [0, 0, u16::MAX, u16::MAX];
+
+/// Reads an image script or a FAB image script file (`fab`), as Encore's Timeline ▸ Import Subtitles ▸ Image
+/// Script / FAB Image Script. A FAB script's pictures are in `folder` (the script's own folder when `None`).
+///
+/// # Errors
+///
+/// When the file cannot be read, is too large, or does not follow the format.
+pub fn read_image_script(
+    path: &Path,
+    fab: bool,
+    folder: Option<&Path>,
+    settings: &DiscSettings,
+) -> Result<Vec<ImageScriptCue>, MenuError> {
+    let display = path.display();
+    let metadata =
+        std::fs::metadata(path).map_err(|e| MenuError::Invalid(format!("{display}: {e}")))?;
+    if metadata.len() > u64::try_from(MAX_SRT_BYTES).unwrap_or(u64::MAX) {
+        return Err(MenuError::Invalid(format!(
+            "{display}: script is too large"
+        )));
+    }
+    let bytes = std::fs::read(path).map_err(|e| MenuError::Invalid(format!("{display}: {e}")))?;
+    let text = decode_text(&bytes);
+    let base = path.parent().unwrap_or_else(|| Path::new(""));
+    let cues = if fab {
+        parse_fab_script(&text, settings, folder.unwrap_or(base))
+    } else {
+        parse_image_script(&text, settings, base)
+    };
+    cues.map_err(|e| MenuError::Invalid(format!("{display}: {e}")))
+}
+
+/// Parses an image script (Adobe Encore DVD 2.0 User Guide, "Structure of image scripts"): a `Display_Area (left
+/// top right bottom)` line (where every picture stands, in the frame's pixels), a `Directory <folder>` line (where
+/// the pictures are), then one subtitle a line: `number start end file`, separated by spaces or tabs. Timecodes
+/// are read as in a text script (no leading zeros needed).
+///
+/// A folder that is not absolute is taken from `base` (the script's folder), and so are the pictures when there
+/// is no Directory line. Other header lines before the first subtitle (such as `Contrast (...)`) and lines that
+/// start with `#` are skipped.
+///
+/// # Errors
+///
+/// When the input is too large, the display area is not four numbers that make a box, a line after the first
+/// subtitle is not a subtitle, or there are too many.
+pub fn parse_image_script(
+    text: &str,
+    settings: &DiscSettings,
+    base: &Path,
+) -> Result<Vec<ImageScriptCue>, MenuError> {
+    if text.len() > MAX_SRT_BYTES {
+        return Err(MenuError::Invalid("script input is too large".to_string()));
+    }
+    let body = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut area = WHOLE_FRAME;
+    let mut directory = base.to_path_buf();
+    let mut cues = Vec::new();
+    for (index, raw_line) in body.split(['\n', '\r']).enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let number = index.saturating_add(1);
+        let (keyword, rest) = next_token(line);
+        if keyword.eq_ignore_ascii_case("Display_Area") {
+            area = parse_area(rest).ok_or_else(|| {
+                MenuError::Invalid(format!(
+                    "line {number}: Display_Area must be four numbers (left top right bottom) that make a box"
+                ))
+            })?;
+            continue;
+        }
+        if keyword.eq_ignore_ascii_case("Directory") {
+            directory = base.join(unquoted(rest.trim()));
+            continue;
+        }
+        let (start, after_start) = next_token(rest);
+        let (end, file) = next_token(after_start);
+        let numbered = !keyword.is_empty() && keyword.chars().all(|c| c.is_ascii_digit());
+        match (
+            numbered,
+            script_time(start, settings),
+            script_time(end, settings),
+        ) {
+            (true, Some(start), Some(end)) if !file.trim().is_empty() => {
+                if end > start {
+                    cues.push(ImageScriptCue {
+                        start,
+                        end,
+                        picture: directory.join(unquoted(file.trim())),
+                        area,
+                    });
+                }
+            }
+            // A header line this reader does not use.
+            _ if cues.is_empty() => {}
+            _ => {
+                return Err(MenuError::Invalid(format!(
+                    "line {number}: expected a number, a start and an end timecode, and a picture file"
+                )));
+            }
+        }
+        if cues.len() > MAX_CUES {
+            return Err(MenuError::Invalid("too many cues".to_string()));
+        }
+    }
+    cues.sort_by_key(|cue| cue.start);
+    Ok(cues)
+}
+
+/// Parses a FAB image script (Adobe Encore DVD 2.0 User Guide, "Structure of FAB image scripts"): one subtitle a
+/// line, `file start end left top right bottom`, separated by spaces or tabs, the place in the frame's pixels.
+/// The pictures are in `folder`. Lines that start with `#` and header lines with a parenthesis before the first
+/// subtitle are skipped.
+///
+/// # Errors
+///
+/// When the input is too large, a line is not a subtitle, its place is not a box, or there are too many.
+pub fn parse_fab_script(
+    text: &str,
+    settings: &DiscSettings,
+    folder: &Path,
+) -> Result<Vec<ImageScriptCue>, MenuError> {
+    if text.len() > MAX_SRT_BYTES {
+        return Err(MenuError::Invalid("script input is too large".to_string()));
+    }
+    let body = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut cues = Vec::new();
+    for (index, raw_line) in body.split(['\n', '\r']).enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        // The file name may hold spaces: the last six fields are the times and the place.
+        let parsed = tokens
+            .len()
+            .checked_sub(6)
+            .filter(|at| *at > 0)
+            .and_then(|at| {
+                let fields = tokens.get(at..)?;
+                let start = script_time(fields.first()?, settings)?;
+                let end = script_time(fields.get(1)?, settings)?;
+                let area = parse_area(&fields.get(2..)?.join(" "))?;
+                Some((tokens.get(..at)?.join(" "), start, end, area))
+            });
+        match parsed {
+            Some((file, start, end, area)) => {
+                if end > start {
+                    cues.push(ImageScriptCue {
+                        start,
+                        end,
+                        picture: folder.join(unquoted(&file)),
+                        area,
+                    });
+                }
+            }
+            None if cues.is_empty() && line.contains('(') => {}
+            None => {
+                return Err(MenuError::Invalid(format!(
+                    "line {}: expected a picture file, a start and an end timecode, and left top right bottom",
+                    index.saturating_add(1)
+                )));
+            }
+        }
+        if cues.len() > MAX_CUES {
+            return Err(MenuError::Invalid("too many cues".to_string()));
+        }
+    }
+    cues.sort_by_key(|cue| cue.start);
+    Ok(cues)
+}
+
+/// Four numbers (left top right bottom), in parentheses or not, that make a box of some size.
+fn parse_area(text: &str) -> Option<[u16; 4]> {
+    let numbers: Vec<u16> = text
+        .split(|c: char| c.is_whitespace() || c == '(' || c == ')' || c == ',')
+        .filter(|token| !token.is_empty())
+        .map(|token| token.parse().ok())
+        .collect::<Option<_>>()?;
+    match numbers.as_slice() {
+        [left, top, right, bottom] if left < right && top < bottom => {
+            Some([*left, *top, *right, *bottom])
+        }
+        _ => None,
+    }
+}
+
+/// A path without the quotes around it.
+fn unquoted(text: &str) -> &str {
+    text.strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .unwrap_or(text)
+}
+
+/// Writes cues as SRT (subtitle export). Picture subtitles have no text and are left out.
 pub fn write_srt(cues: &[Cue]) -> String {
     let mut out = String::new();
-    for (index, cue) in cues.iter().enumerate() {
+    for (index, cue) in cues.iter().filter(|cue| cue.image.is_none()).enumerate() {
         out.push_str(&format!(
             "{}\r\n{} --> {}\r\n{}\r\n\r\n",
             index.saturating_add(1),
@@ -250,10 +467,11 @@ pub fn write_srt(cues: &[Cue]) -> String {
 
 /// Writes cues as the text script Encore CS6 exports (Timeline ▸ Export Subtitles ▸ Text Script), so that the file
 /// goes back into Encore: UTF-16 LE with a byte-order mark, one cue a line as `number start end text` with
-/// timecodes at the project's frame rate, CR LF between cues and a lone CR for a line break inside one.
+/// timecodes at the project's frame rate, CR LF between cues and a lone CR for a line break inside one. Picture
+/// subtitles have no text and are left out.
 pub fn write_text_script(cues: &[Cue], settings: &DiscSettings) -> Vec<u8> {
     let mut text = String::new();
-    for (index, cue) in cues.iter().enumerate() {
+    for (index, cue) in cues.iter().filter(|cue| cue.image.is_none()).enumerate() {
         text.push_str(&format!(
             "{} {} {} {}\r\n",
             index.saturating_add(1),
@@ -283,8 +501,8 @@ fn srt_time(tick: Tick) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        SubtitleFormat, decode_text, parse_text_script, parse_vtt, read_subtitles, write_srt,
-        write_text_script,
+        SubtitleFormat, decode_text, parse_fab_script, parse_image_script, parse_text_script,
+        parse_vtt, read_subtitles, write_srt, write_text_script,
     };
     use crate::subtitle::parse_srt;
     use disccraft_project::{DiscSettings, Tick, VideoStandard, parse_time};
@@ -292,6 +510,92 @@ mod tests {
     use std::path::Path;
 
     const MS: i64 = 254_016_000;
+
+    /// The image script of the Encore DVD 2.0 User Guide's example: the display area and the folder from the
+    /// header, one picture a line; timecodes without leading zeros; a relative folder from the script's.
+    #[test]
+    fn image_script_reads_the_guides_example() -> Result<(), Box<dyn Error>> {
+        let settings = DiscSettings::default();
+        let text = "Display_Area (000 000 720 480)\r\n\
+                    Directory C:\\Subtitles\\Image Files\\Caption Inc Images\\\r\n\
+                    1 00;00;02;02 00;00;03;15 CATTALESS001.TIF\r\n\
+                    2 0;0;5;18\t00;00;09;20\tCATTALESS002.TIF\r\n";
+        let cues = parse_image_script(text, &settings, Path::new("scripts"))?;
+        assert_eq!(cues.len(), 2);
+        let first = cues.first().ok_or("cue")?;
+        assert_eq!(first.area, [0, 0, 720, 480]);
+        assert_eq!(first.start, parse_time("00;00;02;02", &settings)?);
+        assert_eq!(first.end, parse_time("00;00;03;15", &settings)?);
+        if cfg!(windows) {
+            assert_eq!(
+                first.picture,
+                Path::new("C:\\Subtitles\\Image Files\\Caption Inc Images\\CATTALESS001.TIF")
+            );
+        }
+        let second = cues.get(1).ok_or("cue")?;
+        assert_eq!(second.start, parse_time("00;00;05;18", &settings)?);
+        // No Directory line: the pictures are beside the script; other header lines are skipped.
+        let cues = parse_image_script(
+            "Contrast (15 15 15 0)\n1 00;00;01;00 00;00;02;00 \"sub 1.png\"\n",
+            &settings,
+            Path::new("scripts"),
+        )?;
+        assert_eq!(
+            cues.first().map(|cue| (cue.picture.clone(), cue.area)),
+            Some((Path::new("scripts").join("sub 1.png"), super::WHOLE_FRAME))
+        );
+        // A display area that is not a box, and a broken line after the first subtitle, are refused.
+        assert!(
+            parse_image_script("Display_Area (10 0 10 480)\n", &settings, Path::new("")).is_err()
+        );
+        let broken = "1 00;00;01;00 00;00;02;00 a.png\nbroken\n";
+        assert!(parse_image_script(broken, &settings, Path::new("")).is_err());
+        Ok(())
+    }
+
+    /// The FAB image script of the Encore DVD 2.0 User Guide's example: each picture with its own place, in the
+    /// folder asked for; a file name with spaces; PAL timecodes with colons.
+    #[test]
+    fn fab_script_reads_the_guides_example() -> Result<(), Box<dyn Error>> {
+        let settings = DiscSettings::default();
+        let text = "RACE001.TIF 00;00;02;02 00;00;03;15 000 000 720 480\n\
+                    RACE002.TIF\t00;00;05;18\t00;00;09;20\t10 400 710 470\n";
+        let cues = parse_fab_script(text, &settings, Path::new("pics"))?;
+        assert_eq!(cues.len(), 2);
+        assert_eq!(
+            cues.iter().map(|cue| cue.area).collect::<Vec<_>>(),
+            vec![[0, 0, 720, 480], [10, 400, 710, 470]]
+        );
+        assert_eq!(
+            cues.get(1).map(|cue| cue.picture.clone()),
+            Some(Path::new("pics").join("RACE002.TIF"))
+        );
+        assert_eq!(
+            cues.get(1).map(|cue| cue.end),
+            Some(parse_time("00;00;09;20", &settings)?)
+        );
+        let pal = DiscSettings {
+            standard: VideoStandard::Pal,
+            ..DiscSettings::default()
+        };
+        let line = "my sub 1.png 00:00:01:00 00:00:02:12 0 0 720 576\n";
+        let cues = parse_fab_script(line, &pal, Path::new(""))?;
+        assert_eq!(
+            cues.first().map(|cue| (cue.picture.clone(), cue.end)),
+            Some((Path::new("my sub 1.png").to_path_buf(), Tick(2480 * MS)))
+        );
+        // Too few fields, or a place that is not a box.
+        for bad in [
+            "a.png 00;00;01;00 00;00;02;00 0 0 720\n",
+            "a.png 00;00;01;00 00;00;02;00 0 0 0 480\n",
+        ] {
+            assert!(
+                parse_fab_script(bad, &settings, Path::new("")).is_err(),
+                "{bad}"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn webvtt_skips_header_notes_and_settings() -> Result<(), Box<dyn Error>> {

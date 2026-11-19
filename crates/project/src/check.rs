@@ -151,14 +151,16 @@ impl Project {
             }
 
             for track in &timeline.audio {
-                if !self.assets.contains_key(&track.asset) {
-                    problems.push(error(
-                        "missingAsset",
-                        format!(
-                            "timeline {} references missing audio asset {}",
-                            timeline.id.0, track.asset.0
-                        ),
-                    ));
+                for asset in track.assets() {
+                    if !self.assets.contains_key(&asset) {
+                        problems.push(error(
+                            "missingAsset",
+                            format!(
+                                "timeline {} references missing audio asset {}",
+                                timeline.id.0, asset.0
+                            ),
+                        ));
+                    }
                 }
             }
 
@@ -331,6 +333,16 @@ impl Project {
             }
         }
 
+        if self.settings.parental_level > 8 {
+            problems.push(error(
+                "badParentalLevel",
+                format!(
+                    "parental level {} is outside 1..=8",
+                    self.settings.parental_level
+                ),
+            ));
+        }
+
         for region in &self.settings.regions {
             if !(1..=8).contains(region) {
                 problems.push(error(
@@ -401,6 +413,18 @@ fn subtitle_cues_problem(cues: &[crate::model::SubtitleCue]) -> Option<String> {
     {
         return Some(format!("subtitle {} is out of order", index + 2));
     }
+    // A picture subtitle needs a file and a place of some size.
+    if let Some(index) = cues.iter().position(|cue| {
+        cue.image.as_ref().is_some_and(|image| {
+            let [left, top, right, bottom] = image.area;
+            image.path.is_empty() || left >= right || top >= bottom
+        })
+    }) {
+        return Some(format!(
+            "subtitle {}'s picture has no file or no place in the frame",
+            index + 1
+        ));
+    }
     None
 }
 
@@ -469,6 +493,7 @@ mod tests {
             end: Tick(end),
             text: "a".to_owned(),
             look: crate::CueLook::default(),
+            image: None,
         };
         let asset = p.assets.get_mut(&AssetId(1)).ok_or("missing asset")?;
         asset.cues = Some(vec![cue(0, 10), cue(5, 20)]);
@@ -477,6 +502,19 @@ mod tests {
             vec![cue(10, 10)],
             vec![cue(-1, 5)],
             vec![cue(20, 30), cue(0, 10)],
+            // A picture with no place in the frame.
+            vec![crate::model::SubtitleCue {
+                image: Some(crate::CueImage {
+                    path: "a.png".to_owned(),
+                    area: [10, 0, 10, 480],
+                    colors: crate::ImageCueColors {
+                        background: [0, 0, 0],
+                        fill: [255, 255, 255],
+                        outline: [0, 0, 255],
+                    },
+                }),
+                ..cue(0, 10)
+            }],
         ] {
             let asset = p.assets.get_mut(&AssetId(1)).ok_or("missing asset")?;
             asset.cues = Some(bad);

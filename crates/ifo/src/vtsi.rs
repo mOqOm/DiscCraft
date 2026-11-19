@@ -77,8 +77,10 @@ pub fn write_vtsi(v: &Vtsi) -> Result<Vec<u8>, IfoError> {
     w.put_u32(0x0DC, 0);
 
     // The menus of the title set are made by DiscCraft at full size, whatever the title's own picture size is.
+    // (MPEG-2 also when the title is MPEG-1.)
     let menu_video = VideoAttr {
         resolution: crate::Resolution::Full,
+        mpeg1: false,
         ..v.video
     };
     w.put_slice(0x100, &menu_video.to_bytes());
@@ -581,6 +583,7 @@ fn read_video(r: &Reader<'_>) -> Result<VideoAttr, IfoError> {
     // The menus are at full size; the title may have one of the smaller picture sizes.
     let same = VideoAttr {
         resolution: vmgm.resolution,
+        mpeg1: vmgm.mpeg1,
         ..vts
     };
     if vmgm != same {
@@ -1049,11 +1052,14 @@ mod tests {
                 standard: Standard::Ntsc,
                 wide: false,
                 resolution: crate::Resolution::Full,
+                mpeg1: false,
             },
             audio: vec![AudioAttr {
                 coding: AudioCoding::Ac3,
                 channels: 2,
                 language: Some(*b"ja"),
+                bits: 16,
+                sample_rate: 48_000,
             }],
             pgcs: vec![Pgc {
                 prohibited_ops: 0,

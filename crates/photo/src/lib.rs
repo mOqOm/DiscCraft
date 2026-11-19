@@ -83,9 +83,13 @@ pub struct PsdSubpicture {
     /// Each pixel the number of the topmost subpicture layer drawn there (half opaque or more; the layer's own
     /// colour does not matter), 0 where none is.
     pub values: Vec<u8>,
-    /// The colour of each subpicture layer (`(=1)` to `(=3)`): its first opaque pixel. Encore's automatic colour
-    /// set uses them.
+    /// The colour of each subpicture layer (`(=1)` to `(=3)`): its last opaque pixel, as Encore takes it. Encore's
+    /// automatic colour set uses them.
     pub colors: [Option<[u8; 3]>; 3],
+    /// Each subpicture layer (`(=1)` to `(=3)`) as it is, in its own colours over the button's area: straight-alpha
+    /// RGBA, `width * height * 4` bytes, the layers of one number laid over each other (M6.335: a Blu-ray menu's
+    /// rich-colour highlights show them); `None` where the button has no such layer.
+    pub layers: [Option<Vec<u8>>; 3],
 }
 
 /// A menu read from a PSD.
@@ -333,6 +337,82 @@ fn force_visible(layer: &mut Layer) {
     }
 }
 
+/// The artwork of each button (`(+)` group) of the Encore-style menu PSD at `path`, in the order
+/// [`load_psd_menu`] gives the buttons: the button's place on the canvas (x, y, width, height), and the shape of
+/// what its set shows without its `(=n)` highlight layers — colour 1 where the artwork is half opaque or more.
+/// `None` for a button that shows nothing of its own. Encore's Create Subpicture makes a `(=1)` layer of this.
+///
+/// # Errors
+///
+/// When the file cannot be read as a PSD.
+pub fn psd_button_artwork(path: &Path) -> Result<PsdArtwork, PhotoError> {
+    let (doc, canvas) = load_document(path)?;
+    let size = rect_width_u32(canvas)
+        .zip(rect_height_u32(canvas))
+        .ok_or_else(|| PhotoError::Invalid("invalid canvas size".to_string()))?;
+    let mut out = Vec::new();
+    for layer in collect_button_layers(&doc.layers) {
+        let Some(button) = build_button(layer.clone(), canvas) else {
+            continue;
+        };
+        let place = [button.x, button.y, button.width, button.height];
+        let name = button.name.clone();
+        let rect = Rect {
+            x0: i32::try_from(button.x).unwrap_or(i32::MAX),
+            y0: i32::try_from(button.y).unwrap_or(i32::MAX),
+            x1: i32::try_from(button.x.saturating_add(button.width)).unwrap_or(i32::MAX),
+            y1: i32::try_from(button.y.saturating_add(button.height)).unwrap_or(i32::MAX),
+        };
+        // What the set shows: its layers as they are, the highlight layers and the thumbnail's place left out.
+        let mut shown = layer;
+        hide_highlight_layer(&mut shown);
+        let buffer = render_layer(&shown, canvas);
+        let artwork = crop_buffer_to_image(&buffer, rect, canvas).and_then(|image| {
+            let values: Vec<u8> = image
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| u8::from(pixel[3] >= 128))
+                .collect();
+            let drawn = values.iter().any(|value| *value != 0);
+            drawn.then_some(PsdSubpicture {
+                width: button.width,
+                height: button.height,
+                values,
+                colors: [None; 3],
+                layers: Default::default(),
+            })
+        });
+        out.push(PsdButtonArtwork {
+            place,
+            name,
+            artwork,
+        });
+    }
+    Ok(PsdArtwork { size, buttons: out })
+}
+
+/// The artwork of a menu PSD's buttons ([`psd_button_artwork`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PsdArtwork {
+    /// The canvas: width and height in pixels.
+    pub size: (u32, u32),
+    /// Each button: its place, name and artwork.
+    pub buttons: Vec<PsdButtonArtwork>,
+}
+
+/// One button of [`PsdArtwork`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PsdButtonArtwork {
+    /// Its place on the canvas (x, y, width, height).
+    pub place: [u32; 4],
+    /// Its name (the `(+)` group's, as [`load_psd_menu`] names the button).
+    pub name: String,
+    /// The shape of its artwork over that place; `None` when it shows nothing of its own.
+    pub artwork: Option<PsdSubpicture>,
+}
+
 fn build_button(layer: Layer, canvas: Rect) -> Option<PsdButton> {
     let name = button_name(&layer.name)?;
 
@@ -379,6 +459,7 @@ fn build_subpicture(layers: &[Layer], rect: Rect, canvas: Rect) -> Option<PsdSub
         .checked_mul(usize::try_from(height).ok()?)?;
     let mut values = vec![0_u8; len];
     let mut colors = [None; 3];
+    let mut own: [Option<Vec<u8>>; 3] = Default::default();
     for layer in layers {
         let Some(value) = highlight_value(&layer.name) else {
             continue;
@@ -395,13 +476,21 @@ fn build_subpicture(layers: &[Layer], rect: Rect, canvas: Rect) -> Option<PsdSub
                 *slot = value;
             }
         }
+        if let Some(layer) = own.get_mut(usize::from(value - 1)) {
+            match layer {
+                Some(below) => lay_over(below, &image.rgba),
+                None => *layer = Some(image.rgba.clone()),
+            }
+        }
+        // Encore takes a layer's colour from its last opaque pixel (M6.336: a gradient left to right gives the
+        // rightmost colour, top to bottom the lowest).
         if let Some(color) = colors.get_mut(usize::from(value - 1))
             && color.is_none()
         {
             *color = pixels
                 .iter()
-                .find(|pixel| pixel[3] == u8::MAX)
-                .or_else(|| pixels.iter().find(|pixel| pixel[3] >= 128))
+                .rfind(|pixel| pixel[3] == u8::MAX)
+                .or_else(|| pixels.iter().rfind(|pixel| pixel[3] >= 128))
                 .map(|pixel| [pixel[0], pixel[1], pixel[2]]);
         }
     }
@@ -413,7 +502,31 @@ fn build_subpicture(layers: &[Layer], rect: Rect, canvas: Rect) -> Option<PsdSub
             height,
             values,
             colors,
+            layers: own.map(|layer| layer.filter(|rgba| rgba_has_alpha(rgba))),
         })
+}
+
+/// Lays straight-alpha RGBA `top` over `below` (the same size), as one layer over another.
+fn lay_over(below: &mut [u8], top: &[u8]) {
+    for (under, over) in below
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(top.as_chunks::<4>().0)
+    {
+        let (top_alpha, under_alpha) = (u32::from(over[3]), u32::from(under[3]));
+        if top_alpha == 0 {
+            continue;
+        }
+        // The alpha of the two together, times 255.
+        let alpha = top_alpha * 255 + under_alpha * (255 - top_alpha);
+        for channel in 0..3 {
+            let mixed = u32::from(over[channel]) * top_alpha * 255
+                + u32::from(under[channel]) * under_alpha * (255 - top_alpha);
+            under[channel] = u8::try_from((mixed + alpha / 2) / alpha.max(1)).unwrap_or(u8::MAX);
+        }
+        under[3] = u8::try_from((alpha + 127) / 255).unwrap_or(u8::MAX);
+    }
 }
 
 /// What the first `(%)` layer of a button set covers (shown or not: it is where the video goes).

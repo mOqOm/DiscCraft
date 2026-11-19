@@ -94,6 +94,19 @@ fn media_is_opened_once_remembered_and_warmed() {
     store_blob("../evil", &video, &[9]);
     assert!(!dir.join("evil").exists() && cached_blob("../evil", &video).is_none());
 
+    // Cleaning the cache (Preferences ▸ Media) forgets the facts and the thumbnails, and nothing else in the
+    // folder; the file is read again when next asked about.
+    assert_eq!(disccraft_transcode::probe_cache_dir(), Some(cache.clone()));
+    let foreign = cache.join("notes.txt");
+    std::fs::write(&foreign, b"kept").unwrap();
+    assert!(disccraft_transcode::clear_probe_cache() >= 2);
+    assert!(!cache.join("media-facts.tsv").exists());
+    assert_eq!(cached_blob("thumb", &video), None);
+    assert!(foreign.is_file());
+    assert_eq!(disccraft_transcode::clear_probe_cache(), 0);
+    store_blob("thumb", &video, &[4]);
+    assert_eq!(cached_blob("thumb", &video), Some(vec![4]));
+
     // A file that is no media is given up on once: it counts as ready (asking fails at once, as before).
     let junk = dir.join("junk.mkv");
     std::fs::write(&junk, b"this is not a movie").unwrap();

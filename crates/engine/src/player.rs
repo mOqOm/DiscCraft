@@ -38,6 +38,79 @@ pub struct PlayerAudio {
     /// audio track runs along the whole timeline while the picture is one of its clips. Negative when the sound
     /// starts later than the playback does (an audio clip moved along its track): that long is silent first.
     pub from: Option<f64>,
+    /// Where in the audio file the sound ends (seconds), when that is before the file's end: an audio clip whose
+    /// out point is trimmed.
+    pub until: Option<f64>,
+    /// The sound as parts played one after the other (an audio track of several clips, from where the playback
+    /// starts). When there are any, they are what plays: `path`, `from` and `until` are not looked at.
+    pub parts: Vec<PlayerAudioPart>,
+}
+
+/// One part of a playback's sound: a stretch of a file, with silence in front.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayerAudioPart {
+    /// An audio file, or a video file with sound.
+    pub path: PathBuf,
+    /// Seconds of silence before the part (after the part before it has ended).
+    pub silence: f64,
+    /// Where in the file the part starts, seconds.
+    pub from: f64,
+    /// Where in the file the part ends, seconds (`None`: the file's end).
+    pub until: Option<f64>,
+}
+
+/// The sound of an audio track of several clips from `from` seconds of the timeline on, as the parts a player
+/// plays one after the other (M6.269): each clip's stretch of its file, with the silence up to it in front.
+///
+/// Empty for a track of one clip (which plays as before), and when a file is missing.
+#[must_use]
+pub fn audio_track_parts(
+    project: &disccraft_project::Project,
+    track: &disccraft_project::AudioTrack,
+    frame_seconds: f64,
+    from: f64,
+) -> Vec<PlayerAudioPart> {
+    if track.more.is_empty() {
+        return Vec::new();
+    }
+    let mut parts = Vec::new();
+    // The time on the timeline up to which the parts so far have sounded.
+    let mut cursor = from.max(0.0);
+    for (_, clip) in track.clips() {
+        let Some(path) = project
+            .assets
+            .get(&clip.asset)
+            .map(|asset| asset.media_file().into_owned())
+        else {
+            return Vec::new();
+        };
+        let start = f64::from(clip.start) * frame_seconds;
+        let trim = f64::from(clip.trim_start) * frame_seconds;
+        let until = clip.trim_end.map(|end| f64::from(end) * frame_seconds);
+        // Where the clip ends on the timeline: its out point, or its file's end.
+        let file_end = until.or_else(|| disccraft_transcode::probe_audio_seconds(&path).ok());
+        let end = file_end.map(|end| start + (end - trim).max(0.0));
+        if end.is_some_and(|end| end <= cursor) {
+            continue;
+        }
+        let (silence, file_from) = if start >= cursor {
+            (start - cursor, trim)
+        } else {
+            (0.0, trim + (cursor - start))
+        };
+        parts.push(PlayerAudioPart {
+            path,
+            silence,
+            from: file_from,
+            until,
+        });
+        match end {
+            Some(end) => cursor = end,
+            // A clip whose length is not known: what follows it cannot be placed.
+            None => break,
+        }
+    }
+    parts
 }
 
 #[derive(Debug, Default)]
@@ -581,14 +654,54 @@ fn decode_audio(
     shared: &AudioShared,
     stop: &AtomicBool,
 ) -> Result<(), String> {
-    let reader = AudioReader::open(&audio.path).map_err(|error| error.to_string())?;
-    let rate = f64::from(audio.rate);
-    // `as` saturates; `from` is a position in a file of at most hours.
-    let mut position = (from.max(0.0) * rate) as u64;
-    // Frames of silence before the sound starts (a negative `from`).
-    let mut silence = ((-from).max(0.0) * rate) as u64;
+    // One part: the file from `from` (a negative `from` is silence first), up to the trimmed out point.
+    let whole;
+    let parts: &[PlayerAudioPart] = if audio.parts.is_empty() {
+        whole = [PlayerAudioPart {
+            path: audio.path.clone(),
+            silence: (-from).max(0.0),
+            from: from.max(0.0),
+            until: audio.until,
+        }];
+        &whole
+    } else {
+        &audio.parts
+    };
+    for part in parts {
+        if !decode_audio_part(part, audio.rate, shared, stop)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Decodes one part into the queue; `false` when the playback was stopped (no further part is wanted).
+fn decode_audio_part(
+    part: &PlayerAudioPart,
+    output_rate: u32,
+    shared: &AudioShared,
+    stop: &AtomicBool,
+) -> Result<bool, String> {
+    let reader = AudioReader::open(&part.path).map_err(|error| error.to_string())?;
+    let rate = f64::from(output_rate);
+    let seconds = |value: f64| {
+        if value.is_finite() {
+            value.max(0.0)
+        } else {
+            0.0
+        }
+    };
+    // `as` saturates; the positions are in files of at most hours.
+    let mut position = (seconds(part.from) * rate) as u64;
+    // Frames of silence before the sound starts.
+    let mut silence = (seconds(part.silence) * rate) as u64;
     let ahead = (AUDIO_AHEAD * rate) as usize;
     let chunk = ((AUDIO_CHUNK * rate) as usize).max(1);
+    // The frame the sound ends in front of, when the clip's out point is trimmed.
+    let end = part
+        .until
+        .filter(|until| until.is_finite())
+        .map(|until| (until.max(0.0) * rate) as u64);
     while !stop.load(Ordering::Relaxed) {
         let queued = {
             let mut queue = shared.queue.lock().map_err(|error| error.to_string())?;
@@ -612,18 +725,24 @@ fn decode_audio(
                 .extend(std::iter::repeat_n(0.0, frames as usize * 2));
             continue;
         }
+        // Up to the trimmed out point.
+        let chunk = match end {
+            Some(end) if position >= end => return Ok(true),
+            Some(end) => chunk.min(usize::try_from(end - position).unwrap_or(chunk)),
+            None => chunk,
+        };
         let samples = reader
-            .read_stereo(position, chunk, audio.rate)
+            .read_stereo(position, chunk, output_rate)
             .map_err(|error| error.to_string())?;
         if samples.len() < 2 {
-            return Ok(());
+            return Ok(true);
         }
         let frames = u64::try_from(samples.len() / 2).unwrap_or(0);
         position = position.saturating_add(frames);
         let mut queue = shared.queue.lock().map_err(|error| error.to_string())?;
         queue.samples.extend(samples);
     }
-    Ok(())
+    Ok(false)
 }
 
 /// The size of the black frames of a playback without a picture: small, in the shape of `size`.
@@ -826,9 +945,11 @@ mod tests {
         assert!(silent.no_picture().is_none());
 
         let audio = PlayerAudio {
+            parts: Vec::new(),
             path: video.clone(),
             rate: 48_000,
             from: None,
+            until: None,
         };
         let player = Player::start_sized(video, Some(audio), 0.5, 30.0, Some((1920, 1080)));
         let frame = std::cell::RefCell::new(None);
@@ -949,6 +1070,147 @@ mod tests {
         assert_eq!(taken(&feed), (1, 0, 299));
     }
 
+    /// A WAV of `seconds` of one steady value (16-bit mono, 48 kHz).
+    fn steady_wav(path: &std::path::Path, seconds: f64, value: i16) {
+        let samples = (seconds * 48_000.0) as u32;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + samples * 2).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&48_000_u32.to_le_bytes());
+        wav.extend_from_slice(&96_000_u32.to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(samples * 2).to_le_bytes());
+        for _ in 0..samples {
+            wav.extend_from_slice(&value.to_le_bytes());
+        }
+        std::fs::write(path, wav).unwrap();
+    }
+
+    /// M6.269: the sound of a track of several clips plays as parts: each a stretch of its file, with its
+    /// silence in front; and the parts of a track are worked out from where the playback starts.
+    #[test]
+    fn the_parts_of_a_sound_play_one_after_the_other() {
+        use super::{PlayerAudioPart, audio_track_parts, decode_audio};
+        use disccraft_project::{AudioClip, AudioTrack, Project};
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-player-parts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (loud, soft) = (dir.join("loud.wav"), dir.join("soft.wav"));
+        steady_wav(&loud, 0.5, 16_384);
+        steady_wav(&soft, 0.5, 4_096);
+
+        // 0.1 s of the loud file from its 0.1 s on, 0.05 s of silence, then 0.05 s of the soft file.
+        let audio = PlayerAudio {
+            path: loud.clone(),
+            rate: 48_000,
+            from: None,
+            until: None,
+            parts: vec![
+                PlayerAudioPart {
+                    path: loud.clone(),
+                    silence: 0.0,
+                    from: 0.1,
+                    until: Some(0.2),
+                },
+                PlayerAudioPart {
+                    path: soft.clone(),
+                    silence: 0.05,
+                    from: 0.0,
+                    until: Some(0.05),
+                },
+            ],
+        };
+        let shared = AudioShared {
+            rate: 48_000,
+            clock: Arc::new(OnceLock::new()),
+            queue: Mutex::new(AudioQueue::default()),
+        };
+        decode_audio(
+            &audio,
+            0.0,
+            &shared,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+        let queued: Vec<f32> = shared
+            .queue
+            .lock()
+            .unwrap()
+            .samples
+            .iter()
+            .copied()
+            .collect();
+        let left: Vec<f32> = queued.iter().step_by(2).copied().collect();
+        assert_eq!(left.len(), 4_800 + 2_400 + 2_400);
+        let level = |from: usize, to: usize| {
+            let part = &left[from..to];
+            part.iter().map(|value| value.abs()).sum::<f32>() / part.len() as f32
+        };
+        assert!(
+            (level(100, 4_700) - 0.5).abs() < 0.02,
+            "{}",
+            level(100, 4_700)
+        );
+        assert!(level(4_900, 7_100) < 0.001, "{}", level(4_900, 7_100));
+        assert!(
+            (level(7_300, 9_500) - 0.125).abs() < 0.01,
+            "{}",
+            level(7_300, 9_500)
+        );
+
+        // A track: the loud file's first 0.3 s at the start, and the soft file from its 0.1 s on at 0.5 s of the
+        // timeline (frames of a tenth of a second).
+        let mut project = Project::default();
+        let first = project.add_asset(&loud).unwrap();
+        let second = project.add_asset(&soft).unwrap();
+        let track = AudioTrack {
+            trim_end: Some(3),
+            more: vec![AudioClip {
+                asset: second,
+                start: 5,
+                trim_start: 1,
+                trim_end: None,
+            }],
+            ..AudioTrack::of(first)
+        };
+        let parts = |from: f64| -> Vec<(bool, f64, f64, Option<f64>)> {
+            audio_track_parts(&project, &track, 0.1, from)
+                .into_iter()
+                .map(|part| {
+                    let round = |value: f64| (value * 1000.0).round() / 1000.0;
+                    (
+                        part.path.ends_with("soft.wav"),
+                        round(part.silence),
+                        round(part.from),
+                        part.until.map(round),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            parts(0.0),
+            [(false, 0.0, 0.0, Some(0.3)), (true, 0.2, 0.1, None)]
+        );
+        // From inside the first clip; from the gap; from inside the second clip; from behind everything.
+        assert_eq!(
+            parts(0.2),
+            [(false, 0.0, 0.2, Some(0.3)), (true, 0.2, 0.1, None)]
+        );
+        assert_eq!(parts(0.4), [(true, 0.1, 0.1, None)]);
+        assert_eq!(parts(0.7), [(true, 0.0, 0.3, None)]);
+        assert_eq!(parts(5.0), []);
+        // A track of one clip has no parts: it plays as it always did.
+        assert!(audio_track_parts(&project, &AudioTrack::of(first), 0.1, 0.0).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_feed_is_silent_until_the_picture_starts() {
         let feed = queued_feed(1000, Duration::ZERO, 4);
@@ -982,9 +1244,11 @@ mod tests {
         let mut player = Player::start_with_audio(
             video,
             Some(PlayerAudio {
+                parts: Vec::new(),
                 path: audio,
                 rate: 44_100,
                 from: None,
+                until: None,
             }),
             0.5,
             29.97,
@@ -1022,9 +1286,11 @@ mod tests {
         let mut player = Player::start_with_audio(
             fixture.clone(),
             Some(PlayerAudio {
+                parts: Vec::new(),
                 path: fixture,
                 rate: 48_000,
                 from: None,
+                until: None,
             }),
             0.0,
             29.97,
@@ -1046,9 +1312,11 @@ mod tests {
         let silent = Player::start_with_audio(
             PathBuf::from("no-such-video.m2v"),
             Some(PlayerAudio {
+                parts: Vec::new(),
                 path: PathBuf::from("no-such-audio.wav"),
                 rate: 0,
                 from: None,
+                until: None,
             }),
             0.0,
             29.97,

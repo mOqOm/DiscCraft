@@ -238,6 +238,8 @@ impl DiscCraftApp {
                     let area = ui.max_rect().shrink(4.0);
                     let size = self.monitor_zoom.size(area.size(), screen_aspect);
                     let screen = egui::Rect::from_center_size(area.center(), size);
+                    // The same picture goes to the video output (Preferences ▸ Audio/Video Output).
+                    self.video_out_frame = Some((texture.clone(), screen_aspect, false));
                     ui.painter().rect_filled(screen, 0.0, egui::Color32::BLACK);
                     let picture = fit_picture(screen, screen_aspect);
                     ui.painter().image(
@@ -281,18 +283,23 @@ impl DiscCraftApp {
                     if self.subtitle_edit.is_some() {
                         // 字幕を追加したあと / ダブルクリックしたあとは、字幕の場所で入力する（Encore と同じ）。
                         self.subtitle_edit_box(ui, shown);
-                    } else if let (Some((text, colors, look)), Some(id)) = (&subtitle, timeline) {
-                        let at = draw_subtitle(ui.painter(), shown, text, (*colors, *look));
-                        let response = ui
-                            .interact(
-                                at,
-                                ui.scope_id().with("monitor_subtitle"),
-                                egui::Sense::click(),
-                            )
-                            .on_hover_text(tl!("Double-click to change the subtitle's text"));
-                        if response.double_clicked() {
-                            let seconds = crate::timeline_view::playhead_seconds(ui.ctx(), id);
-                            self.edit_shown_subtitle(id, seconds);
+                    } else if let (Some(subtitle), Some(id)) = (&subtitle, timeline) {
+                        let painter = ui.painter().clone();
+                        let at =
+                            self.draw_shown_subtitle(ui.ctx(), &painter, (shown, shown), subtitle);
+                        // A picture subtitle has no text to change (as in Encore).
+                        if subtitle.image.is_none() {
+                            let response = ui
+                                .interact(
+                                    at,
+                                    ui.scope_id().with("monitor_subtitle"),
+                                    egui::Sense::click(),
+                                )
+                                .on_hover_text(tl!("Double-click to change the subtitle's text"));
+                            if response.double_clicked() {
+                                let seconds = crate::timeline_view::playhead_seconds(ui.ctx(), id);
+                                self.edit_shown_subtitle(id, seconds);
+                            }
                         }
                     }
                     if self.show_monitor_safe_areas {
@@ -302,22 +309,37 @@ impl DiscCraftApp {
                 }
                 if let Some(picture) = &preview_picture {
                     let area = ui.max_rect();
-                    let aspect = if picture.wide { 16.0 / 9.0 } else { 4.0 / 3.0 };
-                    let size = self.monitor_zoom.size(area.size(), aspect);
-                    let frame = egui::Rect::from_center_size(area.center(), size);
-                    ui.painter().image(
-                        picture.texture.id(),
-                        frame,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        egui::Color32::WHITE,
-                    );
-                    if let Some((text, colors, look)) = &picture.subtitle {
-                        let _ = draw_subtitle(
-                            ui.painter(),
-                            frame.intersect(area),
-                            text,
-                            (*colors, *look),
+                    // On a 4:3 television (Preferences ▸ Preview) a 16:9 title is letterboxed: the screen is
+                    // 4:3 and black, the picture as wide as it and nine sixteenths as high. Panned and scanned,
+                    // the picture is as high as the screen and its middle fills it (the sides are cut).
+                    let (screen_rect, frame) =
+                        tv_screen(picture.wide, &self.preview_prefs, area, self.monitor_zoom);
+                    if screen_rect != frame {
+                        ui.painter()
+                            .rect_filled(screen_rect, 0.0, egui::Color32::BLACK);
+                    }
+                    let clipped = ui.painter().with_clip_rect(screen_rect.intersect(area));
+                    if picture.fitted {
+                        // A slide: its own shape inside the black frame.
+                        clipped.rect_filled(frame, 0.0, egui::Color32::BLACK);
+                        crate::preview_playback::draw_slides(
+                            &clipped,
+                            frame,
+                            (&picture.texture, picture.view),
+                            picture.blend.as_ref(),
                         );
+                    } else {
+                        clipped.image(
+                            picture.texture.id(),
+                            frame,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                    }
+                    if let Some(subtitle) = &picture.subtitle {
+                        let painter = ui.painter().clone();
+                        let _ =
+                            self.draw_shown_subtitle(ui.ctx(), &painter, (frame, area), subtitle);
                     }
                     if self.show_monitor_safe_areas {
                         crate::menu_editor::paint_safe_areas(ui.painter(), frame);
@@ -644,12 +666,62 @@ impl DiscCraftApp {
             return;
         };
 
-        let value = json!({ "path": path });
+        let value = self.with_player_settings(json!({ "path": path }));
         self.playback = None;
+        if !self.preview_player_accepts() {
+            return;
+        }
 
         if let Some(state) = self.run_query("preview.open", value) {
             self.status = tlf!("Preview opened: {path}", path = path);
             self.preview = parse_preview_state(&state);
+            self.note_parental_stop();
+        }
+    }
+
+    /// Whether the player of Preferences ▸ Preview plays this disc at all: a DVD limited to regions the player's
+    /// is not one of does not play (the status bar says so).
+    pub(crate) fn preview_player_accepts(&mut self) -> bool {
+        let region = self.preview_prefs.region;
+        let settings = &self.session.project.settings;
+        let refused = region != 0
+            && settings.kind == disccraft_project::DiscKind::Dvd
+            && !settings.regions.is_empty()
+            && !settings.regions.contains(&region);
+        if refused {
+            self.status = tlf!(
+                "The disc does not play in region {n} (Preferences ▸ Preview sets the player's region)",
+                n = region
+            );
+        }
+        !refused
+    }
+
+    /// `open` (the parameters of `preview.open`) with the player's parental level, when it has one set.
+    pub(crate) fn with_player_settings(&self, mut open: serde_json::Value) -> serde_json::Value {
+        let level = self.preview_prefs.parental_level;
+        if (1..=8).contains(&level)
+            && let Some(fields) = open.as_object_mut()
+        {
+            let _ = fields.insert("parentalLevel".to_owned(), json!(level));
+        }
+        open
+    }
+
+    /// Says why nothing plays when the disc's parental level stopped the preview's player.
+    pub(crate) fn note_parental_stop(&mut self) {
+        let player = self.preview_prefs.parental_level;
+        let disc = self.session.project.settings.parental_level;
+        if (1..=8).contains(&player)
+            && disc > player
+            && self.preview.title.is_none()
+            && self.preview.menu.is_none()
+        {
+            self.status = tlf!(
+                "The disc's parental level ({disc}) is above the player's ({player}): it does not play",
+                disc = disc,
+                player = player
+            );
         }
     }
 
@@ -704,6 +776,24 @@ impl DiscCraftApp {
             _ => {}
         }
         self.open_project_preview(Value::Object(params));
+    }
+
+    /// Encore の「ここからプレビューする」をメニューのタブのボタンで（M6.338）: そのメニューを、そのボタンを選んだ
+    /// 状態から。
+    pub(crate) fn preview_from_button(&mut self, menu: disccraft_project::MenuId, index: usize) {
+        let Some(pgcn) = self
+            .session
+            .project
+            .menus
+            .keys()
+            .position(|key| *key == menu)
+        else {
+            return;
+        };
+        self.open_project_preview(json!({
+            "menu": pgcn.saturating_add(1),
+            "button": index.saturating_add(1),
+        }));
     }
 
     pub(crate) fn close_preview(&mut self) {
@@ -788,6 +878,36 @@ pub(crate) fn zoom_combo(ui: &mut Ui, id: &str, zoom: &mut MonitorZoom) {
         })
         .response
         .on_hover_text(tl!("Magnification"));
+}
+
+/// The television the previews stand for (Preferences ▸ Preview): the screen in `area` at `zoom`, and where the
+/// picture lies on it. A 16:9 title on a 4:3 television is letterboxed (as wide as the screen) or panned and
+/// scanned (as high as the screen, its sides past it); otherwise the picture is the screen.
+pub(crate) fn tv_screen(
+    wide: bool,
+    prefs: &crate::workspace::PreviewPrefs,
+    area: egui::Rect,
+    zoom: MonitorZoom,
+) -> (egui::Rect, egui::Rect) {
+    let on_4x3 = wide && prefs.tv_4x3;
+    let screen = if on_4x3 || !wide {
+        4.0 / 3.0
+    } else {
+        16.0 / 9.0
+    };
+    let screen_rect = egui::Rect::from_center_size(area.center(), zoom.size(area.size(), screen));
+    if !on_4x3 {
+        return (screen_rect, screen_rect);
+    }
+    let picture = if prefs.pan_scan {
+        egui::vec2(screen_rect.height() * 16.0 / 9.0, screen_rect.height())
+    } else {
+        egui::vec2(screen_rect.width(), screen_rect.width() * 9.0 / 16.0)
+    };
+    (
+        screen_rect,
+        egui::Rect::from_center_size(screen_rect.center(), picture),
+    )
 }
 
 /// A colour of a timeline colour set as an egui colour (its opacity as alpha).

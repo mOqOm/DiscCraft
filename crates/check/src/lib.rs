@@ -25,6 +25,17 @@ use disccraft_project::Project;
 
 /// Checks the whole project before building.
 pub fn check_project(project: &Project) -> Vec<Problem> {
+    // Transcoded files located for the disc's kind are what the build takes (a source that is gone with them is
+    // fine, as in Encore after Locate Transcoded File).
+    let located;
+    let project = if project.has_located_transcodes() {
+        located = project
+            .with_located_transcodes()
+            .unwrap_or_else(|_| project.clone());
+        &located
+    } else {
+        project
+    };
     let mut problems = project.check();
     let base_errors = has_errors(&problems);
 
@@ -63,6 +74,7 @@ pub fn usage(project: &Project) -> Result<Estimate, String> {
     // Button transitions are titles on the disc too.
     let expanded = project
         .with_transitions_expanded()
+        .and_then(|expanded| expanded.with_located_transcodes())
         .map_err(|err| err.to_string())?;
     disccraft_dvd::estimate(&expanded).map_err(|err| err.to_string())
 }

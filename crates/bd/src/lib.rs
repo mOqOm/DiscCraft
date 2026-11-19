@@ -154,9 +154,8 @@ pub fn transcode_now(
             .map_err(|error| BdError::Prepare(error.to_string()));
     }
     // The rates are the whole project's; the titles made are the ones asked for.
-    let hd_rates = disccraft_dvd::hd_budget(project)
-        .map_err(|error| BdError::Prepare(error.to_string()))?
-        .map_or((0, 0), |budget| (budget.target_kbps, budget.max_kbps));
+    let hd_budget =
+        disccraft_dvd::hd_budget(project).map_err(|error| BdError::Prepare(error.to_string()))?;
     let mut wanted = project.clone();
     if let Some(asset) = only {
         wanted
@@ -167,9 +166,45 @@ pub fn transcode_now(
     let titles = load_title_streams_for_hd(&wanted, cache_dir, progress)
         .map_err(|error| BdError::Prepare(error.to_string()))?;
     for title in &titles {
-        let _ = hd::hd_title(&wanted, title, cache_dir, hd_rates, progress)?;
+        let rates = hd::title_rates(&wanted, title, hd_budget.as_ref());
+        let _ = hd::hd_title(&wanted, title, cache_dir, rates, progress)?;
     }
     Ok(())
+}
+
+/// File ▸ Render ▸ Slideshow on a Blu-ray: transcodes the slideshows (`only`: one of them) into `cache_dir` as a
+/// build would (SD: as a DVD's; HD: at the disc's HD size and the rate the whole project gives its titles).
+/// Returns how many.
+///
+/// # Errors
+///
+/// When a slideshow cannot be made.
+pub fn render_slideshows(
+    project: &Project,
+    cache_dir: &Path,
+    only: Option<u64>,
+    progress: &mut dyn FnMut(&str, f32),
+) -> Result<usize, BdError> {
+    if project.settings.bd_video.hd().is_none() {
+        return disccraft_dvd::render_slideshows(project, cache_dir, only, progress)
+            .map_err(|error| BdError::Prepare(error.to_string()));
+    }
+    let hd_budget =
+        disccraft_dvd::hd_budget(project).map_err(|error| BdError::Prepare(error.to_string()))?;
+    let mut wanted = project.clone();
+    wanted.timelines.clear();
+    wanted.chapter_playlists.clear();
+    wanted
+        .slideshows
+        .retain(|id, _| only.is_none_or(|wanted| *id == wanted));
+    let count = wanted.slideshows.len();
+    let titles = load_title_streams_for_hd(&wanted, cache_dir, progress)
+        .map_err(|error| BdError::Prepare(error.to_string()))?;
+    for title in &titles {
+        let rates = hd::title_rates(&wanted, title, hd_budget.as_ref());
+        let _ = hd::hd_title(&wanted, title, cache_dir, rates, progress)?;
+    }
+    Ok(count)
 }
 
 /// Build a BDMV folder with an explicit cache directory and progress callback.
@@ -197,13 +232,14 @@ pub fn build_bdmv_with(
     }
     .map_err(|error| BdError::Prepare(error.to_string()))?;
 
-    // The HD video's bitrate: the format's usual one, or less when the titles would not fit the disc at it.
-    let hd_rates = disccraft_dvd::hd_budget(project)
-        .map_err(|error| BdError::Prepare(error.to_string()))?
-        .map_or((0, 0), |budget| (budget.target_kbps, budget.max_kbps));
+    // The HD video's bitrate: the format's usual one, or less when the titles would not fit the disc at it (each
+    // title at its own format's codec's).
+    let hd_budget =
+        disccraft_dvd::hd_budget(project).map_err(|error| BdError::Prepare(error.to_string()))?;
     let mut hd_titles = Vec::with_capacity(titles.len());
     for title in &titles {
-        hd_titles.push(hd::hd_title(project, title, cache_dir, hd_rates, progress)?);
+        let rates = hd::title_rates(project, title, hd_budget.as_ref());
+        hd_titles.push(hd::hd_title(project, title, cache_dir, rates, progress)?);
     }
 
     let mut output = BuildOutput::default();
@@ -278,7 +314,8 @@ struct BuildOutput {
     /// Each title's UO mask (its timeline's and the disc's prohibited operations), by title number.
     title_uo: BTreeMap<u16, u64>,
     /// The titles that are slideshows advanced by hand (Encore's 手動で進める): a still after every slide.
-    manual_titles: std::collections::BTreeSet<u16>,
+    /// The slideshow titles with slides that are advanced by hand: which of each title's slides are held.
+    manual_titles: std::collections::BTreeMap<u16, Vec<bool>>,
     backup_files: Vec<(PathBuf, PathBuf, u64)>,
     total_bytes: u64,
 }
@@ -298,6 +335,9 @@ fn prepare_directories(out_dir: &Path) -> Result<Directories, BdError> {
     let backup_playlist = backup.join("PLAYLIST");
     let backup_clipinf = backup.join("CLIPINF");
     let backup_bdjo = backup.join("BDJO");
+    // Beside BDMV: the certificate directory of a disc (empty on an unprotected one), which players look for.
+    let certificate = out_dir.join("CERTIFICATE");
+    let certificate_backup = certificate.join("BACKUP");
 
     let dirs = [
         playlist.as_path(),
@@ -311,6 +351,8 @@ fn prepare_directories(out_dir: &Path) -> Result<Directories, BdError> {
         backup_playlist.as_path(),
         backup_clipinf.as_path(),
         backup_bdjo.as_path(),
+        certificate.as_path(),
+        certificate_backup.as_path(),
     ];
 
     for dir in dirs {
@@ -353,6 +395,10 @@ fn write_title_clips(
 ) -> Result<Vec<PendingPopup>, BdError> {
     let mut pending = Vec::new();
     for (index, title) in titles.iter().enumerate() {
+        // Progress panel ▸ Stop while the titles are multiplexed: before the next title's clip is written.
+        if disccraft_transcode::stop_requested() {
+            return Err(BdError::Prepare(disccraft_transcode::STOPPED.to_string()));
+        }
         let hd = hd_titles.get(index).and_then(Option::as_ref);
         let number = u16_from_usize(
             index
@@ -361,12 +407,13 @@ fn write_title_clips(
             "title number",
         )?;
         if let TitleSource::Slideshow(id) = title.source
-            && project
+            && let Some(held) = project
                 .slideshows
                 .get(&id)
-                .is_some_and(|slideshow| slideshow.manual_advance)
+                .map(disccraft_project::Slideshow::held_slides)
+                .filter(|held| held.contains(&true))
         {
-            let _ = output.manual_titles.insert(number);
+            let _ = output.manual_titles.insert(number, held);
         }
         let own: &[disccraft_project::UserOp] = match title.source {
             TitleSource::Timeline(id) => project
@@ -450,8 +497,8 @@ fn record_title_files(
 
     let playlist_name = format!("{number:05}.mpls");
     let playlist_path = dirs.playlist.join(&playlist_name);
-    let mut playlist = if output.manual_titles.contains(&number) {
-        manual_slides_playlist(built)?
+    let mut playlist = if let Some(held) = output.manual_titles.get(&number) {
+        manual_slides_playlist(built, held)?
     } else {
         single_title_playlist(built)?
     };
@@ -504,18 +551,21 @@ fn write_popup_titles(
 /// PlayItem still mode: hold the last picture until the viewer moves on.
 const STILL_UNTIL_USER: u8 = 2;
 
-/// A slideshow advanced by hand (Encore's 手動で進める): one PlayItem per slide (the spans between its marks), each
-/// holding its last picture until the viewer moves on, as DVD holds each slide's cell.
-fn manual_slides_playlist(built: &BuiltClip) -> Result<mpls::PlayList, BdError> {
+/// A slideshow advanced by hand (Encore's 手動で進める): one PlayItem per slide (the spans between its marks). A
+/// slide that is `held` keeps its last picture until the viewer moves on, as DVD holds that slide's cell; the
+/// others play on.
+fn manual_slides_playlist(built: &BuiltClip, held: &[bool]) -> Result<mpls::PlayList, BdError> {
     let slides: Vec<u32> = (0..built.marks.len())
         .map(|index| u32::try_from(index).map_err(|_| invalid("too many slides")))
         .collect::<Result<_, _>>()?;
     let mut items = Vec::with_capacity(slides.len());
     let mut marks = Vec::with_capacity(slides.len());
     let mut duration_90k = 0_u64;
-    for mut item in chapter_span_items(built, &slides)? {
-        item.still_mode = STILL_UNTIL_USER;
-        item.still_time = 0;
+    for (slide, mut item) in chapter_span_items(built, &slides)?.into_iter().enumerate() {
+        if held.get(slide).copied().unwrap_or(false) {
+            item.still_mode = STILL_UNTIL_USER;
+            item.still_time = 0;
+        }
         push_play_item(&mut items, &mut marks, &mut duration_90k, item)?;
     }
     Ok(mpls::PlayList {

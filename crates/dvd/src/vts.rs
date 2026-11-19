@@ -6,7 +6,7 @@ use disccraft_ifo::{
 };
 use disccraft_nav::{ChapterPlaylistNav, TitleNav};
 use disccraft_project::PlaybackOrder;
-use disccraft_psmux::mux::{AudioSource, MuxInput, VobsLayout, mux_vobs};
+use disccraft_psmux::mux::{AudioSource, MuxExtra, MuxInput, VobsLayout, mux_vobs_with};
 use disccraft_psmux::sink::VobFileSink;
 
 use crate::source::{LoadedAudio, LoadedTitle, channels_u8};
@@ -54,7 +54,18 @@ pub(crate) fn build_title_set(
 ) -> Result<BuiltVts, DvdError> {
     let mut sink = VobFileSink::new(video_ts, vts);
     let input = mux_input(loaded);
-    let layout = mux_vobs(&input, &mut sink)?;
+    // Progress panel ▸ Stop also ends a title's multiplexing before its next VOBU (M6.340).
+    let extra = MuxExtra {
+        stop: Some(crate::stop_requested),
+        ..MuxExtra::default()
+    };
+    let layout = mux_vobs_with(&input, &extra, &mut sink).map_err(|error| {
+        if crate::stop_requested() {
+            DvdError::Unsupported(crate::STOPPED.to_string())
+        } else {
+            error.into()
+        }
+    })?;
 
     let vob_bytes = sum_sizes(&sink.files())?;
     let duration = layout
@@ -70,7 +81,7 @@ pub(crate) fn build_title_set(
         standard,
         nav,
         (
-            loaded.cell_still,
+            loaded.cell_stills.as_slice(),
             &loaded.program_cells,
             loaded.layer_break_cell,
         ),
@@ -118,6 +129,8 @@ pub(crate) fn build_title_set(
                 standard,
             )
             .ok_or_else(|| invalid("the video's picture size is not a DVD size"))?,
+            // MPEG-1 video goes on as it is (M6.350).
+            mpeg1: loaded.video.sequence.is_mpeg1(),
         },
         audio: audio_attrs,
         pgcs,
@@ -387,6 +400,10 @@ fn mux_input<'a>(loaded: &'a LoadedTitle) -> MuxInput<'a> {
                 data: data.as_slice(),
             },
             LoadedAudio::Lpcm { stream, .. } => AudioSource::Lpcm(stream),
+            LoadedAudio::Mp2 { stream, data, .. } => AudioSource::Mpeg {
+                stream,
+                data: data.as_slice(),
+            },
         })
         .collect();
 
@@ -418,37 +435,50 @@ fn build_audio_attrs(audio: &[LoadedAudio]) -> Result<Vec<AudioAttr>, DvdError> 
     let mut out = Vec::with_capacity(audio.len());
 
     for item in audio {
-        let (coding, channels, language) = match item {
+        let (coding, channels, language, (bits, sample_rate)) = match item {
             LoadedAudio::Ac3 {
                 stream, language, ..
-            } => (AudioCoding::Ac3, channels_u8(stream.channels)?, *language),
+            } => (
+                AudioCoding::Ac3,
+                channels_u8(stream.channels)?,
+                *language,
+                (16, 48_000),
+            ),
             LoadedAudio::Dts {
                 stream, language, ..
-            } => (AudioCoding::Dts, stream.channels, *language),
-            LoadedAudio::Lpcm { stream, language } => {
-                (AudioCoding::Lpcm, channels_u8(stream.channels)?, *language)
-            }
+            } => (AudioCoding::Dts, stream.channels, *language, (16, 48_000)),
+            LoadedAudio::Lpcm { stream, language } => (
+                AudioCoding::Lpcm,
+                channels_u8(stream.channels)?,
+                *language,
+                (stream.bits, stream.sample_rate),
+            ),
+            LoadedAudio::Mp2 {
+                stream, language, ..
+            } => (AudioCoding::Mpeg1, stream.channels, *language, (16, 48_000)),
         };
 
         out.push(AudioAttr {
             coding,
             channels,
             language,
+            bits,
+            sample_rate,
         });
     }
 
     Ok(out)
 }
 
-/// Build the title PGC from mux layout and compiled navigation. `cell_still` is every cell's still time
-/// (`0xFF` for a manual-advance slideshow).
+/// Build the title PGC from mux layout and compiled navigation. `cell_stills` is each cell's still time (`0xFF`
+/// for a slide that is advanced by hand; none for the cells past its end).
 fn build_pgc(
     layout: &VobsLayout,
     duration: u32,
     (audio_streams, subtitle_streams): (usize, usize),
     standard: Standard,
     nav: &TitleNav,
-    (cell_still, program_cells, layer_break_cell): (u8, &[usize], Option<usize>),
+    (cell_stills, program_cells, layer_break_cell): (&[u8], &[usize], Option<usize>),
     palette: [u32; 16],
 ) -> Result<Pgc, DvdError> {
     if layout.cells.is_empty() {
@@ -473,7 +503,7 @@ fn build_pgc(
                 stc_discontinuity: idx == 0,
                 // The layer break's cell is not seamless: the player may pause there to change layers.
                 seamless: idx != 0 && Some(idx) != layer_break_cell,
-                still_time: cell_still,
+                still_time: cell_stills.get(idx).copied().unwrap_or(0),
                 playback_time: BcdTime::from_90k(u64::from(cell_duration), standard),
                 first_sector: cell.first_sector,
                 last_vobu_start: cell.last_vobu_start,

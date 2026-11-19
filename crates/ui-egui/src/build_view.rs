@@ -60,6 +60,56 @@ pub(crate) fn capacity_choices(kind: DiscKind) -> &'static [Capacity] {
     Capacity::choices(kind)
 }
 
+/// The capacities offered for a disc kind with Custom last (Encore's Size list): the custom one is `current` when
+/// it is custom, else as large as `current` (within what the kind holds), to be changed in the box beside.
+pub(crate) fn capacity_list(kind: DiscKind, current: Capacity) -> Vec<Capacity> {
+    let mut list = capacity_choices(kind).to_vec();
+    list.push(match current {
+        Capacity::Custom { .. } => current,
+        other => {
+            let range = Capacity::custom_range(kind);
+            Capacity::Custom {
+                bytes: other.bytes().clamp(*range.start(), *range.end()),
+            }
+        }
+    });
+    list
+}
+
+/// A custom capacity's size in gigabytes (10⁹ bytes, as the sizes in the list), edited in place: the new size in
+/// bytes when it was changed (on release, not while dragged).
+pub(crate) fn custom_capacity_box(
+    ui: &mut Ui,
+    salt: &str,
+    kind: DiscKind,
+    bytes: u64,
+) -> Option<u64> {
+    let id = ui.make_persistent_id(salt);
+    let range = Capacity::custom_range(kind);
+    let gigabytes = |bytes: u64| bytes as f64 / 1e9;
+    let mut size = ui
+        .data(|data| data.get_temp::<f64>(id))
+        .unwrap_or_else(|| gigabytes(bytes));
+    let response = ui
+        .add(
+            egui::DragValue::new(&mut size)
+                .speed(0.01)
+                .range(gigabytes(*range.start())..=gigabytes(*range.end()))
+                .fixed_decimals(2)
+                .suffix(" GB"),
+        )
+        .on_hover_text(tl!(
+            "The disc's size, in gigabytes (1 GB = 1,000,000,000 bytes)"
+        ));
+    if response.dragged() {
+        ui.data_mut(|data| data.insert_temp(id, size));
+        return None;
+    }
+    ui.data_mut(|data| data.remove::<f64>(id));
+    let wanted = ((size * 1e9).round() as u64).clamp(*range.start(), *range.end());
+    ((response.changed() || response.drag_stopped()) && wanted != bytes).then_some(wanted)
+}
+
 /// Text for a capacity choice.
 fn capacity_text(capacity: &Capacity) -> String {
     match capacity {
@@ -390,7 +440,7 @@ impl DiscCraftApp {
         }
     }
 
-    /// Draws the capacity combo.
+    /// Draws the capacity combo (Encore: the sizes, then Custom with the size beside it).
     fn capacity_combo(&mut self, ui: &mut Ui) {
         let kind = self.session.project.settings.kind;
         let current = self.session.project.settings.capacity;
@@ -399,17 +449,23 @@ impl DiscCraftApp {
         egui::ComboBox::from_id_salt("build_capacity")
             .selected_text(capacity_text(&current))
             .show_ui(ui, |ui| {
-                for choice in capacity_choices(kind).iter().copied() {
-                    if ui
-                        .selectable_label(current == choice, capacity_text(&choice))
-                        .clicked()
-                    {
+                for choice in capacity_list(kind, current) {
+                    let text = match choice {
+                        Capacity::Custom { .. } => tl!("Custom").to_string(),
+                        other => capacity_text(&other),
+                    };
+                    if ui.selectable_label(current == choice, text).clicked() {
                         selected = Some(choice);
                     }
                 }
             });
+        if let Capacity::Custom { bytes } = current
+            && let Some(bytes) = custom_capacity_box(ui, "build_custom_capacity", kind, bytes)
+        {
+            selected = Some(Capacity::Custom { bytes });
+        }
 
-        if let Some(capacity) = selected {
+        if let Some(capacity) = selected.filter(|capacity| *capacity != current) {
             self.set_capacity(capacity);
         }
     }
@@ -429,7 +485,40 @@ impl DiscCraftApp {
                 });
 
             self.region_checkbox_grid(ui);
+            self.parental_level_row(ui);
         });
+    }
+
+    /// Draws the disc's parental level: none, or 1 to 8.
+    fn parental_level_row(&mut self, ui: &mut Ui) {
+        let current = self.session.project.settings.parental_level;
+        let text = |level: u8| match level {
+            0 => tl!("None").to_string(),
+            level => level.to_string(),
+        };
+        let mut selected = None;
+        ui.horizontal(|ui| {
+            ui.label(tl!("Parental level:"));
+            egui::ComboBox::from_id_salt("build_parental_level")
+                .selected_text(text(current))
+                .show_ui(ui, |ui| {
+                    for level in 0..=8 {
+                        if ui.selectable_label(current == level, text(level)).clicked() {
+                            selected = Some(level);
+                        }
+                    }
+                });
+        })
+        .response
+        .on_hover_text(tl!(
+            "A player set to a lower level asks for its password before the disc plays"
+        ));
+        if let Some(level) = selected {
+            let _ = self.run_command(
+                "disc.setParentalLevel",
+                serde_json::json!({ "level": level }),
+            );
+        }
     }
 
     /// Draws the all/custom region mode controls.
@@ -549,7 +638,7 @@ impl DiscCraftApp {
 /// Unit tests for pure build view helpers.
 #[cfg(test)]
 mod tests {
-    use super::{capacity_choices, output_label, toggle_region};
+    use super::{capacity_choices, capacity_list, output_label, toggle_region};
     use crate::i18n::{Language, set_current};
     use disccraft_build::OutputKind;
     use disccraft_project::{Capacity, DiscKind};
@@ -590,6 +679,38 @@ mod tests {
                 Capacity::Bd100,
                 Capacity::Bd128
             ]
+        );
+    }
+
+    /// Encore's Size list ends with Custom: as large as the size chosen, or the custom size itself; never more
+    /// than a single-layer DVD on a DVD.
+    #[test]
+    fn the_capacity_list_ends_with_custom() {
+        assert_eq!(
+            capacity_list(DiscKind::Dvd, Capacity::Dvd5),
+            [
+                Capacity::Dvd5,
+                Capacity::Dvd9,
+                Capacity::Custom {
+                    bytes: 4_700_000_000
+                }
+            ]
+        );
+        assert_eq!(
+            capacity_list(DiscKind::Dvd, Capacity::Dvd9).last(),
+            Some(&Capacity::Custom {
+                bytes: 4_700_000_000
+            })
+        );
+        let mini = Capacity::Custom {
+            bytes: 1_400_000_000,
+        };
+        assert_eq!(capacity_list(DiscKind::Dvd, mini).last(), Some(&mini));
+        assert_eq!(
+            capacity_list(DiscKind::BluRay, Capacity::Bd50).last(),
+            Some(&Capacity::Custom {
+                bytes: Capacity::Bd50.bytes()
+            })
         );
     }
 

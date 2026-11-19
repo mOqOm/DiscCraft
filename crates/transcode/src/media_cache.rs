@@ -134,6 +134,52 @@ pub fn enable_probe_cache(dir: &Path) {
     }
 }
 
+/// The folder what is remembered of media files is kept in ([`enable_probe_cache`]); `None` when nothing is kept.
+#[must_use]
+pub fn probe_cache_dir() -> Option<PathBuf> {
+    cache_dir()
+}
+
+/// Forgets what was remembered of media files (Encore's Media Cache Database ▸ Clean): the facts and the
+/// thumbnails in the cache folder. Files are read again when they are next asked about. Returns how many files
+/// went.
+pub fn clear_probe_cache() -> usize {
+    let Some(dir) = cache_dir() else {
+        return 0;
+    };
+    if let Ok(mut facts) = FACTS.lock()
+        && let Some(facts) = facts.as_mut()
+    {
+        facts.values.clear();
+    }
+    let mut removed = 0usize;
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return 0;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        // Only what this cache wrote: the facts, and the blobs (`<kind>-<16 hex digits>.bin`).
+        let ours = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name == "media-facts.tsv"
+                    || name.strip_suffix(".bin").is_some_and(|stem| {
+                        stem.rsplit_once('-').is_some_and(|(kind, key)| {
+                            !kind.is_empty()
+                                && kind.chars().all(|c| c.is_ascii_alphanumeric())
+                                && key.len() == 16
+                                && key.chars().all(|c| c.is_ascii_hexdigit())
+                        })
+                    })
+            });
+        if ours && path.is_file() && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// The folder of the remembered facts, when [`enable_probe_cache`] named one.
 fn cache_dir() -> Option<PathBuf> {
     let facts = FACTS.lock().ok()?;
@@ -285,7 +331,9 @@ pub fn warm(path: &Path) {
             let known = video || audio;
             // Not openable: nothing to wait for, also when its header alone told its facts.
             if !opened
-                && (!known || crate::mkv_probe::quick(&path).is_some())
+                && (!known
+                    || crate::mkv_probe::quick(&path).is_some()
+                    || crate::ts_probe::looks_like_ts(&path))
                 && let Ok(mut refused) = REFUSED.lock()
             {
                 let _ = refused

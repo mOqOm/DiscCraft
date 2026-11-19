@@ -118,7 +118,19 @@ enum AudioKind<'a> {
     },
     /// DVD LPCM stream.
     Lpcm(&'a LpcmStream),
+    /// MPEG audio: whole frames in an MPEG audio stream's own PES packets (stream ids from 0xC0).
+    Mpeg {
+        /// The frames of the stream.
+        frames: &'a [crate::es::Ac3Frame],
+        /// The elementary stream bytes.
+        data: &'a [u8],
+    },
 }
+
+/// The stream id of the first MPEG audio stream.
+const MPEG_AUDIO_STREAM_ID: u8 = 0xC0;
+/// Maximum MPEG audio elementary data bytes in one pack.
+const MPEG_AUDIO_DATA_CAPACITY: usize = SECTOR - PACK_HEADER_LEN - PES_HEADER_BASE - AUDIO_HDR_LEN;
 
 /// Scheduler state for one audio stream.
 #[derive(Debug)]
@@ -204,6 +216,17 @@ pub(crate) fn init_audio_states<'a>(input: &MuxInput<'a>) -> Result<Vec<AudioSta
                         frames: &stream.frames,
                         data,
                         base: 0x88,
+                    },
+                    next_frame: 0,
+                    next_byte: 0,
+                    start_pts: input.audio_start_pts,
+                });
+            }
+            AudioSource::Mpeg { stream, data } => {
+                states.push(AudioState {
+                    kind: AudioKind::Mpeg {
+                        frames: &stream.frames,
+                        data,
                     },
                     next_frame: 0,
                     next_byte: 0,
@@ -643,11 +666,12 @@ fn emit_audio_pack(
         .ok_or_else(|| invalid("missing audio state"))?;
     let (payload, pts, _count) = state.build_payload(stream_index)?;
     let optional = pack::pts_bytes(pts, pts, false)?;
+    let stream_id = state.pes_stream_id(stream_index)?;
 
     pack::write_pes_pack(
         sector,
         scr,
-        PRIVATE_STREAM_ID,
+        stream_id,
         PES_FLAGS_PTS,
         AUDIO_HDR_LEN,
         &optional,
@@ -950,7 +974,7 @@ impl<'a> AudioState<'a> {
     /// Number of remaining frames in this audio stream.
     fn remaining_frames(&self) -> Result<usize, MuxError> {
         match &self.kind {
-            AudioKind::Framed { frames, .. } => frames
+            AudioKind::Framed { frames, .. } | AudioKind::Mpeg { frames, .. } => frames
                 .len()
                 .checked_sub(self.next_frame)
                 .ok_or_else(|| invalid("AC-3 frame index overflow")),
@@ -967,7 +991,7 @@ impl<'a> AudioState<'a> {
     /// Presentation timestamp of the next frame, in 27 MHz units.
     fn next_pts(&self) -> Result<i64, MuxError> {
         match &self.kind {
-            AudioKind::Framed { frames, .. } => frames
+            AudioKind::Framed { frames, .. } | AudioKind::Mpeg { frames, .. } => frames
                 .get(self.next_frame)
                 .map(|frame| frame.pts)
                 .ok_or_else(|| invalid("missing AC-3 frame")),
@@ -983,8 +1007,57 @@ impl<'a> AudioState<'a> {
                 self.build_ac3_payload(frames, data, base, stream_index)?
             }
             AudioKind::Lpcm(lpcm) => self.build_lpcm_payload(lpcm, stream_index)?,
+            AudioKind::Mpeg { frames, data } => self.build_mpeg_payload(frames, data)?,
         };
         Ok((payload, to_90k(pts), count))
+    }
+
+    /// The PES stream id of this stream's packs: private stream 1 (AC-3, DTS and LPCM tell their number in
+    /// the substream byte), or the MPEG audio stream of its number.
+    fn pes_stream_id(&self, stream_index: usize) -> Result<u8, MuxError> {
+        match self.kind {
+            AudioKind::Framed { .. } | AudioKind::Lpcm(_) => Ok(PRIVATE_STREAM_ID),
+            AudioKind::Mpeg { .. } => u8::try_from(stream_index)
+                .ok()
+                .filter(|index| *index < 8)
+                .and_then(|index| MPEG_AUDIO_STREAM_ID.checked_add(index))
+                .ok_or_else(|| invalid("audio stream number out of range")),
+        }
+    }
+
+    /// Build one PES payload of whole MPEG audio frames (as many as fit), timed by the first of them.
+    fn build_mpeg_payload(
+        &mut self,
+        frames: &[crate::es::Ac3Frame],
+        data: &[u8],
+    ) -> Result<(Vec<u8>, i64, usize), MuxError> {
+        let mut payload = Vec::with_capacity(MPEG_AUDIO_DATA_CAPACITY);
+        let mut index = self.next_frame;
+        let pts = frames
+            .get(index)
+            .map(|frame| frame.pts)
+            .ok_or_else(|| invalid("no MPEG audio frames"))?;
+        while let Some(frame) = frames.get(index) {
+            if frame.len > MPEG_AUDIO_DATA_CAPACITY - payload.len() {
+                break;
+            }
+            let end = frame
+                .offset
+                .checked_add(frame.len)
+                .ok_or_else(|| invalid("MPEG audio frame offset overflow"))?;
+            payload.extend_from_slice(
+                data.get(frame.offset..end)
+                    .ok_or_else(|| invalid("MPEG audio frame data out of range"))?,
+            );
+            index += 1;
+        }
+        if payload.is_empty() {
+            return Err(invalid("MPEG audio frame too large"));
+        }
+        let count = index - self.next_frame;
+        self.next_frame = index;
+        self.next_byte = 0;
+        Ok((payload, pts, count))
     }
 
     /// Build one AC-3 PES payload, filled: frames run on from one pack into the next, as DVD authoring packs them
@@ -1113,10 +1186,24 @@ impl<'a> AudioState<'a> {
 
         let frame_no = u8::try_from(self.next_frame % 20)
             .map_err(|_| invalid("LPCM frame number overflow"))?;
-        let attr = lpcm
-            .channels
-            .checked_sub(1)
-            .ok_or_else(|| invalid("LPCM channel count must be non-zero"))?;
+        // Word length (0: 16 bits, 2: 24), sampling frequency (0: 48 kHz, 1: 96 kHz) and channels less one.
+        let quantization: u8 = match lpcm.bits {
+            16 => 0,
+            24 => 2,
+            _ => return Err(invalid("LPCM word length must be 16 or 24 bits")),
+        };
+        let frequency: u8 = match lpcm.sample_rate {
+            48_000 => 0,
+            96_000 => 1,
+            _ => return Err(invalid("LPCM sample rate must be 48 or 96 kHz")),
+        };
+        let attr = (quantization << 6)
+            | (frequency << 4)
+            | lpcm
+                .channels
+                .checked_sub(1)
+                .filter(|channels| *channels < 8)
+                .ok_or_else(|| invalid("LPCM channel count must be 1..=8"))?;
 
         let mut payload = Vec::with_capacity(
             LPCM_SUBHEADER_LEN

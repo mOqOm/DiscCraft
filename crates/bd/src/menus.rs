@@ -622,19 +622,37 @@ fn build_ig_units_as(
     pts: u64,
     state: CompositionState,
 ) -> Result<Vec<EsUnit>, BdError> {
+    let count = menu_clip.commands.len();
     let colours = IgColours::new(menu_clip.menu, &rendered.highlight);
-    let palette = colours.palette(menu_clip.menu);
-    let mut objects = build_objects(rendered, menu_clip.menu, menu_clip.commands.len(), &colours)?;
+    let mut palette = colours.palette(menu_clip.menu);
+    let layers = ColourLayers::new(menu_clip.menu, count, colours.next_id());
+    palette.extend(layers.entries.iter().copied());
+    let mut objects = build_objects(rendered, menu_clip.menu, count, &colours)?;
+    layers.paint(
+        &mut objects,
+        rendered,
+        |index| object_ids(index).map(|ids| ids.selected),
+        1,
+    )?;
+    layers.paint(
+        &mut objects,
+        rendered,
+        |index| object_ids(index).map(|ids| ids.activated),
+        2,
+    )?;
+    let normal = menu_clip.popup || normal_shown(menu_clip.menu) || layers.any_normal();
     if menu_clip.popup {
         objects.extend(build_label_objects(rendered, menu_clip, &colours)?);
-    } else if normal_shown(menu_clip.menu) {
-        objects.extend(build_normal_objects(
+    } else if normal {
+        objects.extend(build_normal_objects(rendered, count, &colours)?);
+        layers.paint(
+            &mut objects,
             rendered,
-            menu_clip.commands.len(),
-            &colours,
-        )?);
+            |index| normal_object_id(index, count),
+            0,
+        )?;
     }
-    let composition = build_composition(project, rendered, menu_clip)?;
+    let composition = build_composition(project, rendered, menu_clip, normal)?;
     let segments =
         display_set_as(&composition, &palette, &objects, pts, state).map_err(video_error)?;
     segments.into_iter().map(segment_unit).collect()
@@ -788,6 +806,8 @@ struct IgColours {
     steps: u8,
     /// The slots of colours 2 and 3, by state, highlight group (0 to 2; 0 for the normal state) and colour.
     more: Vec<((State, usize, u8), u8)>,
+    /// The highest slot.
+    last: u8,
 }
 
 impl IgColours {
@@ -816,8 +836,14 @@ impl IgColours {
             last = last.saturating_add(1);
             more.push(((State::Normal, 0, n), last));
         }
+        // PSD buttons' layers in their own colours (M6.335) take the ids after these: leave them half.
+        let room = if has_colour_layers(menu) {
+            ROOM_FOR_COLOUR_LAYERS
+        } else {
+            u8::MAX
+        };
         let steps = if menu.rich_highlights {
-            RICH_STEPS.min(u8::MAX / last.max(1))
+            RICH_STEPS.min(room / last.max(1)).max(1)
         } else {
             1
         };
@@ -825,7 +851,13 @@ impl IgColours {
             rich: menu.rich_highlights,
             steps,
             more,
+            last,
         }
+    }
+
+    /// The first palette id after the colour set's.
+    fn next_id(&self) -> u16 {
+        u16::from(self.last) * u16::from(self.steps) + 1
     }
 
     /// The slot of colour `n` (1 to 3) in `state` of highlight group `group` (0 to 2); 0 when it has none.
@@ -934,6 +966,132 @@ impl IgColours {
             }
         }
         entries
+    }
+}
+
+/// The palette ids a rich highlight's colour set takes at most when PSD buttons' layers in their own colours need
+/// the rest.
+const ROOM_FOR_COLOUR_LAYERS: u8 = 128;
+
+/// Whether the menu shows PSD buttons' subpicture layers in their own colours (rich-colour highlights, M6.335).
+fn has_colour_layers(menu: &Menu) -> bool {
+    menu.rich_highlights
+        && menu.buttons.iter().any(|button| {
+            button
+                .subpicture
+                .as_ref()
+                .is_some_and(|sub| sub.color_states().is_some())
+        })
+}
+
+/// PSD buttons' subpicture layers in their own colours, as a rich-colour highlight shows them (Encore, M6.335):
+/// each button's normal, selected and activated pictures, and the palette entries of their colours (brought down
+/// to the ids left after the colour set's).
+struct ColourLayers {
+    /// Each button's pictures ([`disccraft_menu::button_color_states`]); `None` for a button without colour layers.
+    states: Vec<Option<[Option<Vec<u8>>; 3]>>,
+    /// The palette id of each colour.
+    ids: std::collections::HashMap<[u8; 4], u8>,
+    /// The palette entries.
+    entries: Vec<PaletteEntry>,
+}
+
+impl ColourLayers {
+    fn new(menu: &Menu, count: usize, first: u16) -> Self {
+        let states: Vec<_> = if has_colour_layers(menu) {
+            menu.buttons
+                .iter()
+                .take(count)
+                .map(disccraft_menu::button_color_states)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut counts: std::collections::HashMap<[u8; 4], u64> = std::collections::HashMap::new();
+        for picture in states.iter().flatten().flatten().flatten() {
+            for pixel in picture
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|pixel| pixel[3] > 0)
+            {
+                *counts.entry(*pixel).or_default() += 1;
+            }
+        }
+        let room = 256_usize.saturating_sub(usize::from(first));
+        let mut found: Vec<([u8; 4], u64)> = counts.into_iter().collect();
+        found.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let (palette, mapping) = if found.is_empty() || room == 0 {
+            (Vec::new(), Vec::new())
+        } else {
+            disccraft_project::reduce_colors(&found, room)
+        };
+        let id_of = |index: usize| u8::try_from(usize::from(first).checked_add(index)?).ok();
+        let ids = found
+            .iter()
+            .zip(&mapping)
+            .filter_map(|((colour, _), index)| Some((*colour, id_of(*index)?)))
+            .collect();
+        let entries = palette
+            .iter()
+            .enumerate()
+            .filter_map(|(index, [red, green, blue, alpha])| {
+                Some(rgba_to_entry(id_of(index)?, *red, *green, *blue, *alpha))
+            })
+            .collect();
+        Self {
+            states,
+            ids,
+            entries,
+        }
+    }
+
+    /// Whether a button shows a picture in its normal state.
+    fn any_normal(&self) -> bool {
+        self.states
+            .iter()
+            .flatten()
+            .any(|[normal, _, _]| normal.is_some())
+    }
+
+    /// Draws state `state` (0 normal, 1 selected, 2 activated) of each button with colour layers into its object
+    /// (`object_id` of the button's index), in place of the colour set's highlight: clear where its picture shows
+    /// nothing.
+    fn paint(
+        &self,
+        objects: &mut [IgObject],
+        rendered: &RenderedMenu,
+        object_id: impl Fn(usize) -> Result<u16, BdError>,
+        state: usize,
+    ) -> Result<(), BdError> {
+        for (index, states) in self.states.iter().enumerate() {
+            let Some(states) = states else {
+                continue;
+            };
+            let geometry = rendered
+                .buttons
+                .get(index)
+                .ok_or_else(|| invalid("missing button geometry"))?;
+            let size = pixel_count(
+                rect_width(geometry.x1, geometry.x2)?,
+                rect_height(geometry.y1, geometry.y2)?,
+            )?;
+            let id = object_id(index)?;
+            let Some(object) = objects.iter_mut().find(|object| object.id == id) else {
+                continue;
+            };
+            let picture = states.get(state).and_then(Option::as_deref);
+            object.pixels = (0..size)
+                .map(|pixel| {
+                    picture
+                        .and_then(|rgba| rgba.as_chunks::<4>().0.get(pixel))
+                        .filter(|colour| colour[3] > 0)
+                        .and_then(|colour| self.ids.get(colour).copied())
+                        .unwrap_or(0)
+                })
+                .collect();
+        }
+        Ok(())
     }
 }
 
@@ -1181,12 +1339,14 @@ fn rect_height(y1: u16, y2: u16) -> Result<u16, BdError> {
         .ok_or_else(|| invalid("button too large"))
 }
 
+/// The IG composition; `normal`: the buttons have normal-state objects.
 fn build_composition(
     project: &Project,
     rendered: &RenderedMenu,
     menu_clip: &MenuClip<'_>,
+    normal: bool,
 ) -> Result<InteractiveComposition, BdError> {
-    let buttons = build_buttons(rendered, menu_clip)?;
+    let buttons = build_buttons(rendered, menu_clip, normal)?;
     // A menu's movie object selects its button (its default, or the one a link asks for), and a motion menu's later
     // plays keep the button the viewer is on: no default (the player's selected button register). A pop-up menu
     // over a title has no movie object of its own: it names its default.
@@ -1215,6 +1375,7 @@ fn build_composition(
 fn build_buttons(
     rendered: &RenderedMenu,
     menu_clip: &MenuClip<'_>,
+    normal_objects: bool,
 ) -> Result<Vec<IgButton>, BdError> {
     let mut buttons = Vec::new();
 
@@ -1232,7 +1393,7 @@ fn build_buttons(
             .buttons
             .get(index)
             .is_some_and(|button| button.auto_activate);
-        let normal = if menu_clip.popup || normal_shown(menu_clip.menu) {
+        let normal = if normal_objects {
             normal_object_id(index, rendered.buttons.len())?
         } else {
             0xFFFF
@@ -1481,6 +1642,109 @@ mod tests {
         assert_eq!(crowded.steps, 11);
         let ids = crowded.palette(&menu);
         assert!(ids.iter().all(|entry| entry.id <= 22 * 11));
+        Ok(())
+    }
+
+    /// M6.335: with rich-colour highlights, a PSD button's subpicture layers go to the disc in their own colours,
+    /// as Encore writes them: a button with only a `(=1)` layer shows it when selected and activated; one with more
+    /// layers shows `(=1)` normal, `(=2)` selected and `(=3)` activated (clear where it has none).
+    #[test]
+    fn rich_highlights_show_a_psd_buttons_layers_in_their_own_colours()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use disccraft_project::{ColorLayer, Rect, Subpicture};
+        let mut project = Project::default();
+        let menu_id = project.add_menu(None)?;
+        for x in [100, 200] {
+            let rect = Rect {
+                x,
+                y: 100,
+                w: 2,
+                h: 1,
+            };
+            project.add_button(menu_id, String::new(), Some(rect), Link::Stop)?;
+        }
+        let (red, green, blue, white) = (
+            [255, 0, 0, 255],
+            [0, 255, 0, 128],
+            [0, 0, 255, 255],
+            [255, 255, 255, 255],
+        );
+        let layer =
+            |left: [u8; 4], right: [u8; 4]| ColorLayer::from_rgba(2, 1, &[left, right].concat());
+        let mut only = Subpicture::from_values(2, 1, &[1, 1]).ok_or("subpicture")?;
+        only.color_layers = [layer(red, green), None, None];
+        let mut three = Subpicture::from_values(2, 1, &[1, 3]).ok_or("subpicture")?;
+        three.color_layers = [layer(blue, blue), None, layer([0; 4], white)];
+        let menu = project.menu_mut(menu_id).ok_or("menu")?;
+        menu.rich_highlights = true;
+        menu.buttons.get_mut(0).ok_or("button")?.subpicture = Some(only);
+        menu.buttons.get_mut(1).ok_or("button")?.subpicture = Some(three);
+        let menu = menu.clone();
+        let rendered = disccraft_menu::render_menu(&project, &menu)?;
+        let commands = vec![Vec::new(); 2];
+        let clip = super::MenuClip {
+            menu: &menu,
+            number: 0,
+            commands: &commands,
+            popup: false,
+        };
+        let units = super::build_ig_units(&project, &rendered, &clip, 0)?;
+        let stream: Vec<u8> = units.iter().flat_map(|unit| unit.data.clone()).collect();
+        let mut palette = std::collections::HashMap::new();
+        let mut objects = std::collections::HashMap::new();
+        for (kind, body) in disccraft_pgs::read::segments(&stream) {
+            match kind {
+                0x14 => {
+                    for entry in body.get(2..).unwrap_or_default().as_chunks::<5>().0 {
+                        palette.insert(entry[0], [entry[1], entry[2], entry[3], entry[4]]);
+                    }
+                }
+                0x15 => {
+                    let id = u16::from_be_bytes([body[0], body[1]]);
+                    let width = u16::from_be_bytes([body[7], body[8]]);
+                    let height = u16::from_be_bytes([body[9], body[10]]);
+                    let pixels = disccraft_pgs::rle_decode(width, height, &body[11..])?;
+                    objects.insert(id, pixels);
+                }
+                _ => {}
+            }
+        }
+        // Each pixel's colour as the palette gives it.
+        let entry = |colour: [u8; 4]| {
+            let e = super::rgba_to_entry(0, colour[0], colour[1], colour[2], colour[3]);
+            [e.y, e.cr, e.cb, e.alpha]
+        };
+        let shown = |id: u16| -> Vec<Option<[u8; 4]>> {
+            objects
+                .get(&id)
+                .map(|pixels| {
+                    pixels
+                        .iter()
+                        .map(|pixel| (*pixel != 0).then(|| palette.get(pixel).copied()).flatten())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        // Objects: 0 / 1 button 1's selected / activated, 2 / 3 button 2's, then 4 / 5 the normal ones.
+        assert_eq!(shown(0), vec![Some(entry(red)), Some(entry(green))]);
+        assert_eq!(shown(1), vec![Some(entry(red)), Some(entry(green))]);
+        assert_eq!(shown(4), vec![None, None]);
+        assert_eq!(shown(2), vec![None, None]);
+        assert_eq!(shown(3), vec![None, Some(entry(white))]);
+        assert_eq!(shown(5), vec![Some(entry(blue)), Some(entry(blue))]);
+        // The buttons use their normal objects.
+        let compositions = disccraft_pgs::read::interactive_compositions(&stream)?;
+        let normals: Vec<u16> = compositions
+            .first()
+            .and_then(|composition| composition.pages.first())
+            .map(|page| {
+                page.buttons
+                    .iter()
+                    .map(|button| button.normal_object)
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(normals, vec![4, 5]);
         Ok(())
     }
 }

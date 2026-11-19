@@ -21,6 +21,28 @@ pub(crate) struct SubtitleCue {
     pub(crate) text: String,
     /// The subtitle's own colour group, stroke and place.
     pub(crate) look: disccraft_project::CueLook,
+    /// The picture it shows instead of text (an image script's subtitle).
+    pub(crate) image: Option<disccraft_project::CueImage>,
+}
+
+/// The subtitle shown over a picture: its text or its picture, and the colours and look it is drawn in.
+#[derive(Clone, Debug)]
+pub(crate) struct ShownSubtitle {
+    pub(crate) text: String,
+    pub(crate) colors: disccraft_project::SubtitleGroup,
+    pub(crate) look: disccraft_project::CueLook,
+    pub(crate) image: Option<disccraft_project::CueImage>,
+}
+
+/// A subtitle clip's name on the timeline: its first line, or a picture subtitle's file name.
+pub(crate) fn cue_label(cue: &SubtitleCue) -> String {
+    match &cue.image {
+        Some(image) => Path::new(&image.path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        None => cue.text.lines().next().unwrap_or_default().to_owned(),
+    }
 }
 
 /// A subtitle's look from a `subtitle.cues` entry (`group` counts from 1 there).
@@ -76,6 +98,10 @@ impl DiscCraftApp {
                     end: cue.get("end")?.as_f64()?,
                     text: cue.get("text")?.as_str()?.to_owned(),
                     look: parse_look(cue),
+                    image: cue
+                        .get("image")
+                        .filter(|image| !image.is_null())
+                        .and_then(|image| serde_json::from_value(image.clone()).ok()),
                 })
             })
             .collect();
@@ -107,11 +133,7 @@ impl DiscCraftApp {
         &mut self,
         timeline: TimelineId,
         seconds: f64,
-    ) -> Option<(
-        String,
-        disccraft_project::SubtitleGroup,
-        disccraft_project::CueLook,
-    )> {
+    ) -> Option<ShownSubtitle> {
         let track = self.shown_subtitle(timeline)?;
         let asset = self
             .session
@@ -122,11 +144,135 @@ impl DiscCraftApp {
             .asset;
         let cues = self.subtitle_cues(asset);
         let cue = cue_at(&cues, seconds)?;
-        Some((
-            cue.text.clone(),
-            self.cue_colors(timeline, track, cue.look),
-            cue.look,
-        ))
+        Some(ShownSubtitle {
+            text: cue.text.clone(),
+            colors: self.cue_colors(timeline, track, cue.look),
+            look: cue.look,
+            image: cue.image.clone(),
+        })
+    }
+
+    /// Draws `shown` over `frame` (the whole picture; drawing is cut to `clip`): a picture subtitle as the disc
+    /// shows it, its mapped colours in the colour group's at its place in the frame, else the text. Returns
+    /// where it is drawn.
+    pub(crate) fn draw_shown_subtitle(
+        &mut self,
+        ctx: &egui::Context,
+        painter: &egui::Painter,
+        (frame, clip): (egui::Rect, egui::Rect),
+        shown: &ShownSubtitle,
+    ) -> egui::Rect {
+        let Some(image) = &shown.image else {
+            return crate::monitor::draw_subtitle(
+                painter,
+                frame.intersect(clip),
+                &shown.text,
+                (shown.colors, shown.look),
+            );
+        };
+        let (width, height) = self.subtitle_frame();
+        let Some((texture, [x, y, w, h])) =
+            self.image_subtitle_texture(ctx, image, shown.colors, (width, height))
+        else {
+            return egui::Rect::NOTHING;
+        };
+        let scale = egui::vec2(
+            frame.width() / f32::from(width.max(1)),
+            frame.height() / f32::from(height.max(1)),
+        );
+        let at = egui::Rect::from_min_size(
+            frame.min + egui::vec2(x * scale.x, y * scale.y),
+            egui::vec2(w * scale.x, h * scale.y),
+        );
+        painter.with_clip_rect(clip).image(
+            texture.id(),
+            at,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+        at
+    }
+
+    /// The frame a disc title's subtitles are drawn for: a Blu-ray's HD frame, else the SD frame.
+    pub(crate) fn subtitle_frame(&self) -> (u16, u16) {
+        let settings = &self.session.project.settings;
+        match crate::preview_playback::disc_hd(settings) {
+            Some((width, height, _, _)) => (
+                u16::try_from(width).unwrap_or(1920),
+                u16::try_from(height).unwrap_or(1080),
+            ),
+            None if settings.standard == disccraft_project::VideoStandard::Pal => (720, 576),
+            None => (720, 480),
+        }
+    }
+
+    /// A picture subtitle drawn as on the disc (in the group's colours), as a texture, and where it stands in the
+    /// frame (x, y, width, height in the frame's pixels). Kept until the project changes; `None` (also kept)
+    /// when the picture cannot be drawn, with the reason in the status line.
+    fn image_subtitle_texture(
+        &mut self,
+        ctx: &egui::Context,
+        image: &disccraft_project::CueImage,
+        colors: disccraft_project::SubtitleGroup,
+        (width, height): (u16, u16),
+    ) -> Option<(egui::TextureHandle, [f32; 4])> {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (&image.path, image.area, width, height).hash(&mut hasher);
+        let mapped = image.colors;
+        (mapped.background, mapped.fill, mapped.outline).hash(&mut hasher);
+        for color in [colors.fill, colors.stroke] {
+            (color.rgb, color.opacity).hash(&mut hasher);
+        }
+        let key = hasher.finish();
+        if let Some(found) = self.image_subtitles.get(&key) {
+            return found.clone();
+        }
+        // A handful of pictures are on screen at a time; the rest are drawn again when they come back.
+        if self.image_subtitles.len() >= 64 {
+            self.image_subtitles.clear();
+        }
+        let made = match disccraft_menu::subtitle::render_image_cue(image, width, height) {
+            Ok(bitmap) => {
+                let (fill, stroke) = (
+                    crate::monitor::subtitle_color(colors.fill),
+                    crate::monitor::subtitle_color(colors.stroke),
+                );
+                let pixels: Vec<egui::Color32> = bitmap
+                    .pixels
+                    .iter()
+                    .map(|value| match *value {
+                        1 => fill,
+                        2 => stroke,
+                        _ => egui::Color32::TRANSPARENT,
+                    })
+                    .collect();
+                let picture = egui::ColorImage::new(
+                    [usize::from(bitmap.width), usize::from(bitmap.height)],
+                    pixels,
+                );
+                let texture = ctx.load_texture(
+                    format!("image-subtitle-{key:016x}"),
+                    picture,
+                    egui::TextureOptions::NEAREST,
+                );
+                Some((
+                    texture,
+                    [
+                        f32::from(bitmap.x),
+                        f32::from(bitmap.y),
+                        f32::from(bitmap.width),
+                        f32::from(bitmap.height),
+                    ],
+                ))
+            }
+            Err(error) => {
+                self.status = error.to_string();
+                None
+            }
+        };
+        self.image_subtitles.insert(key, made.clone());
+        made
     }
 
     /// 字幕の色: その字幕のグループ、なければトラックのグループの色。
@@ -293,12 +439,14 @@ mod tests {
                 end: 2.0,
                 text: "a".to_owned(),
                 look: disccraft_project::CueLook::default(),
+                image: None,
             },
             SubtitleCue {
                 start: 3.0,
                 end: 4.0,
                 text: "b".to_owned(),
                 look: disccraft_project::CueLook::default(),
+                image: None,
             },
         ];
         assert_eq!(cue_at(&cues, 1.5).map(|cue| cue.text.as_str()), Some("a"));

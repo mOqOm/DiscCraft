@@ -206,6 +206,70 @@ struct TrackRow {
     start: f64,
     /// How long an audio track's clip is, seconds (`None` until its file has been read: drawn to the end).
     length: Option<f64>,
+    /// How much of its file's head an audio track's clip leaves out, seconds (its in point trimmed).
+    trim_start: f64,
+    /// The clips of an audio track after its first (M6.269); the fields above are the first clip's.
+    more: Vec<MoreClip>,
+}
+
+/// A clip of an audio track after its first.
+struct MoreClip {
+    /// Its number on the track (1 the second clip).
+    number: usize,
+    /// The name drawn in it.
+    name: String,
+    /// Its sound file.
+    asset: disccraft_project::AssetId,
+    /// Where it starts on the timeline, seconds.
+    start: f64,
+    /// How long it is, seconds (`None` until its file has been read).
+    length: Option<f64>,
+    /// How much of its file's head it leaves out, seconds.
+    trim_start: f64,
+    /// Its file's waveform peaks, once worked out.
+    peaks: Option<crate::waveforms::Peaks>,
+}
+
+/// One clip of an audio track as it lies on the track: its number, where it starts and ends (seconds), how much
+/// of its file's head it leaves out, its name and its file.
+struct ClipBox<'a> {
+    number: usize,
+    start: f64,
+    end: f64,
+    trim_start: f64,
+    name: &'a str,
+    /// Its file's waveform peaks, when worked out.
+    peaks: Option<&'a crate::waveforms::Peaks>,
+}
+
+/// The clips of an audio track's row, the first clip first (a clip whose length is not known runs to the end of
+/// the timeline).
+fn clip_boxes(track: &TrackRow, duration: f64) -> Vec<ClipBox<'_>> {
+    let span = |start: f64, length: Option<f64>| {
+        let end = length.map_or(duration.max(start), |length| start + length);
+        (start, end.max(start))
+    };
+    let (start, end) = span(track.start, track.length);
+    std::iter::once(ClipBox {
+        number: 0,
+        start,
+        end,
+        trim_start: track.trim_start,
+        name: &track.clip,
+        peaks: track.peaks.as_ref(),
+    })
+    .chain(track.more.iter().map(|clip| {
+        let (start, end) = span(clip.start, clip.length);
+        ClipBox {
+            number: clip.number,
+            start,
+            end,
+            trim_start: clip.trim_start,
+            name: &clip.name,
+            peaks: clip.peaks.as_ref(),
+        }
+    }))
+    .collect()
 }
 
 /// Owned snapshot of timeline data used for drawing and interaction.
@@ -274,7 +338,115 @@ struct TimelineFrame<'a> {
     /// A video clip being dragged along the track: the clip and how far, in seconds.
     clip_move: Option<(usize, f64)>,
     /// An audio track's clip being dragged along its track: the track and how far, in seconds.
-    audio_move: Option<(usize, f64)>,
+    audio_move: Option<(usize, usize, f64)>,
+    /// A subtitle clip being dragged (moved or trimmed): its subtitle track, its number, and where it would be
+    /// (start, end in seconds).
+    cue_move: Option<(usize, usize, f64, f64)>,
+    /// The clip chosen in this timeline (outlined; Edit ▸ Clear and Ripple Delete act on it).
+    picked: Option<ClipPick>,
+}
+
+/// A clip chosen in the timeline viewer by clicking it (Encore: a selected clip, which Edit ▸ Clear and Ripple
+/// Delete act on).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClipPick {
+    /// A video clip (0 the first).
+    Video(usize),
+    /// A clip of an audio track: the track and the clip's number on it (0 the first).
+    Audio(usize, usize),
+}
+
+/// Where a subtitle clip is held to be dragged in the timeline: its body (moved along the track) or its in or out
+/// edge (trimmed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CueGrip {
+    /// Moved along the track.
+    Body,
+    /// Its in point.
+    In,
+    /// Its out point.
+    Out,
+}
+
+impl CueGrip {
+    fn code(self) -> u8 {
+        match self {
+            CueGrip::Body => 0,
+            CueGrip::In => 1,
+            CueGrip::Out => 2,
+        }
+    }
+
+    fn of(code: u8) -> Self {
+        match code {
+            1 => CueGrip::In,
+            2 => CueGrip::Out,
+            _ => CueGrip::Body,
+        }
+    }
+}
+
+/// Where subtitle clip `index` of `cues` (each `(start, end)` in seconds, in order) goes when held by `grip` and
+/// dragged `shift` seconds: by whole `frame`s, snapped to the nearest of `snap`'s times within its reach (seconds)
+/// when snapping is on, kept off its neighbours and at least `shortest` seconds long. `None` for no such clip.
+pub(crate) fn dragged_cue(
+    cues: &[(f64, f64)],
+    index: usize,
+    grip: CueGrip,
+    shift: f64,
+    (frame, shortest): (f64, f64),
+    snap: Option<(&[f64], f64)>,
+) -> Option<(f64, f64)> {
+    let (start, end) = *cues.get(index)?;
+    let before = index
+        .checked_sub(1)
+        .and_then(|previous| cues.get(previous))
+        .map_or(0.0, |previous| previous.1)
+        .max(0.0);
+    let after = cues
+        .get(index.saturating_add(1))
+        .map_or(f64::INFINITY, |next| next.0);
+    let steps = if frame > 0.0 && frame.is_finite() {
+        (shift / frame).round() * frame
+    } else {
+        shift
+    };
+    // The nearest snap point to any of `edges`, as how far to go to it.
+    let pull = |edges: &[f64]| -> f64 {
+        snap.and_then(|(times, reach)| {
+            times
+                .iter()
+                .flat_map(|time| edges.iter().map(move |edge| time - edge))
+                .filter(|by| by.abs() <= reach)
+                .min_by(|a, b| a.abs().total_cmp(&b.abs()))
+        })
+        .unwrap_or(0.0)
+    };
+    let length = end - start;
+    match grip {
+        CueGrip::Body => {
+            let moved = start + steps;
+            let moved = moved + pull(&[moved, moved + length]);
+            let latest = (after - length).max(before);
+            Some((
+                moved.max(before).min(latest),
+                moved.max(before).min(latest) + length,
+            ))
+        }
+        CueGrip::In => {
+            let moved = start + steps;
+            let moved = moved + pull(&[moved]);
+            // A clip already shorter than the shortest is not shortened further.
+            let latest = (end - shortest).max(start).max(before);
+            Some((moved.max(before).min(latest), end))
+        }
+        CueGrip::Out => {
+            let moved = end + steps;
+            let moved = moved + pull(&[moved]);
+            let earliest = (start + shortest).min(end);
+            Some((start, moved.max(earliest).min(after.max(earliest))))
+        }
+    }
 }
 
 /// Timeline view methods for the desktop application.
@@ -305,6 +477,32 @@ impl DiscCraftApp {
             return;
         }
         let _ = egui::DragAndDrop::take_payload::<crate::project_panel::DragRow>(ui.ctx());
+        // A sound file dropped on an audio track's row becomes another clip of that track at the time under the
+        // pointer (Encore); anywhere else the item is added as a track, as before.
+        let target = ui.data_mut(|data| data.remove_temp::<(usize, f64)>(drop_target_key(id.0)));
+        let sound = self
+            .session
+            .project
+            .assets
+            .get(&disccraft_project::AssetId(payload.0))
+            .is_some_and(|asset| asset.kind == disccraft_project::AssetKind::Audio);
+        if let (Some((track, time)), true) = (target, sound) {
+            if self
+                .run_command(
+                    "timeline.addAudioClip",
+                    json!({
+                        "timeline": id.0,
+                        "track": track,
+                        "asset": payload.0,
+                        "time": seconds_to_ticks(time),
+                    }),
+                )
+                .is_some()
+            {
+                self.status = tl!("Added an audio clip").to_string();
+            }
+            return;
+        }
         self.drop_on_timeline(id, payload.0);
     }
 
@@ -316,16 +514,23 @@ impl DiscCraftApp {
             ui.label(tl!("No timeline selected"));
             return;
         };
-        // The audio tracks' waveforms (worked out once per asset, on a thread of their own).
+        // The audio clips' waveforms (worked out once per asset, on a thread of their own): every clip's file,
+        // the second and later clips' too.
         for track in snapshot.tracks.iter_mut().filter(|track| !track.subtitle) {
-            if let Some(path) = self
-                .session
-                .project
-                .assets
-                .get(&track.asset)
-                .map(|asset| asset.media_file().into_owned())
-            {
+            let file = |app: &Self, asset: disccraft_project::AssetId| {
+                app.session
+                    .project
+                    .assets
+                    .get(&asset)
+                    .map(|found| found.media_file().into_owned())
+            };
+            if let Some(path) = file(self, track.asset) {
                 track.peaks = self.waveforms.get(track.asset.0, path, ui.ctx());
+            }
+            for clip in &mut track.more {
+                if let Some(path) = file(self, clip.asset) {
+                    clip.peaks = self.waveforms.get(clip.asset.0, path, ui.ctx());
+                }
             }
         }
 
@@ -371,24 +576,29 @@ impl DiscCraftApp {
         let _ = egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
-                egui::ScrollArea::vertical()
+                // Timeline ▸ Move Track to View asked for a place to scroll to.
+                let wanted = ui.data_mut(|data| data.remove_temp::<f32>(track_view_key(id.0)));
+                let mut rows = egui::ScrollArea::vertical()
                     .id_salt(("timeline_rows", id.0))
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        let height = canvas_height(&snapshot.tracks);
-                        let _ = ui.horizontal_top(|ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            self.track_headers(ui, &snapshot, id, height, &interaction, duration);
-                            self.timeline_scroll(
-                                ui,
-                                &snapshot,
-                                id,
-                                duration,
-                                &mut view,
-                                &mut interaction,
-                            );
-                        });
+                    .auto_shrink([false, false]);
+                if let Some(offset) = wanted {
+                    rows = rows.vertical_scroll_offset(offset.max(0.0));
+                }
+                rows.show(ui, |ui| {
+                    let height = canvas_height(&snapshot.tracks);
+                    let _ = ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        self.track_headers(ui, &snapshot, id, height, &interaction, duration);
+                        self.timeline_scroll(
+                            ui,
+                            &snapshot,
+                            id,
+                            duration,
+                            &mut view,
+                            &mut interaction,
+                        );
                     });
+                });
             });
         ui.data_mut(|data| data.insert_temp(view_key, view));
         timeline_store_state(ui, id, &interaction);
@@ -451,11 +661,12 @@ impl DiscCraftApp {
             show_names: self.show_chapter_names,
             audio_move: ui
                 .data(|data| {
-                    data.get_temp::<(usize, f32, f32)>(timeline_key("audio_move_drag", id.0))
+                    data.get_temp::<(usize, usize, f32, f32)>(timeline_key("audio_move_drag", id.0))
                 })
-                .map(|(track, pressed_x, now_x)| {
+                .map(|(track, clip, pressed_x, now_x)| {
                     (
                         track,
+                        clip,
                         f64::from(now_x - pressed_x) / (f64::from(BASE_SCALE) * f64::from(zoom)),
                     )
                 }),
@@ -469,19 +680,42 @@ impl DiscCraftApp {
                         f64::from(now_x - pressed_x) / (f64::from(BASE_SCALE) * f64::from(zoom)),
                     )
                 }),
+            cue_move: None,
+            picked: self
+                .clip_selection
+                .filter(|(timeline, _)| *timeline == id)
+                .map(|(_, pick)| pick),
         };
+        // A subtitle clip being dragged: where it would go, drawn as an outline.
+        let cue_move = ui
+            .data(|data| data.get_temp::<CueDragState>(timeline_key("cue_drag", id.0)))
+            .and_then(|state| self.cue_drag_result(&frame, state));
+        let frame = TimelineFrame { cue_move, ..frame };
 
         timeline_draw(&ui.painter().with_clip_rect(canvas), &frame);
         let before = interaction.selected;
         self.timeline_handle_input(ui, &frame, &response, interaction);
         if interaction.selected != before {
             self.focus_chapter(id, interaction.selected);
+            // A chapter point chosen lets go of a chosen clip.
+            if interaction.selected.is_some() {
+                self.clip_selection = None;
+            }
         }
         // A click on a subtitle clip selects it: the Properties panel shows the subtitle clip (as in Encore). A
         // click anywhere else in the viewer lets go of it.
         if response.clicked()
             && let Some(point) = response.interact_pointer_pos()
         {
+            // A click on no clip lets go of the chosen clip (a click on one chose it as it was let go).
+            if clip_body_at(&frame, point).is_none()
+                && audio_clip_at(&frame, point).is_none()
+                && self
+                    .clip_selection
+                    .is_some_and(|(timeline, _)| timeline == id)
+            {
+                self.clip_selection = None;
+            }
             match cue_at_point(&frame, point) {
                 Some((track, cue)) => {
                     self.select(crate::app::Selection::Timeline(id));
@@ -494,7 +728,138 @@ impl DiscCraftApp {
                 }
             }
         }
+        self.note_drop_target(ui, &frame, id);
         self.timeline_context_menu(ui, &frame, &response, id, interaction);
+    }
+
+    /// Chooses a clip of timeline `timeline` (outlined; Edit ▸ Clear and Ripple Delete act on it), and the timeline.
+    fn pick_clip(&mut self, timeline: u64, pick: ClipPick) {
+        let id = TimelineId(timeline);
+        self.clip_selection = Some((id, pick));
+        self.cue_focus = None;
+        self.select(crate::app::Selection::Timeline(id));
+    }
+
+    /// Edit ▸ Clear on a chosen clip: a video clip leaves its place empty (a timeline's only clip stays); an audio
+    /// clip is taken off its track, the track itself when it was its only clip.
+    pub(crate) fn clear_clip(&mut self, id: TimelineId, pick: ClipPick) {
+        match pick {
+            ClipPick::Video(clip) => {
+                if self.timeline_clips(id).len() < 2 {
+                    self.status = tl!("A timeline's only clip cannot be removed").to_owned();
+                    return;
+                }
+                let _ = self.run_command(
+                    "timeline.removeVideo",
+                    json!({"timeline": id.0, "clip": clip, "ripple": false}),
+                );
+            }
+            ClipPick::Audio(track, clip) => {
+                let several = self
+                    .session
+                    .project
+                    .timeline(id)
+                    .and_then(|timeline| timeline.audio.get(track))
+                    .is_some_and(|found| !found.more.is_empty());
+                if several {
+                    let _ = self.run_command(
+                        "timeline.removeAudioClip",
+                        json!({"timeline": id.0, "track": track, "clip": clip}),
+                    );
+                } else {
+                    let _ = self.run_command(
+                        "timeline.removeAudioTrack",
+                        json!({"timeline": id.0, "track": track}),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Where a dragged subtitle clip would go ([`dragged_cue`]): its track, its number and its (start, end) in
+    /// seconds; snapped (Preferences ▸ Timelines ▸ Snap subtitle clips) to the other clips' edges, the chapter
+    /// points, the playhead and the start.
+    fn cue_drag_result(
+        &self,
+        frame: &TimelineFrame<'_>,
+        (track, cue, grip, pressed_x, now_x): CueDragState,
+    ) -> Option<(usize, usize, f64, f64)> {
+        let row = frame
+            .snapshot
+            .tracks
+            .iter()
+            .find(|row| row.subtitle && row.index == track)?;
+        let cues: Vec<(f64, f64)> = row
+            .cues
+            .as_ref()?
+            .iter()
+            .map(|found| (found.start, found.end))
+            .collect();
+        let pps = f64::from(BASE_SCALE) * f64::from(frame.zoom);
+        if !(pps.is_finite() && pps > 0.0) {
+            return None;
+        }
+        let (num, den) = (frame.snapshot.fps_num, frame.snapshot.fps_den);
+        let step = f64::from(den.max(1)) / f64::from(num.max(1));
+        // `as` is exact for a count of frames.
+        let shortest = crate::subtitle_edit::min_subtitle_frames(num, den) as f64 * step;
+        let snaps: Vec<f64> = if self.timeline_prefs.snap_subtitles {
+            let mut times = vec![0.0, frame.playhead];
+            times.extend(frame.snapshot.chapters.iter().map(|chapter| chapter.time));
+            for other in frame.snapshot.tracks.iter().filter(|other| other.subtitle) {
+                for (number, found) in other.cues.iter().flat_map(|cues| cues.iter()).enumerate() {
+                    if !(other.index == track && number == cue) {
+                        times.extend([found.start, found.end]);
+                    }
+                }
+            }
+            times
+        } else {
+            Vec::new()
+        };
+        let snap = (!snaps.is_empty()).then_some((snaps.as_slice(), f64::from(CUE_SNAP) / pps));
+        let shift = f64::from(now_x - pressed_x) / pps;
+        let (start, end) =
+            dragged_cue(&cues, cue, CueGrip::of(grip), shift, (step, shortest), snap)?;
+        Some((track, cue, start, end))
+    }
+
+    /// A Project panel row dragged over an audio track's row: where it would go (the track and the time under the
+    /// pointer), marked on the row and kept for the drop ([`DiscCraftApp::accept_timeline_drop`]).
+    fn note_drop_target(&self, ui: &Ui, frame: &TimelineFrame<'_>, id: TimelineId) {
+        let key = drop_target_key(id.0);
+        let dragging =
+            egui::DragAndDrop::has_payload_of_type::<crate::project_panel::DragRow>(ui.ctx());
+        let target = ui
+            .input(|i| i.pointer.interact_pos())
+            .filter(|point| dragging && point.x >= frame.origin_x && frame.canvas.contains(*point))
+            .and_then(|point| {
+                let row = audio_row_at(frame, point)?;
+                let time =
+                    x_to_time(point.x, frame.origin_x, frame.zoom).clamp(0.0, frame.duration);
+                Some((row, time))
+            });
+        match target {
+            Some((row, time)) => {
+                // Where the clip would start, across the row under the pointer.
+                let top = frame
+                    .snapshot
+                    .tracks
+                    .iter()
+                    .zip(track_rows_geometry(&frame.snapshot.tracks))
+                    .find(|(track, _)| !track.subtitle && track.index == row)
+                    .map(|(_, (top, height))| (frame.canvas.min.y + top, height));
+                if let Some((y, height)) = top {
+                    let x = time_to_x(time, frame.origin_x, frame.zoom);
+                    let _ = ui.painter().line_segment(
+                        [egui::pos2(x, y), egui::pos2(x, y + height)],
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(0x4a, 0x90, 0xff)),
+                    );
+                }
+                ui.data_mut(|data| data.insert_temp(key, (row, time)));
+            }
+            None => ui.data_mut(|data| data.remove::<(usize, f64)>(key)),
+        }
     }
 
     /// The last frame of a video asset (cached per asset; `asset.frame` at one frame before the end).
@@ -604,6 +969,18 @@ impl DiscCraftApp {
             .iter()
             .map(|track| self.asset_probe(track.asset).seconds)
             .collect();
+        // The lengths of the files of each track's further clips.
+        let more_lengths: Vec<Vec<Option<f64>>> = timeline
+            .audio
+            .iter()
+            .map(|track| {
+                track
+                    .more
+                    .iter()
+                    .map(|clip| self.asset_probe(clip.asset).seconds)
+                    .collect()
+            })
+            .collect();
         let name = |asset: &disccraft_project::AssetId| {
             self.session
                 .project
@@ -626,7 +1003,34 @@ impl DiscCraftApp {
                 asset: track.asset,
                 peaks: None,
                 start: f64::from(track.start) * frame,
-                length: lengths.get(index).copied().flatten(),
+                length: audio_clip_length(
+                    lengths.get(index).copied().flatten(),
+                    f64::from(track.trim_start) * frame,
+                    track.trim_end.map(|end| f64::from(end) * frame),
+                ),
+                trim_start: f64::from(track.trim_start) * frame,
+                more: track
+                    .more
+                    .iter()
+                    .enumerate()
+                    .map(|(at, clip)| MoreClip {
+                        number: at.saturating_add(1),
+                        name: name(&clip.asset),
+                        asset: clip.asset,
+                        start: f64::from(clip.start) * frame,
+                        length: audio_clip_length(
+                            more_lengths
+                                .get(index)
+                                .and_then(|lengths| lengths.get(at))
+                                .copied()
+                                .flatten(),
+                            f64::from(clip.trim_start) * frame,
+                            clip.trim_end.map(|end| f64::from(end) * frame),
+                        ),
+                        trim_start: f64::from(clip.trim_start) * frame,
+                        peaks: None,
+                    })
+                    .collect(),
             });
         let subtitles = timeline
             .subtitles
@@ -643,6 +1047,8 @@ impl DiscCraftApp {
                 peaks: None,
                 start: 0.0,
                 length: None,
+                trim_start: 0.0,
+                more: Vec::new(),
             });
         audio.chain(subtitles).collect()
     }
@@ -751,8 +1157,13 @@ impl DiscCraftApp {
                 self.add_chapter_at_playhead(id, interaction.playhead, duration);
             }
             Some(ViewRequest::Clear) => {
-                // The first chapter point cannot be removed.
-                if let Some(index) = interaction.selected.filter(|index| *index > 0) {
+                // A chosen clip is cleared (its place left empty); else the chosen chapter point (the first cannot
+                // be removed).
+                if let Some((_, pick)) = self.clip_selection.filter(|(timeline, _)| *timeline == id)
+                {
+                    self.clip_selection = None;
+                    self.clear_clip(id, pick);
+                } else if let Some(index) = interaction.selected.filter(|index| *index > 0) {
                     let _ = self.run_command(
                         "timeline.removeChapter",
                         json!({"timeline": id.0, "chapter": index}),
@@ -1024,6 +1435,10 @@ impl DiscCraftApp {
                 .collect();
             let hit = hit_marker(&markers_x, point.x, HIT_TOLERANCE);
             ui.data_mut(|data| data.insert_temp(key, (time, hit)));
+            // The audio track's row and the clip that were clicked, for the audio clip items.
+            let row = audio_row_at(frame, point);
+            let clip = audio_clip_at(frame, point).map(|(_, clip)| clip);
+            ui.data_mut(|data| data.insert_temp(audio_context_key(id.0), (row, clip)));
         }
 
         let Some((time, hit)) = ui.data(|data| data.get_temp::<(f64, Option<usize>)>(key)) else {
@@ -1038,12 +1453,75 @@ impl DiscCraftApp {
             .iter()
             .filter(|join| **join <= time)
             .count();
+        let (audio_row, audio_clip) = ui
+            .data(|data| data.get_temp::<(Option<usize>, Option<usize>)>(audio_context_key(id.0)))
+            .unwrap_or((None, None));
         let _ = response.context_menu(|ui| {
+            // On an audio track's row (M6.269): another clip of a sound file at this time, and Clear on a clip
+            // of a track that has several.
+            if let Some(track) = audio_row {
+                let sounds: Vec<(u64, String)> = self
+                    .session
+                    .project
+                    .assets
+                    .values()
+                    .filter(|asset| asset.kind == disccraft_project::AssetKind::Audio)
+                    .map(|asset| (asset.id.0, asset.name.clone()))
+                    .collect();
+                ui.menu_button(tl!("Add Audio Clip Here"), |ui| {
+                    if sounds.is_empty() {
+                        let _ = ui.add_enabled(false, egui::Button::new(tl!("(no audio assets)")));
+                    }
+                    for (asset, name) in &sounds {
+                        if ui.button(name).clicked() {
+                            let _ = self.run_command(
+                                "timeline.addAudioClip",
+                                json!({
+                                    "timeline": id.0,
+                                    "track": track,
+                                    "asset": asset,
+                                    "time": seconds_to_ticks(time),
+                                }),
+                            );
+                            ui.close();
+                        }
+                    }
+                });
+                let several = frame
+                    .snapshot
+                    .tracks
+                    .iter()
+                    .any(|row| !row.subtitle && row.index == track && !row.more.is_empty());
+                if let Some(clip) = audio_clip.filter(|_| several)
+                    && ui.button(tl!("Clear Audio Clip")).clicked()
+                {
+                    let _ = self.run_command(
+                        "timeline.removeAudioClip",
+                        json!({"timeline": id.0, "track": track, "clip": clip}),
+                    );
+                    ui.close();
+                }
+                let _ = ui.separator();
+            }
             if clips > 1 {
+                // Encore: Clear leaves the clip's place empty; Ripple Delete closes it up.
                 if ui.button(tl!("Clear Video Clip")).clicked() {
                     let _ = self.run_command(
                         "timeline.removeVideo",
-                        json!({"timeline": id.0, "clip": clip}),
+                        json!({"timeline": id.0, "clip": clip, "ripple": false}),
+                    );
+                    ui.close();
+                }
+                if ui
+                    .button(tl!("Ripple Delete"))
+                    .on_hover_text(tl!(
+                        "Removes the clip and moves the clips after it up into its place"
+                    ))
+                    .clicked()
+                {
+                    let _ = self.run_command(
+                        "timeline.removeVideo",
+                        json!({"timeline": id.0, "clip": clip, "ripple": true}),
                     );
                     ui.close();
                 }
@@ -1124,6 +1602,91 @@ impl DiscCraftApp {
         });
     }
 
+    /// A subtitle clip pressed, dragged or let go of in the timeline (Encore: moving a subtitle clip along its
+    /// track, or trimming it by an edge): whether the pointer was the subtitle clip's (nothing else then takes it).
+    fn handle_cue_drag(
+        &mut self,
+        ui: &Ui,
+        frame: &TimelineFrame<'_>,
+        response: &Response,
+        marker_drag: bool,
+    ) -> bool {
+        let pointer = ui.input(|input| input.pointer.interact_pos());
+        // A subtitle clip being dragged (Encore: moving a subtitle clip along its track, or trimming it by an edge).
+        // On release it goes where the outline is, through `subtitle.setCue` (one undo step).
+        let cue_key = timeline_key("cue_drag", frame.snapshot.id);
+        if let Some(state) = ui.data(|data| data.get_temp::<CueDragState>(cue_key)) {
+            let (track, cue, grip, pressed_x, _) = state;
+            let now_x = pointer.map_or(pressed_x, |point| point.x);
+            let state = (track, cue, grip, pressed_x, now_x);
+            if ui.input(|input| input.pointer.any_released()) {
+                ui.data_mut(|data| data.remove::<CueDragState>(cue_key));
+                // A press and release without moving is a click (it selects the clip), not a move.
+                if (now_x - pressed_x).abs() >= 3.0
+                    && let Some((_, _, start, end)) = self.cue_drag_result(frame, state)
+                    && let Some(asset) = frame
+                        .snapshot
+                        .tracks
+                        .iter()
+                        .find(|row| row.subtitle && row.index == track)
+                        .map(|row| row.asset)
+                {
+                    let _ = self.run_command(
+                        "subtitle.setCue",
+                        json!({
+                            "asset": asset.0,
+                            "cue": cue,
+                            "start": seconds_to_ticks(start),
+                            "end": seconds_to_ticks(end),
+                        }),
+                    );
+                }
+            } else {
+                ui.ctx()
+                    .set_cursor_icon(if CueGrip::of(grip) == CueGrip::Body {
+                        egui::CursorIcon::Grabbing
+                    } else {
+                        egui::CursorIcon::ResizeHorizontal
+                    });
+                ui.data_mut(|data| data.insert_temp(cue_key, state));
+                ui.ctx().request_repaint();
+            }
+            return true;
+        }
+        if let Some(point) = pointer
+            && frame.canvas.contains(point)
+            && response.contains_pointer()
+            && !marker_drag
+            && let Some((track, cue, grip)) = cue_grip_at(frame, point)
+            // A chapter point's line runs through the clip: a press on it drags the chapter, as before.
+            && (grip != CueGrip::Body
+                || hit_marker(
+                    &frame
+                        .snapshot
+                        .chapters
+                        .iter()
+                        .map(|chapter| time_to_x(chapter.time, frame.origin_x, frame.zoom))
+                        .collect::<Vec<f32>>(),
+                    point.x,
+                    HIT_TOLERANCE,
+                )
+                .is_none())
+        {
+            if grip != CueGrip::Body {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            if ui.input(|input| input.pointer.button_pressed(egui::PointerButton::Primary))
+                && !ui.input(|input| input.pointer.any_released())
+            {
+                ui.data_mut(|data| {
+                    data.insert_temp(cue_key, (track, cue, grip.code(), point.x, point.x));
+                });
+                return true;
+            }
+        }
+        false
+    }
+
     /// Handles pointer interaction with the timeline canvas.
     fn timeline_handle_input(
         &mut self,
@@ -1165,7 +1728,10 @@ impl DiscCraftApp {
             let now_x = pointer.map_or(pressed_x, |point| point.x);
             if ui.input(|input| input.pointer.any_released()) {
                 ui.data_mut(|data| data.remove::<(usize, f32, f32)>(move_key));
-                // A press and release without moving is a click, not a move.
+                // A press and release without moving is a click, not a move: it chooses the clip.
+                if (now_x - pressed_x).abs() < 3.0 {
+                    self.pick_clip(frame.snapshot.id, ClipPick::Video(clip));
+                }
                 if (now_x - pressed_x).abs() >= 3.0
                     && let Some((start, _)) = clip_spans_of(frame).get(clip).copied()
                 {
@@ -1187,22 +1753,70 @@ impl DiscCraftApp {
             }
             return;
         }
+        if self.handle_cue_drag(ui, frame, response, interaction.drag.is_some()) {
+            return;
+        }
+        // An audio clip's edge being dragged (M6.254: trimming its in or out point). On release the engine trims
+        // it to the nearest frame.
+        let audio_edge_key = timeline_key("audio_edge_drag", frame.snapshot.id);
+        if let Some((track, clip, out_edge)) =
+            ui.data(|data| data.get_temp::<(usize, usize, bool)>(audio_edge_key))
+        {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            if ui.input(|input| input.pointer.any_released()) {
+                ui.data_mut(|data| data.remove::<(usize, usize, bool)>(audio_edge_key));
+                if let Some(point) = pointer {
+                    let time = x_to_time(point.x, frame.origin_x, frame.zoom).max(0.0);
+                    let _ = self.run_command(
+                        "timeline.trimAudio",
+                        json!({
+                            "timeline": frame.snapshot.id,
+                            "track": track,
+                            "clip": clip,
+                            "edge": if out_edge { "out" } else { "in" },
+                            "time": seconds_to_ticks(time),
+                        }),
+                    );
+                }
+            }
+            return;
+        }
+        if let Some(point) = pointer
+            && frame.canvas.contains(point)
+            && response.contains_pointer()
+            && interaction.drag.is_none()
+            && let Some(edge) = audio_edge_at(frame, point)
+        {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            if ui.input(|input| input.pointer.button_pressed(egui::PointerButton::Primary)) {
+                ui.data_mut(|data| data.insert_temp(audio_edge_key, edge));
+                return;
+            }
+        }
         // An audio track's clip being dragged (Encore: moving an audio clip along its track). On release the engine
         // starts its sound at the nearest frame.
         let audio_key = timeline_key("audio_move_drag", frame.snapshot.id);
-        if let Some((track, pressed_x, _)) =
-            ui.data(|data| data.get_temp::<(usize, f32, f32)>(audio_key))
+        if let Some((track, clip, pressed_x, _)) =
+            ui.data(|data| data.get_temp::<(usize, usize, f32, f32)>(audio_key))
         {
             let now_x = pointer.map_or(pressed_x, |point| point.x);
             if ui.input(|input| input.pointer.any_released()) {
-                ui.data_mut(|data| data.remove::<(usize, f32, f32)>(audio_key));
+                ui.data_mut(|data| data.remove::<(usize, usize, f32, f32)>(audio_key));
                 let start = frame
                     .snapshot
                     .tracks
                     .iter()
                     .find(|row| !row.subtitle && row.index == track)
-                    .map(|row| row.start);
-                // A press and release without moving is a click, not a move.
+                    .and_then(|row| {
+                        clip_boxes(row, frame.duration)
+                            .into_iter()
+                            .find(|found| found.number == clip)
+                            .map(|found| found.start)
+                    });
+                // A press and release without moving is a click, not a move: it chooses the clip.
+                if (now_x - pressed_x).abs() < 3.0 {
+                    self.pick_clip(frame.snapshot.id, ClipPick::Audio(track, clip));
+                }
                 if (now_x - pressed_x).abs() >= 3.0
                     && let Some(start) = start
                 {
@@ -1213,13 +1827,14 @@ impl DiscCraftApp {
                         json!({
                             "timeline": frame.snapshot.id,
                             "track": track,
+                            "clip": clip,
                             "time": seconds_to_ticks((start + shift).max(0.0)),
                         }),
                     );
                 }
             } else {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                ui.data_mut(|data| data.insert_temp(audio_key, (track, pressed_x, now_x)));
+                ui.data_mut(|data| data.insert_temp(audio_key, (track, clip, pressed_x, now_x)));
                 ui.ctx().request_repaint();
             }
             return;
@@ -1228,11 +1843,11 @@ impl DiscCraftApp {
             && frame.canvas.contains(point)
             && response.contains_pointer()
             && interaction.drag.is_none()
-            && let Some(track) = audio_clip_at(frame, point)
+            && let Some((track, clip)) = audio_clip_at(frame, point)
             && ui.input(|input| input.pointer.button_pressed(egui::PointerButton::Primary))
             && !ui.input(|input| input.pointer.any_released())
         {
-            ui.data_mut(|data| data.insert_temp(audio_key, (track, point.x, point.x)));
+            ui.data_mut(|data| data.insert_temp(audio_key, (track, clip, point.x, point.x)));
             return;
         }
         if let Some(point) = pointer
@@ -1660,6 +2275,15 @@ fn draw_video_bar(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
             }
         }
         craft_timeline::clip_name_and_edges(painter, body, name, true, true);
+        // The chosen clip: outlined.
+        if frame.picked == Some(ClipPick::Video(index)) {
+            let _ = painter.rect_stroke(
+                body,
+                2.0,
+                egui::Stroke::new(2.0, Color32::WHITE),
+                egui::StrokeKind::Inside,
+            );
+        }
     }
     // A clip being dragged along the track (Encore: moving a clip): an outline where it would start.
     if let Some((clip, shift)) = frame.clip_move
@@ -1805,17 +2429,102 @@ fn language_list(
     chosen
 }
 
-/// Where an audio track's clip is on the timeline, seconds: from its start for its length (to the end of the
-/// timeline while its length is not known).
-fn audio_clip_span(track: &TrackRow, duration: f64) -> (f64, f64) {
-    let end = track
-        .length
-        .map_or(duration.max(track.start), |length| track.start + length);
-    (track.start, end.max(track.start))
+/// How long an audio clip is, seconds: its file's length (`None` while unknown) less what its in point leaves
+/// out, or up to its trimmed out point.
+fn audio_clip_length(file: Option<f64>, trim_start: f64, trim_end: Option<f64>) -> Option<f64> {
+    let end = match (trim_end, file) {
+        (Some(end), Some(file)) => end.min(file),
+        (Some(end), None) => end,
+        (None, Some(file)) => file,
+        (None, None) => return None,
+    };
+    Some((end - trim_start).max(0.0))
 }
 
-/// The audio track whose clip is under `point` (its index among the audio tracks).
-fn audio_clip_at(frame: &TimelineFrame<'_>, point: egui::Pos2) -> Option<usize> {
+/// Where Timeline ▸ Move Track to View leaves the vertical scroll it asks the timeline's rows for.
+fn track_view_key(timeline: u64) -> egui::Id {
+    timeline_key("timeline_track_view", timeline)
+}
+
+/// How far down the timeline's rows audio track `track` starts (the rows above it: the ruler, the video, and the
+/// audio tracks before it), points.
+pub(crate) fn audio_track_top(track: usize) -> f32 {
+    // `as` is exact for the track counts a timeline holds.
+    TRACKS_TOP + AUDIO_ROW * track as f32
+}
+
+impl DiscCraftApp {
+    /// Timeline ▸ Move Track to View: the timeline in the viewer scrolls down (or up) to the audio track that is
+    /// heard (the speaker in its header), so its row is in sight.
+    pub(crate) fn move_track_to_view(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.viewer_timeline() else {
+            return;
+        };
+        let track = self.heard_audio(id).unwrap_or(0);
+        // A little of the row above stays in sight.
+        let offset = (audio_track_top(track) - 8.0).max(0.0);
+        ctx.data_mut(|data| data.insert_temp(track_view_key(id.0), offset));
+        self.show_panel(crate::workspace::Panel::TimelineViewer);
+    }
+}
+
+/// Where the context menu keeps the audio row and clip it was opened on.
+/// Where a dragged Project panel row would go on an audio track (see `note_drop_target`).
+fn drop_target_key(timeline: u64) -> egui::Id {
+    timeline_key("timeline_drop_target", timeline)
+}
+
+fn audio_context_key(timeline: u64) -> egui::Id {
+    timeline_key("timeline_context_audio", timeline)
+}
+
+/// The edge of an audio clip under `point` (within reach of it): the audio track's index, the clip's number on
+/// it, and whether it is the clip's end (its out point) rather than its start.
+fn audio_edge_at(frame: &TimelineFrame<'_>, point: egui::Pos2) -> Option<(usize, usize, bool)> {
+    const REACH: f32 = 5.0;
+    frame
+        .snapshot
+        .tracks
+        .iter()
+        .zip(track_rows_geometry(&frame.snapshot.tracks))
+        .find_map(|(track, (top, height))| {
+            let rows = (frame.canvas.min.y + top)..=(frame.canvas.min.y + top + height);
+            if track.subtitle || !rows.contains(&point.y) {
+                return None;
+            }
+            clip_boxes(track, frame.duration)
+                .into_iter()
+                .find_map(|clip| {
+                    let (left, right) = (
+                        time_to_x(clip.start, frame.origin_x, frame.zoom),
+                        time_to_x(clip.end, frame.origin_x, frame.zoom),
+                    );
+                    if point.x <= right && right - point.x <= REACH {
+                        Some((track.index, clip.number, true))
+                    } else if point.x >= left && point.x - left <= REACH && point.x <= right {
+                        Some((track.index, clip.number, false))
+                    } else {
+                        None
+                    }
+                })
+        })
+}
+
+/// The audio track whose row is under `point` (its index among the audio tracks).
+fn audio_row_at(frame: &TimelineFrame<'_>, point: egui::Pos2) -> Option<usize> {
+    frame
+        .snapshot
+        .tracks
+        .iter()
+        .zip(track_rows_geometry(&frame.snapshot.tracks))
+        .find_map(|(track, (top, height))| {
+            let rows = (frame.canvas.min.y + top)..=(frame.canvas.min.y + top + height);
+            (!track.subtitle && rows.contains(&point.y)).then_some(track.index)
+        })
+}
+
+/// The audio clip under `point`: its track (the index among the audio tracks) and its number on the track.
+fn audio_clip_at(frame: &TimelineFrame<'_>, point: egui::Pos2) -> Option<(usize, usize)> {
     if point.x < frame.origin_x {
         return None;
     }
@@ -1830,8 +2539,10 @@ fn audio_clip_at(frame: &TimelineFrame<'_>, point: egui::Pos2) -> Option<usize> 
             if track.subtitle || !rows.contains(&point.y) {
                 return None;
             }
-            let (start, end) = audio_clip_span(track, frame.duration);
-            (seconds >= start && seconds < end).then_some(track.index)
+            clip_boxes(track, frame.duration)
+                .into_iter()
+                .find(|clip| seconds >= clip.start && seconds < clip.end)
+                .map(|clip| (track.index, clip.number))
         })
 }
 
@@ -1855,45 +2566,116 @@ fn draw_track_bars(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
         );
         if let Some(cues) = &track.cues {
             draw_cues(painter, frame, lane, cues);
+            // Being dragged: an outline where it would go.
+            if let Some((moved, _, start, end)) = frame.cue_move
+                && moved == track.index
+            {
+                let block = Rect::from_min_max(
+                    egui::pos2(time_to_x(start, origin_x, frame.zoom), lane.min.y + 1.0),
+                    egui::pos2(time_to_x(end, origin_x, frame.zoom), lane.max.y - 1.0),
+                );
+                let _ = painter.rect_stroke(
+                    block,
+                    3.0,
+                    egui::Stroke::new(1.5, craft_timeline::style::RULER_TEXT),
+                    egui::StrokeKind::Inside,
+                );
+            }
             continue;
         }
         if track.subtitle {
             continue;
         }
-        // The audio clip: where its sound starts (it may have been moved along the track), for its length.
-        let (start, end) = audio_clip_span(track, frame.duration);
-        let lane = Rect::from_min_max(
-            egui::pos2(time_to_x(start, origin_x, frame.zoom), lane.min.y),
-            egui::pos2(time_to_x(end, origin_x, frame.zoom), lane.max.y),
-        );
-        if lane.width() <= 0.0 {
-            continue;
-        }
-        craft_timeline::clip_body(painter, lane, craft_timeline::style::CLIP_AUDIO);
-        if let Some(peaks) = &track.peaks {
-            let pps = f64::from(BASE_SCALE) * f64::from(frame.zoom);
-            craft_timeline::draw_waveform(
-                painter,
-                lane,
-                peaks,
-                |x| f64::from(x - origin_x) / pps - start,
-                craft_timeline::darker(craft_timeline::style::CLIP_AUDIO),
+        // The audio clips: each where its sound starts (it may have been moved along the track), for its length.
+        for clip in clip_boxes(track, frame.duration) {
+            let lane = Rect::from_min_max(
+                egui::pos2(time_to_x(clip.start, origin_x, frame.zoom), lane.min.y),
+                egui::pos2(time_to_x(clip.end, origin_x, frame.zoom), lane.max.y),
             );
-        }
-        craft_timeline::clip_name_and_edges(painter, lane, &track.clip, true, true);
-        // Being dragged: an outline where it would start.
-        if let Some((moved, shift)) = frame.audio_move
-            && moved == track.index
-        {
-            let by = time_to_x((start + shift).max(0.0), origin_x, frame.zoom) - lane.min.x;
-            let _ = painter.rect_stroke(
-                lane.translate(egui::vec2(by, 0.0)),
-                2.0,
-                egui::Stroke::new(1.5, craft_timeline::style::RULER_TEXT),
-                egui::StrokeKind::Inside,
-            );
+            if lane.width() <= 0.0 {
+                continue;
+            }
+            craft_timeline::clip_body(painter, lane, craft_timeline::style::CLIP_AUDIO);
+            // Each clip's own file's waveform.
+            if let Some(peaks) = clip.peaks {
+                let pps = f64::from(BASE_SCALE) * f64::from(frame.zoom);
+                let (start, trim_start) = (clip.start, clip.trim_start);
+                craft_timeline::draw_waveform(
+                    painter,
+                    lane,
+                    peaks,
+                    // The time in the file: the clip's head is its trimmed in point.
+                    |x| f64::from(x - origin_x) / pps - start + trim_start,
+                    craft_timeline::darker(craft_timeline::style::CLIP_AUDIO),
+                );
+            }
+            craft_timeline::clip_name_and_edges(painter, lane, clip.name, true, true);
+            // The chosen clip: outlined.
+            if frame.picked == Some(ClipPick::Audio(track.index, clip.number)) {
+                let _ = painter.rect_stroke(
+                    lane,
+                    2.0,
+                    egui::Stroke::new(2.0, Color32::WHITE),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            // Being dragged: an outline where it would start.
+            if let Some((moved, number, shift)) = frame.audio_move
+                && moved == track.index
+                && number == clip.number
+            {
+                let by =
+                    time_to_x((clip.start + shift).max(0.0), origin_x, frame.zoom) - lane.min.x;
+                let _ = painter.rect_stroke(
+                    lane.translate(egui::vec2(by, 0.0)),
+                    2.0,
+                    egui::Stroke::new(1.5, craft_timeline::style::RULER_TEXT),
+                    egui::StrokeKind::Inside,
+                );
+            }
         }
     }
+}
+
+/// A subtitle clip being dragged: its subtitle track, its number, the grip ([`CueGrip`] code), and the pointer's x
+/// when pressed and now.
+type CueDragState = (usize, usize, u8, f32, f32);
+
+/// How near (points) an edge of a subtitle clip a press trims it instead of moving it.
+const CUE_EDGE: f32 = 4.0;
+
+/// How near (points) a dragged subtitle clip's edge snaps to a snap point.
+const CUE_SNAP: f32 = 8.0;
+
+/// The subtitle clip under `point` and where it is held: its subtitle track, its number and the grip (an edge
+/// within [`CUE_EDGE`], else its body).
+fn cue_grip_at(frame: &TimelineFrame<'_>, point: egui::Pos2) -> Option<(usize, usize, CueGrip)> {
+    if point.x < frame.origin_x - CUE_EDGE {
+        return None;
+    }
+    frame
+        .snapshot
+        .tracks
+        .iter()
+        .zip(track_rows_geometry(&frame.snapshot.tracks))
+        .find_map(|(track, (top, height))| {
+            let rows = (frame.canvas.min.y + top)..=(frame.canvas.min.y + top + height);
+            let cues = track.cues.as_ref().filter(|_| rows.contains(&point.y))?;
+            cues.iter().enumerate().find_map(|(number, cue)| {
+                let left = time_to_x(cue.start, frame.origin_x, frame.zoom);
+                let right = time_to_x(cue.end, frame.origin_x, frame.zoom);
+                let grip = if (point.x - left).abs() <= CUE_EDGE && right - left > 3.0 * CUE_EDGE {
+                    CueGrip::In
+                } else if (point.x - right).abs() <= CUE_EDGE {
+                    CueGrip::Out
+                } else if point.x > left && point.x < right {
+                    CueGrip::Body
+                } else {
+                    return None;
+                };
+                Some((track.index, number, grip))
+            })
+        })
 }
 
 /// The subtitle clip under `point`: its subtitle track (counted among the subtitle tracks) and its number.
@@ -1939,7 +2721,7 @@ fn draw_cues(
         );
         painter.rect_filled(block, 3.0, craft_timeline::style::CAPTION);
         if block.width() > 14.0 {
-            let text = cue.text.lines().next().unwrap_or_default().to_owned();
+            let text = crate::subtitles::cue_label(cue);
             painter
                 .with_clip_rect(block.shrink2(egui::vec2(4.0, 0.0)))
                 .text(
@@ -2049,6 +2831,66 @@ fn draw_playhead(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
 #[cfg(test)]
 mod tests {
     use super::{chapter_label, hit_marker, time_to_x, timecode, x_to_time};
+
+    /// M6.299: a dragged subtitle clip moves by whole frames, stays off its neighbours and the start, keeps at least
+    /// the shortest length when trimmed, and snaps to the nearest snap point within reach.
+    #[test]
+    fn a_subtitle_clip_is_dragged_trimmed_and_snapped() {
+        use super::{CueGrip, dragged_cue};
+        let cues = [(1.0, 2.0), (3.0, 4.0), (6.0, 7.0)];
+        let grid = (0.5, 0.5);
+        // Moved by 0.6 s: a whole frame of 0.5.
+        assert_eq!(
+            dragged_cue(&cues, 1, CueGrip::Body, 0.6, grid, None),
+            Some((3.5, 4.5))
+        );
+        // Not into the next clip, nor the one before.
+        assert_eq!(
+            dragged_cue(&cues, 1, CueGrip::Body, 5.0, grid, None),
+            Some((5.0, 6.0))
+        );
+        assert_eq!(
+            dragged_cue(&cues, 1, CueGrip::Body, -5.0, grid, None),
+            Some((2.0, 3.0))
+        );
+        assert_eq!(
+            dragged_cue(&cues, 0, CueGrip::Body, -5.0, grid, None),
+            Some((0.0, 1.0))
+        );
+        // Trimmed: never shorter than the shortest, nor past a neighbour.
+        assert_eq!(
+            dragged_cue(&cues, 1, CueGrip::In, 2.0, grid, None),
+            Some((3.5, 4.0))
+        );
+        assert_eq!(
+            dragged_cue(&cues, 1, CueGrip::In, -3.0, grid, None),
+            Some((2.0, 4.0))
+        );
+        assert_eq!(
+            dragged_cue(&cues, 1, CueGrip::Out, -2.0, grid, None),
+            Some((3.0, 3.5))
+        );
+        assert_eq!(
+            dragged_cue(&cues, 1, CueGrip::Out, 9.0, grid, None),
+            Some((3.0, 6.0))
+        );
+        // Snapped: the nearer edge goes to the snap point within reach.
+        let snaps = [5.2];
+        assert_eq!(
+            dragged_cue(&cues, 1, CueGrip::Body, 1.0, grid, Some((&snaps, 0.3))),
+            Some((4.2, 5.2))
+        );
+        assert_eq!(
+            dragged_cue(&cues, 1, CueGrip::Out, 1.0, grid, Some((&snaps, 0.3))),
+            Some((3.0, 5.2))
+        );
+        // Out of reach: by frames only.
+        assert_eq!(
+            dragged_cue(&cues, 1, CueGrip::Out, 0.5, grid, Some((&snaps, 0.3))),
+            Some((3.0, 4.5))
+        );
+        assert_eq!(dragged_cue(&cues, 3, CueGrip::Body, 1.0, grid, None), None);
+    }
 
     /// Checks that time and x coordinates round trip.
     #[test]

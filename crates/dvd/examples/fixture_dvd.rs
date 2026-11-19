@@ -15,9 +15,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     project.add_chapter(timeline, Tick(10 * 254_016_000_000), None)?;
     if let Some(tl) = project.timeline_mut(timeline) {
         tl.audio.push(AudioTrack {
+            more: Vec::new(),
             asset: audio,
             language: "ja".to_string(),
             start: 0,
+            trim_start: 0,
+            trim_end: None,
         });
     }
     let report = build_video_ts(&project, &fixtures.join("dvd_out"))?;

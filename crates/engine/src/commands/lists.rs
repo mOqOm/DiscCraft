@@ -142,7 +142,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "スライドショーの手動で進めるを設定",
         menu: &["スライドショー"],
         shortcut: None,
-        params: r#"{"slideshow": id, "manual": bool}"#,
+        params: r#"{"slideshow": id, "manual": bool, "slide"?: index (そのスライドだけ。なければスライドショー全体)}"#,
         enabled: always_enabled,
         run: run_set_manual_advance,
         journal: true,
@@ -715,10 +715,16 @@ fn run_set_manual_advance(session: &mut Session, params: &Value) -> CommandResul
         .get("manual")
         .and_then(Value::as_bool)
         .ok_or_else(|| "parameter \"manual\" must be a boolean".to_string())?;
-    session
-        .project
-        .set_manual_advance(id, manual)
-        .map_err(|error| error.to_string())?;
+    // One slide's own Manual Advance, or the show's (which holds every slide).
+    let slide = match params.get("slide") {
+        None | Some(Value::Null) => None,
+        Some(_) => Some(req_usize(params, "slide")?),
+    };
+    match slide {
+        Some(slide) => session.project.set_slide_manual_advance(id, slide, manual),
+        None => session.project.set_manual_advance(id, manual),
+    }
+    .map_err(|error| error.to_string())?;
     Ok(empty_object())
 }
 
@@ -1350,6 +1356,78 @@ mod tests {
                 .map(|show| show.manual_advance),
             Some(false)
         );
+        // One slide's own Manual Advance: only that slide is held; the show's holds them all.
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-slide-manual-{}", std::process::id()));
+        fs::create_dir_all(&dir)?;
+        let mut pictures = Vec::new();
+        for name in ["a.png", "b.png", "c.png"] {
+            let path = dir.join(name);
+            fs::write(&path, b"fake")?;
+            let asset = value_u64(
+                &session.execute(
+                    "asset.import",
+                    &obj(&[("path", Value::String(path.to_string_lossy().into_owned()))]),
+                )?,
+                "asset",
+            )?;
+            session.execute(
+                "slideshow.addSlide",
+                &obj(&[
+                    ("slideshow", Value::from(slideshow)),
+                    ("asset", Value::from(asset)),
+                ]),
+            )?;
+            pictures.push(asset);
+        }
+        let held = |session: &Session| {
+            session
+                .project
+                .slideshow(slideshow)
+                .map(disccraft_project::Slideshow::held_slides)
+        };
+        assert_eq!(held(&session), Some(vec![false, false, false]));
+        session.execute(
+            "slideshow.setManualAdvance",
+            &obj(&[
+                ("slideshow", Value::from(slideshow)),
+                ("slide", Value::from(1)),
+                ("manual", Value::Bool(true)),
+            ]),
+        )?;
+        assert_eq!(held(&session), Some(vec![false, true, false]));
+        assert_eq!(
+            session
+                .project
+                .slideshow(slideshow)
+                .map(|show| show.manual_advance),
+            Some(false)
+        );
+        // A slide that is not there is an error and changes nothing.
+        assert!(
+            session
+                .execute(
+                    "slideshow.setManualAdvance",
+                    &obj(&[
+                        ("slideshow", Value::from(slideshow)),
+                        ("slide", Value::from(9)),
+                        ("manual", Value::Bool(true)),
+                    ]),
+                )
+                .is_err()
+        );
+        session.execute(
+            "slideshow.setManualAdvance",
+            &obj(&[
+                ("slideshow", Value::from(slideshow)),
+                ("manual", Value::Bool(true)),
+            ]),
+        )?;
+        assert_eq!(held(&session), Some(vec![true, true, true]));
+        session.undo()?;
+        session.undo()?;
+        assert_eq!(held(&session), Some(vec![false, false, false]));
+        let _ = fs::remove_dir_all(&dir);
         for params in [
             obj(&[
                 ("slideshow", Value::from(slideshow)),

@@ -250,10 +250,11 @@ impl DiscCraftApp {
             }
         }
 
-        let capacities: Vec<(Capacity, &str)> = Capacity::choices(settings.kind)
-            .iter()
-            .map(|capacity| (*capacity, capacity_name(*capacity)))
-            .collect();
+        let capacities: Vec<(Capacity, &str)> =
+            crate::build_view::capacity_list(settings.kind, settings.capacity)
+                .into_iter()
+                .map(|capacity| (capacity, capacity_name(capacity)))
+                .collect();
         if let Some(capacity) = choice_row(
             ui,
             tl!("Disc capacity:"),
@@ -262,6 +263,22 @@ impl DiscCraftApp {
             &capacities,
         ) {
             self.set_capacity(capacity);
+        }
+        // Custom: its size beside (Encore's Size ▸ Custom).
+        if let Capacity::Custom { bytes } = settings.capacity {
+            let mut changed = None;
+            ui.horizontal(|ui| {
+                prop_label(ui, tl!("Custom size:"));
+                changed = crate::build_view::custom_capacity_box(
+                    ui,
+                    "sheet_custom_capacity",
+                    settings.kind,
+                    bytes,
+                );
+            });
+            if let Some(bytes) = changed {
+                self.set_capacity(Capacity::Custom { bytes });
+            }
         }
     }
 
@@ -278,21 +295,84 @@ impl DiscCraftApp {
         ui.separator();
         self.composition_row(ui, id, &asset);
 
-        if let Some(state) = self.transcode_state(id) {
-            let (dvd, bluray) = state.by_kind(self.session.project.settings.kind);
-            text_row(ui, tl!("DVD Transcode Settings:"), dvd.setting_label());
+        if let Some((dvd, bluray)) = self.transcode_columns(id) {
+            // Encore's sheet: the DVD and Blu-ray quality presets as combos, each with its status, then the two
+            // rendering checkboxes.
+            let unneeded = crate::project_panel::TranscodeState::Unneeded;
+            let applies = |state: crate::project_panel::TranscodeState| {
+                state != crate::project_panel::TranscodeState::NotApplicable
+            };
+            let mut dvd_pick = None;
+            let mut bluray_pick = None;
+            ui.horizontal(|ui| {
+                prop_label(ui, tl!("DVD Transcode:"));
+                if applies(dvd) {
+                    let fits = self.passes_through_kinds(id).0;
+                    dvd_pick = self.dvd_preset_combo(ui, "sheet_dvd_preset", &asset, fits);
+                } else {
+                    ui.label(dvd.setting_label());
+                }
+            });
             text_row(ui, tl!("DVD Transcode Status:"), dvd.status_label());
-            text_row(
-                ui,
-                tl!("Blu-ray Transcode Settings:"),
-                bluray.setting_label(),
-            );
+            ui.horizontal(|ui| {
+                prop_label(ui, tl!("Blu-ray Transcode:"));
+                if applies(bluray) {
+                    bluray_pick = self.bluray_preset_combo(
+                        ui,
+                        "sheet_bluray_preset",
+                        &asset,
+                        bluray == unneeded,
+                    );
+                } else {
+                    ui.label(bluray.setting_label());
+                }
+            });
             text_row(ui, tl!("Blu-ray Transcode Status:"), bluray.status_label());
+            if asset.transcode_audio != disccraft_project::TranscodeAudio::DolbyDigital {
+                text_row(
+                    ui,
+                    tl!("DVD Transcode Audio:"),
+                    crate::transcode_settings::audio_name(asset.transcode_audio),
+                );
+            }
+            // Encore's rendering checkboxes, for either kind of disc (M6.327).
+            let mut rendering = (asset.max_render_quality, asset.frame_blend);
+            let changed = ui
+                .horizontal(|ui| {
+                    prop_label(ui, "");
+                    ui.vertical(|ui| {
+                        crate::transcode_settings::rendering_checkboxes(ui, &mut rendering)
+                    })
+                    .inner
+                })
+                .inner;
+            if changed {
+                let _ = self.run_command(
+                    "asset.setRendering",
+                    serde_json::json!({
+                        "asset": id.0,
+                        "maxRenderQuality": rendering.0,
+                        "frameBlend": rendering.1,
+                    }),
+                );
+                self.transcode_dirty = true;
+            }
+            if let Some(picked) = dvd_pick {
+                self.apply_dvd_pick(id, picked);
+            }
+            if let Some(picked) = bluray_pick {
+                self.apply_bluray_pick(id, picked);
+            }
             ui.separator();
         }
 
         text_row(ui, tl!("Location:"), &asset.path);
-        text_row(ui, tl!("Media category:"), media_category(asset.kind));
+        let sound = self.asset_probe(id).audio;
+        text_row(
+            ui,
+            tl!("Media category:"),
+            media_category(asset.kind, sound),
+        );
         text_row(
             ui,
             tl!("Format:"),
@@ -326,6 +406,10 @@ impl DiscCraftApp {
         }
         if let Some(fps) = probe.fps {
             text_row(ui, tl!("Frame rate:"), &fps_text(fps));
+        }
+        // Encore's フィールドタイプ, after the frame rate.
+        if let Some(field) = probe.field {
+            text_row(ui, tl!("Field type:"), field.label());
         }
         if let Ok(metadata) = std::fs::metadata(&asset.path) {
             text_row(
@@ -449,6 +533,34 @@ impl DiscCraftApp {
         );
         text_row(ui, tl!("Chapters:"), &timeline.chapters.len().to_string());
         self.subtitle_color_rows(ui, id, &timeline);
+    }
+
+    /// Timeline ▸ Edit Timeline Color Set… (Encore: a dialog of the timeline's colour set): the rows the
+    /// timeline's Properties have, in a dialog of their own.
+    pub(crate) fn timeline_color_set_window(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.timeline_color_set_dialog else {
+            return;
+        };
+        let Some(timeline) = self.session.project.timeline(id).cloned() else {
+            self.timeline_color_set_dialog = None;
+            return;
+        };
+        let mut close = false;
+        let response =
+            egui::Modal::new(egui::Id::unique("timeline_color_set_dialog")).show(ctx, |ui| {
+                ui.set_width(460.0);
+                ui.heading(tl!("Timeline Color Set"));
+                ui.label(timeline.name.as_str());
+                self.subtitle_color_rows(ui, id, &timeline);
+                ui.add_space(6.0);
+                if ui.button(tl!("Close")).clicked() {
+                    close = true;
+                }
+            });
+        // A colour picker open over the dialog is not a click outside it.
+        if close || (response.should_close() && !egui::Popup::is_any_open(ctx)) {
+            self.timeline_color_set_dialog = None;
+        }
     }
 
     /// タイムラインカラーセット（Encore の「タイムラインカラーセットを編集」）: 3 つのグループの文字とストロークの色と
@@ -1223,7 +1335,7 @@ impl DiscCraftApp {
 
     /// ボタンのシートの 文字 タブ: ボタンの文字のフォントスタイルと書式（Encore の文字パネル）。フォントは
     /// メニューのボタンの文字のフォント（基本 タブ）。
-    fn button_character_rows(
+    pub(crate) fn button_character_rows(
         &mut self,
         ui: &mut Ui,
         id: MenuId,
@@ -1510,6 +1622,8 @@ impl DiscCraftApp {
             }
             2 => {
                 self.button_character_rows(ui, id, index, &button);
+                // M6.342: the layer effects of the button's text.
+                self.effects_row(ui, id, crate::effects_dialog::EffectsTarget::Button(index));
                 return;
             }
             _ => {}
@@ -2037,6 +2151,31 @@ impl DiscCraftApp {
             );
         }
         ui.separator();
+        // 手動で進める（Encore: このスライドは、観る人が次へ進めるまで出したまま）。スライドショー全体が手動なら
+        // どのスライドも止まるので、チェックは入ったまま変えられない。
+        let whole_show = self
+            .session
+            .project
+            .slideshow(id)
+            .is_some_and(|slideshow| slideshow.manual_advance);
+        let mut manual = whole_show || slide.manual_advance;
+        ui.horizontal(|ui| {
+            prop_label(ui, "");
+            let _ = ui
+                .add_enabled(
+                    !whole_show,
+                    egui::Checkbox::new(&mut manual, tl!("Manual advance")),
+                )
+                .on_hover_text(tl!(
+                    "This slide holds until the viewer presses Next or Enter"
+                ));
+        });
+        if !whole_show && manual != slide.manual_advance {
+            let _ = self.run_command(
+                "slideshow.setManualAdvance",
+                json!({"slideshow": id, "slide": index, "manual": manual}),
+            );
+        }
         // 字幕を作成（Encore: スライドの名前や説明を、そのスライドの間だけ字幕として出す）。
         let mut subtitle = slide.subtitle;
         ui.horizontal(|ui| {
@@ -2773,16 +2912,21 @@ impl DiscCraftApp {
         };
 
         let mut changed_text = None;
-        ui.horizontal_top(|ui| {
-            prop_label(ui, tl!("Text:"));
-            changed_text = committed_text(
-                ui,
-                &format!("cue_text_{}_{track}_{index}", id.0),
-                &cue.text,
-                true,
-            )
-            .1;
-        });
+        if cue.image.is_some() {
+            // A picture subtitle (an image script's) is shown as it is drawn: its file instead of a text.
+            text_row(ui, tl!("Picture:"), &crate::subtitles::cue_label(&cue));
+        } else {
+            ui.horizontal_top(|ui| {
+                prop_label(ui, tl!("Text:"));
+                changed_text = committed_text(
+                    ui,
+                    &format!("cue_text_{}_{track}_{index}", id.0),
+                    &cue.text,
+                    true,
+                )
+                .1;
+            });
+        }
         if let Some(text) = changed_text {
             set(self, json!({ "text": text }));
         }
@@ -2834,6 +2978,11 @@ impl DiscCraftApp {
                 self,
                 json!({ "group": choice.map(|group| u64::from(group) + 1) }),
             );
+        }
+
+        // 画像の字幕は描いてあるとおりに出る（位置もスクリプトのとおり）: ストローク / 揃え / 整列はない。
+        if cue.image.is_some() {
+            return;
         }
 
         // ストローク。
@@ -3179,10 +3328,12 @@ fn slide_scale_label(scale: disccraft_project::SlideScale) -> &'static str {
 }
 
 /// Encore の「メディアのカテゴリ」: 素材の中身の種類。
-pub(crate) fn media_category(kind: disccraft_project::AssetKind) -> &'static str {
+/// Encore's メディアのカテゴリ: a video with sound (`sound`) is "Video and audio", one without "Video".
+pub(crate) fn media_category(kind: disccraft_project::AssetKind, sound: bool) -> &'static str {
     use disccraft_project::AssetKind;
     match kind {
-        AssetKind::Video => tl!("Video and audio"),
+        AssetKind::Video if sound => tl!("Video and audio"),
+        AssetKind::Video => tl!("Video"),
         AssetKind::Audio => tl!("Audio"),
         AssetKind::Image => tl!("Still image"),
         AssetKind::Subtitle => tl!("Subtitles"),
@@ -3562,5 +3713,26 @@ fn slide_zoom_label(zoom: disccraft_project::SlideZoom) -> &'static str {
         disccraft_project::SlideZoom::In => tl!("Zoom In"),
         disccraft_project::SlideZoom::Out => tl!("Zoom Out"),
         disccraft_project::SlideZoom::None => tl!("None"),
+    }
+}
+
+#[cfg(test)]
+mod category_tests {
+    use super::media_category;
+    use crate::i18n::tl;
+    use disccraft_project::AssetKind;
+
+    /// M6.319: Encore's media category: a video file with sound is "Video and audio" (h264_aac.mp4: ビデオと
+    /// オーディオ), one without "Video" (ntsc.m2v: ビデオ); the other kinds whatever their sound.
+    #[test]
+    fn a_video_without_sound_is_video() {
+        assert_eq!(
+            media_category(AssetKind::Video, true),
+            tl!("Video and audio")
+        );
+        assert_eq!(media_category(AssetKind::Video, false), tl!("Video"));
+        assert_eq!(tl!("Video"), "ビデオ");
+        assert_eq!(media_category(AssetKind::Audio, false), tl!("Audio"));
+        assert_eq!(media_category(AssetKind::Image, true), tl!("Still image"));
     }
 }

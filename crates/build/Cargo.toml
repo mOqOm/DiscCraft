@@ -14,5 +14,9 @@ disccraft-udf.workspace = true
 disccraft-project.workspace = true
 disccraft-dvd.workspace = true
 
+[dev-dependencies]
+# The tests ask the media reader what a build's sources are (their pixel aspect ratio, whether they are wide).
+disccraft-transcode.workspace = true
+
 [lints]
 workspace = true

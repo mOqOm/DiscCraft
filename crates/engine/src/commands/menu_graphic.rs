@@ -43,11 +43,31 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "menu.placeLayers",
+        label: "レイヤーを配置（ライブラリのレイヤーセット / 置換レイヤー）",
+        menu: &["メニュー"],
+        shortcut: None,
+        params: r#"{"menu": id, "graphics": [a menu graphic (as the project file holds it), ...] (下から順), "x"?: n, "y"?: n (全体の左上をそこに。省略で元の場所)} → {"graphics": [index, ...]}"#,
+        enabled: always_enabled,
+        run: run_place_layers,
+        journal: true,
+    },
+    CommandSpec {
+        id: "menu.setEffects",
+        label: "レイヤー効果を設定",
+        menu: &["オブジェクト"],
+        shortcut: None,
+        params: r##"{"menu": id, "graphic" | "text" | "button": index (画像・シェイプ / テキスト / ボタンの文字), "effects": {"stroke"?: {"size", "color": [r, g, b], "opacity"}, "outerGlow"? / "innerGlow"?: {"size", "spread", "color", "opacity"}, "bevel"?: {"size", "angle", "highlight", "shadow"}, "overlay"?: {"color", "opacity"}} | null (なし)}"##,
+        enabled: always_enabled,
+        run: run_set_effects,
+        journal: true,
+    },
+    CommandSpec {
         id: "menu.setGraphic",
         label: "グラフィックを変更",
         menu: &["メニュー"],
         shortcut: None,
-        params: r##"{"menu": id, "index": n, "x"?: n, "y"?: n, "w"?: n, "h"?: n, "color"?: "#RRGGBB", "shape"?: string, "asset"?: id, "opacity"?: 1..100}"##,
+        params: r##"{"menu": id, "index": n, "x"?: n, "y"?: n, "w"?: n, "h"?: n, "color"?: "#RRGGBB", "shape"?: string, "asset"?: id, "opacity"?: 1..100, "replacement"?: bool (Encore's replacement layer)}"##,
         enabled: always_enabled,
         run: run_set_graphic,
         journal: true,
@@ -180,11 +200,121 @@ fn add_graphic(session: &mut Session, params: &Value, kind: GraphicKind) -> Comm
                 orientation: Default::default(),
                 hidden: false,
                 locked: false,
+                replacement: false,
+                effects: Default::default(),
             },
         )
         .map_err(|error| error.to_string())?;
     let index = u64::try_from(index).map_err(|_| "graphic index is too large".to_string())?;
     Ok(object(&[("index", Value::from(index))]))
+}
+
+/// Encore's Library layer set or replacement layer placed in a menu (M6.331): its graphics on top of the menu's
+/// others, in one step; with `x` and `y` the set moved so its top-left corner is there, kept inside the frame.
+fn run_place_layers(session: &mut Session, params: &Value) -> CommandResult {
+    let menu = MenuId(req_u64(params, "menu")?);
+    let graphics: Vec<MenuGraphic> = serde_json::from_value(
+        params
+            .get("graphics")
+            .cloned()
+            .ok_or_else(|| "parameter \"graphics\" is missing".to_string())?,
+    )
+    .map_err(|error| format!("parameter \"graphics\" must be a list of menu graphics: {error}"))?;
+    if graphics.is_empty() {
+        return Err("parameter \"graphics\" holds no graphic".to_string());
+    }
+    let (width, height) = frame_size(&session.project.settings);
+    // The set's bounds, and how far it moves.
+    let left = graphics
+        .iter()
+        .map(|graphic| graphic.rect.x)
+        .min()
+        .unwrap_or(0);
+    let top = graphics
+        .iter()
+        .map(|graphic| graphic.rect.y)
+        .min()
+        .unwrap_or(0);
+    let right = graphics
+        .iter()
+        .map(|graphic| u32::from(graphic.rect.x) + u32::from(graphic.rect.w))
+        .max()
+        .unwrap_or(0);
+    let bottom = graphics
+        .iter()
+        .map(|graphic| u32::from(graphic.rect.y) + u32::from(graphic.rect.h))
+        .max()
+        .unwrap_or(0);
+    let (set_w, set_h) = (right - u32::from(left), bottom - u32::from(top));
+    let at = |name: &str, own: u16, extent: u32, frame: u16| -> Result<i64, String> {
+        let wanted = opt_u64(params, name)?.unwrap_or(u64::from(own));
+        // Kept inside the frame (from its far edge when the set is as large).
+        let most = u64::from(frame).saturating_sub(u64::from(extent));
+        Ok(i64::try_from(wanted.min(most)).unwrap_or(0) - i64::from(own))
+    };
+    let dx = at("x", left, set_w, width)?;
+    let dy = at("y", top, set_h, height)?;
+    let shift =
+        |start: u16, by: i64| u16::try_from((i64::from(start) + by).max(0)).unwrap_or(u16::MAX);
+    let before = session.project.clone();
+    let mut placed = Vec::new();
+    for mut graphic in graphics {
+        graphic.rect.x = shift(graphic.rect.x, dx);
+        graphic.rect.y = shift(graphic.rect.y, dy);
+        graphic.hidden = false;
+        graphic.locked = false;
+        match session.project.add_menu_graphic(menu, graphic) {
+            Ok(index) => placed.push(Value::from(u64::try_from(index).unwrap_or(u64::MAX))),
+            Err(error) => {
+                // All or nothing.
+                session.project = before;
+                return Err(error.to_string());
+            }
+        }
+    }
+    Ok(object(&[("graphics", Value::Array(placed))]))
+}
+
+/// An image's or a shape's layer effects (Encore's layer styles, M6.332): each value brought inside its range.
+fn run_set_effects(session: &mut Session, params: &Value) -> CommandResult {
+    let menu = MenuId(req_u64(params, "menu")?);
+    let effects = match params.get("effects") {
+        None | Some(Value::Null) => disccraft_project::LayerEffects::default(),
+        Some(value) => serde_json::from_value::<disccraft_project::LayerEffects>(value.clone())
+            .map_err(|error| format!("parameter \"effects\" is not layer effects: {error}"))?,
+    }
+    .sane();
+    let target = (
+        opt_u64(params, "graphic")?,
+        opt_u64(params, "text")?,
+        opt_u64(params, "button")?,
+    );
+    let found = session
+        .project
+        .menu_mut(menu)
+        .ok_or_else(|| format!("menu {} does not exist", menu.0))?;
+    let index = |value: u64| usize::try_from(value).unwrap_or(usize::MAX);
+    // An image's or a shape's (M6.332), a text object's or a button's text (M6.342).
+    let slot = match target {
+        (Some(graphic), None, None) => found
+            .graphics
+            .get_mut(index(graphic))
+            .map(|graphic| &mut graphic.effects)
+            .ok_or_else(|| format!("graphic {graphic} does not exist"))?,
+        (None, Some(text), None) => found
+            .texts
+            .get_mut(index(text))
+            .map(|text| &mut text.effects)
+            .ok_or_else(|| format!("text {text} does not exist"))?,
+        (None, None, Some(button)) => found
+            .buttons
+            .get_mut(index(button))
+            .map(|button| &mut button.effects)
+            .ok_or_else(|| format!("button {button} does not exist"))?,
+        _ => return Err("give exactly one of \"graphic\", \"text\" or \"button\"".to_string()),
+    };
+    *slot = effects;
+    Ok(empty_object())
 }
 
 fn run_add_image(session: &mut Session, params: &Value) -> CommandResult {
@@ -222,6 +352,14 @@ fn run_set_graphic(session: &mut Session, params: &Value) -> CommandResult {
         .transpose()?;
     let asset = opt_u64(params, "asset")?.map(AssetId);
     let opacity = opacity(params)?;
+    let replacement = match params.get("replacement") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_bool()
+                .ok_or_else(|| "parameter \"replacement\" must be true or false".to_string())?,
+        ),
+    };
 
     let current = session
         .project
@@ -279,6 +417,14 @@ fn run_set_graphic(session: &mut Session, params: &Value) -> CommandResult {
             .set_menu_graphic_opacity(menu, index, opacity)
             .map_err(|error| error.to_string())?;
     }
+    if let Some(replacement) = replacement
+        && let Some(graphic) = session
+            .project
+            .menu_mut(menu)
+            .and_then(|menu| menu.graphics.get_mut(index))
+    {
+        graphic.replacement = replacement;
+    }
     Ok(empty_object())
 }
 
@@ -300,6 +446,8 @@ fn run_convert_to_button(session: &mut Session, params: &Value) -> CommandResult
     let text = opt_u64(params, "text")?;
     let graphic = opt_u64(params, "graphic")?;
     let frame = frame_size(&session.project.settings);
+    // The text's layer effects go with it (M6.342).
+    let mut effects = disccraft_project::LayerEffects::default();
     let (label, rect) = match (text, graphic) {
         (Some(index), None) => {
             let index =
@@ -314,6 +462,7 @@ fn run_convert_to_button(session: &mut Session, params: &Value) -> CommandResult
                 .ok_or_else(|| format!("text {index} does not exist"))?;
             let rect = disccraft_menu::text_rect(menu, text);
             let label = text.text.lines().next().unwrap_or_default().to_owned();
+            effects = text.effects;
             let menu = session
                 .project
                 .menu_mut(menu_id)
@@ -353,6 +502,13 @@ fn run_convert_to_button(session: &mut Session, params: &Value) -> CommandResult
         .project
         .add_button(menu_id, label, Some(rect), Link::NotSet)
         .map_err(|error| error.to_string())?;
+    if let Some(added) = session
+        .project
+        .menu_mut(menu_id)
+        .and_then(|menu| menu.buttons.get_mut(index))
+    {
+        added.effects = effects;
+    }
     let button = u64::try_from(index).map_err(|_| "button index is too large".to_string())?;
     Ok(object(&[("button", Value::from(button))]))
 }
@@ -379,6 +535,10 @@ fn run_convert_to_object(session: &mut Session, params: &Value) -> CommandResult
         .menu_mut(menu_id)
         .ok_or_else(|| format!("menu {} does not exist", menu_id.0))?;
     menu.texts.push(MenuText {
+        // The button's layer effects stay with its text (M6.342).
+        effects: button.effects,
+        box_width: None,
+        box_height: None,
         text: button.label,
         x: button.rect.x,
         y: button.rect.y,
@@ -414,6 +574,84 @@ mod tests {
     use disccraft_project::{GraphicKind, ShapeKind};
     use serde_json::{Value, json};
     use std::error::Error;
+
+    /// M6.331: a Library layer set is placed in one step, its layers on top in their order, moved with their
+    /// corner where asked and kept inside the frame; a replacement layer stays one; a bad one places nothing.
+    #[test]
+    fn a_layer_set_is_placed_in_one_step() -> Result<(), Box<dyn Error>> {
+        let mut session = Session::new();
+        let menu = session.project.add_menu(None)?;
+        let settings = session.project.settings.clone();
+        let band = disccraft_project::layer_preset("layers.band-top")
+            .ok_or("preset")?
+            .graphics(&settings);
+        let placed = session.execute(
+            "menu.placeLayers",
+            &json!({ "menu": menu.0, "graphics": band, "x": 100, "y": 300 }),
+        )?;
+        assert_eq!(placed.get("graphics"), Some(&json!([0, 1])));
+        let graphics = |session: &Session| {
+            session
+                .project
+                .menu(menu)
+                .map(|menu| menu.graphics.clone())
+                .unwrap_or_default()
+        };
+        let rects: Vec<(u16, u16, u16, u16)> = graphics(&session)
+            .iter()
+            .map(|graphic| {
+                (
+                    graphic.rect.x,
+                    graphic.rect.y,
+                    graphic.rect.w,
+                    graphic.rect.h,
+                )
+            })
+            .collect();
+        // The band is the whole width: it stays at x 0; its top moves to 300 (the line 70 below it).
+        assert_eq!(rects, [(0, 300, 720, 70), (0, 370, 720, 3)]);
+        // Undone in one step.
+        session.execute("edit.undo", &Value::Null)?;
+        assert!(graphics(&session).is_empty());
+
+        let photo = disccraft_project::layer_preset("replace.photo-round")
+            .ok_or("preset")?
+            .graphics(&settings);
+        session.execute(
+            "menu.placeLayers",
+            &json!({ "menu": menu.0, "graphics": photo }),
+        )?;
+        let placed = graphics(&session);
+        assert_eq!(placed.len(), 1);
+        assert!(placed.iter().all(|graphic| graphic.replacement));
+        assert!(matches!(
+            placed.first().map(|graphic| graphic.kind),
+            Some(GraphicKind::Shape {
+                shape: ShapeKind::Ellipse,
+                ..
+            })
+        ));
+        // An image of an asset the project does not have: nothing is placed.
+        let missing = json!([{ "rect": { "x": 0, "y": 0, "w": 10, "h": 10 }, "kind": { "image": { "asset": 99 } } }]);
+        assert!(
+            session
+                .execute(
+                    "menu.placeLayers",
+                    &json!({ "menu": menu.0, "graphics": missing })
+                )
+                .is_err()
+        );
+        assert_eq!(graphics(&session).len(), 1);
+        assert!(
+            session
+                .execute(
+                    "menu.placeLayers",
+                    &json!({ "menu": menu.0, "graphics": [] })
+                )
+                .is_err()
+        );
+        Ok(())
+    }
 
     /// M6.197: the Layers panel's eye and lock set a layer hidden or locked, each on its own; anything else is
     /// refused; it undoes.
@@ -463,6 +701,65 @@ mod tests {
             state(&session),
             Some((Some((true, false)), Some((false, false))))
         );
+        Ok(())
+    }
+
+    /// M6.283: Object ▸ Convert to Replacement Layer sets a graphic's `(!)` flag; a still that replaces the layer
+    /// keeps it, with the layer's opacity; Convert to Object clears it; anything but a bool is refused.
+    #[test]
+    fn a_graphic_becomes_a_replacement_layer_and_back() -> Result<(), Box<dyn Error>> {
+        let dir = std::env::temp_dir().join(format!(
+            "disccraft-replacement-layer-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir)?;
+        let still = dir.join("still.png");
+        std::fs::File::create(&still)?;
+        let mut session = Session::new();
+        let asset = session.project.add_asset(&still)?;
+        let menu = session.project.add_menu(None)?;
+        session.execute(
+            "menu.addShape",
+            &json!({ "menu": menu.0, "shape": "rectangle", "color": "#808080", "x": 100, "y": 50, "w": 200, "h": 200, "opacity": 70 }),
+        )?;
+        let graphic = |session: &Session| {
+            session
+                .project
+                .menu(menu)
+                .and_then(|menu| menu.graphics.first())
+                .cloned()
+        };
+        session.execute(
+            "menu.setGraphic",
+            &json!({ "menu": menu.0, "index": 0, "replacement": true }),
+        )?;
+        assert!(graphic(&session).is_some_and(|graphic| graphic.replacement));
+        // A still dropped on it: its picture and fitted place, the flag and the opacity kept.
+        session.execute(
+            "menu.setGraphic",
+            &json!({ "menu": menu.0, "index": 0, "asset": asset.0, "x": 100, "y": 125, "w": 200, "h": 50 }),
+        )?;
+        let replaced = graphic(&session).ok_or("graphic")?;
+        assert_eq!(replaced.kind, GraphicKind::Image { asset });
+        assert!(replaced.replacement);
+        assert_eq!(
+            (replaced.rect.y, replaced.rect.h, replaced.opacity),
+            (125, 50, 70)
+        );
+        session.execute(
+            "menu.setGraphic",
+            &json!({ "menu": menu.0, "index": 0, "replacement": false }),
+        )?;
+        assert!(graphic(&session).is_some_and(|graphic| !graphic.replacement));
+        assert!(
+            session
+                .execute(
+                    "menu.setGraphic",
+                    &json!({ "menu": menu.0, "index": 0, "replacement": "yes" }),
+                )
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 

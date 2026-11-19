@@ -8,7 +8,7 @@ use disccraft_bdmv::{Stream, StreamCoding};
 use disccraft_dvd::{SubtitleTrack, TitleAudio, TitleStreams};
 use disccraft_m2tsmux::{
     AUDIO_PID, EsInput, EsUnit, M2tsLayout, MuxConfig, PCR_PID, PG_PID, PMT_PID, StreamKind,
-    VIDEO_PID, bd_lpcm_units,
+    VIDEO_PID,
 };
 use disccraft_project::DiscSettings;
 use disccraft_psmux::es::{Ac3Frame, Ac3Stream, LpcmStream, PictureType, VideoStream};
@@ -378,8 +378,22 @@ fn audio_inputs(title: &TitleStreams) -> Result<(Vec<EsInput>, Vec<Stream>), BdE
         match audio {
             TitleAudio::Lpcm { stream, language } => {
                 let coding = lpcm_coding(stream, *language)?;
-                let units = bd_lpcm_units(&stream.data, stream.channels, start_pts)
-                    .map_err(|error| BdError::Mux(error.to_string()))?;
+                // 24-bit samples come in a DVD's order: a Blu-ray's are one after another.
+                let plain;
+                let samples: &[u8] = if stream.bits == 24 {
+                    plain = plain_24(&stream.data, stream.channels);
+                    &plain
+                } else {
+                    &stream.data
+                };
+                let units = disccraft_m2tsmux::bd_lpcm_units_of(
+                    samples,
+                    stream.channels,
+                    stream.channel_mask,
+                    (stream.bits, stream.sample_rate),
+                    start_pts,
+                )
+                .map_err(|error| BdError::Mux(error.to_string()))?;
                 inputs.push(EsInput {
                     pid,
                     kind: StreamKind::Lpcm,
@@ -401,10 +415,25 @@ fn audio_inputs(title: &TitleStreams) -> Result<(Vec<EsInput>, Vec<Stream>), BdE
                 });
                 streams.push(Stream { pid, coding });
             }
-            // A DTS track goes on a DVD as it is; the Blu-ray stream for it is not written yet.
-            TitleAudio::Dts { .. } => {
+            // A DTS track goes on the disc as it is, frame by frame (M6.348).
+            TitleAudio::Dts {
+                stream,
+                data,
+                language,
+            } => {
+                let coding = dts_coding(stream, *language)?;
+                let units = ac3_units(&stream.frames, data)?;
+                inputs.push(EsInput {
+                    pid,
+                    kind: StreamKind::Dts,
+                    units,
+                });
+                streams.push(Stream { pid, coding });
+            }
+            // MPEG audio is passed through only for a PAL DVD; a Blu-ray's is converted before it gets here.
+            TitleAudio::Mp2 => {
                 return Err(BdError::Unsupported(
-                    "a DTS audio track cannot be put on a Blu-ray disc yet".to_string(),
+                    "an MPEG audio track cannot be put on a Blu-ray disc as it is".to_string(),
                 ));
             }
         }
@@ -449,30 +478,58 @@ fn ac3_units(frames: &[Ac3Frame], data: &[u8]) -> Result<Vec<EsUnit>, BdError> {
     Ok(units)
 }
 
+/// 24-bit samples in a DVD's LPCM order (`LpcmStream::data`: for every two samples a channel, the two high bytes
+/// of each sample, then the low byte of each) as plain big-endian samples one after another.
+fn plain_24(data: &[u8], channels: u8) -> Vec<u8> {
+    let samples = usize::from(channels.max(1)) * 2;
+    let mut out = Vec::with_capacity(data.len());
+    for group in data.chunks_exact(samples * 3) {
+        let (high, low) = group.split_at(samples * 2);
+        for (pair, low) in high.as_chunks::<2>().0.iter().zip(low) {
+            out.extend_from_slice(pair);
+            out.push(*low);
+        }
+    }
+    out
+}
+
 pub(crate) fn lpcm_coding(
     stream: &LpcmStream,
     language: Option<[u8; 2]>,
 ) -> Result<StreamCoding, BdError> {
-    if stream.sample_rate != 48_000 {
+    // The sampling frequency code of the clip's and the playlist's stream attributes.
+    let sample_rate = match stream.sample_rate {
+        48_000 => 1,
+        96_000 => 4,
+        192_000 => 5,
+        _ => {
+            return Err(BdError::Unsupported(
+                "LPCM sample rate must be 48, 96 or 192 kHz".to_string(),
+            ));
+        }
+    };
+    if stream.bits != 16 && stream.bits != 24 {
         return Err(BdError::Unsupported(
-            "LPCM sample rate must be 48 kHz".to_string(),
+            "LPCM bit depth must be 16 or 24".to_string(),
         ));
     }
-    if stream.bits != 16 {
-        return Err(BdError::Unsupported(
-            "LPCM bit depth must be 16".to_string(),
-        ));
-    }
-    if stream.channels == 0 || stream.channels > 2 {
-        return Err(BdError::Unsupported(
-            "LPCM channel count must be 1 or 2".to_string(),
-        ));
+    // Up to eight channels on speakers a channel assignment has (M6.347).
+    if disccraft_m2tsmux::bd_lpcm_layout(stream.channels, stream.channel_mask).is_none() {
+        return Err(BdError::Unsupported(format!(
+            "a Blu-ray's LPCM has no channel layout for these {} channels",
+            stream.channels
+        )));
     }
 
-    let audio_format = if stream.channels == 2 { 3 } else { 1 };
+    // Mono, stereo or multi-channel.
+    let audio_format = match stream.channels {
+        1 => 1,
+        2 => 3,
+        _ => 6,
+    };
     Ok(StreamCoding::Lpcm {
         audio_format,
-        sample_rate: 1,
+        sample_rate,
         language: iso639_2(language),
     })
 }
@@ -491,6 +548,29 @@ fn ac3_coding(stream: &Ac3Stream, language: Option<[u8; 2]>) -> StreamCoding {
         sample_rate: 1,
         language: iso639_2(language),
     }
+}
+
+/// The stream attributes of a DTS track (M6.348): 48 kHz (a Blu-ray's DTS is), mono, stereo or multi-channel.
+fn dts_coding(
+    stream: &disccraft_psmux::es::DtsStream,
+    language: Option<[u8; 2]>,
+) -> Result<StreamCoding, BdError> {
+    if stream.sample_rate != 48_000 {
+        return Err(BdError::Unsupported(format!(
+            "a Blu-ray's DTS is 48 kHz, not {} Hz",
+            stream.sample_rate
+        )));
+    }
+    let audio_format = match stream.channels {
+        0 | 1 => 1,
+        2 => 3,
+        _ => 6,
+    };
+    Ok(StreamCoding::Dts {
+        audio_format,
+        sample_rate: 1,
+        language: iso639_2(language),
+    })
 }
 
 pub(crate) fn video_coding(settings: &DiscSettings, wide: bool) -> StreamCoding {
@@ -597,9 +677,21 @@ fn write_m2ts_with(
 ) -> Result<(M2tsLayout, u64), BdError> {
     let file = std::fs::File::create(path).map_err(|error| io_error(path, error))?;
     let mut writer = BufWriter::new(file);
-    let layout =
-        disccraft_m2tsmux::mux_m2ts_with(inputs, &[video], &MuxConfig::default(), &mut writer)
-            .map_err(|error| BdError::Mux(error.to_string()))?;
+    // Progress panel ▸ Stop also ends a clip's multiplexing before its next unit (M6.340).
+    let layout = disccraft_m2tsmux::mux_m2ts_stoppable(
+        inputs,
+        &[video],
+        &MuxConfig::default(),
+        disccraft_transcode::stop_requested,
+        &mut writer,
+    )
+    .map_err(|error| {
+        if disccraft_transcode::stop_requested() {
+            BdError::Prepare(disccraft_transcode::STOPPED.to_string())
+        } else {
+            BdError::Mux(error.to_string())
+        }
+    })?;
     writer.flush().map_err(|error| io_error(path, error))?;
 
     if layout.late_packets > 0 {
@@ -671,7 +763,7 @@ fn build_play_item(
             .filter(|s| {
                 matches!(
                     s.coding,
-                    StreamCoding::Lpcm { .. } | StreamCoding::Ac3 { .. }
+                    StreamCoding::Lpcm { .. } | StreamCoding::Ac3 { .. } | StreamCoding::Dts { .. }
                 )
             })
             .collect(),

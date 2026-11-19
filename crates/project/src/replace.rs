@@ -19,8 +19,11 @@ pub struct MenuDesign {
     pub colors: Option<([u8; 3], [u8; 3])>,
     /// The design's buttons, in number order.
     pub buttons: Vec<DesignButton>,
-    /// The colours of the design's subpicture layers (a PSD's), for the automatic colour set.
+    /// The colours of the design's subpicture layers (a PSD's), for the automatic colour set: group 1's and
+    /// group 2's (M6.336).
     pub subpicture_colors: [Option<[u8; 3]>; 3],
+    /// Group 2's colours (the next PSD button whose colours differ).
+    pub second_subpicture_colors: [Option<[u8; 3]>; 3],
 }
 
 /// One button of a [`MenuDesign`].
@@ -37,6 +40,9 @@ pub struct DesignButton {
     pub thumbnail: Option<crate::thumbnail::ThumbnailArea>,
     /// The design's subpicture for the button (a PSD's `(=1)` / `(=2)` / `(=3)` layers).
     pub subpicture: Option<crate::subpicture::Subpicture>,
+    /// The button's highlight group in the design's automatic colour set (a PSD's, M6.336); `None` keeps the
+    /// button's.
+    pub highlight_group: Option<u8>,
 }
 
 impl Project {
@@ -57,9 +63,11 @@ impl Project {
                     label: None,
                     thumbnail: button.thumbnail,
                     subpicture: None,
+                    highlight_group: None,
                 })
                 .collect(),
             subpicture_colors: [None; 3],
+            second_subpicture_colors: [None; 3],
         }
     }
 
@@ -86,6 +94,7 @@ impl Project {
             target.highlight_color = highlight;
         }
         target.subpicture_colors = design.subpicture_colors;
+        target.second_subpicture_colors = design.second_subpicture_colors;
         // The old design's objects go with it.
         target.texts.clear();
         target.graphics.clear();
@@ -105,6 +114,9 @@ impl Project {
             button.rect = new.rect;
             button.thumbnail = new.thumbnail;
             button.subpicture.clone_from(&new.subpicture);
+            if let Some(group) = new.highlight_group {
+                button.highlight_group = group;
+            }
             if let Some(label) = &new.label {
                 button.label.clone_from(label);
             }
@@ -129,6 +141,9 @@ impl Project {
                 }
                 button.thumbnail = new.thumbnail;
                 button.subpicture.clone_from(&new.subpicture);
+                if let Some(group) = new.highlight_group {
+                    button.highlight_group = group;
+                }
             }
         }
         Ok(())
@@ -175,10 +190,12 @@ mod tests {
             background: MenuBackground::Color { color: [0, 0, 80] },
             colors: Some(([255, 255, 255], [255, 0, 0])),
             subpicture_colors: [None; 3],
+            second_subpicture_colors: [None; 3],
             buttons: (0..buttons)
                 .map(|index| DesignButton {
                     thumbnail: None,
                     subpicture: None,
+                    highlight_group: None,
                     rect: rect(200 + u16::try_from(index).unwrap_or(0) * 10),
                     name: None,
                     label: None,

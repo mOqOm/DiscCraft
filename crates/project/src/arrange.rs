@@ -805,6 +805,7 @@ mod tests {
         let mut project = Project::default();
         let menu = menu_with(&mut project, 1)?;
         let copy = Button {
+            effects: Default::default(),
             auto_activate: false,
             override_link: None,
             highlight_group: 1,

@@ -61,6 +61,14 @@ impl DiscCraftApp {
         for action in pressed.into_iter().chain(clicked) {
             self.run_action(ui, action);
         }
+        let render = ui.ctx().data_mut(|data| {
+            let what = data.get_temp::<disccraft_build::Render>(render_request_id());
+            data.remove::<disccraft_build::Render>(render_request_id());
+            what
+        });
+        if let Some(what) = render {
+            self.start_render(what);
+        }
         // 編集 ▸ ヒストリー で選んだところまで、まとめて取り消す / やり直す。
         let jump = ui
             .ctx()
@@ -95,6 +103,19 @@ impl DiscCraftApp {
         push(clicked, ui, Action::OpenProject, true);
         ui.separator();
         push(clicked, ui, Action::CloseProject, true);
+        // Encore: 閉じる（使っているビューアに出ているものを閉じる）。
+        push(
+            clicked,
+            ui,
+            Action::CloseViewer,
+            matches!(
+                self.selection,
+                Selection::Menu(_)
+                    | Selection::Timeline(_)
+                    | Selection::Slideshow(_)
+                    | Selection::ChapterPlaylist(_)
+            ),
+        );
         push(clicked, ui, Action::Save, true);
         push(clicked, ui, Action::SaveAs, true);
         ui.separator();
@@ -112,6 +133,18 @@ impl DiscCraftApp {
             push(clicked, ui, Action::ImportTimeline, true);
             push(clicked, ui, Action::ImportSlideshow, true);
         });
+        // Encore: アセットを置き換え… / アセットを検索…（選んだアセットに。検索はファイルが見つからないときだけ）。
+        let chosen_asset = match self.selection {
+            Selection::Asset(id) => self.session.project.assets.get(&id),
+            _ => None,
+        };
+        push(clicked, ui, Action::ReplaceAsset, chosen_asset.is_some());
+        push(
+            clicked,
+            ui,
+            Action::LocateAsset,
+            chosen_asset.is_some_and(|asset| asset.offline),
+        );
         ui.separator();
         // Encore: トランスコード ▸ トランスコード設定… / 今すぐトランスコード / オリジナルに戻す（選んだアセットに）。
         ui.menu_button(tl!("Transcode"), |ui| {
@@ -127,7 +160,9 @@ impl DiscCraftApp {
                 .assets
                 .keys()
                 .any(|id| self.transcode_state(*id) == Some(TranscodeState::Untranscoded));
-            let _ = ui.add_enabled(false, egui::Button::new(tl!("Transcode Settings…")));
+            let settable =
+                matches!(self.selection, Selection::Asset(id) if self.has_transcode_settings(id));
+            push(clicked, ui, Action::TranscodeSettings, settable);
             push(
                 clicked,
                 ui,
@@ -141,11 +176,32 @@ impl DiscCraftApp {
                 Action::RevertToOriginal,
                 idle && state == Some(TranscodeState::Transcoded),
             );
+            ui.separator();
+            push(clicked, ui, Action::EditQualityPresets, true);
+        });
+        // Encore: トランスコードされたファイルを検索 ▸ DVD… / Blu-ray…（選んだビデオのアセットに）。
+        let video = matches!(self.selection, Selection::Asset(id) if self.is_video_asset(id));
+        ui.add_enabled_ui(video, |ui| {
+            ui.menu_button(tl!("Locate Transcoded File"), |ui| {
+                if ui.button(tl!("DVD…")).clicked() {
+                    clicked.push(Action::LocateTranscodedDvd);
+                    ui.close();
+                }
+                if ui.button(tl!("Blu-ray…")).clicked() {
+                    clicked.push(Action::LocateTranscodedBluray);
+                    ui.close();
+                }
+            });
         });
         ui.separator();
         push(clicked, ui, Action::ProjectSettings, true);
+        // Encore: フッテージを変換…（選んだビデオのアセットに）。
+        let interpretable =
+            matches!(self.selection, Selection::Asset(id) if self.can_interpret_footage(id));
+        push(clicked, ui, Action::InterpretFootage, interpretable);
         ui.separator();
-        // Encore: ディスクのユーザー操作を設定…
+        // Encore: DVD-ROM フォルダーを選択… / ディスクのユーザー操作を設定…
+        push(clicked, ui, Action::ChooseRomFolder, true);
         push(clicked, ui, Action::DiscUserOps, true);
         ui.separator();
         push(
@@ -155,6 +211,58 @@ impl DiscCraftApp {
             self.selection_node().is_some(),
         );
         push(clicked, ui, Action::Preview, true);
+        // Encore: レンダリング ▸ プロジェクト / モーションメニュー / スライドショー（ビルドより先にキャッシュに作る）。
+        ui.menu_button(tl!("Render"), |ui| {
+            let idle = !self.build_job.is_running() && !self.transcode_job.is_running();
+            let any = self.session.project.assets.keys().any(|id| {
+                self.transcode_state(*id)
+                    == Some(crate::project_panel::TranscodeState::Untranscoded)
+            });
+            if labeled(ui, tl!("Project"), Action::TranscodeAll, idle && any) {
+                clicked.push(Action::TranscodeAll);
+            }
+            // The selected motion menu (an HD Blu-ray's are made at the build), the selected slideshow.
+            let settings = &self.session.project.settings;
+            let hd = settings.kind == disccraft_project::DiscKind::BluRay
+                && settings.bd_video.hd().is_some();
+            let motion = match self.selection {
+                Selection::Menu(id) => self
+                    .session
+                    .project
+                    .menu(id)
+                    .filter(|menu| menu.is_motion() && !hd)
+                    .map(|menu| menu.id),
+                _ => None,
+            };
+            if ui
+                .add_enabled(
+                    idle && motion.is_some(),
+                    egui::Button::new(tl!("Motion Menu")),
+                )
+                .clicked()
+            {
+                if let Some(id) = motion {
+                    request_render(ui, disccraft_build::Render::MotionMenus(Some(id)));
+                }
+                ui.close();
+            }
+            let slideshow = match self.selection {
+                Selection::Slideshow(id) => Some(id),
+                _ => None,
+            };
+            if ui
+                .add_enabled(
+                    idle && slideshow.is_some(),
+                    egui::Button::new(tl!("Slideshow")),
+                )
+                .clicked()
+            {
+                if let Some(id) = slideshow {
+                    request_render(ui, disccraft_build::Render::Slideshows(Some(id)));
+                }
+                ui.close();
+            }
+        });
         push(clicked, ui, Action::CheckProject, true);
         ui.menu_button(tl!("Build"), |ui| {
             push(clicked, ui, Action::BuildFolder, true);
@@ -208,6 +316,22 @@ impl DiscCraftApp {
         self.history_menu(ui);
         ui.separator();
         self.clipboard_items(ui, clicked);
+        // Encore: ソースからマーカーを更新（すべてのマーカーを置換）。
+        push(
+            clicked,
+            ui,
+            Action::UpdateMarkersFromSource,
+            self.viewer_timeline().is_some(),
+        );
+        // Encore: リップル削除（タイムラインビューアの再生ヘッドの下のクリップを消して詰める）。
+        push(
+            clicked,
+            ui,
+            Action::RippleDelete,
+            self.viewer_timeline()
+                .and_then(|id| self.session.project.timeline(id))
+                .is_some_and(|timeline| !timeline.more_video.is_empty()),
+        );
         ui.separator();
         push(
             clicked,
@@ -249,9 +373,19 @@ impl DiscCraftApp {
         let item = !selected && self.copyable_item(self.selection).is_some();
         let paste_buttons = menu && !self.button_clipboard.is_empty();
         let paste_item = self.copyable_item(self.project_clipboard).is_some();
-        push(clicked, ui, Action::Cut, selected);
-        push(clicked, ui, Action::Copy, selected || item);
+        // A graphic layer chosen in the menu is cut or copied for Paste as Subpicture (Encore).
+        let graphic = self
+            .edit_menu_target()
+            .is_some_and(|menu| self.selected_menu_graphic(menu).is_some());
+        push(clicked, ui, Action::Cut, selected || graphic);
+        push(clicked, ui, Action::Copy, selected || item || graphic);
         push(clicked, ui, Action::Paste, paste_buttons || paste_item);
+        push(
+            clicked,
+            ui,
+            Action::PasteAsSubpicture,
+            menu && self.graphic_clipboard.is_some() && self.selected_buttons.len() == 1,
+        );
         push(clicked, ui, Action::Duplicate, selected || item);
     }
 
@@ -263,10 +397,29 @@ impl DiscCraftApp {
             self.selected_menu_text(menu).is_some() || self.selected_menu_graphic(menu).is_some()
         });
         push(clicked, ui, Action::ConvertToButton, object_selected);
+        // Encore: 置換レイヤーに変換（Ctrl+J）は選んだグラフィックに。置換レイヤーはオブジェクトに変換 で戻す。
+        let replacement = target
+            .and_then(|menu| {
+                let index = self.selected_menu_graphic(menu)?;
+                self.session.project.menu(menu)?.graphics.get(index)
+            })
+            .map(|graphic| graphic.replacement);
+        push(
+            clicked,
+            ui,
+            Action::ConvertToReplacementLayer,
+            replacement == Some(false),
+        );
         push(
             clicked,
             ui,
             Action::ConvertToObject,
+            target.is_some() && (!self.selected_buttons.is_empty() || replacement == Some(true)),
+        );
+        push(
+            clicked,
+            ui,
+            Action::CreateSubpicture,
             target.is_some() && !self.selected_buttons.is_empty(),
         );
         ui.separator();
@@ -358,7 +511,12 @@ impl DiscCraftApp {
             Action::CreateChapterIndex,
             timeline || self.viewer_menu_has_chapter_buttons(),
         );
-        push(clicked, ui, Action::CreateMultiPageChapterIndex, timeline);
+        push(
+            clicked,
+            ui,
+            Action::CreateMultiPageChapterIndex,
+            timeline || self.viewer_menu_has_chapter_buttons(),
+        );
         // Encore: メニューを置き換え…（ビューアのメニューを PSD のデザインに。リンクは番号で残す）。
         push(
             clicked,
@@ -450,18 +608,40 @@ impl DiscCraftApp {
         push(clicked, ui, Action::RemoveAudioTrack, audio);
         push(clicked, ui, Action::RemoveSubtitleTrack, subtitles);
         ui.separator();
-        // 字幕ファイル（SRT、WebVTT、タイムコード付きテキスト）の読み込みと、SRT での書き出し。
-        push(clicked, ui, Action::ImportSubtitles, timeline);
+        // 字幕の読み込み ▸（Encore と同じ 3 つ）: テキストスクリプト（SRT、WebVTT も読む）、FAB 画像スクリプト、
+        // 画像スクリプト。書き出しは SRT かテキストスクリプト。
+        ui.add_enabled_ui(timeline, |ui| {
+            ui.menu_button(tl!("Import Subtitles"), |ui| {
+                if ui.button(tl!("Text Script…")).clicked() {
+                    clicked.push(Action::ImportSubtitles);
+                    ui.close();
+                }
+                push(clicked, ui, Action::ImportFabImageScript, true);
+                push(clicked, ui, Action::ImportImageScript, true);
+            });
+        });
         self.export_subtitles_menu(ui);
         ui.separator();
         push(clicked, ui, Action::AddChapterPoint, timeline);
         push(clicked, ui, Action::AddChapterPointsAtInterval, timeline);
+        push(clicked, ui, Action::SetPosterFrame, timeline);
         // FilmCraft のプロジェクトのマーカーをチャプターに（Encore は Premiere Pro のチャプターマーカーを読む）。
         push(clicked, ui, Action::ImportFilmCraftMarkers, timeline);
         push(clicked, ui, Action::ImportSourceChapters, timeline);
         push(clicked, ui, Action::NewTimelineFromFilmCraft, true);
         ui.separator();
         // Encore と同じく最後に再生。再生中にもう一度選ぶと止まる。
+        push(clicked, ui, Action::EditTimelineColorSet, timeline);
+        push(
+            clicked,
+            ui,
+            Action::MoveTrackToView,
+            self.viewer_timeline()
+                .and_then(|id| self.session.project.timeline(id))
+                .is_some_and(|timeline| !timeline.audio.is_empty()),
+        );
+        push(clicked, ui, Action::SetTimelineUserOps, timeline);
+        push(clicked, ui, Action::SaveFrameAsFile, timeline);
         push(clicked, ui, Action::Play, self.viewer_timeline().is_some());
     }
 
@@ -595,9 +775,19 @@ impl DiscCraftApp {
     }
 
     /// ウィンドウメニューの項目が今表示されているか（パネルはタブグループの前面に出ているか）。
+    /// Encore's ウィンドウ ▸ ツール (Ctrl+F4, M6.339): shows or hides the toolbar under the menu bar, and keeps the
+    /// choice for the next start.
+    fn toggle_tools(&mut self) {
+        self.show_tools = !self.show_tools;
+        if let Err(error) = crate::workspace::save_hide_tools(!self.show_tools) {
+            self.status = error;
+        }
+    }
+
     fn window_shown(&self, action: Action) -> bool {
         match (action, window_panel(action)) {
             (Action::WindowCheck, _) => self.check_window.open,
+            (Action::WindowTools, _) => self.show_tools,
             (_, Some(panel)) => self.panel_front(panel),
             _ => false,
         }
@@ -664,6 +854,8 @@ impl DiscCraftApp {
             Action::RemoveAudioTrack => self.remove_last_track(TrackKind::Audio),
             Action::RemoveSubtitleTrack => self.remove_last_track(TrackKind::Subtitle),
             Action::ImportSubtitles => self.import_subtitles(),
+            Action::ImportFabImageScript => self.import_image_script(ui.ctx(), true),
+            Action::ImportImageScript => self.import_image_script(ui.ctx(), false),
             Action::ImportFilmCraftMarkers => self.import_filmcraft_markers(),
             Action::ImportSourceChapters => {
                 if let Some(timeline) = self.viewer_timeline() {
@@ -702,11 +894,21 @@ impl DiscCraftApp {
             Action::Rename => self.start_rename(),
             Action::Preferences => self.prefs.open = true,
             Action::Clear => self.clear_selection(),
-            Action::Cut => self.cut_buttons(ui.ctx()),
+            Action::Cut => {
+                if self.copy_selected_graphic() {
+                    let _ = self.remove_selected_graphic();
+                } else {
+                    self.cut_buttons(ui.ctx());
+                }
+            }
+            Action::PasteAsSubpicture => self.paste_as_subpicture(),
             Action::Copy => {
-                // Menu buttons when some are chosen; else the item chosen in the Project panel.
-                // What was copied last is what Paste makes.
-                if self.copy_buttons(ui.ctx()) {
+                // A graphic layer chosen in the menu (for Paste as Subpicture); else menu buttons when some
+                // are chosen; else the item chosen in the Project panel. What was copied last is what Paste makes.
+                let graphic = self.copy_selected_graphic();
+                if graphic {
+                    // Kept for Paste as Subpicture.
+                } else if self.copy_buttons(ui.ctx()) {
                     self.project_clipboard = Selection::None;
                 } else if self.copyable_item(self.selection).is_some() {
                     self.copy_item(ui.ctx(), self.selection);
@@ -744,9 +946,54 @@ impl DiscCraftApp {
                 }
             }
             Action::DiscUserOps => self.open_disc_user_ops(),
+            Action::ReplaceAsset | Action::LocateAsset => {
+                if let Selection::Asset(asset) = self.selection {
+                    self.relink_asset(asset);
+                }
+            }
+            Action::InterpretFootage => {
+                if let Selection::Asset(asset) = self.selection
+                    && self.can_interpret_footage(asset)
+                {
+                    self.open_interpret_footage(asset);
+                }
+            }
+            Action::ChooseRomFolder => self.pick_rom_content(),
+            Action::UpdateMarkersFromSource => {
+                if let Some(timeline) = self.viewer_timeline()
+                    && let Some(added) = self
+                        .run_command(
+                            "timeline.importSourceChapters",
+                            serde_json::json!({ "timeline": timeline.0, "replace": true }),
+                        )
+                        .as_ref()
+                        .and_then(|value| value.get("added"))
+                        .and_then(serde_json::Value::as_u64)
+                {
+                    self.status = tlf!(
+                        "Replaced the chapter points with {n} from the source",
+                        n = added
+                    );
+                }
+            }
+            Action::CloseViewer => self.close_viewer(),
+            Action::EditQualityPresets => self.open_quality_presets(),
+            Action::EditTimelineColorSet => {
+                self.timeline_color_set_dialog = self.viewer_timeline();
+            }
+            Action::RippleDelete => self.ripple_delete_at_playhead(ui.ctx()),
+            Action::SetPosterFrame => self.set_poster_frame_at_playhead(ui.ctx()),
+            Action::SetTimelineUserOps => self.open_timeline_user_ops(),
+            Action::MoveTrackToView => self.move_track_to_view(ui.ctx()),
+            Action::SaveFrameAsFile => self.save_frame_as_file(ui.ctx()),
             Action::EditOriginal => {
                 if let Selection::Asset(asset) = self.selection {
                     self.edit_original(asset);
+                }
+            }
+            Action::TranscodeSettings => {
+                if let Selection::Asset(asset) = self.selection {
+                    self.open_transcode_settings(asset);
                 }
             }
             Action::TranscodeNow => {
@@ -755,6 +1002,16 @@ impl DiscCraftApp {
                 }
             }
             Action::TranscodeAll => self.start_transcode_now(None),
+            Action::LocateTranscodedDvd | Action::LocateTranscodedBluray => {
+                if let Selection::Asset(asset) = self.selection {
+                    let kind = if action == Action::LocateTranscodedDvd {
+                        disccraft_project::DiscKind::Dvd
+                    } else {
+                        disccraft_project::DiscKind::BluRay
+                    };
+                    self.locate_transcoded(asset, kind);
+                }
+            }
             Action::RevertToOriginal => {
                 if let Selection::Asset(asset) = self.selection {
                     self.revert_to_original(asset);
@@ -788,6 +1045,8 @@ impl DiscCraftApp {
             | Action::DistributeToSafeArea
             | Action::ConvertToButton
             | Action::ConvertToObject
+            | Action::ConvertToReplacementLayer
+            | Action::CreateSubpicture
             | Action::SpecifyLink
             | Action::DropShadow
             | Action::FlipHorizontal
@@ -820,10 +1079,15 @@ impl DiscCraftApp {
             | Action::WindowProperties
             | Action::WindowTimelines
             | Action::WindowLayers
+            | Action::WindowProgress
+            | Action::WindowCharacter
+            | Action::WindowStyles
+            | Action::WindowMetadata
             | Action::WindowLibrary
             | Action::WindowMenuViewer
             | Action::WindowSlideshowViewer
             | Action::WindowTimelineViewer => self.toggle_window(action),
+            Action::WindowTools => self.toggle_tools(),
         }
     }
 
@@ -952,7 +1216,27 @@ impl DiscCraftApp {
                 self.distribute_to_safe_area = !self.distribute_to_safe_area;
             }
             Action::ConvertToButton => self.convert_selected_to_button(),
-            Action::ConvertToObject => self.convert_selected_buttons_to_objects(),
+            Action::ConvertToObject => {
+                if !self.set_selected_replacement(false) {
+                    self.convert_selected_buttons_to_objects();
+                }
+            }
+            Action::ConvertToReplacementLayer => {
+                let _ = self.set_selected_replacement(true);
+            }
+            Action::CreateSubpicture => {
+                if let Some(menu) = self.edit_menu_target() {
+                    let made = self
+                        .run_command(
+                            "button.createSubpicture",
+                            serde_json::json!({ "menu": menu.0, "buttons": self.selected_buttons }),
+                        )
+                        .and_then(|made| made.get("buttons")?.as_u64());
+                    if let Some(made) = made {
+                        self.status = tlf!("Subpictures created: {n}", n = made);
+                    }
+                }
+            }
             Action::SpecifyLink => self.open_link_dialog(),
             Action::DropShadow => self.open_shadow_dialog(),
             Action::FlipHorizontal => self.orient_selected(OrientChange::FlipHorizontal),
@@ -1103,6 +1387,17 @@ impl DiscCraftApp {
     }
 }
 
+/// Where File ▸ Render ▸ Motion Menu / Slideshow leaves what to make (the menus are drawn without `&mut self`).
+fn render_request_id() -> egui::Id {
+    egui::Id::unique("render_request")
+}
+
+/// Asks for `what` to be made once the menus are drawn.
+fn request_render(ui: &Ui, what: disccraft_build::Render) {
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(render_request_id(), what));
+}
+
 /// ウィンドウメニューの項目のパネル。
 fn window_panel(action: Action) -> Option<Panel> {
     Some(match action {
@@ -1115,6 +1410,10 @@ fn window_panel(action: Action) -> Option<Panel> {
         Action::WindowProperties => Panel::Properties,
         Action::WindowTimelines => Panel::Timelines,
         Action::WindowLayers => Panel::Layers,
+        Action::WindowProgress => Panel::Progress,
+        Action::WindowCharacter => Panel::Character,
+        Action::WindowStyles => Panel::Styles,
+        Action::WindowMetadata => Panel::Metadata,
         Action::WindowLibrary => Panel::Library,
         Action::WindowMenuViewer => Panel::MenuViewer,
         Action::WindowSlideshowViewer => Panel::SlideshowViewer,
@@ -1124,20 +1423,25 @@ fn window_panel(action: Action) -> Option<Panel> {
 }
 
 /// ウィンドウメニューに並べるパネル（Encore と同じ順。ディスクは DiscCraft だけのパネルで、英語名の順の位置に置く）。
-const WINDOW_ACTIONS: [Action; 14] = [
+const WINDOW_ACTIONS: [Action; 19] = [
     Action::WindowBuild,
+    Action::WindowCharacter,
     Action::WindowCheck,
     Action::WindowDisc,
     Action::WindowFlowchart,
     Action::WindowLayers,
     Action::WindowLibrary,
     Action::WindowMenus,
+    Action::WindowMetadata,
     Action::WindowMonitor,
+    Action::WindowProgress,
     Action::WindowProject,
     Action::WindowProperties,
     Action::WindowTimelines,
+    Action::WindowTools,
     Action::WindowMenuViewer,
     Action::WindowSlideshowViewer,
+    Action::WindowStyles,
     Action::WindowTimelineViewer,
 ];
 

@@ -62,6 +62,7 @@ fn run(standard: Standard, w: usize, h: usize, frames: usize, gop: u16, check_si
         max_bitrate: 9_800_000,
         wide: false,
         format: disccraft_mpeg2venc::encoder::Format::Sd,
+        pulldown: false,
     })
     .unwrap();
     let sources: Vec<Frame420> = (0..frames).map(|t| synthetic(w, h, t)).collect();
@@ -150,6 +151,7 @@ fn gop_header_is_closed() {
         max_bitrate: 9_800_000,
         wide: false,
         format: disccraft_mpeg2venc::encoder::Format::Sd,
+        pulldown: false,
     })
     .unwrap();
     let au = enc.encode_frame(&synthetic(720, 480, 0)).unwrap();
@@ -174,6 +176,7 @@ fn a_gop_starts_where_asked() {
         max_bitrate: 9_800_000,
         wide: false,
         format: disccraft_mpeg2venc::encoder::Format::Sd,
+        pulldown: false,
     };
     let starts_of = |forced: &[usize], frames: usize, regular: bool| -> Vec<usize> {
         let mut enc = Encoder::new(config.clone()).unwrap();
@@ -210,6 +213,7 @@ fn run_hd(standard: Standard, frame_rate_code: u8) {
         max_bitrate: 35_000_000,
         wide: true,
         format: Format::Hd1080,
+        pulldown: false,
     })
     .unwrap();
     let frames = 4;
@@ -286,6 +290,7 @@ fn sd_sequence_extension_is_well_formed() {
         max_bitrate: 9_800_000,
         wide: false,
         format: disccraft_mpeg2venc::encoder::Format::Sd,
+        pulldown: false,
     })
     .unwrap();
     let es = enc.encode_frame(&synthetic(720, 480, 0)).unwrap();
@@ -306,6 +311,7 @@ fn hd_still_decodes() {
         max_bitrate: 35_000_000,
         wide: true,
         format: Format::Hd1080,
+        pulldown: false,
     })
     .unwrap();
     let source = synthetic(1920, 1088, 0);
@@ -325,4 +331,96 @@ fn hd_still_decodes() {
     assert_eq!(pics.len(), 1);
     let shown = 1920 * 1080;
     assert!(psnr(&pics[0].y[..shown], &source.y[..shown]) > 35.0);
+}
+
+/// M6.314: film (Encore's NTSC DV 23.976 presets). Each picture says how 3:2 pulldown shows it (top_field_first,
+/// repeat_first_field: T B T | B T | B T B | T B) and that it is progressive; the sequence stays 29.97 (frame_rate_code
+/// 4) as a DVD needs; no GOP holds more than 14 pictures (35 fields of the 36 a DVD allows); a GOP's time code counts
+/// the frames shown (two and a half a picture); and the stream decodes, every picture once. PAL or HD film is refused.
+#[test]
+fn film_is_shown_by_pulldown() {
+    use disccraft_mpeg2venc::encoder::{Format, MAX_FILM_GOP_FRAMES, pulldown_flags};
+    let config = EncoderConfig {
+        standard: Standard::Ntsc,
+        gop_size: 12,
+        bitrate: 6_000_000,
+        max_bitrate: 9_800_000,
+        wide: false,
+        format: Format::Sd,
+        pulldown: true,
+    };
+    let mut enc = Encoder::new(config.clone()).unwrap();
+    let frames = 40usize;
+    let mut es = Vec::new();
+    let mut shown = Vec::new();
+    let mut gops = Vec::new();
+    for index in 0..frames {
+        let au = enc
+            .encode_frame_gop(&synthetic(720, 480, index), false)
+            .unwrap();
+        // The picture coding extension (identifier 8): top_field_first is bit 24 of it, repeat_first_field bit 30,
+        // progressive_frame bit 32.
+        let at = au
+            .windows(5)
+            .position(|w| w[..4] == [0, 0, 1, 0xB5] && w[4] >> 4 == 8)
+            .unwrap();
+        let ext = &au[at + 4..at + 9];
+        let bits = u32::from_be_bytes([ext[0], ext[1], ext[2], ext[3]]);
+        shown.push(((bits >> 7) & 1 == 1, (bits >> 1) & 1 == 1, ext[4] >> 7 == 1));
+        if let Some(at) = au.windows(4).position(|w| w == [0, 0, 1, 0xB8]) {
+            let b = &au[at + 4..at + 8];
+            let bits = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+            gops.push((index, (bits >> 13) & 0x3F, (bits >> 7) & 0x3F));
+        }
+        if index == 0 {
+            let at = au.windows(4).position(|w| w == [0, 0, 1, 0xB3]).unwrap();
+            assert_eq!(au[at + 7] & 0x0F, 4, "frame_rate_code 29.97");
+        }
+        es.extend_from_slice(&au);
+    }
+    es.extend_from_slice(&enc.finish());
+    let expected: Vec<(bool, bool, bool)> = (0..frames as u64)
+        .map(|index| {
+            let (top, repeat) = pulldown_flags(index);
+            (top, repeat, true)
+        })
+        .collect();
+    assert_eq!(shown, expected);
+    assert_eq!(
+        shown
+            .iter()
+            .take(4)
+            .map(|(top, repeat, _)| (*top, *repeat))
+            .collect::<Vec<_>>(),
+        vec![(true, true), (false, false), (false, true), (true, false)]
+    );
+    // GOPs of 14 pictures at the most; their time codes (seconds, pictures at 30) count the frames shown: 35 fields
+    // (17 frames) before picture 14, 70 fields (35 frames: 1 s 5) before picture 28.
+    assert_eq!(MAX_FILM_GOP_FRAMES, 14);
+    assert_eq!(gops, vec![(0, 0, 0), (14, 0, 17), (28, 1, 5)]);
+
+    let mut dec = Decoder::new();
+    let mut pics = Vec::new();
+    for (i, range) in craft_video::mpeg2::access_units(&es)
+        .into_iter()
+        .enumerate()
+    {
+        pics.extend(dec.decode(&es[range], i as i64).unwrap());
+    }
+    pics.extend(dec.flush());
+    assert_eq!(dec.errors(), 0, "decoder errors: {:?}", dec.last_error());
+    assert_eq!(pics.len(), frames);
+
+    for (standard, format) in [
+        (Standard::Pal, Format::Sd),
+        (Standard::Ntsc, Format::Hd1080),
+    ] {
+        let refused = Encoder::new(EncoderConfig {
+            standard,
+            format,
+            max_bitrate: 9_800_000,
+            ..config.clone()
+        });
+        assert!(refused.is_err(), "{standard:?} {format:?}");
+    }
 }

@@ -9,5 +9,13 @@ publish.workspace = true
 
 [dependencies]
 
-[lints]
-workspace = true
+# The workspace's lints, but `unsafe_code` denied instead of forbidden: this crate alone calls foreign functions
+# (AGENTS.md rule 1), in modules that allow it, each `unsafe` with its `// SAFETY:`.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+cognitive_complexity = "deny"
+too_many_arguments = "deny"
+wildcard_imports = "deny"
+undocumented_unsafe_blocks = "deny"

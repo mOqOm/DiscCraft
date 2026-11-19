@@ -258,24 +258,41 @@ fn popup_menus(project: &Project) -> Vec<Option<u16>> {
 impl Preview {
     /// ディスクを開いてファーストプレイを走らせる。`start` があればそこから（Encore の「ここからプレビューする」:
     /// メニューならそのメニュー、タイトルならそのチャプターの頭。レジスタは初期値）。
-    pub(crate) fn open(&mut self, path: &Path, start: Option<Location>) -> Result<(), String> {
+    pub(crate) fn open(
+        &mut self,
+        path: &Path,
+        start: Option<Location>,
+        parental: Option<u8>,
+    ) -> Result<(), String> {
         let model = load_video_ts(path).map_err(|error| error.to_string())?;
-        self.open_model(model, start)
+        self.open_model(model, start, parental)
     }
 
     /// `model` を開いてファーストプレイ（または `start`）から走らせる。
+    ///
+    /// `parental`: the player's parental level (1 to 8), when it has one set. A disc of a higher level asks for
+    /// the player's password, which the preview has no one to give: it stops, as a locked player does.
     pub(crate) fn open_model(
         &mut self,
         model: DiscModel,
         start: Option<Location>,
+        parental: Option<u8>,
     ) -> Result<(), String> {
-        let vm = match start {
-            Some(location) => Vm::restore(&model, location).map_err(|error| error.to_string())?,
-            None => Vm::start(&model).map_err(|error| error.to_string())?,
+        let vm = match (start, parental) {
+            (Some(location), _) => {
+                Vm::restore(&model, location).map_err(|error| error.to_string())?
+            }
+            (None, Some(level)) => Vm::start_with_parental_level(&model, level, false)
+                .map_err(|error| error.to_string())?,
+            (None, None) => Vm::start(&model).map_err(|error| error.to_string())?,
         };
 
         self.location = *vm.location();
         self.registers = vm.registers();
+        // The level stays the player's for the titles that follow (a title checks it again).
+        if let (Some(level), Some(slot)) = (parental, self.registers.sprm.get_mut(13)) {
+            *slot = u16::from(level);
+        }
         self.model = Some(model);
         self.bluray = false;
         self.popups = Vec::new();
@@ -564,7 +581,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "プレビューを開く",
         menu: &["プレビュー"],
         shortcut: None,
-        params: r#"{"path"?: "VIDEO_TS フォルダ（なければビルドせずにプロジェクトから）", "menu"?: VMGM の PGCN, "title"?: n, "chapter"?: n}"#,
+        params: r#"{"path"?: "VIDEO_TS フォルダ（なければビルドせずにプロジェクトから）", "menu"?: VMGM の PGCN, "button"?: n (menu のときに選んでおくボタン。1 から), "title"?: n, "chapter"?: n, "parentalLevel"?: 1..8 (プレーヤーの視聴制限レベル)}"#,
         enabled: always_enabled,
         run: run_open,
         journal: false,
@@ -642,8 +659,25 @@ fn run_open(session: &mut Session, params: &Value) -> CommandResult {
                 .ok_or_else(|| format!("parameter \"{name}\" must be a positive number")),
         }
     };
+    let parental = match params.get("parentalLevel") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|level| u8::try_from(level).ok())
+                .filter(|level| (1..=8).contains(level))
+                .ok_or_else(|| "parameter \"parentalLevel\" must be 1 to 8".to_string())?,
+        ),
+    };
     let start = if let Some(pgcn) = small("menu")? {
-        Some(Location::Menu { pgcn, button: 1 })
+        // Encore's ここからプレビューする on a button (M6.338): the menu with that button selected.
+        let button = small("button")?
+            .map(|button| {
+                u8::try_from(button).map_err(|_| "parameter \"button\" is too large".to_string())
+            })
+            .transpose()?
+            .unwrap_or(1);
+        Some(Location::Menu { pgcn, button })
     } else if let Some(title) = small("title")? {
         let title =
             u8::try_from(title).map_err(|_| "parameter \"title\" is too large".to_string())?;
@@ -661,7 +695,7 @@ fn run_open(session: &mut Session, params: &Value) -> CommandResult {
                 .preview
                 .open_bd(Path::new(&path), &session.project)?;
         }
-        Some(path) => session.preview.open(Path::new(&path), start)?,
+        Some(path) => session.preview.open(Path::new(&path), start, parental)?,
         // Encore のプロジェクトプレビュー: ビルドせずに、ビルドが書くのと同じナビゲーションで（ボタンの
         // トランジションも隠しタイトルに広げて）。
         None => {
@@ -671,7 +705,7 @@ fn run_open(session: &mut Session, params: &Value) -> CommandResult {
                 .map_err(|error| error.to_string())?;
             let model =
                 disccraft_dvd::preview_model(&project).map_err(|error| error.to_string())?;
-            session.preview.open_model(model, start)?;
+            session.preview.open_model(model, start, parental)?;
             session.preview.set_bluray(&project);
         }
     }
@@ -944,6 +978,15 @@ mod tests {
             button: None,
         };
 
+        // M6.338: from the menu with one of its buttons selected (Encore's ここからプレビューする on a button).
+        session
+            .project
+            .add_button(menu, "Stop".to_owned(), None, Link::Stop)?;
+        session.execute("preview.open", &json!({ "menu": 1, "button": 2 }))?;
+        assert_eq!(
+            session.preview.location(),
+            Location::Menu { pgcn: 1, button: 2 }
+        );
         let state = session.execute("preview.open", &json!({}))?;
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(state.get("open").and_then(Value::as_bool), Some(true));
@@ -981,6 +1024,48 @@ mod tests {
                 .execute("preview.streams", &json!({ "audio": 0 }))
                 .is_err()
         );
+        Ok(())
+    }
+
+    /// M6.257: the preview's player can have a parental level; a disc of a higher level does not play on it.
+    #[test]
+    fn the_previews_player_has_a_parental_level() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::Link;
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-preview-parental-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let video = dir.join("movie.m2v");
+        std::fs::write(&video, b"")?;
+        let mut session = Session::new();
+        let asset = session.project.add_asset(&video)?;
+        let timeline = session.project.add_timeline(asset, None)?;
+        session.project.settings.first_play = Link::Timeline {
+            id: timeline,
+            chapter: 0,
+        };
+        session.project.settings.parental_level = 6;
+        let playing = Location::Title {
+            title: 1,
+            chapter: 1,
+        };
+        // A player with no level set, and one set as high as the disc: the title plays.
+        session.execute("preview.open", &json!({}))?;
+        assert_eq!(session.preview.location(), playing);
+        session.execute("preview.open", &json!({ "parentalLevel": 6 }))?;
+        assert_eq!(session.preview.location(), playing);
+        // One set lower: the disc asks for the password, there is no one to give it, and it stops.
+        session.execute("preview.open", &json!({ "parentalLevel": 5 }))?;
+        assert_eq!(session.preview.location(), Location::Stopped);
+        // A disc without a level plays on any player.
+        session.project.settings.parental_level = 0;
+        session.execute("preview.open", &json!({ "parentalLevel": 1 }))?;
+        assert_eq!(session.preview.location(), playing);
+        assert!(
+            session
+                .execute("preview.open", &json!({ "parentalLevel": 9 }))
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 

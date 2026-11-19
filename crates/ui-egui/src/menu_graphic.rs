@@ -52,6 +52,25 @@ pub(crate) fn dragged_graphic_rect(
     clamp_rect(rect, frame)
 }
 
+/// The names of the layer effects a graphic has, or "None".
+pub(crate) fn effects_summary(effects: &disccraft_project::LayerEffects) -> String {
+    let names: Vec<&str> = [
+        (effects.stroke.is_some(), tl!("Stroke")),
+        (effects.outer_glow.is_some(), tl!("Outer Glow")),
+        (effects.inner_glow.is_some(), tl!("Inner Glow")),
+        (effects.bevel.is_some(), tl!("Bevel")),
+        (effects.overlay.is_some(), tl!("Color Overlay")),
+    ]
+    .into_iter()
+    .filter_map(|(on, name)| on.then_some(name))
+    .collect();
+    if names.is_empty() {
+        tl!("None").to_owned()
+    } else {
+        names.join(", ")
+    }
+}
+
 /// Encore's names for the shapes.
 pub(crate) fn shape_label(shape: ShapeKind) -> &'static str {
     match shape {
@@ -250,12 +269,128 @@ impl DiscCraftApp {
         let _ = self.run_command("menu.setGraphic", params);
     }
 
+    /// Edit ▸ Copy (and Cut) with a graphic layer chosen in the menu: keeps it for Edit ▸ Paste as Subpicture.
+    /// Returns whether one was chosen.
+    pub(crate) fn copy_selected_graphic(&mut self) -> bool {
+        let Some(menu) = self.edit_menu_target() else {
+            return false;
+        };
+        let Some(graphic) = self.selected_menu_graphic(menu).and_then(|index| {
+            self.session
+                .project
+                .menu(menu)
+                .and_then(|found| found.graphics.get(index))
+                .cloned()
+        }) else {
+            return false;
+        };
+        self.graphic_clipboard = Some(graphic);
+        self.status =
+            tl!("Copied the layer: select a button and choose Paste as Subpicture").to_string();
+        true
+    }
+
+    /// Edit ▸ Paste as Subpicture (Shift+Ctrl+V, Encore): the copied layer's shape, where it covers the one button
+    /// chosen, becomes colour 1 of that button's subpicture.
+    pub(crate) fn paste_as_subpicture(&mut self) {
+        let Some(menu) = self.edit_menu_target() else {
+            return;
+        };
+        let (Some(graphic), [button]) = (
+            self.graphic_clipboard.clone(),
+            self.selected_buttons.as_slice(),
+        ) else {
+            self.status = tl!("Copy a layer and select one button first").to_string();
+            return;
+        };
+        let button = *button;
+        let Ok(graphic) = serde_json::to_value(&graphic) else {
+            return;
+        };
+        if self
+            .run_command(
+                "button.pasteSubpicture",
+                json!({ "menu": menu.0, "button": button, "graphic": graphic }),
+            )
+            .is_some()
+        {
+            self.status = tl!("Pasted as the button's subpicture").to_string();
+        }
+    }
+
+    /// Object ▸ Convert to Replacement Layer (`true`) / Convert to Object (`false`) for the selected graphic, when
+    /// it is not that already. Returns whether a graphic was changed.
+    pub(crate) fn set_selected_replacement(&mut self, replacement: bool) -> bool {
+        let Some(menu) = self.edit_menu_target() else {
+            return false;
+        };
+        let Some(index) = self.selected_menu_graphic(menu) else {
+            return false;
+        };
+        let current = self
+            .session
+            .project
+            .menu(menu)
+            .and_then(|found| found.graphics.get(index))
+            .map(|graphic| graphic.replacement);
+        if current != Some(!replacement) {
+            return false;
+        }
+        self.set_graphic_field(menu, index, json!({ "replacement": replacement }));
+        true
+    }
+
+    /// A still dropped on a replacement layer (Encore): it takes the layer's place, scaled to fit the layer with its
+    /// own shape and centred there; the layer's opacity, shadow and turn stay.
+    pub(crate) fn replace_layer_image(&mut self, menu: MenuId, index: usize, asset: AssetId) {
+        let Some(rect) = self
+            .session
+            .project
+            .menu(menu)
+            .and_then(|found| found.graphics.get(index))
+            .map(|graphic| graphic.rect)
+        else {
+            return;
+        };
+        // The still's own size, from the picture (a still has no media probe).
+        let dimensions = self
+            .session
+            .project
+            .assets
+            .get(&asset)
+            .and_then(|found| disccraft_menu::subtitle::load_picture(&found.media_file()).ok())
+            .map(|(width, height, _)| (width, height));
+        let fitted = replacement_rect(rect, dimensions);
+        self.set_graphic_field(
+            menu,
+            index,
+            json!({ "asset": asset.0, "x": fitted.x, "y": fitted.y, "w": fitted.w, "h": fitted.h }),
+        );
+        self.select_menu_graphic(menu, index);
+    }
+
     /// Places a shape from the Library in the middle of the open menu and selects it.
     pub(crate) fn place_shape(&mut self, menu: MenuId, shape: ShapeKind) {
-        let placed = self.run_command(
-            "menu.addShape",
-            json!({ "menu": menu.0, "shape": shape.as_str(), "color": "#FFFFFF" }),
-        );
+        self.place_shape_at(menu, shape, None);
+    }
+
+    /// Places a shape from the Library with its top left corner at `top_left` (the middle when `None`) and
+    /// selects it.
+    pub(crate) fn place_shape_at(
+        &mut self,
+        menu: MenuId,
+        shape: ShapeKind,
+        top_left: Option<(u16, u16)>,
+    ) {
+        let mut params = json!({ "menu": menu.0, "shape": shape.as_str(), "color": "#FFFFFF" });
+        if let (Some((x, y)), Some(map)) = (top_left, params.as_object_mut()) {
+            // A new shape is a third of the frame: it starts at the point, moved in so it stays in the frame.
+            let (width, height) = disccraft_project::frame_size(&self.session.project.settings);
+            let (w, h) = (width / 3, height / 3);
+            map.insert("x".to_owned(), json!(x.min(width.saturating_sub(w))));
+            map.insert("y".to_owned(), json!(y.min(height.saturating_sub(h))));
+        }
+        let placed = self.run_command("menu.addShape", params);
         self.select_placed_graphic(menu, placed);
     }
 
@@ -275,7 +410,11 @@ impl DiscCraftApp {
         response: &egui::Response,
     ) {
         use crate::project_panel::DragRow;
-        if response.dnd_hover_payload::<DragRow>().is_some() {
+        if response.dnd_hover_payload::<DragRow>().is_some()
+            || response
+                .dnd_hover_payload::<crate::library_panel::LibraryDrag>()
+                .is_some()
+        {
             let _ = ui.painter().rect_stroke(
                 response.rect,
                 0.0,
@@ -283,21 +422,36 @@ impl DiscCraftApp {
                 egui::StrokeKind::Inside,
             );
         }
+        let drop_point = |ui: &Ui| {
+            let point = ui
+                .input(|i| i.pointer.interact_pos())
+                .unwrap_or(response.rect.center());
+            let (x, y) = to_frame_point(point, frame, response.rect);
+            (
+                u16::try_from(x.clamp(0, i32::from(frame.0.saturating_sub(1)))).unwrap_or(0),
+                u16::try_from(y.clamp(0, i32::from(frame.1.saturating_sub(1)))).unwrap_or(0),
+            )
+        };
+        // A Library item: placed at the drop point (Encore).
+        if let Some(payload) = response.dnd_release_payload::<crate::library_panel::LibraryDrag>() {
+            let at = drop_point(ui);
+            self.drop_library_item(menu.id, payload.0, at);
+            return;
+        }
         let Some(payload) = response.dnd_release_payload::<DragRow>() else {
             return;
         };
-        let point = ui
-            .input(|i| i.pointer.interact_pos())
-            .unwrap_or(response.rect.center());
-        let (x, y) = to_frame_point(point, frame, response.rect);
-        let x = u16::try_from(x.clamp(0, i32::from(frame.0.saturating_sub(1)))).unwrap_or(0);
-        let y = u16::try_from(y.clamp(0, i32::from(frame.1.saturating_sub(1)))).unwrap_or(0);
+        let (x, y) = drop_point(ui);
         let id = payload.0;
         let project = &self.session.project;
 
         if let Some(asset) = project.assets.get(&AssetId(id)) {
             if asset.kind == AssetKind::Image {
-                self.place_image_at(menu.id, AssetId(id), Some((x, y)));
+                // On a replacement layer the still takes the layer's place (Encore); elsewhere it is a new layer.
+                match replacement_layer_at(menu, (x, y)) {
+                    Some(index) => self.replace_layer_image(menu.id, index, AssetId(id)),
+                    None => self.place_image_at(menu.id, AssetId(id), Some((x, y))),
+                }
             } else {
                 self.status =
                     tl!("Drop an image, a timeline, a slideshow or a playlist on the menu")
@@ -483,6 +637,19 @@ impl DiscCraftApp {
         if opacity_changed && opacity != graphic.opacity {
             self.set_graphic_field(menu, index, json!({ "opacity": opacity }));
         }
+        // M6.332: its layer effects (a stroke, glows, a bevel, a colour over it).
+        ui.horizontal(|ui| {
+            crate::properties::prop_label(ui, tl!("Effects:"));
+            let named = effects_summary(&graphic.effects);
+            if ui
+                .button(tl!("Layer Effects…"))
+                .on_hover_text(named.clone())
+                .clicked()
+            {
+                self.open_effects_dialog(menu, index);
+            }
+            ui.label(egui::RichText::new(named).weak());
+        });
         ui.separator();
 
         let (frame_w, frame_h) = disccraft_project::frame_size(&project.settings);
@@ -546,8 +713,18 @@ impl DiscCraftApp {
         });
     }
 
-    /// The layer name of a graphic for the Layers panel ("Image: logo" / "Shape: Ellipse").
+    /// The layer name of a graphic for the Layers panel ("Image: logo" / "Shape: Ellipse"); a replacement layer
+    /// has Encore's `(!)` in front.
     pub(crate) fn graphic_layer_name(&self, graphic: &MenuGraphic) -> String {
+        let name = self.graphic_kind_name(graphic);
+        if graphic.replacement {
+            format!("(!) {name}")
+        } else {
+            name
+        }
+    }
+
+    fn graphic_kind_name(&self, graphic: &MenuGraphic) -> String {
         match graphic.kind {
             GraphicKind::Image { asset } => tlf!(
                 "Image: {name}",
@@ -560,5 +737,79 @@ impl DiscCraftApp {
             ),
             GraphicKind::Shape { shape, .. } => tlf!("Shape: {name}", name = shape_label(shape)),
         }
+    }
+}
+
+/// The topmost replacement layer (shown and not locked) under the frame point `at`.
+fn replacement_layer_at(menu: &Menu, (x, y): (u16, u16)) -> Option<usize> {
+    menu.graphics
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, graphic)| {
+            let drawn = disccraft_project::rotated_bounds(graphic.rect, graphic.orientation.angle);
+            graphic.replacement
+                && !graphic.hidden
+                && !graphic.locked
+                && x >= drawn.x
+                && y >= drawn.y
+                && u32::from(x) < u32::from(drawn.x) + u32::from(drawn.w)
+                && u32::from(y) < u32::from(drawn.y) + u32::from(drawn.h)
+        })
+        .map(|(index, _)| index)
+}
+
+/// Where a still of `dimensions` (width, height) goes in a replacement layer at `layer`: as large as fits with its
+/// own shape, centred. Without dimensions it fills the layer.
+fn replacement_rect(layer: Rect, dimensions: Option<(u32, u32)>) -> Rect {
+    let Some((width, height)) = dimensions.filter(|(w, h)| *w > 0 && *h > 0) else {
+        return layer;
+    };
+    let scale = (f64::from(layer.w) / f64::from(width)).min(f64::from(layer.h) / f64::from(height));
+    // `as` saturates; the sizes are at most the layer's.
+    let w = ((f64::from(width) * scale).round() as u16).clamp(1, layer.w.max(1));
+    let h = ((f64::from(height) * scale).round() as u16).clamp(1, layer.h.max(1));
+    Rect {
+        x: layer.x.saturating_add((layer.w - w) / 2),
+        y: layer.y.saturating_add((layer.h - h) / 2),
+        w,
+        h,
+    }
+}
+
+#[cfg(test)]
+mod replacement_tests {
+    use super::replacement_rect;
+    use disccraft_project::Rect;
+
+    #[test]
+    fn a_still_fits_its_replacement_layer_with_its_own_shape() {
+        let layer = Rect {
+            x: 100,
+            y: 50,
+            w: 200,
+            h: 200,
+        };
+        // A wide still: as wide as the layer, centred up and down.
+        assert_eq!(
+            replacement_rect(layer, Some((400, 100))),
+            Rect {
+                x: 100,
+                y: 125,
+                w: 200,
+                h: 50
+            }
+        );
+        // A tall one: as high as the layer, centred across.
+        assert_eq!(
+            replacement_rect(layer, Some((100, 400))),
+            Rect {
+                x: 175,
+                y: 50,
+                w: 50,
+                h: 200
+            }
+        );
+        assert_eq!(replacement_rect(layer, None), layer);
     }
 }

@@ -97,6 +97,16 @@ pub struct MenuGraphic {
     /// Locked (Encore's lock in the Layers panel): cannot be picked or moved in the menu viewer.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub locked: bool,
+    /// A replacement layer (Encore's Object ▸ Convert to Replacement Layer, a `(!)` layer): a still image dropped
+    /// on it takes its place, scaled to fit it with its own shape, keeping the layer's opacity, shadow and turn.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replacement: bool,
+    /// Its layer effects (Encore's layer styles on an image or a shape, M6.332).
+    #[serde(
+        default,
+        skip_serializing_if = "crate::effects::LayerEffects::is_empty"
+    )]
+    pub effects: crate::effects::LayerEffects,
 }
 
 impl MenuGraphic {
@@ -164,6 +174,9 @@ impl Project {
             orientation: graphic.orientation.rotated(0),
             hidden: false,
             locked: false,
+            // A Library replacement layer comes as one (M6.331).
+            replacement: graphic.replacement,
+            effects: graphic.effects.sane(),
         });
         Ok(target.graphics.len().saturating_sub(1))
     }
@@ -294,6 +307,8 @@ mod tests {
             orientation: Default::default(),
             hidden: false,
             locked: false,
+            replacement: false,
+            effects: Default::default(),
         }
     }
 
@@ -321,6 +336,8 @@ mod tests {
                     orientation: Default::default(),
                     hidden: false,
                     locked: false,
+                    replacement: false,
+                    effects: Default::default(),
                 }
             )?,
             1

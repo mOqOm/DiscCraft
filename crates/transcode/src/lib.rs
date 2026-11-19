@@ -13,22 +13,35 @@
     clippy::cognitive_complexity
 )]
 
+mod field_type;
+pub use field_type::{FieldType, field_type};
 mod audio;
+mod blend;
 mod file_chapters;
 pub use file_chapters::file_chapters;
+pub mod h264_sps;
 pub mod hd;
 mod media_cache;
 mod mkv_probe;
 pub use media_cache::{
-    cached_blob, enable_probe_cache, media_open, probe_ready, store_blob, warm, warming,
+    cached_blob, clear_probe_cache, enable_probe_cache, media_open, probe_cache_dir, probe_ready,
+    store_blob, warm, warming,
 };
 mod picture;
+mod pixel_aspect;
 mod pulldown;
 mod raw_ac3;
+mod resample;
 mod session;
+pub use pixel_aspect::{
+    chosen_pixel_aspect, pixel_aspect, set_pixel_aspects, still_default_aspect, still_own_aspect,
+    still_pixel_aspect,
+};
 pub use session::{document_metadata, document_of, set_compositions};
 pub mod slideshow;
 mod source;
+pub mod ts_index;
+mod ts_probe;
 mod wav;
 
 use std::path::{Path, PathBuf};
@@ -55,6 +68,42 @@ pub enum TranscodeError {
     /// Unsupported input, output, or option.
     #[error("unsupported: {0}")]
     Unsupported(String),
+    /// The transcode was stopped ([`request_stop`]): what it had written is not a transcode.
+    #[error("{STOPPED}")]
+    Stopped,
+}
+
+/// What a transcode that was stopped says of itself ([`TranscodeError::Stopped`]); a caller tells a stop from a
+/// failure by it.
+pub const STOPPED: &str = "the transcode was stopped";
+
+/// Set while the transcodes are asked to stop.
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Asks every running transcode to stop (Encore's Progress panel ▸ Stop): each gives up at its next picture
+/// with [`TranscodeError::Stopped`]. It stays asked until [`clear_stop`].
+pub fn request_stop() {
+    STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Lets transcodes run again: called before a build or a Transcode Now starts.
+pub fn clear_stop() {
+    STOP.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the transcodes are asked to stop.
+#[must_use]
+pub fn stop_requested() -> bool {
+    STOP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// [`TranscodeError::Stopped`] when the transcodes are asked to stop: called once a picture by each of them.
+pub(crate) fn check_stop() -> Result<(), TranscodeError> {
+    if stop_requested() {
+        Err(TranscodeError::Stopped)
+    } else {
+        Ok(())
+    }
 }
 
 /// Options for transcoding one media file.
@@ -72,6 +121,45 @@ pub struct TranscodeOptions {
     /// break of the titles that play the video, so their DVD cells begin exactly there. Between them the GOPs keep
     /// their regular length.
     pub gop_starts: Vec<u64>,
+    /// How the bit rate is kept: one-pass VBR, two-pass VBR or CBR.
+    pub mode: RateMode,
+    /// Film (NTSC only; Encore's 23.976 presets): the video is made of the source's pictures at 23.976 a second,
+    /// progressive, shown by 3:2 pulldown in the DVD's 29.97 sequence (soft pulldown). `gop_starts` are then
+    /// counted in those pictures.
+    pub film: bool,
+    /// How hard the encoder searches for motion: Encore's quality (1 to 5; its "Low quality" presets' 2, the
+    /// others' 5). See [`disccraft_mpeg2venc::Encoder::set_quality`].
+    pub quality: u8,
+    /// How the pictures are made (Encore's rendering checkboxes).
+    pub rendering: Rendering,
+}
+
+/// How a transcode makes its pictures: Encore's Transcode Settings checkboxes "Use Maximum Render Quality" and
+/// "Use Frame Blending". Both off is how DiscCraft always made them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Rendering {
+    /// Scale with an area filter (scaling down) or between pixel centres (scaling up) instead of sampling two by
+    /// two pixels bilinearly: fine detail averages out instead of aliasing.
+    pub max_quality: bool,
+    /// Where an output picture falls between two of the source's (another frame rate), mix the two by how near
+    /// it is to each instead of showing the one before it.
+    pub frame_blend: bool,
+}
+
+/// The best quality (Encore's 5): the encoder's whole motion search. See [`TranscodeOptions::quality`].
+pub const BEST_QUALITY: u8 = disccraft_mpeg2venc::encoder::BEST_QUALITY;
+
+/// How a transcode keeps its video bit rate (Encore's quality presets: VBR 1 pass, VBR 2 pass, CBR 1 pass).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RateMode {
+    /// Variable, in one pass: the rate averages the target, up to the maximum.
+    #[default]
+    Vbr,
+    /// Variable, in two passes: a first pass measures every picture (writing nothing), the second shares the bits
+    /// by what it measured. Twice the time.
+    Vbr2Pass,
+    /// Constant: the target is also the maximum.
+    Cbr,
 }
 
 impl Default for TranscodeOptions {
@@ -83,6 +171,10 @@ impl Default for TranscodeOptions {
             max_bitrate: 9_800_000,
             wide: false,
             gop_starts: Vec::new(),
+            mode: RateMode::Vbr,
+            film: false,
+            quality: BEST_QUALITY,
+            rendering: Rendering::default(),
         }
     }
 }
@@ -122,13 +214,14 @@ pub fn transcode(
 
     let source = source::Source::open(input)?;
     let duration = source.info().duration;
-    let frames = picture::frame_count(duration, options.standard).ok_or_else(|| {
+    let film = options.film && options.standard == Standard::Ntsc;
+    let frames = picture::frame_count(duration, options.standard, film).ok_or_else(|| {
         TranscodeError::Unsupported("could not compute output frame count".to_string())
     })?;
 
     picture::encode_video(&source, video_out, options, max_bitrate, frames, progress)?;
 
-    let audio = audio::extract_audio(&source, frames, options.standard, audio_out)?;
+    let audio = audio::extract_audio(&source, frames, (options.standard, film), audio_out)?;
 
     Ok(TranscodeOutput {
         video: video_out.to_path_buf(),
@@ -244,6 +337,16 @@ pub fn is_wide(width: u32, height: u32, par: (u32, u32)) -> bool {
 
 /// Probe a video file: duration, dimensions and frame rate.
 pub fn probe_video(input: &Path) -> Result<VideoProbe, TranscodeError> {
+    let mut probe = probe_video_as_it_is(input)?;
+    // Interpret Footage: whether the picture is wide follows the pixel aspect ratio chosen for the file.
+    if let Some(aspect) = chosen_pixel_aspect(input) {
+        probe.wide = is_wide(probe.width, probe.height, aspect);
+    }
+    Ok(probe)
+}
+
+/// [`probe_video`] as the file itself says (what is remembered of a file is the file's own).
+fn probe_video_as_it_is(input: &Path) -> Result<VideoProbe, TranscodeError> {
     if let Some(probe) = remembered_video(input) {
         return Ok(probe);
     }
@@ -270,7 +373,12 @@ fn probe_video_now(input: &Path) -> Result<VideoProbe, TranscodeError> {
     if let Some(probe) = mkv_probe::quick(input) {
         return Ok(probe);
     }
-    let source = source::Source::open(input)?;
+    let source = match source::Source::open(input) {
+        Ok(source) => source,
+        // A transport stream the media reader refuses (H.264 coded as fields or MBAFF) still tells its length,
+        // size and rate: enough to put it on a Blu-ray as it is.
+        Err(error) => return ts_probe::quick(input).ok_or(error),
+    };
     let info = source.info();
     let seconds = info.duration.0 as f64 / 254_016_000_000.0;
     let video = info
@@ -541,7 +649,14 @@ pub fn probe_audio_seconds(input: &Path) -> Result<f64, TranscodeError> {
         None if raw_ac3.is_some() => raw_ac3.unwrap_or_default(),
         None => match source::Source::open_audio(input) {
             Ok(source) => source.info().duration.0 as f64 / 254_016_000_000.0,
-            Err(error) => ac3_seconds(input).ok_or(error)?,
+            Err(error) => match ac3_seconds(input) {
+                Some(seconds) => seconds,
+                // A transport stream whose video the media reader refuses: its sound is as long as the file.
+                None => ts_probe::quick(input)
+                    .filter(|probe| probe.has_audio)
+                    .map(|probe| probe.seconds)
+                    .ok_or(error)?,
+            },
         },
     };
     media_cache::remember("audio", input, &seconds.to_string());

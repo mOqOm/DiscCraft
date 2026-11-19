@@ -227,9 +227,12 @@ fn a_dvd_compliant_program_stream_is_repackaged() -> Result<(), Box<dyn Error>> 
                 .ok_or("no timeline")?
                 .audio
                 .push(disccraft_project::AudioTrack {
+                    more: Vec::new(),
                     asset: video,
                     language: "en".to_string(),
                     start: 0,
+                    trim_start: 0,
+                    trim_end: None,
                 });
         }
         let dir = temp_dir(name);
@@ -280,6 +283,72 @@ fn a_dvd_compliant_program_stream_is_repackaged() -> Result<(), Box<dyn Error>> 
     };
     build(false, "packed_own_sound")?;
     build(true, "packed_audio_track")
+}
+
+/// M6.350: an MPEG-1 system stream as a VCD has it (352x240, 1150 kbit/s constant, MPEG audio at 44.1 kHz) goes on a
+/// DVD with its MPEG-1 video as it is: the title set says MPEG-1 at 352x240 (its menus MPEG-2), the VOB holds
+/// MPEG-1 video whose pictures are the source's, and the 44.1 kHz sound is converted.
+#[test]
+fn a_vcd_mpeg1_stream_goes_on_as_it_is() -> Result<(), Box<dyn Error>> {
+    let ffmpeg = ffmpeg_path();
+    let ffprobe = ffprobe_path();
+    if !tool_available(&ffmpeg) || !tool_available(&ffprobe) {
+        println!("skipped: ffmpeg not found");
+        return Ok(());
+    }
+    let _guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
+    let fixtures = fixtures_dir();
+    fs::create_dir_all(&fixtures)?;
+    let mpg = fixtures.join("vcd_mpeg1.mpg");
+    if !mpg.is_file() {
+        let made = Command::new(&ffmpeg)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .args(["testsrc=size=352x240:rate=30000/1001", "-f", "lavfi", "-i"])
+            .args(["sine=frequency=440:sample_rate=44100", "-t", "3"])
+            .args(["-c:v", "mpeg1video", "-b:v", "1150k", "-maxrate", "1150k"])
+            .args(["-minrate", "1150k", "-bufsize", "327680", "-g", "15"])
+            .args(["-c:a", "mp2", "-b:a", "224k", "-f", "vcd"])
+            .arg(&mpg)
+            .status()?;
+        assert!(made.success(), "ffmpeg could not make the fixture");
+    }
+    let frames = |path: &Path| -> Result<Vec<String>, Box<dyn Error>> {
+        let out = Command::new(&ffmpeg)
+            .args(["-v", "error", "-i"])
+            .arg(path)
+            .args(["-map", "0:v:0", "-f", "framemd5", "-"])
+            .output()?;
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|line| line.starts_with("0,"))
+            .filter_map(|line| line.rsplit(',').next().map(|hash| hash.trim().to_string()))
+            .collect())
+    };
+
+    let mut project = Project::default();
+    project.settings.kind = DiscKind::Dvd;
+    project.settings.standard = VideoStandard::Ntsc;
+    let video = project.add_asset(&mpg)?;
+    let _ = project.add_timeline(video, Some("VCD".to_string()))?;
+    let dir = temp_dir("vcd_mpeg1");
+    let _ = fs::remove_dir_all(&dir);
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        let _ = build_video_ts(&project, &dir)?;
+        let ifo = fs::read(dir.join("VIDEO_TS").join("VTS_01_0.IFO"))?;
+        // Menus MPEG-2 (0x43); the title MPEG-1 (coding mode 0), 4:3, 352x240.
+        assert_eq!(ifo.get(0x100..0x102), Some(&[0x43, 0x00][..]));
+        assert_eq!(ifo.get(0x200..0x202), Some(&[0x03, 0x18][..]));
+        let vob = dir.join("VIDEO_TS").join("VTS_01_1.VOB");
+        let streams = probe_codecs(&ffprobe, &vob)?;
+        expect_contains(&streams, "mpeg1video")?;
+        expect_contains(&streams, "ac3")?;
+        let (source, disc) = (frames(&mpg)?, frames(&vob)?);
+        assert!(source.len() >= 89, "{}", source.len());
+        assert_eq!(disc, source);
+        Ok(())
+    })();
+    let _ = fs::remove_dir_all(&dir);
+    result
 }
 
 /// A gap between two video clips (Encore: a clip moved along the track) plays black: the title is as long as the
@@ -619,9 +688,12 @@ fn build_project(video: &Path, audio: &Path) -> Result<Project, Box<dyn Error>> 
 
     let timeline = project.timeline_mut(timeline).ok_or("missing timeline")?;
     timeline.audio.push(AudioTrack {
+        more: Vec::new(),
         asset: audio_asset,
         language: "ja".to_string(),
         start: 0,
+        trim_start: 0,
+        trim_end: None,
     });
 
     Ok(project)

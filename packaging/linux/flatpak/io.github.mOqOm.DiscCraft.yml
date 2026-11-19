@@ -1,0 +1,28 @@
+# DiscCraft as a Flatpak, repacked from the Linux build's installed tree (packaging/linux/flatpak.sh unpacks it
+# into stage/ beside this file). The programs are built on Ubuntu 22.04, whose C library is older than the
+# runtime's.
+id: io.github.mOqOm.DiscCraft
+runtime: org.freedesktop.Platform
+runtime-version: "24.08"
+sdk: org.freedesktop.Sdk
+command: disccraft
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  # The monitor and previews play sound.
+  - --socket=pulseaudio
+  # Projects, media and the discs it writes are anywhere in the home folder and on other drives.
+  - --filesystem=home
+  - --filesystem=/media
+  - --filesystem=/run/media
+modules:
+  - name: disccraft
+    buildsystem: simple
+    build-commands:
+      - cp -r usr/bin /app/bin
+      - cp -r usr/share /app/share
+    sources:
+      - type: dir
+        path: stage

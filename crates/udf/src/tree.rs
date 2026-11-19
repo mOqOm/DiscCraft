@@ -161,7 +161,25 @@ pub fn write_udf250_iso(
     out: &Path,
     unix_time: i64,
 ) -> Result<IsoReport, UdfError> {
+    write_udf250_iso_with_dirs(files, &[], label, out, unix_time)
+}
+
+/// [`write_udf250_iso`], with the directories `dirs` (paths inside the image, as `BDMV/AUXDATA`) there too
+/// although no file is in them: a Blu-ray has directories that stay empty (`AUXDATA`, `BDJO`, `JAR`, `META`,
+/// `CERTIFICATE`), and a player may look for them.
+///
+/// # Errors
+///
+/// As [`write_udf250_iso`], and when a directory's path is a file's.
+pub fn write_udf250_iso_with_dirs(
+    files: &[TreeFile],
+    dirs: &[String],
+    label: &str,
+    out: &Path,
+    unix_time: i64,
+) -> Result<IsoReport, UdfError> {
     let mut tree = build_tree(files)?;
+    add_directories(&mut tree, dirs)?;
     assign_unique_ids(&mut tree)?;
     let plan = plan_layout(&mut tree)?;
 
@@ -267,6 +285,37 @@ fn build_tree(files: &[TreeFile]) -> Result<Tree, UdfError> {
     }
 
     Ok(tree)
+}
+
+/// Adds the directories of `dirs` that the files' paths did not make.
+fn add_directories(tree: &mut Tree, dirs: &[String]) -> Result<(), UdfError> {
+    for dir in dirs {
+        let components = validate_path(dir)?;
+        let mut parent = 0usize;
+        for component in components {
+            if let Some(child) = find_child(tree, parent, component)? {
+                let node = tree
+                    .nodes
+                    .get(child)
+                    .ok_or_else(|| invalid("missing child node"))?;
+                if !node.is_dir {
+                    return Err(invalid("path type conflict"));
+                }
+                parent = child;
+            } else {
+                let child = tree.nodes.len();
+                tree.nodes
+                    .push(Node::new_dir(component.to_string(), parent));
+                let parent_node = tree
+                    .nodes
+                    .get_mut(parent)
+                    .ok_or_else(|| invalid("missing parent node"))?;
+                parent_node.children.insert(component.to_string(), child);
+                parent = child;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn assign_unique_ids(tree: &mut Tree) -> Result<(), UdfError> {
@@ -901,6 +950,9 @@ fn write_file_data<W: Write>(w: &mut W, node: &Node) -> Result<(), UdfError> {
     let mut buf = vec![0u8; CHUNK_SIZE];
     let mut copied = 0u64;
     loop {
+        if crate::cancelled() {
+            return Err(invalid(crate::CANCELLED));
+        }
         let n = std::io::Read::read(&mut file, &mut buf).map_err(|e| io_error(&path, e))?;
         if n == 0 {
             break;
@@ -928,7 +980,7 @@ fn write_file_data<W: Write>(w: &mut W, node: &Node) -> Result<(), UdfError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TreeFile, write_udf250_iso};
+    use super::{TreeFile, write_udf250_iso, write_udf250_iso_with_dirs};
 
     fn sector(image: &[u8], n: usize) -> &[u8] {
         &image[n * 2048..(n + 1) * 2048]
@@ -985,6 +1037,36 @@ mod tests {
                 .iter()
                 .take(3000)
                 .all(|b| b"ABC".contains(b))
+        );
+        // M11.9: with empty directories the image is larger by their entries, and holds their names; a
+        // directory whose path is a file's is refused.
+        let with_dirs = dir.join("d.iso");
+        let dirs = vec![
+            "BDMV/AUXDATA".to_string(),
+            "CERTIFICATE/BACKUP".to_string(),
+            "BDMV/STREAM".to_string(),
+        ];
+        let more = write_udf250_iso_with_dirs(&files, &dirs, "TEST", &with_dirs, 0).unwrap();
+        assert!(more.sectors >= report.sectors);
+        let image = std::fs::read(&with_dirs).unwrap();
+        let holds = |name: &str| {
+            // File identifiers are stored as 8-bit compressed text here.
+            image
+                .windows(name.len())
+                .any(|window| window == name.as_bytes())
+        };
+        assert!(holds("AUXDATA") && holds("CERTIFICATE") && holds("BACKUP"));
+        let plain = std::fs::read(&out).unwrap();
+        assert!(!plain.windows(7).any(|window| window == b"AUXDATA"));
+        assert!(
+            write_udf250_iso_with_dirs(
+                &files,
+                &["BDMV/index.bdmv".to_string()],
+                "TEST",
+                &with_dirs,
+                0
+            )
+            .is_err()
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

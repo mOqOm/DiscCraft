@@ -116,6 +116,7 @@ fn pasted_button(item: &Value) -> Result<Button, String> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     Ok(Button {
+        effects: Default::default(),
         name: String::new(),
         label,
         rect,

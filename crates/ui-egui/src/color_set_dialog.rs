@@ -17,6 +17,10 @@ pub(crate) struct ColorSetDialog {
     pub(crate) draft: ColorSet,
     /// Whether the viewer shows the draft.
     pub(crate) preview: bool,
+    /// The project's named set the draft was taken from, if any (Delete removes it).
+    pub(crate) named: Option<String>,
+    /// The name typed for New.
+    pub(crate) new_name: String,
 }
 
 impl DiscCraftApp {
@@ -34,6 +38,8 @@ impl DiscCraftApp {
             own: menu.color_set.is_some(),
             draft: menu.color_set_or_default(),
             preview: false,
+            named: None,
+            new_name: String::new(),
         });
     }
 
@@ -69,10 +75,10 @@ impl DiscCraftApp {
                     });
                     ui.horizontal(|ui| {
                         crate::properties::prop_label(ui, tl!("Color Set:"));
-                        let shown = if state.own {
-                            tl!("Menu Default")
-                        } else {
-                            tl!("Automatic")
+                        let shown = match (&state.named, state.own) {
+                            (Some(name), true) => name.clone(),
+                            (_, true) => tl!("Menu Default").to_owned(),
+                            (_, false) => tl!("Automatic").to_owned(),
                         };
                         egui::ComboBox::from_id_salt("color_set_kind")
                             .width(200.0)
@@ -80,19 +86,73 @@ impl DiscCraftApp {
                             .show_ui(ui, |ui| {
                                 if ui.selectable_label(!state.own, tl!("Automatic")).clicked() {
                                     state.own = false;
+                                    state.named = None;
                                     // The automatic set is made from the highlight colour.
                                     let mut automatic = menu.clone();
                                     automatic.color_set = None;
                                     state.draft = automatic.color_set_or_default();
                                 }
                                 if ui
-                                    .selectable_label(state.own, tl!("Menu Default"))
+                                    .selectable_label(
+                                        state.own && state.named.is_none(),
+                                        tl!("Menu Default"),
+                                    )
                                     .clicked()
                                 {
                                     state.own = true;
+                                    state.named = None;
+                                }
+                                // The project's named sets (New): the menu takes a copy of the one chosen.
+                                for (name, set) in &self.session.project.menu_color_sets {
+                                    if ui
+                                        .selectable_label(
+                                            state.named.as_ref() == Some(name),
+                                            name.as_str(),
+                                        )
+                                        .clicked()
+                                    {
+                                        state.own = true;
+                                        state.draft = *set;
+                                        state.named = Some(name.clone());
+                                    }
                                 }
                             });
                     });
+                    // Encore's New / Delete (the colour sets kept in the project) and Import / Export (files).
+                    let mut action = None;
+                    ui.horizontal(|ui| {
+                        crate::properties::prop_label(ui, tl!("Name:"));
+                        let _ = ui.add(
+                            egui::TextEdit::singleline(&mut state.new_name).desired_width(140.0),
+                        );
+                        if ui
+                            .add_enabled(
+                                !state.new_name.trim().is_empty(),
+                                egui::Button::new(tl!("New")),
+                            )
+                            .clicked()
+                        {
+                            action = Some(SetAction::New);
+                        }
+                        if ui
+                            .add_enabled(state.named.is_some(), egui::Button::new(tl!("Delete")))
+                            .clicked()
+                        {
+                            action = Some(SetAction::Delete);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        crate::properties::prop_label(ui, "");
+                        if ui.button(tl!("Import…")).clicked() {
+                            action = Some(SetAction::Import);
+                        }
+                        if ui.button(tl!("Export…")).clicked() {
+                            action = Some(SetAction::Export);
+                        }
+                    });
+                    if let Some(action) = action {
+                        self.color_set_action(&mut state, action);
+                    }
                     ui.add_enabled_ui(state.own, |ui| color_set_fields(ui, &mut state.draft));
                 });
                 ui.add_space(12.0);
@@ -135,6 +195,81 @@ impl DiscCraftApp {
             }
             Some(false) => self.color_set_dialog = None,
             None => self.color_set_dialog = Some(state),
+        }
+    }
+}
+
+/// A button of the dialog that acts on the project or a file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SetAction {
+    New,
+    Delete,
+    Import,
+    Export,
+}
+
+impl DiscCraftApp {
+    /// New (keeps the draft in the project under the typed name), Delete (the named set chosen), Import (a file's
+    /// set becomes the draft, the menu's own) and Export (the draft to a file).
+    fn color_set_action(&mut self, state: &mut ColorSetDialog, action: SetAction) {
+        let set = serde_json::to_value(state.draft).unwrap_or(serde_json::Value::Null);
+        match action {
+            SetAction::New => {
+                let name = state.new_name.trim().to_owned();
+                if self
+                    .run_command(
+                        "menucolorset.save",
+                        json!({ "name": name, "colorSet": set }),
+                    )
+                    .is_some()
+                {
+                    state.own = true;
+                    state.named = Some(name);
+                    state.new_name.clear();
+                }
+            }
+            SetAction::Delete => {
+                if let Some(name) = state.named.take() {
+                    let _ = self.run_command("menucolorset.delete", json!({ "name": name }));
+                }
+            }
+            SetAction::Import => {
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter(tl!("Menu Color Set"), &["dcmenucolors"])
+                    .pick_file()
+                else {
+                    return;
+                };
+                let read = self.run_query(
+                    "menucolorset.read",
+                    json!({ "path": path.to_string_lossy() }),
+                );
+                if let Some(read) = read.and_then(|read| {
+                    serde_json::from_value::<ColorSet>(read.get("colorSet")?.clone()).ok()
+                }) {
+                    state.own = true;
+                    state.named = None;
+                    state.draft = read;
+                }
+            }
+            SetAction::Export => {
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter(tl!("Menu Color Set"), &["dcmenucolors"])
+                    .set_file_name("colors.dcmenucolors")
+                    .save_file()
+                else {
+                    return;
+                };
+                if self
+                    .run_query(
+                        "menucolorset.export",
+                        json!({ "path": path.to_string_lossy(), "colorSet": set }),
+                    )
+                    .is_some()
+                {
+                    self.status = tlf!("Exported: {path}", path = path.display());
+                }
+            }
         }
     }
 }
