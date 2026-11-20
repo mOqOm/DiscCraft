@@ -603,7 +603,7 @@ order they are to play (so extras can be watched in any order).
 | **File ▸ New ▸ Menu** (Ctrl+M) | An empty menu, with the same guides as Encore |
 | **File ▸ Import ▸ Menu…** (Shift+Ctrl+I) | Makes a menu from a PSD / `.pcraft`. Groups whose names start with `(+)` become buttons |
 | **New Menu** on a **Library** preset | Made from one of DiscCraft's own templates |
-| **Menu ▸ Add New Page** | The next page of the open menu (same background and settings). A page is an empty menu of its own: put its buttons on it. The pages are listed under their menu in the Menus panel (**Page 1**, **Page 2**…), the viewer's tab says which page is open, and the arrows under the viewer go from page to page. A link reaches a page through its menu's name ▸ **Page n** in the link lists. On a Blu-ray the pages are one menu, as Encore builds them: going from page to page only changes the buttons and what the page draws, while the background video and the menu's sound play on without starting again. That needs pages that share the first page's background, sound, duration and loops (as **Add New Page** makes them), at most 8 pages, and no pop-up menu; otherwise each page is built as a menu of its own and turning a page starts it from the beginning. On a DVD each page is always a menu of its own |
+| **Menu ▸ Add New Page** | The next page of the open menu (same background and settings). A page is an empty menu of its own: put its buttons on it. The pages are listed under their menu in the Menus panel (**Page 1**, **Page 2**…), the viewer's tab says which page is open, and the arrows under the viewer go from page to page. A link reaches a page through its menu's name ▸ **Page n** in the link lists. On a Blu-ray the pages are one menu, as Encore builds them: going from page to page only changes the buttons and what the page draws, while the background video and the menu's sound play on without starting again. That needs pages that share the first page's background, sound, duration and loops (as **Add New Page** makes them) and at most 8 pages; otherwise each page is built as a menu of its own and turning a page starts it from the beginning. A pop-up menu's pages pop up together over the title ([Blu-ray](#1410-blu-ray)). On a DVD each page is always a menu of its own |
 
 The first menu made becomes **First Play** and the **Title Button** automatically.
 
@@ -787,7 +787,7 @@ Set in the menu's sheet of the Properties panel (**Basic / Motion / Pop-up**).
 - The background is a colour / an image / a video asset (not a timeline). With video it becomes a motion menu
 - Loop count and loop point, duration (a menu is at most 254 seconds)
 - **End Action** (where to go when time runs out; Menu ▸ Set End Action… opens it too) and **Override**
-- The **Pop-up** sheet makes it a pop-up menu and sets its background timeline / background frame (Blu-ray)
+- The **Pop-up** sheet makes it a pop-up menu (with all its pages) and sets its background timeline / background frame (Blu-ray)
 
 **Menu ▸ Create EffectCraft Composition…** makes an EffectCraft project from the menu's layers; the rendered movie
 can be the menu's background (a motion menu). [Motion menus, with sound and movement](#146-motion-menus-with-sound-and-movement)
@@ -974,10 +974,10 @@ DTS tracks are silent.
 
 | Field | Contents |
 |---|---|
-| Format / Output | DVD / Blu-ray, a folder (`VIDEO_TS` / `BDMV`) or an ISO image |
+| Format / Output | DVD / Blu-ray, a folder (`VIDEO_TS` / `BDMV`), an ISO image, or for a DVD a **DDP Image** (for replication) |
 | Build | Starts the build. It saves the project and checks it first |
 | Source | The current project (the Build panel writes only the project that is open) |
-| Destination | When empty, the place shown in faint text (`<project name>_DVD` / `_BD` beside the project; `<project name>.iso` for an image). For a folder, naming an existing folder makes a `<disc name>` folder inside it (a place that already has `VIDEO_TS` / `BDMV` is built again in place). An image cannot be given a folder |
+| Destination | When empty, the place shown in faint text (`<project name>_DVD` / `_BD` beside the project; `<project name>.iso` for an image; `<project name>_DDP` for a DDP image). For a folder or a DDP image, naming an existing folder makes a `<disc name>` folder inside it (a place that already has `VIDEO_TS` / `BDMV`, or a DDP image's `DDPID`, is built again in place). An image cannot be given a folder |
 | Disc Info | The usage bar (**Refresh Usage** calculates it), the disc's name (also the ISO's volume label), the size (**Custom**, last in the list, takes a size of your own in GB beside it — 1 GB = 1,000,000,000 bytes — from 0.001 GB up to a single-layer DVD's 4.7 GB, or a BDXL's 128 GB on a Blu-ray; a larger DVD is DVD9. The usage bar and the project check then measure against it), **DVD-ROM content** / **BD-ROM content** (**Browse…** chooses a folder; its files and folders go in the disc's root, beside `VIDEO_TS` / `BDMV`: a manual or photos to read on a computer. A folder build copies them, an image holds them. They take that much of the capacity from the video, and the line under the bar shows their size. **Clear** takes them off. A file must be under 4 GB, folders at most 7 deep) |
 | Layer Break | DVD-9 only. Automatic / manual. Manual is set by timeline and position (timecode / frame / seconds, **Playhead**) |
 | Region Codes | DVD only. All regions / custom (ticks for 1 to 8). **Parental level**: none, or 1 to 8 (8 is the most restricted). A player whose parental level is set lower asks for its password before the disc plays (at the start, and when a title is started from the remote) and stops when it is not given; a player with no level set plays as usual. A timeline, slideshow or chapter playlist can ask a level of its own (**Parental level** in its properties: the disc's, none, or 1 to 8), and a timeline can name what plays in its place when the level is not raised (**If Not Allowed**: another title or a menu, as a parental block; not set, the player stops). Country-specific ratings are not written, and this has not been tried on a hardware player |
@@ -990,6 +990,11 @@ During a build a bar shows the progress and the time taken (also in the status b
   command line keeps it elsewhere to share it
 - An ISO is UDF + ISO 9660. On Windows a double click in Explorer mounts it
 - A DVD-9 image with a layer break leaves a note in `<name>.layerbreak.txt` at the same place
+- A **DDP Image** (DVD only, as in Encore) is what a replication plant takes in place of a master disc: a folder
+  holding `MAIN.DAT` (the disc image), `CONTROL.DAT` (the disc's control data: its size and layout) and `DDPID`
+  (which says what the two files are and where they go on the disc). These are the same files Encore CS6 writes
+  for the same image. The `VIDEO_TS` folder is built beside it (`<name>.files`). A dual-layer (DVD-9) disc cannot
+  be written as a DDP image yet
 - Nothing is burned to a disc. Use other software to burn
 - How much of the disc is left, and what to do when it is not enough:
   [reading the disc's size as you work](#149-reading-the-discs-size-as-you-work)
@@ -1276,7 +1281,11 @@ authoring mode, and the **Disc** panel also chooses the video's size, SD (MPEG-2
 
 - Blu-ray is HDMV only (no BD-J), and the menus work as they do on a DVD.
 - A **pop-up menu** is the Blu-ray's version of a remote menu: make it on the menu's **Pop-up** tab, and
-  set the timeline's **Remote Menu** to it. The viewer can call it up in the middle of a title.
+  set the timeline's **Remote Menu** to it. The viewer can call it up in the middle of a title. It shows what the
+  menu draws over the video — texts, pictures and the buttons as you designed them — without the menu's
+  background. A pop-up menu with pages (**Menu ▸ Add New Page**) pops up with all of them, on its first page: a
+  button to another of its pages turns the page while the title plays on (up to 8 pages of up to 254 buttons;
+  otherwise such a button leaves the title for that page's menu, as before)
 - HD (1080p, 720p) is H.264, and clips are joined at IDR pictures, so trims come out exactly where you
   cut them — unlike a DVD, where a converted clip is cut at a GOP start.
 - A DTS file cannot go on a Blu-ray yet.
@@ -1291,7 +1300,7 @@ So that you are not looking for it:
 
 | Encore has | DiscCraft |
 |---|---|
-| Burning to a disc, DDP export | Not there. DiscCraft writes a folder or an ISO |
+| Burning to a disc; a dual-layer DVD's DDP image | Not there. DiscCraft writes a folder, an ISO, or a single-layer DVD's DDP image |
 | Copy protection (CSS, AACS) | Not there. Only the region code flags |
 | BD-J menus | Not there. Blu-ray is HDMV |
 | Highlight colour sets shared between projects as a file | Not there for menus (subtitle colour sets have `.dccolors`). Save the menu as a template instead |
@@ -1396,6 +1405,7 @@ cargo run -p disccraft-cli -- run <project.dcproj> <script.jsonl>
 cargo run -p disccraft-cli -- inspect <project.dcproj> [--json]
 cargo run -p disccraft-cli -- build <project.dcproj> --out <dir>
 cargo run -p disccraft-cli -- build <project.dcproj> --iso <file> [--cache <dir>] [--audio-language ja]
+cargo run -p disccraft-cli -- build <project.dcproj> --ddp <dir>
 ```
 
 - `commands` lists the engine's commands (id, label, place in the menus, shortcut, parameters). `--json` for JSON
@@ -1403,7 +1413,8 @@ cargo run -p disccraft-cli -- build <project.dcproj> --iso <file> [--cache <dir>
 - `run` runs a JSON Lines script. One line is one command, `{"command": "...", "params": {...}}`.
   Lines starting with `#` or `//` are ignored. A script may be up to 16 MB
 - `inspect` prints a summary of the project (`--json` gives the JSON of `project.inspect`)
-- `build` makes a folder with `--out` and an image with `--iso`. `--cache` names where converted media is kept;
+- `build` makes a folder with `--out`, an image with `--iso` and a DVD's DDP image with `--ddp` (into that folder).
+  `--cache` names where converted media is kept;
   `--audio-language` gives the language (ISO 639-1) of audio that has none
 
 ## 18. Using it from an AI agent (MCP)

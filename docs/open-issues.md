@@ -27,7 +27,8 @@ DiscCraft writes VIDEO_TS / BDMV folders and ISO images. Burning them to a disc 
 | Large | Burn a build to a DVD or Blu-ray on Windows (the operating system's disc writing service): choice of drive, speed and number of copies, as the Build panel's "Disc" output |
 | Large | Dual-layer discs (DVD-9, BD-50): check that the layer change falls where the image marks it |
 | Large | Burning on macOS and Linux |
-| Needs a decision | DDP export, double-sided discs |
+| Large | DDP image of a dual-layer (DVD-9) disc. A single-layer DVD's DDP image is written (byte for byte what Encore CS6 writes from the same image; the DDP specification comes with a contract with DCA, so it was not used: the output was matched against Encore's). Two layers need layer 0 to be a whole number of ECC blocks (16 sectors; ECMA-267 §25), and today's DVD-9 images do not align the layer break's cell to one. That comes first, then a comparison with Encore's dual-layer DDP |
+| Out of scope | Double-sided discs (the Side setting of Encore's Build panel) |
 | Needs hardware | All of the above needs testing with a writer drive and blank discs |
 
 ## 2. Blu-ray and HD

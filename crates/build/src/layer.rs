@@ -68,11 +68,12 @@ pub fn frame_90k(standard: VideoStandard) -> u64 {
 
 /// Where the image breaks: the project's manual break when it sets one for a dual-layer disc (checked: layer 0
 /// at least as large as layer 1 and no larger than a layer holds), else the build's choice when the image needs two
-/// layers, else none. Writes `<name>.layerbreak.txt` next to the image for a break.
+/// layers, else none. Writes `note` (`<name>.layerbreak.txt` next to the image) for a break.
 pub(crate) fn layer_break(
     project: &Project,
     dvd: &DvdBuildReport,
     iso: &Path,
+    note: &Path,
     total_sectors: u32,
 ) -> Result<Option<LayerBreak>, String> {
     let video_ts = dvd.video_ts.as_path();
@@ -98,8 +99,7 @@ pub(crate) fn layer_break(
         place: describe(iso, video_ts, sector, dvd)?,
         requested_90k: manual.map(|(_, _, requested)| requested),
     };
-    let note = iso.with_extension("layerbreak.txt");
-    std::fs::write(&note, note_text(&found, project.settings.standard))
+    std::fs::write(note, note_text(&found, project.settings.standard))
         .map_err(|e| format!("{}: {e}", note.display()))?;
     Ok(Some(found))
 }

@@ -331,7 +331,7 @@ impl DiscCraftApp {
 
     pub(crate) fn pick_build_path(&mut self) {
         let path = match self.build_output {
-            OutputKind::Folder => FileDialog::new().pick_folder(),
+            OutputKind::Folder | OutputKind::Ddp => FileDialog::new().pick_folder(),
             OutputKind::Iso => FileDialog::new().add_filter("ISO", &["iso"]).save_file(),
         };
 
@@ -364,7 +364,7 @@ impl DiscCraftApp {
     }
 
     /// Where a build goes when the Location box is empty: next to the saved project (else in the home folder),
-    /// named after the project — a `<name>_DVD` / `<name>_BD` folder, or `<name>.iso`.
+    /// named after the project — a `<name>_DVD` / `<name>_BD` folder, `<name>.iso`, or a `<name>_DDP` folder.
     /// The options a render into the build's cache would use now: the Location as the build panel has it (its
     /// default when empty). `None` when that is not a valid path.
     pub(crate) fn cache_options(&self) -> Option<BuildOptions> {
@@ -412,6 +412,7 @@ impl DiscCraftApp {
         match self.build_output {
             OutputKind::Folder => folder.join(format!("{stem}_{kind}")),
             OutputKind::Iso => folder.join(format!("{stem}.iso")),
+            OutputKind::Ddp => folder.join(format!("{stem}_DDP")),
         }
     }
 
@@ -800,9 +801,9 @@ impl DiscCraftApp {
 }
 
 /// Where a build to `location` goes, as in Encore CS6: an image is the file itself (`None` when the location is
-/// a folder: there is nothing to name the image); a folder build goes into a folder named after the disc inside
-/// an existing location, unless the location already is a disc folder (a rebuild goes to the same place) or the
-/// disc has no name.
+/// a folder: there is nothing to name the image); a folder build, and a DDP image (Encore's is a folder too), goes
+/// into a folder named after the disc inside an existing location, unless the location already is such a folder
+/// (a rebuild goes to the same place) or the disc has no name.
 pub(crate) fn build_target(
     output: OutputKind,
     location: &Path,
@@ -810,9 +811,12 @@ pub(crate) fn build_target(
 ) -> Option<PathBuf> {
     match output {
         OutputKind::Iso => (!location.is_dir()).then(|| location.to_path_buf()),
-        OutputKind::Folder => {
+        OutputKind::Folder | OutputKind::Ddp => {
             let name = file_safe(disc_name.trim());
-            let built = location.join("VIDEO_TS").is_dir() || location.join("BDMV").is_dir();
+            let built = match output {
+                OutputKind::Ddp => location.join("DDPID").is_file(),
+                _ => location.join("VIDEO_TS").is_dir() || location.join("BDMV").is_dir(),
+            };
             if location.is_dir() && !built && !name.trim().is_empty() {
                 Some(location.join(name))
             } else {
@@ -889,6 +893,15 @@ mod build_target_tests {
             build_target(OutputKind::Folder, &fresh, "Movie"),
             Some(fresh)
         );
+        // A DDP image goes into a folder named after the disc too, and a rebuild into it stays there.
+        assert_eq!(
+            build_target(OutputKind::Ddp, &dir, "Untitled Project"),
+            Some(dir.join("Untitled Project"))
+        );
+        let ddp = dir.join("Movie");
+        std::fs::create_dir_all(&ddp)?;
+        std::fs::write(ddp.join("DDPID"), b"")?;
+        assert_eq!(build_target(OutputKind::Ddp, &ddp, "Movie"), Some(ddp));
         // An image: a folder is refused, a file is taken.
         assert_eq!(build_target(OutputKind::Iso, &dir, "Movie"), None);
         assert_eq!(

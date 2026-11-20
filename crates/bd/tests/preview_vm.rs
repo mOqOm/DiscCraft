@@ -327,3 +327,159 @@ fn a_menus_pages_turn_in_one_composition() {
         let _ = std::fs::remove_dir_all(&out);
     }
 }
+
+/// GitHub issue #13: a pop-up menu with pages pops up over the title with all of them in one composition (pages 0
+/// and 1, no page of its own to turn to the page asked for). Its button to its other page turns the page while the
+/// title plays on, with the button the link asks for; a button to a chapter takes the title there and closes it.
+#[test]
+fn a_popups_pages_turn_over_the_playing_title() {
+    let Some(video) = video() else {
+        eprintln!("ffmpeg not found; skipping");
+        return;
+    };
+    let mut p = Project::default();
+    p.settings.kind = DiscKind::BluRay;
+    let v = p.add_asset(&video).unwrap();
+    let t = p.add_timeline(v, Some("Main".to_string())).unwrap();
+    p.add_chapter(t, Tick(3 * TICKS_PER_SECOND), None).unwrap();
+    let menu = p.add_menu(Some("Top".to_string())).unwrap();
+    p.menu_mut(menu).unwrap().buttons.clear();
+    p.add_button(
+        menu,
+        "Play".to_string(),
+        None,
+        Link::Timeline { id: t, chapter: 0 },
+    )
+    .unwrap();
+    // The pop-up and its second page (a page takes the first page's settings, the pop-up's among them).
+    let popup = p.add_menu(Some("Scenes".to_string())).unwrap();
+    p.menu_mut(popup).unwrap().buttons.clear();
+    p.menu_mut(popup).unwrap().popup = true;
+    let page = p.add_menu_page(popup).unwrap();
+    assert!(p.menu(page).unwrap().popup);
+    p.add_button(
+        popup,
+        "Chapter 1".to_string(),
+        None,
+        Link::Timeline { id: t, chapter: 0 },
+    )
+    .unwrap();
+    p.add_button(
+        popup,
+        "More".to_string(),
+        None,
+        Link::Menu {
+            id: page,
+            button: Some(1),
+        },
+    )
+    .unwrap();
+    p.add_button(
+        page,
+        "Back".to_string(),
+        None,
+        Link::Menu {
+            id: popup,
+            button: Some(1),
+        },
+    )
+    .unwrap();
+    p.add_button(
+        page,
+        "Chapter 2".to_string(),
+        None,
+        Link::Timeline { id: t, chapter: 1 },
+    )
+    .unwrap();
+    p.timeline_mut(t).unwrap().menu_remote = Link::Menu {
+        id: popup,
+        button: None,
+    };
+    p.settings.first_play = Link::Menu {
+        id: menu,
+        button: None,
+    };
+    assert_eq!(disccraft_bd::popup_page_groups(&p), vec![vec![1, 2]]);
+
+    let out = fixtures().join("bd_popup_pages_out");
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = build_bdmv(&p, &out).unwrap();
+    // The title's IG: one pop-up composition with both pages, each button drawn in its normal state.
+    let clip = std::fs::read(out.join("BDMV/STREAM/00001.m2ts")).unwrap();
+    let segments: Vec<u8> = disccraft_m2tsmux::pes_payloads(&clip, disccraft_m2tsmux::IG_PID)
+        .unwrap()
+        .concat();
+    let compositions = disccraft_pgs::read::interactive_compositions(&segments).unwrap();
+    let composition = compositions.first().unwrap();
+    assert!(composition.popup);
+    assert_eq!(
+        composition
+            .pages
+            .iter()
+            .map(|page| page.id)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    for page in &composition.pages {
+        let buttons: Vec<_> = page
+            .buttons
+            .iter()
+            .filter(|button| button.id < disccraft_bd::PAGE_PICTURE_BUTTON)
+            .collect();
+        assert_eq!(buttons.len(), 2, "page {}", page.id);
+        assert!(
+            buttons
+                .iter()
+                .all(|button| button.normal_object != 0xFFFF && !button.commands.is_empty()),
+            "page {}: {buttons:?}",
+            page.id
+        );
+    }
+    let disc = load_bdmv(&out).unwrap();
+
+    // Play the title; pop up the menu: its first page, its default button.
+    let mut vm = BdVm::start(&disc).unwrap();
+    vm.press(Key::Enter).unwrap();
+    let playing = BdLocation::Playing {
+        playlist: 1,
+        mark: 0,
+    };
+    assert_eq!(vm.state().location, playing);
+    assert!(vm.has_popup());
+    vm.popup_key();
+    let (shown, view) = vm.menu().unwrap();
+    assert!(shown.popup);
+    assert_eq!(shown.pages.len(), 2);
+    assert_eq!((view.page, view.button), (0, 0));
+
+    // More: the second page's Chapter 2, over the same play of the title.
+    vm.press(Key::Down).unwrap();
+    assert_eq!(vm.menu().unwrap().1.button, 1);
+    vm.press(Key::Enter).unwrap();
+    assert_eq!(vm.state().location, playing);
+    let (shown, view) = vm.menu().unwrap();
+    assert!(shown.popup && view.open);
+    assert_eq!((view.page, view.button), (1, 1));
+
+    // Back: the first page's More.
+    vm.press(Key::Up).unwrap();
+    vm.press(Key::Enter).unwrap();
+    assert_eq!(vm.state().location, playing);
+    let view = vm.menu().unwrap().1;
+    assert_eq!((view.page, view.button), (0, 1));
+
+    // More, then Chapter 2: the title's second chapter, the pop-up closed.
+    vm.press(Key::Enter).unwrap();
+    vm.press(Key::Enter).unwrap();
+    assert_eq!(
+        vm.state().location,
+        BdLocation::Playing {
+            playlist: 1,
+            mark: 1
+        }
+    );
+    assert!(vm.menu().is_none());
+    if std::env::var_os("DISCCRAFT_KEEP_OUTPUT").is_none() {
+        let _ = std::fs::remove_dir_all(&out);
+    }
+}

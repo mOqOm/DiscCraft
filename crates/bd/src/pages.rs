@@ -10,6 +10,10 @@
 //! (Encore's pages are one menu; DiscCraft's pages could differ). Otherwise, and for a pop-up menu, more than
 //! [`MAX_PAGES`] pages, or pictures too large for the player's interactive graphics, each page is a menu of its own
 //! as before (and turning a page plays its own clip).
+//!
+//! A pop-up menu's pages are one composition in each title clip it pops up over ([`popup_page_groups`], GitHub
+//! issue #13): there the title plays under them, so they need not share a background, and a link to another of its
+//! pages turns the page over the playing title.
 
 use disccraft_project::{Menu, MenuId, Project, Rect};
 
@@ -23,6 +27,10 @@ const MAX_BUTTONS: usize = 254;
 /// decoded before the menu's first picture (M10.28: 64 Mbit/s, so 2 MiB in about 0.26 s of the clip's 0.3 s before
 /// it).
 const OBJECT_BUDGET: u64 = 2 << 20;
+/// The most bytes of decoded objects a pop-up's pages take. A pop-up's display set may come later in the title clip
+/// than the clip's start (`crate::menus::popup_ig_units`), so it is not held to a menu clip's 0.3 s; 8 MiB keeps its
+/// decoding under about a second at the decoder model's 8 MB/s (several pages each with a picture over the frame).
+const POPUP_OBJECT_BUDGET: u64 = 8 << 20;
 
 /// Which of the project's menus (by their index in the project's order) are built as pages of one composition:
 /// each group's menus, its first page first. Empty for a DVD. The preview reads the playing page this way too.
@@ -48,6 +56,50 @@ pub fn menu_page_groups(project: &Project) -> Vec<Vec<usize>> {
             || indices.len() != pages.len()
             || indices.first() != Some(&index)
             || !shares_background(project, &menus)
+        {
+            continue;
+        }
+        groups.push(indices);
+    }
+    groups
+}
+
+/// Which of the project's pop-up menus (by their index in the project's order) pop up with all their pages: each
+/// group's menus, its first page first. Every page a pop-up with buttons, few enough pages and buttons, and small
+/// enough for the decoder (as [`menu_page_groups`]); the pages need not share a background (the title plays under
+/// them). Empty for a DVD. The preview reads the pop-up's page this way too.
+#[must_use]
+pub fn popup_page_groups(project: &Project) -> Vec<Vec<usize>> {
+    if project.settings.kind != disccraft_project::DiscKind::BluRay {
+        return Vec::new();
+    }
+    let ids: Vec<MenuId> = project.menus.keys().copied().collect();
+    let index_of = |id: MenuId| ids.iter().position(|known| *known == id);
+    let mut groups = Vec::new();
+    for (index, menu) in project.menus.values().enumerate() {
+        if !menu.popup || project.is_menu_page(menu.id) {
+            continue;
+        }
+        let pages = project.menu_pages(menu.id);
+        let menus: Vec<&Menu> = pages.iter().filter_map(|id| project.menu(*id)).collect();
+        let indices: Vec<usize> = pages.iter().filter_map(|id| index_of(*id)).collect();
+        let fits = |page: &&Menu| {
+            page.popup
+                && !page.animate_buttons
+                && !page.buttons.is_empty()
+                && page.buttons.len() <= MAX_BUTTONS
+        };
+        if pages.len() < 2
+            || pages.len() > MAX_PAGES
+            || menus.len() != pages.len()
+            || indices.len() != pages.len()
+            || indices.first() != Some(&index)
+            || !menus.iter().all(fits)
+            || menus
+                .iter()
+                .map(|page| object_bytes(project, page))
+                .sum::<u64>()
+                > POPUP_OBJECT_BUDGET
         {
             continue;
         }

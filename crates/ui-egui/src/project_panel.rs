@@ -993,6 +993,7 @@ impl DiscCraftApp {
         let output = match self.build_output {
             OutputKind::Folder => "folder",
             OutputKind::Iso => "iso",
+            OutputKind::Ddp => "ddp",
         };
         self.transcode_for = Some((path.clone(), self.build_output));
         // The cache is where the build puts it: in the folder the build writes (inside the Location).

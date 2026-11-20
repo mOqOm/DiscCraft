@@ -1,0 +1,13 @@
+[package]
+name = "disccraft-ddp"
+description = "DVD の DDP イメージ（プレス工場へのマスターの受け渡し）: MAIN.DAT・CONTROL.DAT・DDPID"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

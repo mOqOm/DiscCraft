@@ -342,6 +342,8 @@
 	Result	結果
 	Creates a disc folder (VIDEO_TS or BDMV) on the hard drive.	ハードドライブにディスクのフォルダー (VIDEO_TS / BDMV) を作ります。
 	Creates an ISO disc image on the hard drive.	ハードドライブにディスクの ISO イメージを作ります。
+	Creates a DDP image on the hard drive for replication.	プレス（複製）用の DDP イメージをハードドライブに作ります。
+	DDP Image	DDP イメージ
 	1 - United States, Canada	1 - 米国、カナダ
 	2 - Japan, Europe, South Africa, Middle East	2 - 日本、ヨーロッパ、南アフリカ、中東
 	3 - Southeast Asia, Korea, Hong Kong	3 - 東南アジア、韓国、香港

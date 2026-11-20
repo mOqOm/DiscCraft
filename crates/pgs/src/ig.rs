@@ -421,7 +421,8 @@ fn ticks(bytes: u64, rate: u64) -> u64 {
 }
 
 /// One frame at frame rate code `id`, in 90 kHz ticks.
-fn frame_ticks(id: u8) -> u64 {
+#[must_use]
+pub fn frame_ticks(id: u8) -> u64 {
     match id {
         1 => 3754,
         2 => 3750,

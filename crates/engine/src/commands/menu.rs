@@ -1079,16 +1079,22 @@ fn run_set_transition(session: &mut Session, params: &Value) -> CommandResult {
 }
 
 /// Encore's "Set as Blu-ray Pop-up Menu".
+/// Encore's "Set as Blu-ray Pop-up Menu" for the menu and all its pages (Encore's pages are one menu): a pop-up
+/// menu's pages pop up together over the title (M10.29).
 fn run_set_popup(session: &mut Session, params: &Value) -> CommandResult {
     let menu_id = MenuId(req_u64(params, "menu")?);
     let on = params
         .get("on")
         .and_then(Value::as_bool)
         .ok_or_else(|| "parameter \"on\" must be true or false".to_string())?;
-    let Some(menu) = session.project.menu_mut(menu_id) else {
+    if session.project.menu(menu_id).is_none() {
         return Err(format!("menu {} does not exist", menu_id.0));
-    };
-    menu.popup = on;
+    }
+    for page in session.project.menu_pages(menu_id) {
+        if let Some(menu) = session.project.menu_mut(page) {
+            menu.popup = on;
+        }
+    }
     Ok(empty_object())
 }
 
@@ -2595,6 +2601,28 @@ mod tests {
         assert_ne!(shown(385, 355), Some(0));
         assert_ne!(shown(335, 305), Some(0));
         assert_eq!(shown(300, 240), Some(0));
+        Ok(())
+    }
+
+    /// M10.29: Set as Blu-ray Pop-up Menu on any page of a menu sets it for all its pages (Encore's pages are one
+    /// menu), so they pop up together.
+    #[test]
+    fn the_popup_setting_goes_to_every_page() -> Result<(), Box<dyn Error>> {
+        let mut session = Session::new();
+        let menu = session.project.add_menu(Some("Scenes".to_owned()))?;
+        let page = session.project.add_menu_page(menu)?;
+        session.execute(
+            "menu.setPopup",
+            &serde_json::json!({ "menu": page.0, "on": true }),
+        )?;
+        let popup = |id| session.project.menu(id).is_some_and(|menu| menu.popup);
+        assert!(popup(menu) && popup(page));
+        session.execute(
+            "menu.setPopup",
+            &serde_json::json!({ "menu": menu.0, "on": false }),
+        )?;
+        let popup = |id| session.project.menu(id).is_some_and(|menu| menu.popup);
+        assert!(!popup(menu) && !popup(page));
         Ok(())
     }
 

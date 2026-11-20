@@ -28,9 +28,10 @@ pub(crate) struct Preview {
     registers: Registers,
     /// Blu-ray のプロジェクトのプレビューか。
     bluray: bool,
-    /// Blu-ray のタイトルごとの、ポップアップメニュー（リモートメニューがポップアップのメニューならその PGCN）。
-    /// モデルのタイトルの順（タイムライン、スライドショー、チャプター再生リスト）。
-    popups: Vec<Option<u16>>,
+    /// Blu-ray のタイトルごとの、ポップアップメニュー（リモートメニューがポップアップのメニューなら、そのページの
+    /// PGCN。最初のページが先。ないタイトルは空）。モデルのタイトルの順（タイムライン、スライドショー、チャプター
+    /// 再生リスト）。
+    popups: Vec<Vec<u16>>,
     /// 再生中のタイトルの上に出ているポップアップメニュー（PGCN とハイライトしているボタン）。
     popup: Option<(u16, u8)>,
     /// ビルドした Blu-ray を開いているときのディスク（このときは上の DVD のモデルを使わない）。
@@ -45,8 +46,8 @@ pub(crate) struct BdPreview {
     timelines: u32,
     /// メニューのプレイリストの最初の番号（プロジェクトのメニューの順に続く）。
     menu_base: u32,
-    /// タイムラインごとのポップアップメニュー（メニューの順の 1 から）。
-    popups: Vec<Option<u16>>,
+    /// タイムラインごとのポップアップメニューのページ（メニューの順の 1 から。IG のページ n が n 番目）。
+    popups: Vec<Vec<u16>>,
     /// ページを 1 つの IG にまとめたメニュー（M10.26）: まとまりごとのメニューの順（0 から、最初のページが先）。
     /// 最初のページのプレイリストで IG のページ n を見ているときは、n 番目のページのメニュー。
     groups: Vec<Vec<usize>>,
@@ -215,21 +216,25 @@ impl BdPreview {
                 "title": { "title": playlist, "chapter": mark.saturating_add(1) }
             }),
         };
-        let popup_menu = match self.state.location {
+        let popup_pages: &[u16] = match self.state.location {
             BdLocation::Playing { playlist, .. } if playlist <= self.timelines => {
                 usize::try_from(playlist)
                     .ok()
                     .and_then(|title| title.checked_sub(1))
                     .and_then(|index| self.popups.get(index))
-                    .copied()
-                    .flatten()
+                    .map_or(&[], Vec::as_slice)
             }
-            _ => None,
+            _ => &[],
         };
-        let popup = match (shown, popup_menu) {
-            (Some((menu, view)), Some(pgcn)) if menu.popup && view.open => {
-                json!({ "pgcn": pgcn, "button": button_number(view.button) })
-            }
+        // ページのあるポップアップは、IG のページ n が n 番目のページのメニュー。
+        let popup = match shown {
+            Some((menu, view)) if menu.popup && view.open => popup_pages
+                .get(usize::from(view.page))
+                .or(popup_pages.first())
+                .map_or(
+                    Value::Null,
+                    |pgcn| json!({ "pgcn": pgcn, "button": button_number(view.button) }),
+                ),
             _ => Value::Null,
         };
         let (subtitle_on, subtitle_track) = self.state.subtitle;
@@ -239,7 +244,7 @@ impl BdPreview {
             "built": true,
             "location": location,
             "popup": popup,
-            "popupAvailable": vm.has_popup() && popup_menu.is_some(),
+            "popupAvailable": vm.has_popup() && !popup_pages.is_empty(),
             "audio": (self.state.audio > 0).then_some(self.state.audio),
             "subtitle": { "on": subtitle_on, "track": (subtitle_track > 0).then_some(subtitle_track) },
             "menus": [],
@@ -263,12 +268,15 @@ impl Default for Preview {
 }
 
 /// Blu-ray のプロジェクトの、タイトルごとのポップアップメニュー（[`Preview::popups`]）。タイムラインの
-/// リモートメニューが「Blu-ray のポップアップメニューに設定」したボタンのあるメニューなら、その PGCN（メニューの
-/// 順）。スライドショーとチャプター再生リストにはない。DVD では空。
-fn popup_menus(project: &Project) -> Vec<Option<u16>> {
+/// リモートメニューが「Blu-ray のポップアップメニューに設定」したボタンのあるメニューなら、そのページの PGCN
+/// （メニューの順。ページがまとめてポップアップになるメニューは全ページ、最初のページが先。そうでなければその
+/// メニューだけ）。スライドショーとチャプター再生リストにはない（空）。DVD では空。
+fn popup_menus(project: &Project) -> Vec<Vec<u16>> {
     if project.settings.kind != DiscKind::BluRay {
         return Vec::new();
     }
+    let groups = disccraft_build::popup_page_groups(project);
+    let pgcn = |index: usize| u16::try_from(index.saturating_add(1)).ok();
     project
         .timelines
         .values()
@@ -278,8 +286,16 @@ fn popup_menus(project: &Project) -> Vec<Option<u16>> {
                 .get(id)
                 .filter(|menu| menu.popup && !menu.buttons.is_empty())
                 .and_then(|_| project.menus.keys().position(|key| key == id))
-                .and_then(|index| u16::try_from(index.saturating_add(1)).ok()),
-            _ => None,
+                .map_or_else(Vec::new, |index| {
+                    groups
+                        .iter()
+                        .find(|group| group.contains(&index))
+                        .map_or_else(|| vec![index], Clone::clone)
+                        .into_iter()
+                        .filter_map(pgcn)
+                        .collect()
+                }),
+            _ => Vec::new(),
         })
         .collect()
 }
@@ -355,20 +371,26 @@ impl Preview {
         self.popups = popup_menus(project);
     }
 
-    /// 再生中のタイトルのポップアップメニューの PGCN（Blu-ray で、そのタイトルにあるとき）。
+    /// 再生中のタイトルのポップアップメニューの最初のページの PGCN（Blu-ray で、そのタイトルにあるとき）。
     fn title_popup(&self) -> Option<u16> {
+        self.title_popup_pages().first().copied()
+    }
+
+    /// 再生中のタイトルのポップアップメニューのページの PGCN（最初のページが先。ないときは空）。
+    fn title_popup_pages(&self) -> &[u16] {
         let Location::Title { title, .. } = self.location else {
-            return None;
+            return &[];
         };
-        self.popups
-            .get(usize::from(title).checked_sub(1)?)
-            .copied()
-            .flatten()
+        usize::from(title)
+            .checked_sub(1)
+            .and_then(|index| self.popups.get(index))
+            .map_or(&[], Vec::as_slice)
     }
 
     /// ポップアップメニューが出ている間のキー: 十字キーはそのボタンを移り、決定はボタンのリンクへ（ポップアップは
-    /// 閉じる。リンクがそのポップアップ自身なら出たまま）。メニュー / ポップアップのキーで閉じる。タイトルは
-    /// その間も再生を続ける（Blu-ray のポップアップメニュー）。ほかのキーはポップアップを閉じてから。
+    /// 閉じる。リンクがそのポップアップ自身かその別のページなら、出たままそのページへ）。メニュー / ポップアップの
+    /// キーで閉じる。タイトルはその間も再生を続ける（Blu-ray のポップアップメニュー）。ほかのキーはポップアップを
+    /// 閉じてから。
     fn press_in_popup(&mut self, key: &str, pgcn: u16, button: u8) -> Result<bool, String> {
         let pressed = match key {
             "menu" | "popup" => {
@@ -387,17 +409,18 @@ impl Preview {
                 return Ok(false);
             }
         };
+        let pages = self.title_popup_pages().to_vec();
         let model = self.model.as_ref().ok_or("preview is not open")?;
         let mut vm =
             Vm::restore_with_registers(model, Location::Menu { pgcn, button }, self.registers)
                 .map_err(|error| error.to_string())?;
         vm.press(pressed).map_err(|error| error.to_string())?;
         match *vm.location() {
-            // ハイライトが動いた（または決定しても同じポップアップに残った）。
+            // ハイライトが動いた（または決定しても同じポップアップに残った、そのポップアップの別のページへ移った）。
             Location::Menu {
                 pgcn: shown,
                 button,
-            } if shown == pgcn => self.popup = Some((pgcn, button)),
+            } if shown == pgcn || pages.contains(&shown) => self.popup = Some((shown, button)),
             location => {
                 self.popup = None;
                 self.location = location;
@@ -1246,6 +1269,111 @@ mod tests {
                 chapter: 2
             }
         );
+        Ok(())
+    }
+
+    /// GitHub issue #13: a pop-up menu with pages stays over the playing title when its button goes to its other
+    /// page (that page's menu is drawn), and back.
+    #[test]
+    fn a_popups_pages_turn_over_the_title_in_the_preview() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::{DiscKind, Link, Tick};
+        let dir = std::env::temp_dir().join(format!(
+            "disccraft-preview-popup-pages-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir)?;
+        let video = dir.join("movie.m2v");
+        std::fs::write(&video, b"")?;
+        let mut session = Session::new();
+        session.project.settings.kind = DiscKind::BluRay;
+        let asset = session.project.add_asset(&video)?;
+        let timeline = session.project.add_timeline(asset, None)?;
+        session
+            .project
+            .add_chapter(timeline, Tick(5 * 254_016_000_000), None)?;
+        let popup = session.project.add_menu(Some("Scenes".to_owned()))?;
+        if let Some(menu) = session.project.menus.get_mut(&popup) {
+            menu.buttons.clear();
+            menu.popup = true;
+        }
+        let page = session.project.add_menu_page(popup)?;
+        session.project.add_button(
+            popup,
+            "Scene 1".to_owned(),
+            None,
+            Link::Timeline {
+                id: timeline,
+                chapter: 0,
+            },
+        )?;
+        session.project.add_button(
+            popup,
+            "More".to_owned(),
+            None,
+            Link::Menu {
+                id: page,
+                button: Some(0),
+            },
+        )?;
+        session.project.add_button(
+            page,
+            "Back".to_owned(),
+            None,
+            Link::Menu {
+                id: popup,
+                button: Some(1),
+            },
+        )?;
+        session.project.add_button(
+            page,
+            "Scene 2".to_owned(),
+            None,
+            Link::Timeline {
+                id: timeline,
+                chapter: 1,
+            },
+        )?;
+        if let Some(found) = session.project.timeline_mut(timeline) {
+            found.menu_remote = Link::Menu {
+                id: popup,
+                button: None,
+            };
+        }
+        session.project.settings.first_play = Link::Timeline {
+            id: timeline,
+            chapter: 0,
+        };
+
+        session.execute("preview.open", &json!({}))?;
+        let _ = std::fs::remove_dir_all(&dir);
+        let title = Location::Title {
+            title: 1,
+            chapter: 1,
+        };
+        session.execute("preview.key", &json!({ "key": "menu" }))?;
+        // More: the second page (the second menu), its first button, over the same title.
+        session.preview.popup = Some((1, 2));
+        let state = session.execute("preview.key", &json!({ "key": "enter" }))?;
+        assert_eq!(
+            state.pointer("/popup/pgcn").and_then(Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            state.pointer("/popup/button").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(session.preview.location(), title);
+        // Back: the first page's More.
+        let state = session.execute("preview.key", &json!({ "key": "enter" }))?;
+        assert_eq!(
+            state.pointer("/popup/pgcn").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            state.pointer("/popup/button").and_then(Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(session.preview.location(), title);
         Ok(())
     }
 

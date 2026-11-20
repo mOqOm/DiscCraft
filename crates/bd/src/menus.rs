@@ -42,7 +42,7 @@ pub(crate) struct MenuDirs<'a> {
     pub(crate) playlist: &'a Path,
 }
 
-/// One menu to write as a still-video clip with an IG stream, or to lay over a title as a pop-up menu.
+/// One menu to write as a still-video clip with an IG stream.
 pub(crate) struct MenuClip<'a> {
     /// Project menu.
     pub(crate) menu: &'a Menu,
@@ -50,9 +50,6 @@ pub(crate) struct MenuClip<'a> {
     pub(crate) number: u16,
     /// HDMV commands for each button.
     pub(crate) commands: &'a [Vec<NavCommand>],
-    /// A pop-up menu (shown over a title on the remote's Pop-up Menu key): the buttons carry their text as the
-    /// normal state, since there is no menu picture under them.
-    pub(crate) popup: bool,
     /// The menu's pages built as one composition (M10.26): then `menu` is the first page with nothing over its
     /// background (the clip's picture), and the IG has every page.
     pub(crate) pages: Option<&'a MenuPagesClip<'a>>,
@@ -668,7 +665,7 @@ fn build_ig_units_as(
         height: rendered.height,
         frame_rate_id: frame_rate(project.settings.standard),
         number: 0,
-        popup: menu_clip.popup,
+        popup: false,
         pages: vec![page],
     };
     let segments =
@@ -700,10 +697,8 @@ fn page_parts(
         |index| object_ids(index).map(|ids| ids.activated),
         2,
     )?;
-    let normal = menu_clip.popup || normal_shown(menu_clip.menu) || layers.any_normal();
-    if menu_clip.popup {
-        objects.extend(build_label_objects(rendered, menu_clip, &colours)?);
-    } else if normal {
+    let normal = normal_shown(menu_clip.menu) || layers.any_normal();
+    if normal {
         objects.extend(build_normal_objects(rendered, count, &colours)?);
         layers.paint(
             &mut objects,
@@ -721,50 +716,121 @@ fn page_parts(
     Ok((page, palette, objects))
 }
 
-/// The IG display set of a menu whose pages are one composition (M10.26): page 0 has one auto-action button (a clear
-/// 8 x 8 object, as Encore's) that turns to the page asked for; each page of the menu follows with a palette of its
-/// own (page n names palette n - 1) and its buttons as a menu's. What the page draws over the background is in its
-/// buttons' states where they are (each state over the picture under it, as Encore's buttons carry their artwork),
-/// and elsewhere in buttons that cannot be selected, in pieces that do not overlap the buttons (M10.28: PowerDVD
-/// draws a button's state in place of what is under it, so a picture under the buttons went missing).
+/// The IG display set of a menu whose pages are one composition (M10.26), at `pts`: [`pages_composition`] with page 0
+/// turning to the page the movie object asks for.
 fn pages_ig_units(
     project: &Project,
     clip: &MenuPagesClip<'_>,
     pts: u64,
     state: CompositionState,
 ) -> Result<Vec<EsUnit>, BdError> {
+    let (composition, palettes, objects) =
+        pages_composition(project, &clip.pages, Some(&clip.dispatcher))?;
+    // Its objects must be decoded before the menu's first picture (M10.28); `crate::pages` keeps to that.
+    if disccraft_pgs::ig::display_set_lead(&composition, &objects, state) >= pts {
+        return Err(invalid("the menu's pages are too large to show in time"));
+    }
+    paletted_units(&composition, &palettes, &objects, pts, state)
+}
+
+/// The IG stream of a pop-up menu over a title clip that starts at `start` (its pages, the first first, each with its
+/// buttons' commands), and its stream entry: [`pages_composition`] without a page 0 of its own (GitHub issue #13: a
+/// pop-up's pages turn over the playing title). Its display set comes at the clip's start, or as many frames later
+/// as its objects take to decode (the pop-up can be shown from then on).
+pub(crate) fn popup_ig_units(
+    project: &Project,
+    pages: &[(&Menu, &[Vec<NavCommand>])],
+    start: u64,
+) -> Result<(Vec<EsUnit>, Stream), BdError> {
+    let (composition, palettes, objects) = pages_composition(project, pages, None)?;
+    let state = CompositionState::EpochStart;
+    let lead = disccraft_pgs::ig::display_set_lead(&composition, &objects, state);
+    let frame = disccraft_pgs::ig::frame_ticks(composition.frame_rate_id);
+    let pts = if lead < start {
+        start
+    } else {
+        lead.checked_sub(start)
+            .map(|late| late / frame + 1)
+            .and_then(|frames| frames.checked_mul(frame))
+            .and_then(|later| start.checked_add(later))
+            .ok_or_else(|| invalid("the pop-up menu is too large"))?
+    };
+    let units = paletted_units(&composition, &palettes, &objects, pts, state)?;
+    Ok((units, menu_streams(project).ig))
+}
+
+/// The display set of a composition whose pages name palettes of their own.
+fn paletted_units(
+    composition: &InteractiveComposition,
+    palettes: &[(u8, Vec<PaletteEntry>)],
+    objects: &[IgObject],
+    pts: u64,
+    state: CompositionState,
+) -> Result<Vec<EsUnit>, BdError> {
+    let palettes: Vec<(u8, &[PaletteEntry])> = palettes
+        .iter()
+        .map(|(id, entries)| (*id, entries.as_slice()))
+        .collect();
+    let segments =
+        display_set_paletted(composition, &palettes, objects, pts, state).map_err(video_error)?;
+    segments.into_iter().map(segment_unit).collect()
+}
+
+/// A palette id and its entries.
+type Palette = (u8, Vec<PaletteEntry>);
+
+/// A menu's pages as one interactive composition, its palettes and its objects. With a `dispatcher` (an always-on
+/// menu, M10.26), page 0 has one auto-action button (a clear 8 x 8 object, as Encore's) with those commands, which
+/// turns to the page asked for, and the menu's pages follow; without one (a pop-up), the menu's pages start at page 0.
+/// Each page has a palette of its own (the menu's n-th page names palette n) and its buttons as a menu's. What the
+/// page draws over the background (texts, pictures, the buttons' texts and thumbnails) is in its buttons' states
+/// where they are (each state over the picture under it, as Encore's buttons carry their artwork), and elsewhere in
+/// buttons that cannot be selected, in pieces that do not overlap the buttons (M10.28: PowerDVD draws a button's
+/// state in place of what is under it, so a picture under the buttons went missing).
+fn pages_composition(
+    project: &Project,
+    menu_pages: &[(&Menu, &[Vec<NavCommand>])],
+    dispatcher: Option<&[NavCommand]>,
+) -> Result<(InteractiveComposition, Vec<Palette>, Vec<IgObject>), BdError> {
     const CLEAR_OBJECT: u16 = 0;
-    let mut objects = vec![IgObject {
-        id: CLEAR_OBJECT,
-        width: 8,
-        height: 8,
-        pixels: vec![0; 64],
-    }];
-    let mut pages = vec![IgPage {
-        id: 0,
-        default_selected: 0,
-        palette_id: 0,
-        buttons: vec![IgButton {
-            id: 0,
-            numeric_value: 0xFFFF,
-            auto_action: true,
-            x: 0,
-            y: 0,
-            upper: 0,
-            lower: 0,
-            left: 0,
-            right: 0,
-            normal_object: CLEAR_OBJECT,
-            selected_object: CLEAR_OBJECT,
-            activated_object: CLEAR_OBJECT,
-            commands: command_bytes(&clip.dispatcher)?,
-        }],
-    }];
-    let mut palettes: Vec<(u8, Vec<PaletteEntry>)> = Vec::new();
+    let (mut objects, mut pages, mut next_id) = match dispatcher {
+        Some(commands) => (
+            vec![IgObject {
+                id: CLEAR_OBJECT,
+                width: 8,
+                height: 8,
+                pixels: vec![0; 64],
+            }],
+            vec![IgPage {
+                id: 0,
+                default_selected: 0,
+                palette_id: 0,
+                buttons: vec![IgButton {
+                    id: 0,
+                    numeric_value: 0xFFFF,
+                    auto_action: true,
+                    x: 0,
+                    y: 0,
+                    upper: 0,
+                    lower: 0,
+                    left: 0,
+                    right: 0,
+                    normal_object: CLEAR_OBJECT,
+                    selected_object: CLEAR_OBJECT,
+                    activated_object: CLEAR_OBJECT,
+                    commands: command_bytes(commands)?,
+                }],
+            }],
+            1_u16,
+        ),
+        None => (Vec::new(), Vec::new(), 0_u16),
+    };
+    let first_page = usize::from(dispatcher.is_some());
+    let mut palettes: Vec<Palette> = Vec::new();
     let mut size = None;
-    let mut next_id: u16 = 1;
-    for (index, (menu, commands)) in clip.pages.iter().enumerate() {
-        let page_number = u8::try_from(index + 1).map_err(|_| invalid("too many pages"))?;
+    for (index, (menu, commands)) in menu_pages.iter().enumerate() {
+        let page_number =
+            u8::try_from(index + first_page).map_err(|_| invalid("too many pages"))?;
         let palette_id = u8::try_from(index).map_err(|_| invalid("too many pages"))?;
         let rendered = render_with_thumbnails(project, menu)?;
         size.get_or_insert((rendered.width, rendered.height));
@@ -772,7 +838,6 @@ fn pages_ig_units(
             menu,
             number: 0,
             commands,
-            popup: false,
             pages: None,
         };
         let (mut page, mut palette, mut page_objects) = page_parts(project, &rendered, &page_clip)?;
@@ -914,20 +979,10 @@ fn pages_ig_units(
         height,
         frame_rate_id: frame_rate(project.settings.standard),
         number: 0,
-        popup: false,
+        popup: dispatcher.is_none(),
         pages,
     };
-    // Its objects must be decoded before the menu's first picture (M10.28); `crate::pages` keeps to that.
-    if disccraft_pgs::ig::display_set_lead(&composition, &objects, state) >= pts {
-        return Err(invalid("the menu's pages are too large to show in time"));
-    }
-    let palettes: Vec<(u8, &[PaletteEntry])> = palettes
-        .iter()
-        .map(|(id, entries)| (*id, entries.as_slice()))
-        .collect();
-    let segments =
-        display_set_paletted(&composition, &palettes, &objects, pts, state).map_err(video_error)?;
-    segments.into_iter().map(segment_unit).collect()
+    Ok((composition, palettes, objects))
 }
 
 /// What a page draws over its background, as palette ids over the frame ([`page_picture`]).
@@ -1191,88 +1246,6 @@ fn render_with_thumbnails(project: &Project, menu: &Menu) -> Result<RenderedMenu
         },
     )
     .map_err(menu_error)
-}
-
-/// The IG stream of `menu` as a pop-up over a title, and its stream entry.
-pub(crate) fn popup_ig_units(
-    project: &Project,
-    menu: &Menu,
-    commands: &[Vec<NavCommand>],
-    pts: u64,
-) -> Result<(Vec<EsUnit>, Stream), BdError> {
-    let rendered = render_with_thumbnails(project, menu)?;
-    let menu_clip = MenuClip {
-        menu,
-        number: 0,
-        commands,
-        popup: true,
-        pages: None,
-    };
-    let units = build_ig_units(project, &rendered, &menu_clip, pts)?;
-    Ok((units, menu_streams(project).ig))
-}
-
-/// A pop-up menu's normal-state objects: each button's text in white, cropped to the button.
-fn build_label_objects(
-    rendered: &RenderedMenu,
-    menu_clip: &MenuClip<'_>,
-    colours: &IgColours,
-) -> Result<Vec<IgObject>, BdError> {
-    let count = menu_clip.commands.len();
-    let mut objects = Vec::with_capacity(count);
-    for index in 0..count {
-        let geometry = rendered
-            .buttons
-            .get(index)
-            .ok_or_else(|| invalid("missing button geometry"))?;
-        let button = menu_clip
-            .menu
-            .buttons
-            .get(index)
-            .ok_or_else(|| invalid("missing button"))?;
-        let width = rect_width(geometry.x1, geometry.x2)?;
-        let height = rect_height(geometry.y1, geometry.y2)?;
-        let rgba =
-            disccraft_menu::label_rgba(menu_clip.menu, button, rendered.width, rendered.height);
-        // The normal frame (when it is seen) under the text.
-        let mut pixels = if normal_shown(menu_clip.menu) {
-            crop_highlight(
-                &rendered.highlight,
-                geometry,
-                (width, height),
-                colours.slots(State::Normal, 0),
-                colours,
-            )?
-        } else {
-            vec![0_u8; pixel_count(width, height)?]
-        };
-        for row in 0..usize::from(height) {
-            for col in 0..usize::from(width) {
-                let x = usize::from(geometry.x1).saturating_add(col);
-                let y = usize::from(geometry.y1).saturating_add(row);
-                let alpha = y
-                    .checked_mul(usize::from(rendered.width))
-                    .and_then(|n| n.checked_add(x))
-                    .and_then(|n| n.checked_mul(4))
-                    .and_then(|n| n.checked_add(3))
-                    .and_then(|n| rgba.get(n).copied())
-                    .unwrap_or(0);
-                if let Some(id) = colours.shade(LABEL_PALETTE, alpha) {
-                    let i = pixel_index(width, row, col)?;
-                    if let Some(pixel) = pixels.get_mut(i) {
-                        *pixel = id;
-                    }
-                }
-            }
-        }
-        objects.push(IgObject {
-            id: normal_object_id(index, count)?,
-            width,
-            height,
-            pixels,
-        });
-    }
-    Ok(objects)
 }
 
 /// The object id of a button's normal state (a pop-up's text, or the normal frame): after the selected /
@@ -1868,16 +1841,11 @@ fn build_composition(
 ) -> Result<InteractiveComposition, BdError> {
     let buttons = build_buttons(rendered, menu_clip, normal)?;
     // A menu's movie object selects its button (its default, or the one a link asks for), and a motion menu's later
-    // plays keep the button the viewer is on: no default (the player's selected button register). A pop-up menu
-    // over a title has no movie object of its own: it names its default.
-    let default_selected = if !menu_clip.popup {
-        NO_DEFAULT_BUTTON
-    } else {
-        default_selected(menu_clip.menu.default_button, buttons.len())?
-    };
+    // plays keep the button the viewer is on: no default (the player's selected button register). A page of a
+    // composition names its own ([`pages_composition`]).
     let page = IgPage {
         id: 0,
-        default_selected,
+        default_selected: NO_DEFAULT_BUTTON,
         palette_id: 0,
         buttons,
     };
@@ -1887,7 +1855,7 @@ fn build_composition(
         height: rendered.height,
         frame_rate_id: frame_rate(project.settings.standard),
         number: 0,
-        popup: menu_clip.popup,
+        popup: false,
         pages: vec![page],
     })
 }
@@ -2206,7 +2174,6 @@ mod tests {
             menu: &menu,
             number: 0,
             commands: &commands,
-            popup: false,
             pages: None,
         };
         let units = super::build_ig_units(&project, &rendered, &clip, 0)?;
