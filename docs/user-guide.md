@@ -787,7 +787,7 @@ Set in the menu's sheet of the Properties panel (**Basic / Motion / Pop-up**).
 - The background is a colour / an image / a video asset (not a timeline). With video it becomes a motion menu
 - Loop count and loop point, duration (a menu is at most 254 seconds)
 - **End Action** (where to go when time runs out; Menu ▸ Set End Action… opens it too) and **Override**
-- The **Pop-up** sheet makes it a pop-up menu and sets its background timeline / background frame (Blu-ray)
+- The **Pop-up** sheet makes it a pop-up menu (with all its pages) and sets its background timeline / background frame (Blu-ray)
 
 **Menu ▸ Create EffectCraft Composition…** makes an EffectCraft project from the menu's layers; the rendered movie
 can be the menu's background (a motion menu). [Motion menus, with sound and movement](#146-motion-menus-with-sound-and-movement)
