@@ -11,6 +11,7 @@ publish.workspace = true
 disccraft-bd.workspace = true
 disccraft-ifo.workspace = true
 disccraft-udf.workspace = true
+disccraft-ddp.workspace = true
 disccraft-project.workspace = true
 disccraft-dvd.workspace = true
 

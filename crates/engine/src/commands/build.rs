@@ -14,7 +14,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "ビルド",
         menu: &["ファイル"],
         shortcut: None,
-        params: r#"{"output": "folder" | "iso", "path": string, "cache"?: string, "audioLanguage"?: "ja"}"#,
+        params: r#"{"output": "folder" | "iso" | "ddp" (DVD のみ), "path": string, "cache"?: string, "audioLanguage"?: "ja"}"#,
         enabled: always_enabled,
         run: run_build,
         journal: false,
@@ -24,7 +24,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "今すぐトランスコード",
         menu: &["ファイル", "トランスコード"],
         shortcut: None,
-        params: r#"{"output": "folder" | "iso", "path": string, "cache"?: string, "asset"?: id (そのアセットを使うタイムラインだけ。なければプロジェクト全体)}"#,
+        params: r#"{"output": "folder" | "iso" | "ddp" (DVD のみ), "path": string, "cache"?: string, "asset"?: id (そのアセットを使うタイムラインだけ。なければプロジェクト全体)}"#,
         enabled: always_enabled,
         run: run_transcode,
         journal: false,
@@ -34,7 +34,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "オリジナルに戻す",
         menu: &["ファイル", "トランスコード"],
         shortcut: None,
-        params: r#"{"output": "folder" | "iso", "path": string, "cache"?: string, "asset": id} → {"removed": 消したファイルの数}"#,
+        params: r#"{"output": "folder" | "iso" | "ddp" (DVD のみ), "path": string, "cache"?: string, "asset": id} → {"removed": 消したファイルの数}"#,
         enabled: always_enabled,
         run: run_revert,
         journal: false,
@@ -44,7 +44,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "アセットのトランスコードステータス",
         menu: &["アセット"],
         shortcut: None,
-        params: r#"{"output"?: "folder" | "iso", "path"?: string}"#,
+        params: r#"{"output"?: "folder" | "iso" | "ddp", "path"?: string}"#,
         enabled: always_enabled,
         run: run_transcode_status,
         journal: false,
@@ -250,6 +250,7 @@ fn parse_output(text: &str) -> Result<OutputKind, String> {
     match text {
         "folder" | "dvdFolder" => Ok(OutputKind::Folder),
         "iso" => Ok(OutputKind::Iso),
+        "ddp" => Ok(OutputKind::Ddp),
         _ => Err(format!("unknown build output: {text}")),
     }
 }

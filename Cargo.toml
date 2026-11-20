@@ -21,6 +21,7 @@ disccraft-m2tsmux = { path = "crates/m2tsmux" }
 disccraft-bdmv = { path = "crates/bdmv" }
 disccraft-pgs = { path = "crates/pgs" }
 disccraft-udf = { path = "crates/udf" }
+disccraft-ddp = { path = "crates/ddp" }
 disccraft-project = { path = "crates/project" }
 disccraft-vm = { path = "crates/vm" }
 disccraft-menu = { path = "crates/menu" }

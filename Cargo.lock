@@ -2953,6 +2953,7 @@ name = "disccraft-build"
 version = "0.1.0"
 dependencies = [
  "disccraft-bd",
+ "disccraft-ddp",
  "disccraft-dvd",
  "disccraft-ifo",
  "disccraft-project",
@@ -2980,6 +2981,10 @@ dependencies = [
  "disccraft-project",
  "serde_json",
 ]
+
+[[package]]
+name = "disccraft-ddp"
+version = "0.1.0"
 
 [[package]]
 name = "disccraft-dvd"

@@ -31,7 +31,7 @@ mod uo;
 
 pub use menus::PAGE_PICTURE_BUTTON;
 use nav::{MenuMotion, MenuNav, TitleMap, TitleNav};
-pub use pages::menu_page_groups;
+pub use pages::{menu_page_groups, popup_page_groups};
 
 /// Errors produced while building a BDMV folder.
 #[derive(Debug, thiserror::Error)]
@@ -418,9 +418,9 @@ fn remove_existing(path: &Path) -> Result<(), BdError> {
 /// A title clip waiting for its pop-up menu (whose button commands exist once the navigation is built).
 struct PendingPopup {
     clip: clip::PreparedClip,
-    /// Index of the menu among the project's menus.
-    menu_index: usize,
-    menu: Menu,
+    /// The pop-up's pages: their menus' indices among the project's menus, the first page first (just the menu
+    /// unless its pages pop up together, [`pages::popup_page_groups`]).
+    pages: Vec<usize>,
 }
 
 /// Writes every title clip and its playlist. A timeline whose remote menu is a menu gets that menu as a pop-up:
@@ -433,6 +433,7 @@ fn write_title_clips(
     output: &mut BuildOutput,
 ) -> Result<Vec<PendingPopup>, BdError> {
     let mut pending = Vec::new();
+    let popup_groups = pages::popup_page_groups(project);
     for (index, title) in titles.iter().enumerate() {
         // Progress panel ▸ Stop while the titles are multiplexed: before the next title's clip is written.
         if disccraft_transcode::stop_requested() {
@@ -465,15 +466,14 @@ fn write_title_clips(
             number,
             uo::uo_mask(&[own, &project.settings.prohibited_ops]),
         );
-        let popup = popup_menu_of(project, title);
+        let popup = popup_pages_of(project, title, &popup_groups);
         let built = match popup {
-            Some((menu_index, menu)) => {
+            Some(pages) => {
                 let prepared = clip::prepare_clip(title, hd, number, &project.settings)?;
                 let planned = prepared.planned()?;
                 pending.push(PendingPopup {
                     clip: prepared,
-                    menu_index,
-                    menu,
+                    pages,
                 });
                 planned
             }
@@ -504,9 +504,14 @@ fn write_title_clips(
     Ok(pending)
 }
 
-/// The menu a timeline title shows on the remote's Pop-up Menu key (Encore's timeline "Remote Menu"), with its
-/// index among the project's menus.
-fn popup_menu_of(project: &Project, title: &TitleStreams) -> Option<(usize, Menu)> {
+/// The menu a timeline title shows on the remote's Pop-up Menu key (Encore's timeline "Remote Menu"), as the indices
+/// of its pages among the project's menus: all of a pop-up whose pages pop up together (one of `groups`, from its
+/// first page), else the menu alone.
+fn popup_pages_of(
+    project: &Project,
+    title: &TitleStreams,
+    groups: &[Vec<usize>],
+) -> Option<Vec<usize>> {
     let TitleSource::Timeline(id) = title.source else {
         return None;
     };
@@ -517,7 +522,80 @@ fn popup_menu_of(project: &Project, title: &TitleStreams) -> Option<(usize, Menu
     let index = project.menus.keys().position(|key| *key == menu_id)?;
     let menu = project.menus.get(&menu_id)?;
     // Encore's "Set as Blu-ray Pop-up Menu": only flagged menus pop up over the title.
-    (menu.popup && !menu.buttons.is_empty()).then(|| (index, menu.clone()))
+    if !menu.popup || menu.buttons.is_empty() {
+        return None;
+    }
+    Some(
+        groups
+            .iter()
+            .find(|group| group.contains(&index))
+            .cloned()
+            .unwrap_or_else(|| vec![index]),
+    )
+}
+
+/// The commands of a pop-up's pages' buttons (`pages`: the menus' indices, the first page first): the menus' own
+/// (from the navigation), except that a link to one of the pop-up's pages turns to it over the playing title
+/// (Set_ButtonPage after the button's audio and subtitle choice, GitHub issue #13) instead of playing that page's
+/// menu.
+fn popup_commands(
+    menus: &[&Menu],
+    pages: &[usize],
+    navigation: &nav::Navigation,
+) -> Result<Vec<Vec<Vec<mobj::NavCommand>>>, BdError> {
+    let page_of = |id: disccraft_project::MenuId| {
+        pages
+            .iter()
+            .position(|index| menus.get(*index).is_some_and(|menu| menu.id == id))
+    };
+    pages
+        .iter()
+        .map(|index| {
+            let menu = menus
+                .get(*index)
+                .ok_or_else(|| invalid("missing pop-up menu"))?;
+            let own = navigation
+                .button_commands
+                .get(*index)
+                .ok_or_else(|| invalid("missing pop-up menu commands"))?;
+            menu.buttons
+                .iter()
+                .enumerate()
+                .map(|(number, button)| {
+                    let own = || {
+                        own.get(number)
+                            .cloned()
+                            .ok_or_else(|| invalid("missing pop-up button commands"))
+                    };
+                    let Link::Menu { id, button: wanted } = &button.link else {
+                        return own();
+                    };
+                    let Some(page) = page_of(*id) else {
+                        return own();
+                    };
+                    let count = pages
+                        .get(page)
+                        .and_then(|index| menus.get(*index))
+                        .map_or(0, |menu| menu.buttons.len());
+                    let page = u16::try_from(page).map_err(|_| invalid("too many pages"))?;
+                    let turn = match wanted
+                        .and_then(|wanted| usize::try_from(wanted).ok())
+                        .filter(|wanted| *wanted < count)
+                    {
+                        Some(wanted) => mobj::NavCommand::set_button_page(
+                            u16::try_from(wanted).map_err(|_| invalid("too many buttons"))?,
+                            page,
+                        ),
+                        None => mobj::NavCommand::set_page(page),
+                    };
+                    Ok(stream_command(button.audio, button.subtitle)
+                        .into_iter()
+                        .chain([turn])
+                        .collect())
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Records a written title clip's CLPI backup and writes its single-item playlist.
@@ -563,13 +641,22 @@ fn write_popup_titles(
     navigation: &nav::Navigation,
     pending: Vec<PendingPopup>,
 ) -> Result<(), BdError> {
+    let menus: Vec<&Menu> = project.menus.values().collect();
     for item in pending {
-        let commands = navigation
-            .button_commands
-            .get(item.menu_index)
-            .ok_or_else(|| invalid("missing pop-up menu commands"))?;
-        let (units, stream) =
-            menus::popup_ig_units(project, &item.menu, commands, item.clip.start_90k())?;
+        let commands = popup_commands(&menus, &item.pages, navigation)?;
+        let pages = item
+            .pages
+            .iter()
+            .zip(&commands)
+            .map(|(index, commands)| {
+                let menu = menus
+                    .get(*index)
+                    .copied()
+                    .ok_or_else(|| invalid("missing pop-up menu"))?;
+                Ok((menu, commands.as_slice()))
+            })
+            .collect::<Result<Vec<_>, BdError>>()?;
+        let (units, stream) = menus::popup_ig_units(project, &pages, item.clip.start_90k())?;
         let number = item.clip.number();
         let mut clip = item.clip;
         clip.add_ig(units, stream);
@@ -1125,7 +1212,6 @@ fn write_menus(
             menu,
             number: *number,
             commands,
-            popup: false,
             pages: pages.as_ref(),
         };
         menus::write_menu_clip(project, &menu_clip, &menu_dirs, cache_dir)

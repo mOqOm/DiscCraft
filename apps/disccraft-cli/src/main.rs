@@ -56,11 +56,14 @@ enum Sub {
     Build {
         project: PathBuf,
         /// Output folder (VIDEO_TS is written inside it)
-        #[arg(long, required_unless_present = "iso")]
+        #[arg(long, required_unless_present_any = ["iso", "ddp"])]
         out: Option<PathBuf>,
         /// Write a DVD ISO image instead of a folder
         #[arg(long)]
         iso: Option<PathBuf>,
+        /// Write a DVD's DDP image for replication into this folder (MAIN.DAT, CONTROL.DAT, DDPID)
+        #[arg(long, conflicts_with = "iso")]
+        ddp: Option<PathBuf>,
         /// Keep transcoded media in this folder (shared between builds) instead of next to the output
         #[arg(long)]
         cache: Option<PathBuf>,
@@ -100,23 +103,23 @@ fn run(cli: Cli) -> Result<(), String> {
             project,
             out,
             iso,
+            ddp,
             cache,
             audio_language,
-        } => match (iso, out) {
-            (Some(iso), _) => build_project(
+        } => {
+            let (path, output) = match (iso, ddp, out) {
+                (Some(iso), _, _) => (iso, "iso"),
+                (None, Some(ddp), _) => (ddp, "ddp"),
+                (None, None, Some(out)) => (out, "folder"),
+                (None, None, None) => return Err("--out, --iso or --ddp is required".to_string()),
+            };
+            build_project(
                 &project,
-                &iso,
-                "iso",
+                &path,
+                output,
                 (cache.as_deref(), audio_language.as_deref()),
-            ),
-            (None, Some(out)) => build_project(
-                &project,
-                &out,
-                "folder",
-                (cache.as_deref(), audio_language.as_deref()),
-            ),
-            (None, None) => Err("--out or --iso is required".to_string()),
-        },
+            )
+        }
     }
 }
 

@@ -21,7 +21,8 @@ use std::time::Instant;
 
 use disccraft_bd::{BdBuildReport, build_bdmv_with};
 /// A Blu-ray menu's pages built as one interactive composition (M10.26), for the preview.
-pub use disccraft_bd::{PAGE_PICTURE_BUTTON, menu_page_groups};
+/// A pop-up menu's pages built as one composition over the title (GitHub issue #13), for the preview.
+pub use disccraft_bd::{PAGE_PICTURE_BUTTON, menu_page_groups, popup_page_groups};
 pub use disccraft_dvd::TranscodeStatus;
 /// Whether a video asset fits the project's disc as it is (a DVD preset of its own transcodes it all the same).
 pub use disccraft_dvd::video_fits_as_is;
@@ -98,6 +99,10 @@ pub enum OutputKind {
     Folder,
     /// Disc image. DVD: UDF 1.02 + ISO 9660 bridge; the folder is built next to it (`<name>.files`).
     Iso,
+    /// DDP image of a DVD, for replication (Encore's DDP Image): a folder holding the image as `MAIN.DAT` with
+    /// `CONTROL.DAT` and `DDPID` (`disccraft_ddp`); the VIDEO_TS folder is built next to it (`<name>.files`).
+    /// Encore makes none for a Blu-ray.
+    Ddp,
 }
 
 /// Build request.
@@ -179,6 +184,7 @@ pub fn cache_dir(options: &BuildOptions) -> PathBuf {
                 .unwrap_or("disc");
             options.path.with_file_name(format!("{stem}.files"))
         }
+        OutputKind::Ddp => work_folder(&options.path),
     };
     folder.join("disccraft-cache")
 }
@@ -352,7 +358,27 @@ pub fn build_with_progress(
         (DiscKind::BluRay, OutputKind::Iso) => {
             build_bd_iso(project, (&options.path, &rom), at, progress)
         }
+        (DiscKind::Dvd, OutputKind::Ddp) => {
+            build_dvd_ddp(project, (&options.path, &rom), at, progress)
+        }
+        (DiscKind::BluRay, OutputKind::Ddp) => Err(
+            "a DDP image is made for a DVD only (as in Encore): build a Blu-ray folder or image"
+                .to_string(),
+        ),
     }
+}
+
+/// The name of a DDP image's folder (the disc's name when it has none).
+fn ddp_name(dir: &Path) -> &str {
+    dir.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("disc")
+}
+
+/// Where a DDP image's VIDEO_TS folder is built: `<name>.files` beside the DDP folder.
+fn work_folder(dir: &Path) -> PathBuf {
+    dir.with_file_name(format!("{}.files", ddp_name(dir)))
 }
 
 /// The names in the root of a Blu-ray disc that ROM content may not use.
@@ -607,6 +633,29 @@ fn build_dvd_iso(
     let mut report = report_from_dvd(&dvd, started);
     progress(STEP_IMAGE, 0.0);
     stop_before_step()?;
+    let sectors = write_dvd_image(&folder, rom, &disc_label(project, stem), iso)?;
+    progress(STEP_IMAGE, 1.0);
+    report.output = iso.to_path_buf();
+    report.total_bytes = u64::from(sectors) * 2048;
+    report.layer_break = layer::layer_break(
+        project,
+        &dvd,
+        iso,
+        &iso.with_extension("layerbreak.txt"),
+        sectors,
+    )?;
+    report.seconds = started.elapsed().as_secs_f64();
+    Ok(report)
+}
+
+/// Writes the DVD image of the built `folder` (its VIDEO_TS) and the ROM content to `image`, labelled `label`;
+/// returns its size in sectors. An image that fails is removed: what was written of it is no image.
+fn write_dvd_image(
+    folder: &Path,
+    rom: &[TreeFile],
+    label: &str,
+    image: &Path,
+) -> Result<u32, String> {
     let video_ts = folder.join("VIDEO_TS");
     let names: Vec<String> = std::fs::read_dir(&video_ts)
         .map_err(|e| format!("{}: {e}", video_ts.display()))?
@@ -620,23 +669,65 @@ fn build_dvd_iso(
             name,
         })
         .collect();
-    let label = disc_label(project, stem);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
-    let iso_report = catch_unwind(AssertUnwindSafe(|| {
-        write_dvd_iso_with_rom(&files, rom, &label, iso, now)
+    catch_unwind(AssertUnwindSafe(|| {
+        write_dvd_iso_with_rom(&files, rom, label, image, now)
     }))
     .map_err(|_| "internal error while writing the ISO image".to_string())
     .and_then(|written| written.map_err(|e| format!("ISO: {e}")))
+    .map(|written| written.sectors)
     .inspect_err(|_| {
-        // What was written of the image is no image: it is not left for a player to open.
-        let _ = std::fs::remove_file(iso);
-    })?;
+        let _ = std::fs::remove_file(image);
+    })
+}
+
+/// Builds the VIDEO_TS folder beside `dir` (`<name>.files`), then writes the DDP image into `dir`: the disc image as
+/// MAIN.DAT, then CONTROL.DAT and DDPID (Encore's DDP Image). A dual-layer disc's layer break is chosen as for an
+/// image and written beside the folder (`<name>.layerbreak.txt`).
+fn build_dvd_ddp(
+    project: &Project,
+    (dir, rom): (&Path, &[TreeFile]),
+    (cache, started): (&Path, Instant),
+    progress: &mut dyn FnMut(&str, f32),
+) -> Result<BuildReport, String> {
+    let name = ddp_name(dir);
+    let dvd = build_video_ts_checked(project, &work_folder(dir), cache, progress)?;
+    let mut report = report_from_dvd(&dvd, started);
+    progress(STEP_IMAGE, 0.0);
+    stop_before_step()?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    // What an earlier DDP image left in the folder goes first: it would not match the new image.
+    let files = [
+        disccraft_ddp::MAIN_FILE,
+        disccraft_ddp::CONTROL_FILE,
+        disccraft_ddp::ID_FILE,
+    ];
+    let remove_all = || {
+        for file in files {
+            let _ = std::fs::remove_file(dir.join(file));
+        }
+    };
+    remove_all();
+    let main = dir.join(disccraft_ddp::MAIN_FILE);
+    let sectors = write_dvd_image(&work_folder(dir), rom, &disc_label(project, name), &main)?;
+    let note = dir.with_file_name(format!("{name}.layerbreak.txt"));
+    let layer_break =
+        layer::layer_break(project, &dvd, &main, &note, sectors).inspect_err(|_| remove_all())?;
+    let layout = disccraft_ddp::Layout {
+        sectors,
+        layer_break: layer_break.as_ref().map(|found| found.sector),
+    };
+    let main_sectors = layout
+        .main_sectors()
+        .and_then(|main_sectors| disccraft_ddp::finish(dir, &layout).map(|()| main_sectors))
+        .map_err(|error| error.to_string())
+        .inspect_err(|_| remove_all())?;
     progress(STEP_IMAGE, 1.0);
-    report.output = iso.to_path_buf();
-    report.total_bytes = u64::from(iso_report.sectors) * 2048;
-    report.layer_break = layer::layer_break(project, &dvd, iso, iso_report.sectors)?;
+    report.output = dir.to_path_buf();
+    report.total_bytes = u64::from(main_sectors) * disccraft_ddp::SECTOR_BYTES;
+    report.layer_break = layer_break;
     report.seconds = started.elapsed().as_secs_f64();
     Ok(report)
 }

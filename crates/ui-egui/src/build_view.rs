@@ -21,6 +21,8 @@ pub(crate) fn output_label(kind: DiscKind, output: OutputKind) -> String {
     match output {
         OutputKind::Folder => tlf!("{kind} Folder", kind = kind_label(kind)),
         OutputKind::Iso => tlf!("{kind} Image", kind = kind_label(kind)),
+        // Encore's DVD output list says "DDP Image" (a DVD's only).
+        OutputKind::Ddp => tl!("DDP Image").to_owned(),
     }
 }
 
@@ -128,6 +130,7 @@ fn output_description(output: OutputKind) -> &'static str {
     match output {
         OutputKind::Folder => tl!("Creates a disc folder (VIDEO_TS or BDMV) on the hard drive."),
         OutputKind::Iso => tl!("Creates an ISO disc image on the hard drive."),
+        OutputKind::Ddp => tl!("Creates a DDP image on the hard drive for replication."),
     }
 }
 
@@ -137,6 +140,12 @@ const BUTTON_SIZE: egui::Vec2 = egui::Vec2::new(120.0, 0.0);
 impl DiscCraftApp {
     /// The Build tab.
     pub(crate) fn build_view(&mut self, ui: &mut Ui) {
+        // A DDP image is a DVD's only (as in Encore): a Blu-ray project builds a folder instead.
+        if self.session.project.settings.kind == DiscKind::BluRay
+            && self.build_output == OutputKind::Ddp
+        {
+            self.build_output = OutputKind::Folder;
+        }
         self.build_top_row(ui);
         self.build_description_row(ui);
         self.build_progress_section(ui);
@@ -284,6 +293,17 @@ impl DiscCraftApp {
                     .clicked()
                 {
                     selected = Some(OutputKind::Iso);
+                }
+
+                if kind == DiscKind::Dvd
+                    && ui
+                        .selectable_label(
+                            current == OutputKind::Ddp,
+                            output_label(kind, OutputKind::Ddp),
+                        )
+                        .clicked()
+                {
+                    selected = Some(OutputKind::Ddp);
                 }
             });
 
@@ -724,6 +744,7 @@ mod tests {
             "DVD Folder"
         );
         assert_eq!(output_label(DiscKind::Dvd, OutputKind::Iso), "DVD Image");
+        assert_eq!(output_label(DiscKind::Dvd, OutputKind::Ddp), "DDP Image");
         assert_eq!(
             output_label(DiscKind::BluRay, OutputKind::Folder),
             "Blu-ray Folder"
