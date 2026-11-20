@@ -321,7 +321,7 @@
 	Bitrate: automatic, to fit the disc (video up to 9.8 Mbps)	ビットレート: ディスク容量に合わせて自動 (ビデオは最大 9.8 Mbps)
 	Standard definition: HD sources are converted down to SD.	SD（標準画質）: HD の素材は SD に縮めて変換します。
 	Video: {codec}, {width} x {height}, {rate} fps (files that fit go on as they are)	ビデオ: {codec}、{width} x {height}、{rate} fps（合うファイルはそのまま）
-	Bitrate: {target} Mbps on average, up to {peak} (lower if the disc is too small)	ビットレート: 平均 {target} Mbps、最大 {peak} Mbps（入りきらないときは下げる）
+	Bitrate: {target} Mbps on average, up to {peak} (more when the disc has room, less when it is short)	ビットレート: 平均 {target} Mbps、最大 {peak} Mbps（ディスクに余裕があれば上げ、入りきらなければ下げる）
 	Format:	形式:
 	{kind} Folder	{kind} フォルダー
 	{kind} Image	{kind} イメージ
@@ -441,9 +441,9 @@
 	DVD Transcode Settings	DVD トランスコード設定
 	Blu-ray Transcode Status	Blu-ray トランスコードステータス
 	Blu-ray Transcode Settings	Blu-ray トランスコード設定
-	DVD Transcode Status:	DVD トランスコードステータス:
+	DVD Transcode Status:	DVD トランスコードステータス：
 	DVD Transcode Settings:	DVD トランスコード設定:
-	Blu-ray Transcode Status:	Blu-ray トランスコードステータス:
+	Blu-ray Transcode Status:	Blu-ray トランスコードステータス：
 	Blu-ray Transcode Settings:	Blu-ray トランスコード設定:
 	Override	上書き
 	Encoded Size	エンコード後のサイズ
@@ -1404,8 +1404,8 @@
 	Scaling down averages the pixels each new one covers (fine detail does not shimmer); scaling up blends between pixel centres. Slower	縮めるときは新しい画素が覆う画素を平均し（細かい模様がちらつかない）、広げるときは画素の中心のあいだで補間します。時間がかかります
 	When the disc's frame rate differs from the video's, a picture that falls between two frames mixes them instead of repeating one	ディスクのフレームレートがビデオと違うとき、2 つのフレームのあいだに来る絵は、片方をくり返さずに 2 つを混ぜます
 	This video goes on the disc as it is: it is not transcoded	このビデオはそのままディスクに入るので、トランスコードしません
-	DVD Transcode:	DVD トランスコード :
-	Blu-ray Transcode:	Blu-ray トランスコード :
+	DVD Transcode:	DVD トランスコード：
+	Blu-ray Transcode:	Blu-ray トランスコード：
 	Nothing is selected: these are the characters of the next text typed	何も選んでいません。次に入力するテキストの文字の設定です
 	Reset	リセット
 	The next text typed gets the default characters	次に入力するテキストを初期設定の文字に戻します
@@ -1464,3 +1464,21 @@
 	Disc's ({level})	ディスクのレベル（{level}）
 	Disc's (none)	ディスクのレベル（なし）
 	A player set to a lower level asks for its password before the title plays	それより低いレベルのプレーヤーは、タイトルを再生する前にパスワードを求める
+	Not H.264 (nor HD MPEG-2 that fits the format)	H.264 ではない（形式に合う HD の MPEG-2 でもない）
+	H.264 profile {profile}: a Blu-ray takes Main or High	H.264 のプロファイルが {profile}（Blu-ray は Main か High）
+	Not 4:2:0 at 8 bits (10-bit or 4:2:2)	8 ビットの 4:2:0 ではない（10 ビットや 4:2:2）
+	H.264 level {level}: a Blu-ray takes up to 4.1	H.264 のレベルが {level}（Blu-ray は 4.1 まで）
+	{width} x {height}: not the Blu-ray video's size	{width} x {height}（Blu-ray の映像の大きさと違う）
+	Interlaced, and the Blu-ray video is progressive	インターレースで、Blu-ray の映像はプログレッシブ
+	Progressive, and the Blu-ray video is interlaced	プログレッシブで、Blu-ray の映像はインターレース
+	{rate} fps: not the Blu-ray video's frame rate	{rate} fps（Blu-ray の映像のフレームレートと違う）
+	{rate} Mbps on average: a Blu-ray takes up to 40	平均 {rate} Mbps（Blu-ray は 40 Mbps まで）
+	Changed in Transcode Settings…	トランスコード設定… で変える
+	Characters:	文字:
+	{start} to {end} (selected in the text)	{start}〜{end} 文字目（テキストで選択中）
+	Whole text	テキスト全体
+	Set the size, colour, font and style of the whole text instead	選択をやめ、テキスト全体のサイズ・色・フォント・スタイルを変える
+	Blu-ray codec:	Blu-ray のコーデック：
+	Automatic (MPEG-2 for 1080i)	自動（1080i は MPEG-2）
+	H.264 (1080i too)	H.264（1080i も）
+	MPEG-2 for 1080i	1080i は MPEG-2

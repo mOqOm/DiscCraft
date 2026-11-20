@@ -305,6 +305,12 @@ pub struct Menu {
     /// Encore's menu pages: the first page this menu is a later page of (`None` for a menu of its own).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_of: Option<MenuId>,
+    /// The page of its PSD background this menu shows (M10.27, Encore's `(#)` layer groups): the background is
+    /// then the PSD's layers outside the pages and its buttons, and the menu draws over it page 0 (the top level's
+    /// `(+)` groups) or page n (the n-th `(#)` group, the lowest first); a page the PSD does not have
+    /// ([`NO_PSD_PAGE`] for a page added later) draws nothing over it. `None`: the PSD drawn whole, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub psd_page: Option<u16>,
 }
 
 /// The most times a motion menu can be set to play (Encore's list goes to 1024; any number can be typed).
@@ -415,6 +421,10 @@ impl DropShadow {
 }
 
 /// A text object on a menu: drawn into the menu picture, not a button (Encore's text tool).
+/// The [`Menu::psd_page`] of a page that shows only the layers a PSD's pages share (a page added to a menu shown by
+/// page, M10.27).
+pub const NO_PSD_PAGE: u16 = u16::MAX;
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MenuText {
@@ -472,6 +482,10 @@ pub struct MenuText {
     /// Locked (Encore's lock in the Layers panel): cannot be picked or moved in the menu viewer.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub locked: bool,
+    /// Characters with formatting of their own (M6.389: Encore's Character panel on characters selected with the
+    /// text tool), in order and apart; see [`crate::TextSpan`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spans: Vec<crate::TextSpan>,
 }
 
 /// The narrowest and the widest box of a paragraph text, frame pixels.
@@ -1690,6 +1704,7 @@ impl Default for Menu {
             subpicture_colors: [None; 3],
             second_subpicture_colors: [None; 3],
             page_of: None,
+            psd_page: None,
         }
     }
 }

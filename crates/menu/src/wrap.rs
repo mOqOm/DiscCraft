@@ -197,33 +197,82 @@ pub(crate) fn wrap(
     rules: impl Into<Rules>,
     measure: &dyn Fn(&str) -> f32,
 ) -> String {
+    let lines = wrap_lines(text, limit, rules, &|range| {
+        text.get(range).map_or(f32::INFINITY, measure)
+    });
+    joined(text, &lines)
+}
+
+/// [`wrap`] as the lines it makes: the byte range of `text` each one is (without the spaces it breaks at), `measure`
+/// giving the width of a range of `text` (M6.389: so that characters with formatting of their own are measured as
+/// they are set).
+pub(crate) fn wrap_lines(
+    text: &str,
+    limit: f32,
+    rules: impl Into<Rules>,
+    measure: &dyn Fn(std::ops::Range<usize>) -> f32,
+) -> Vec<std::ops::Range<usize>> {
     let rules = rules.into();
-    if !(limit.is_finite() && limit > 0.0) {
-        return text.to_owned();
+    let mut lines = Vec::new();
+    let mut breaks = 0_usize;
+    let mut base = 0_usize;
+    for source in text.split('\n') {
+        let end = base.saturating_add(source.len());
+        wrap_paragraph(
+            text,
+            base..end,
+            (limit, rules),
+            measure,
+            &mut breaks,
+            &mut lines,
+        );
+        base = end.saturating_add(1);
     }
+    lines
+}
+
+/// The lines of the paragraph `paragraph` (a byte range of `text`) appended to `lines`; `breaks` counts the lines
+/// broken so far (at most [`MAX_LINES`]). A `limit` that is not a positive number leaves it one line.
+fn wrap_paragraph(
+    text: &str,
+    paragraph: std::ops::Range<usize>,
+    (limit, rules): (f32, Rules),
+    measure: &dyn Fn(std::ops::Range<usize>) -> f32,
+    breaks: &mut usize,
+    lines: &mut Vec<std::ops::Range<usize>>,
+) {
+    let end = paragraph.end;
+    if !(limit.is_finite() && limit > 0.0) {
+        lines.push(paragraph);
+        return;
+    }
+    let mut start = paragraph.start;
+    loop {
+        let rest = text.get(start..end).unwrap_or("");
+        if *breaks >= MAX_LINES || rest.is_empty() || measure(start..end) <= limit {
+            lines.push(start..end);
+            return;
+        }
+        let cut = break_at(rest, start, limit, rules, measure);
+        let (head, tail) = rest.split_at_checked(cut).unwrap_or((rest, ""));
+        lines.push(start..start.saturating_add(head.trim_end_matches(' ').len()));
+        let tail = tail.trim_start_matches(' ');
+        if tail.is_empty() {
+            return;
+        }
+        start = end.saturating_sub(tail.len());
+        *breaks += 1;
+    }
+}
+
+/// The lines of `text` (byte ranges) one after another, each after a line break.
+pub(crate) fn joined(text: &str, lines: &[std::ops::Range<usize>]) -> String {
     let mut out = String::with_capacity(text.len().saturating_add(16));
-    let mut lines = 0_usize;
-    for (index, source) in text.split('\n').enumerate() {
+    for (index, line) in lines.iter().enumerate() {
         if index > 0 {
             out.push('\n');
         }
-        let mut rest = source;
-        loop {
-            if lines >= MAX_LINES || rest.is_empty() || measure(rest) <= limit {
-                out.push_str(rest);
-                break;
-            }
-            let cut = break_at(rest, limit, rules, measure);
-            let (head, tail) = rest.split_at_checked(cut).unwrap_or((rest, ""));
-            out.push_str(head.trim_end_matches(' '));
-            let tail = tail.trim_start_matches(' ');
-            if tail.is_empty() {
-                break;
-            }
-            out.push('\n');
-            rest = tail;
-            lines += 1;
-        }
+        out.push_str(text.get(line.clone()).unwrap_or(""));
     }
     out
 }
@@ -239,22 +288,52 @@ pub(crate) fn justify(
     measure: &dyn Fn(&str) -> f32,
     em: f32,
 ) -> (String, Vec<(std::ops::Range<usize>, f32)>) {
+    let (out, room, _) = justify_lines(
+        text,
+        limit,
+        rules,
+        &|range| text.get(range).map_or(f32::INFINITY, measure),
+        em,
+    );
+    (out, room)
+}
+
+/// [`justify`] with `measure` giving the width of a byte range of `text` (as [`wrap_lines`]), and the range of
+/// `text` each line is.
+#[allow(clippy::type_complexity)]
+pub(crate) fn justify_lines(
+    text: &str,
+    limit: f32,
+    rules: Rules,
+    measure: &dyn Fn(std::ops::Range<usize>) -> f32,
+    em: f32,
+) -> (
+    String,
+    Vec<(std::ops::Range<usize>, f32)>,
+    Vec<std::ops::Range<usize>>,
+) {
     let mut out = String::with_capacity(text.len().saturating_add(16));
     let mut room = Vec::new();
+    let mut ranges = Vec::new();
+    let mut base = 0_usize;
     for (index, paragraph) in text.split('\n').enumerate() {
         if index > 0 {
             out.push('\n');
         }
-        let wrapped = wrap(paragraph, limit, rules, measure);
-        let lines: Vec<&str> = wrapped.split('\n').collect();
+        let end = base.saturating_add(paragraph.len());
+        let mut lines = Vec::new();
+        wrap_paragraph(text, base..end, (limit, rules), measure, &mut 0, &mut lines);
+        base = end.saturating_add(1);
         let last = lines.len().saturating_sub(1);
-        for (at, line) in lines.iter().enumerate() {
+        for (at, range) in lines.iter().enumerate() {
             if at > 0 {
                 out.push('\n');
             }
+            ranges.push(range.clone());
+            let line = text.get(range.clone()).unwrap_or("");
             let start = out.len();
             out.push_str(line);
-            let spare = limit - measure(line);
+            let spare = limit - measure(range.clone());
             if at == last || !(spare.is_finite() && spare > 0.0 && em > 0.0) {
                 continue;
             }
@@ -284,12 +363,20 @@ pub(crate) fn justify(
             }));
         }
     }
-    (out, room)
+    (out, room, ranges)
 }
 
-/// Where the first line of `line` (which is wider than `limit`) ends: a byte offset behind at least one
-/// character.
-fn break_at(line: &str, limit: f32, rules: Rules, measure: &dyn Fn(&str) -> f32) -> usize {
+/// Where the first line of `line` (which is wider than `limit`; at byte `offset` of the text `measure` measures
+/// ranges of) ends: a byte offset into `line` behind at least one character.
+fn break_at(
+    line: &str,
+    offset: usize,
+    limit: f32,
+    rules: Rules,
+    measure: &dyn Fn(std::ops::Range<usize>) -> f32,
+) -> usize {
+    // The width of the first `end` bytes of the line.
+    let head_width = |end: usize| measure(offset..offset.saturating_add(end));
     let kinsoku = rules.kinsoku;
     let chars: Vec<(usize, char)> = line.char_indices().collect();
     // The byte offset behind the first `count` characters.
@@ -298,7 +385,7 @@ fn break_at(line: &str, limit: f32, rules: Rules, measure: &dyn Fn(&str) -> f32)
     let (mut fits, mut over) = (1_usize, chars.len());
     while fits + 1 < over {
         let middle = fits + (over - fits) / 2;
-        let width = line.get(..end_of(middle)).map_or(f32::INFINITY, measure);
+        let width = head_width(end_of(middle));
         if width <= limit {
             fits = middle;
         } else {
@@ -329,8 +416,8 @@ fn break_at(line: &str, limit: f32, rules: Rules, measure: &dyn Fn(&str) -> f32)
         if !tight {
             return Some(count);
         }
-        let head = line.get(..end_of(fits)).map_or(f32::INFINITY, measure);
-        let longer = line.get(..end_of(count)).map_or(f32::INFINITY, measure);
+        let head = head_width(end_of(fits));
+        let longer = head_width(end_of(count));
         let room = PUSH_IN_ROOM * head / fits.max(1) as f32;
         (longer - limit <= room).then_some(count)
     };

@@ -248,3 +248,134 @@ fn a_photocraft_document_reads_like_its_psd() {
     assert_eq!(pixel(&menu.background, 7, 7), [0, 0, 80, 255]);
     assert_eq!(pixel(&image, 10, 10), [255, 255, 0, 255]);
 }
+
+/// M10.27: a menu PSD with Encore's `(#)` page groups. Its top level's `(+)` groups are the first page's buttons,
+/// each `(#)` group's its own page's (the lowest group first, whatever its name). The shared picture leaves the
+/// buttons and the pages out; page 0's picture is the top level's buttons, each later page's its group, over
+/// transparency, highlights left out.
+#[test]
+fn page_groups_are_the_menus_pages() {
+    let mut b = PsdBuilder::new(W, H);
+    b.push_layer(LayerSpec::new(
+        "背景",
+        0,
+        0,
+        W,
+        H,
+        solid(W, H, [0, 0, 80, 255]),
+    ));
+    b.push_layer(LayerSpec::new(
+        "shared art",
+        0,
+        0,
+        8,
+        8,
+        solid(8, 8, [0, 200, 0, 255]),
+    ));
+    b.begin_group(GroupSpec::new("(+) Play"));
+    b.push_layer(LayerSpec::new(
+        "label",
+        10,
+        10,
+        10,
+        6,
+        solid(10, 6, [255, 0, 0, 255]),
+    ));
+    b.push_layer(LayerSpec::new(
+        "(=1)",
+        9,
+        9,
+        12,
+        8,
+        solid(12, 8, [255, 255, 0, 255]),
+    ));
+    b.end_group().unwrap();
+    // The lower page group is the second page, though its name sorts after the other's.
+    b.begin_group(GroupSpec::new("(#) Z first"));
+    b.push_layer(LayerSpec::new(
+        "z art",
+        40,
+        0,
+        8,
+        8,
+        solid(8, 8, [200, 200, 0, 255]),
+    ));
+    b.begin_group(GroupSpec::new("(+) Back"));
+    b.push_layer(LayerSpec::new(
+        "label",
+        30,
+        30,
+        10,
+        6,
+        solid(10, 6, [0, 255, 255, 255]),
+    ));
+    b.end_group().unwrap();
+    b.end_group().unwrap();
+    b.begin_group(GroupSpec::new("(#) A second"));
+    b.push_layer(LayerSpec::new(
+        "a art",
+        50,
+        40,
+        8,
+        8,
+        solid(8, 8, [255, 0, 255, 255]),
+    ));
+    b.begin_group(GroupSpec::new("(+) One"));
+    b.push_layer(LayerSpec::new(
+        "label",
+        2,
+        30,
+        10,
+        6,
+        solid(10, 6, [255, 255, 255, 255]),
+    ));
+    b.end_group().unwrap();
+    b.begin_group(GroupSpec::new("(+) Two"));
+    b.push_layer(LayerSpec::new(
+        "label",
+        20,
+        30,
+        10,
+        6,
+        solid(10, 6, [255, 255, 255, 255]),
+    ));
+    b.end_group().unwrap();
+    b.end_group().unwrap();
+    b.composite(solid(W, H, [0, 0, 80, 255]));
+    let path =
+        std::env::temp_dir().join(format!("disccraft-photo-pages-{}.psd", std::process::id()));
+    std::fs::write(&path, b.to_bytes().unwrap()).unwrap();
+
+    let menu = load_psd_menu(&path).unwrap();
+    let names = |buttons: &[disccraft_photo::PsdButton]| -> Vec<String> {
+        buttons.iter().map(|button| button.name.clone()).collect()
+    };
+    assert_eq!(names(&menu.buttons), ["Play"]);
+    assert_eq!(menu.pages.len(), 2);
+    assert_eq!(menu.pages[0].0, "Z first");
+    assert_eq!(names(&menu.pages[0].1), ["Back"]);
+    assert_eq!(menu.pages[1].0, "A second");
+    assert_eq!(names(&menu.pages[1].1), ["One", "Two"]);
+    assert_eq!(disccraft_photo::psd_page_count(&path).unwrap(), 3);
+
+    let pages = disccraft_photo::load_menu_pages(&path).unwrap();
+    assert_eq!(pages.pages.len(), 3);
+    // Shared: the background and its art, no button and no page.
+    assert_eq!(pixel(&pages.shared, 2, 2), [0, 200, 0, 255]);
+    assert_eq!(pixel(&pages.shared, 12, 12), [0, 0, 80, 255]);
+    assert_eq!(pixel(&pages.shared, 42, 2), [0, 0, 80, 255]);
+    // Page 0: the Play button's label, its highlight left out, nothing else.
+    assert_eq!(pixel(&pages.pages[0], 12, 12), [255, 0, 0, 255]);
+    assert_eq!(pixel(&pages.pages[0], 9, 9)[3], 0);
+    assert_eq!(pixel(&pages.pages[0], 2, 2)[3], 0);
+    assert_eq!(pixel(&pages.pages[0], 32, 32)[3], 0);
+    // Page 1 ("Z first"): its art and its button.
+    assert_eq!(pixel(&pages.pages[1], 42, 2), [200, 200, 0, 255]);
+    assert_eq!(pixel(&pages.pages[1], 32, 32), [0, 255, 255, 255]);
+    assert_eq!(pixel(&pages.pages[1], 12, 12)[3], 0);
+    assert_eq!(pixel(&pages.pages[1], 52, 42)[3], 0);
+    // Page 2 ("A second").
+    assert_eq!(pixel(&pages.pages[2], 52, 42), [255, 0, 255, 255]);
+    assert_eq!(pixel(&pages.pages[2], 42, 2)[3], 0);
+    let _ = std::fs::remove_file(&path);
+}

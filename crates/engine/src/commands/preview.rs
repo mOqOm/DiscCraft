@@ -47,6 +47,9 @@ pub(crate) struct BdPreview {
     menu_base: u32,
     /// タイムラインごとのポップアップメニュー（メニューの順の 1 から）。
     popups: Vec<Option<u16>>,
+    /// ページを 1 つの IG にまとめたメニュー（M10.26）: まとまりごとのメニューの順（0 から、最初のページが先）。
+    /// 最初のページのプレイリストで IG のページ n を見ているときは、n 番目のページのメニュー。
+    groups: Vec<Vec<usize>>,
 }
 
 /// ビルドした Blu-ray のプレイリストの番号の並び（Blu-ray のビルドと同じ）: タイムラインとスライドショーの
@@ -94,10 +97,13 @@ impl BdPreview {
             .state()
             .clone();
         let (timelines, menu_base) = bd_layout(project);
-        let popups = {
+        let (popups, groups) = {
             let mut bluray = project.clone();
             bluray.settings.kind = DiscKind::BluRay;
-            popup_menus(&bluray)
+            (
+                popup_menus(&bluray),
+                disccraft_build::menu_page_groups(&bluray),
+            )
         };
         Ok(Self {
             disc,
@@ -105,6 +111,7 @@ impl BdPreview {
             timelines,
             menu_base,
             popups,
+            groups,
         })
     }
 
@@ -165,6 +172,7 @@ impl BdPreview {
     fn state(&self) -> Value {
         let vm = BdVm::restore(&self.disc, self.state.clone());
         let shown = vm.menu();
+        // ページの絵のボタン（M10.26）は選べないので数えない。
         let button_number = |id: u16| -> u64 {
             shown
                 .and_then(|(menu, view)| {
@@ -172,6 +180,7 @@ impl BdPreview {
                         .get(usize::from(view.page))?
                         .buttons
                         .iter()
+                        .filter(|button| button.id < disccraft_build::PAGE_PICTURE_BUTTON)
                         .position(|button| button.id == id)
                 })
                 .map_or(0, |index| {
@@ -180,12 +189,28 @@ impl BdPreview {
         };
         let location = match self.state.location {
             BdLocation::Stopped => Value::String("stopped".to_string()),
-            BdLocation::Playing { playlist, .. } if playlist >= self.menu_base => json!({
-                "menu": {
-                    "pgcn": playlist - self.menu_base + 1,
-                    "button": shown.map_or(0, |(_, view)| button_number(view.button)),
-                }
-            }),
+            BdLocation::Playing { playlist, .. } if playlist >= self.menu_base => {
+                let index = playlist - self.menu_base;
+                // ページを 1 つの IG にまとめたメニューは、IG のページ n が n 番目のページ（0 ページ目は振り分け）。
+                let page = shown.map_or(0, |(_, view)| usize::from(view.page));
+                let pgcn = self
+                    .groups
+                    .iter()
+                    .find(|group| {
+                        group
+                            .first()
+                            .is_some_and(|first| u32::try_from(*first).ok() == Some(index))
+                    })
+                    .and_then(|group| group.get(page.checked_sub(1)?))
+                    .and_then(|menu| u32::try_from(*menu).ok())
+                    .unwrap_or(index);
+                json!({
+                    "menu": {
+                        "pgcn": pgcn + 1,
+                        "button": shown.map_or(0, |(_, view)| button_number(view.button)),
+                    }
+                })
+            }
             BdLocation::Playing { playlist, mark } => json!({
                 "title": { "title": playlist, "chapter": mark.saturating_add(1) }
             }),

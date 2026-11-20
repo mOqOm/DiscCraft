@@ -350,9 +350,21 @@ pub(crate) fn prepare_all_of(
     timelines: bool,
     only: Option<AssetId>,
 ) -> Result<(), DvdError> {
-    // Nothing to make ahead when the titles' video is made elsewhere (HD Blu-ray titles): neither the timelines'
-    // nor the slideshows' DVD video is wanted.
+    // The titles' video is made elsewhere (HD Blu-ray titles): neither the timelines' nor the slideshows' DVD video
+    // is wanted, but their sound is made here side by side (M6.381), so the titles loaded one by one afterwards
+    // find it in the cache.
     if !timelines {
+        let jobs: Vec<&Timeline> = project
+            .timelines
+            .values()
+            .filter(|timeline| only.is_none_or(|asset| timeline_uses(timeline, asset)))
+            .collect();
+        let results = crate::parallel::run(&jobs, progress, |timeline, _report| {
+            prepare_title_sound(project, timeline, cache_dir).map(|_| ())
+        });
+        for result in results {
+            result?;
+        }
         return Ok(());
     }
     enum Job<'a> {
@@ -3599,6 +3611,10 @@ pub fn encode_hd_slideshow(
         options.max_kbps
     );
     seed = fnv1a64(format.as_bytes(), seed);
+    // 1080i coded as H.264 (M12.28) is another stream than the format's MPEG-2 (the keys of the others as they were).
+    if options.interlaced {
+        seed = fnv1a64(b"h264-interlaced", seed);
+    }
     seed = slideshow_seed(project, slideshow, seed)?;
     let es = cache_dir.join(format!("hd-{seed:016x}.h264"));
     let index = cache_dir.join(format!("hd-{seed:016x}.idx"));
@@ -4841,7 +4857,68 @@ pub fn estimate(project: &Project) -> Result<Estimate, DvdError> {
         probe_seconds(path)
             .map_err(|err| DvdError::Unsupported(format!("probe {}: {err}", path.display())))
     };
-    estimate_with_probe(project, &probe)
+    // Counted as the build makes it: with the clips' own sound (M6.378).
+    estimate_with_probe(&with_clip_sounds(project), &probe)
+}
+
+/// The project as a build plays it (M6.378): a title of several clips (or with an empty stretch before a clip) and
+/// no audio tracks gets an audio track of its clips' own sounds, each where its clip is on the timeline and cut as
+/// its clip is, as the preview plays it. Clips without sound leave silence. A title of one clip keeps playing its
+/// file's own sound as before (trimmed with it, M10.21). Titles whose files cannot be read are left as they are.
+#[must_use]
+pub fn with_clip_sounds(project: &Project) -> Project {
+    let mut out = project.clone();
+    let rate = project.settings.frame_rate();
+    for timeline in out.timelines.values_mut() {
+        if !timeline.audio.is_empty()
+            || (timeline.more_video.is_empty() && !timeline.has_video_gaps())
+        {
+            continue;
+        }
+        let mut frames = 0_i64;
+        let mut clips = Vec::new();
+        let mut readable = true;
+        for (index, video) in timeline.videos().into_iter().enumerate() {
+            frames = frames.saturating_add(i64::from(timeline.video_gap(index)));
+            let Some(probe) = asset_path(project, video)
+                .ok()
+                .and_then(|path| disccraft_transcode::probe_video(&path).ok())
+            else {
+                readable = false;
+                break;
+            };
+            // `as` saturates; a clip's length is far inside the range.
+            let length = (probe.seconds * rate.as_f64()).round() as i64;
+            let trim = timeline.video_trim(index);
+            let end = trim.end.map_or(length, |end| i64::from(end).min(length));
+            let kept = end.saturating_sub(i64::from(trim.start)).max(0);
+            if probe.has_audio
+                && let (Ok(start), Ok(trim_end)) = (u32::try_from(frames), u32::try_from(end))
+            {
+                clips.push(disccraft_project::AudioClip {
+                    asset: video,
+                    start,
+                    trim_start: trim.start,
+                    trim_end: Some(trim_end),
+                });
+            }
+            frames = frames.saturating_add(kept);
+        }
+        if !readable {
+            continue;
+        }
+        if let Some(first) = clips.first().copied() {
+            timeline.audio.push(disccraft_project::AudioTrack {
+                more: clips.get(1..).unwrap_or(&[]).to_vec(),
+                asset: first.asset,
+                language: String::new(),
+                start: first.start,
+                trim_start: first.trim_start,
+                trim_end: first.trim_end,
+            });
+        }
+    }
+    out
 }
 
 /// [`estimate`] with the media durations from `probe`.

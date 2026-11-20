@@ -102,13 +102,29 @@ pub struct PsdMenu {
     /// Background composite with highlight layers hidden.
     pub background: Image8,
     /// Buttons in Encore's numbering: from the bottom of the layer stack up (the lowest `(+)` group is button 1,
-    /// wherever it lies on the screen).
+    /// wherever it lies on the screen). With pages ([`PsdMenu::pages`]), the first page's: the top level's.
     pub buttons: Vec<PsdButton>,
+    /// The later pages (Encore's `(#)` groups at the top level, the lowest first, M10.27): each one's name (after
+    /// `(#)`) and its buttons. Empty for a menu of one page.
+    pub pages: Vec<(String, Vec<PsdButton>)>,
+}
+
+/// A menu PSD's pictures by page (Encore's `(#)` groups, M10.27): what every page shows, and what each page
+/// draws over it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PsdPages {
+    /// The layers outside the pages that are not buttons, highlight layers hidden: the picture under every page.
+    pub shared: Image8,
+    /// Each page's own layers over transparency, highlight layers hidden: page 0 the top level's `(+)` groups,
+    /// then each `(#)` group (shown whatever its own eye says), the lowest first.
+    pub pages: Vec<Image8>,
 }
 
 const MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 pub(crate) const MAX_DIMENSION: u32 = 8192;
 const BUTTON_PREFIX: &str = "(+)";
+/// Encore's prefix of a menu page's layer group.
+const PAGE_PREFIX: &str = "(#)";
 
 /// Whether the path looks like a Photoshop document (`.psd` / `.psb`, case-insensitive).
 pub fn is_psd(path: &Path) -> bool {
@@ -151,12 +167,30 @@ pub fn load_psd_menu(path: &Path) -> Result<PsdMenu, PhotoError> {
     let (doc, canvas) = load_document(path)?;
     let background = render_background(&doc, canvas)?;
     let mut buttons = Vec::new();
+    let paged = doc.layers.iter().any(is_page_group);
 
-    for layer in collect_button_layers(&doc.layers) {
+    // With pages, the top level's buttons are the first page's, and each page group's are its own.
+    for layer in collect_button_layers(&doc.layers, paged) {
         if let Some(button) = build_button(layer, canvas) {
             buttons.push(button);
         }
     }
+    let pages = doc
+        .layers
+        .iter()
+        .filter(|layer| is_page_group(layer))
+        .map(|layer| {
+            let name = page_name(&layer.name).unwrap_or_default();
+            let buttons = match &layer.content {
+                LayerContent::Group(group) => collect_button_layers(&group.children, false)
+                    .into_iter()
+                    .filter_map(|layer| build_button(layer, canvas))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            (name, buttons)
+        })
+        .collect();
 
     let width = rect_width_u32(canvas)
         .ok_or_else(|| PhotoError::Invalid("invalid canvas width".to_string()))?;
@@ -168,7 +202,62 @@ pub fn load_psd_menu(path: &Path) -> Result<PsdMenu, PhotoError> {
         height,
         background,
         buttons,
+        pages,
     })
+}
+
+/// How many pages the menu PSD at `path` has: 1, and one more for each `(#)` group at its top level (M10.27).
+///
+/// # Errors
+///
+/// As [`load_psd_menu`].
+pub fn psd_page_count(path: &Path) -> Result<usize, PhotoError> {
+    let (doc, _) = load_document(path)?;
+    Ok(1 + doc
+        .layers
+        .iter()
+        .filter(|layer| is_page_group(layer))
+        .count())
+}
+
+/// The pictures of the menu PSD at `path` by page (M10.27, Encore's `(#)` groups): what every page shows and what
+/// each draws over it, at the canvas size.
+///
+/// # Errors
+///
+/// As [`load_psd_menu`].
+pub fn load_menu_pages(path: &Path) -> Result<PsdPages, PhotoError> {
+    let (doc, canvas) = load_document(path)?;
+    let render = |keep: &dyn Fn(usize, &Layer) -> bool| -> Result<Image8, PhotoError> {
+        let mut doc = doc.clone();
+        for (index, layer) in doc.layers.iter_mut().enumerate() {
+            if !keep(index, layer) {
+                layer.visible = false;
+            } else if is_page_group(layer) {
+                // A page shows whatever its group's own eye says (Encore hides the other pages' groups).
+                layer.visible = true;
+            }
+        }
+        hide_highlights_in_layers(&mut doc.layers);
+        let image = image_from_rgba8(flatten(&doc).to_rgba8())?;
+        validate_image_size(&image, canvas)?;
+        Ok(image)
+    };
+    let shared = render(&|_, layer| !is_page_group(layer) && !is_button_name(&layer.name))?;
+    let mut pages = vec![render(&|_, layer| {
+        matches!(layer.content, LayerContent::Group(_)) && is_button_name(&layer.name)
+    })?];
+    let groups: Vec<usize> = doc
+        .layers
+        .iter()
+        .enumerate()
+        .filter(|(_, layer)| is_page_group(layer))
+        .map(|(index, _)| index)
+        .collect();
+    for group in groups {
+        pages.push(render(&|index, _| index == group)?);
+    }
+    Ok(PsdPages { shared, pages })
 }
 
 fn load_document(path: &Path) -> Result<(Document, Rect), PhotoError> {
@@ -269,7 +358,9 @@ fn render_background(doc: &Document, canvas: Rect) -> Result<Image8, PhotoError>
     Ok(image)
 }
 
-fn collect_button_layers(layers: &[Layer]) -> Vec<Layer> {
+/// The `(+)` groups in `layers` and the groups under them, bottom to top; `skip_pages`: not inside `(#)` groups
+/// (a paged menu's top level, whose pages have buttons of their own).
+fn collect_button_layers(layers: &[Layer], skip_pages: bool) -> Vec<Layer> {
     let mut out = Vec::new();
 
     // Bottom to top (the document keeps its layers that way), as Encore numbers the buttons.
@@ -277,8 +368,8 @@ fn collect_button_layers(layers: &[Layer]) -> Vec<Layer> {
         if let LayerContent::Group(group) = &layer.content {
             if is_button_name(&layer.name) {
                 out.push(layer.clone());
-            } else {
-                out.extend(collect_button_layers(&group.children));
+            } else if !(skip_pages && is_page_name(&layer.name)) {
+                out.extend(collect_button_layers(&group.children, false));
             }
         }
     }
@@ -351,7 +442,9 @@ pub fn psd_button_artwork(path: &Path) -> Result<PsdArtwork, PhotoError> {
         .zip(rect_height_u32(canvas))
         .ok_or_else(|| PhotoError::Invalid("invalid canvas size".to_string()))?;
     let mut out = Vec::new();
-    for layer in collect_button_layers(&doc.layers) {
+    // As load_psd_menu numbers them: with pages, the first page's.
+    let paged = doc.layers.iter().any(is_page_group);
+    for layer in collect_button_layers(&doc.layers, paged) {
         let Some(button) = build_button(layer.clone(), canvas) else {
             continue;
         };
@@ -1010,6 +1103,23 @@ fn clamp_i64(value: i64, min: i64, max: i64) -> i64 {
 
 fn is_button_name(name: &str) -> bool {
     name.starts_with(BUTTON_PREFIX)
+}
+
+/// Whether `name` is a menu page's layer group's (Encore's `(#) <name>`).
+fn is_page_name(name: &str) -> bool {
+    name.trim_start().starts_with(PAGE_PREFIX)
+}
+
+/// Whether `layer` is a menu page's layer group.
+fn is_page_group(layer: &Layer) -> bool {
+    matches!(layer.content, LayerContent::Group(_)) && is_page_name(&layer.name)
+}
+
+/// A page group's name after its `(#)`.
+fn page_name(name: &str) -> Option<String> {
+    name.trim_start()
+        .strip_prefix(PAGE_PREFIX)
+        .map(|rest| rest.trim().to_string())
 }
 
 fn button_name(name: &str) -> Option<String> {

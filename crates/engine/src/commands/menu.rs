@@ -1870,10 +1870,14 @@ fn run_fill_chapter_index_pages(session: &mut Session, params: &Value) -> Comman
 fn run_apply_psd(session: &mut Session, params: &Value) -> CommandResult {
     let menu_id = MenuId(req_u64(params, "menu")?);
     let path = req_str(params, "path")?;
-    if session.project.menu(menu_id).is_none() {
+    let Some(page) = session.project.menu(menu_id).map(|menu| menu.psd_page) else {
         return Err(format!("menu {} does not exist", menu_id.0));
-    }
-    let (rects, asset) = psd_buttons(session, &path)?;
+    };
+    let (pages, asset) = psd_buttons(session, &path)?;
+    // A page of a PSD shown by page takes its own page's buttons (M10.27).
+    let index = page.map_or(0, usize::from);
+    let index = if index < pages.len() { index } else { 0 };
+    let rects = pages.into_iter().nth(index).unwrap_or_default();
 
     let Some(menu) = session.project.menu_mut(menu_id) else {
         return Err(format!("menu {} does not exist", menu_id.0));
@@ -1949,7 +1953,10 @@ fn psd_button(found: &PsdMenuButton, highlight_group: u8) -> disccraft_project::
 /// Encore's ファイル ▸ 読み込み ▸ メニュー… / ポップアップメニュー… / メニューページ…: a layered PSD becomes a new menu
 /// named after the file (its picture the background, its `(+)` groups the buttons, the lowest group first as
 /// Encore numbers them), a Blu-ray
-/// pop-up menu with "popup", or a new page of the menu "pageOf".
+/// pop-up menu with "popup", or a new page of the menu "pageOf". A PSD with `(#)` groups at its top level
+/// (Encore's menu pages, M10.27) becomes a menu of pages: the top level the first page, each group the next (the
+/// lowest first), every page over the layers they share. A top level without buttons is no page (Encore keeps it
+/// as an empty first page, which a disc cannot use): the lowest group is the first page.
 fn run_import(session: &mut Session, params: &Value) -> CommandResult {
     let path = req_str(params, "path")?;
     let popup = match opt_value(params, "popup") {
@@ -1963,14 +1970,19 @@ fn run_import(session: &mut Session, params: &Value) -> CommandResult {
     {
         return Err(format!("menu {} does not exist", root.0));
     }
-    let (rects, asset) = psd_buttons(session, &path)?;
-    if rects.len() > disccraft_project::MAX_BUTTONS {
-        return Err(format!(
-            "the PSD has {} buttons; a menu holds at most {}",
-            rects.len(),
-            disccraft_project::MAX_BUTTONS
-        ));
+    let (pages, asset) = psd_buttons(session, &path)?;
+    for rects in &pages {
+        if rects.len() > disccraft_project::MAX_BUTTONS {
+            return Err(format!(
+                "a page of the PSD has {} buttons; a menu holds at most {}",
+                rects.len(),
+                disccraft_project::MAX_BUTTONS
+            ));
+        }
     }
+    let paged = pages.len() > 1;
+    let start = usize::from(paged && pages.first().is_some_and(Vec::is_empty));
+    let first_buttons = pages.get(start).map_or(0, Vec::len);
     let menu_id = match page_of {
         Some(root) => session
             .project
@@ -1987,26 +1999,41 @@ fn run_import(session: &mut Session, params: &Value) -> CommandResult {
         }
     };
     session.project.adopt_title_remote(menu_id);
-    let Some(menu) = session.project.menu_mut(menu_id) else {
-        return Err(format!("menu {} does not exist", menu_id.0));
-    };
-    menu.background = MenuBackground::Image { asset };
-    let groups = psd_groups(&rects);
-    menu.subpicture_colors = groups.first;
-    menu.second_subpicture_colors = groups.second;
-    if popup {
-        menu.popup = true;
+    let mut page_ids = Vec::new();
+    for (index, rects) in pages.iter().enumerate().skip(start) {
+        let id = if index == start {
+            menu_id
+        } else {
+            let page = session
+                .project
+                .add_menu_page(menu_id)
+                .map_err(|error| error.to_string())?;
+            page_ids.push(Value::from(page.0));
+            page
+        };
+        let Some(menu) = session.project.menu_mut(id) else {
+            return Err(format!("menu {} does not exist", id.0));
+        };
+        menu.background = MenuBackground::Image { asset };
+        menu.psd_page = paged.then(|| u16::try_from(index).ok()).flatten();
+        let groups = psd_groups(rects);
+        menu.subpicture_colors = groups.first;
+        menu.second_subpicture_colors = groups.second;
+        if popup {
+            menu.popup = true;
+        }
+        menu.buttons = rects
+            .iter()
+            .zip(groups.groups.iter().copied().chain(std::iter::repeat(1)))
+            .map(|(found, group)| psd_button(found, group))
+            .collect();
+        menu.default_button = 0;
     }
-    menu.buttons = rects
-        .iter()
-        .zip(groups.groups.iter().copied().chain(std::iter::repeat(1)))
-        .map(|(found, group)| psd_button(found, group))
-        .collect();
-    menu.default_button = 0;
     Ok(object(&[
         ("menu", Value::from(menu_id.0)),
         ("asset", Value::from(asset.0)),
-        ("buttons", Value::from(rects.len())),
+        ("buttons", Value::from(first_buttons)),
+        ("pages", Value::from(page_ids)),
     ]))
 }
 
@@ -2064,9 +2091,13 @@ fn psd_groups(buttons: &[PsdMenuButton]) -> PsdGroups {
     }
 }
 
-/// The buttons of a layered PSD menu (their names, places in the project's frame and video thumbnails) and the
-/// PSD as an image asset (the same path reuses it).
-fn psd_buttons(session: &mut Session, path: &str) -> Result<(Vec<PsdMenuButton>, AssetId), String> {
+/// The buttons of a layered PSD menu (their names, places in the project's frame and video thumbnails) by page
+/// (the top level's first, then each `(#)` group's, M10.27; one page without groups) and the PSD as an image
+/// asset (the same path reuses it).
+fn psd_buttons(
+    session: &mut Session,
+    path: &str,
+) -> Result<(Vec<Vec<PsdMenuButton>>, AssetId), String> {
     let psd = disccraft_photo::load_psd_menu(std::path::Path::new(path))
         .map_err(|error| error.to_string())?;
     let (frame_w, frame_h) = disccraft_project::frame_size(&session.project.settings);
@@ -2074,54 +2105,53 @@ fn psd_buttons(session: &mut Session, path: &str) -> Result<(Vec<PsdMenuButton>,
         let scaled = u64::from(value) * u64::from(to) / u64::from(from.max(1));
         u16::try_from(scaled).unwrap_or(u16::MAX)
     };
-    let rects: Vec<PsdMenuButton> = psd
-        .buttons
-        .iter()
-        .map(|button| {
-            let x = scale(button.x, psd.width, frame_w).min(frame_w.saturating_sub(8));
-            let y = scale(button.y, psd.height, frame_h).min(frame_h.saturating_sub(8));
-            let w = scale(button.width, psd.width, frame_w)
-                .max(8)
-                .min(frame_w.saturating_sub(x));
-            let h = scale(button.height, psd.height, frame_h)
-                .max(8)
-                .min(frame_h.saturating_sub(y));
-            let rect = Rect { x, y, w, h };
-            let thumbnail = button.thumbnail.and_then(|[tx, ty, tw, th]| {
-                let area = Rect {
-                    x: scale(tx, psd.width, frame_w),
-                    y: scale(ty, psd.height, frame_h),
-                    w: scale(tw, psd.width, frame_w).max(1),
-                    h: scale(th, psd.height, frame_h).max(1),
-                };
-                disccraft_project::ThumbnailArea::within(rect, area)
+    let convert = |button: &disccraft_photo::PsdButton| {
+        let x = scale(button.x, psd.width, frame_w).min(frame_w.saturating_sub(8));
+        let y = scale(button.y, psd.height, frame_h).min(frame_h.saturating_sub(8));
+        let w = scale(button.width, psd.width, frame_w)
+            .max(8)
+            .min(frame_w.saturating_sub(x));
+        let h = scale(button.height, psd.height, frame_h)
+            .max(8)
+            .min(frame_h.saturating_sub(y));
+        let rect = Rect { x, y, w, h };
+        let thumbnail = button.thumbnail.and_then(|[tx, ty, tw, th]| {
+            let area = Rect {
+                x: scale(tx, psd.width, frame_w),
+                y: scale(ty, psd.height, frame_h),
+                w: scale(tw, psd.width, frame_w).max(1),
+                h: scale(th, psd.height, frame_h).max(1),
+            };
+            disccraft_project::ThumbnailArea::within(rect, area)
+        });
+        let subpicture = button.subpicture.as_ref().and_then(|sub| {
+            let (width, height) = (
+                u16::try_from(sub.width).ok()?,
+                u16::try_from(sub.height).ok()?,
+            );
+            let mut made = disccraft_project::Subpicture::from_values(width, height, &sub.values)?;
+            // M6.335: the layers in their own colours, for rich-colour Blu-ray highlights.
+            made.color_layers = sub.layers.each_ref().map(|layer| {
+                layer
+                    .as_deref()
+                    .and_then(|rgba| disccraft_project::ColorLayer::from_rgba(width, height, rgba))
             });
-            let subpicture = button.subpicture.as_ref().and_then(|sub| {
-                let (width, height) = (
-                    u16::try_from(sub.width).ok()?,
-                    u16::try_from(sub.height).ok()?,
-                );
-                let mut made =
-                    disccraft_project::Subpicture::from_values(width, height, &sub.values)?;
-                // M6.335: the layers in their own colours, for rich-colour Blu-ray highlights.
-                made.color_layers = sub.layers.each_ref().map(|layer| {
-                    layer.as_deref().and_then(|rgba| {
-                        disccraft_project::ColorLayer::from_rgba(width, height, rgba)
-                    })
-                });
-                Some(made)
-            });
-            PsdMenuButton {
-                name: button.name.clone(),
-                rect,
-                thumbnail,
-                subpicture,
-                subpicture_colors: button
-                    .subpicture
-                    .as_ref()
-                    .map_or([None; 3], |sub| sub.colors),
-            }
-        })
+            Some(made)
+        });
+        PsdMenuButton {
+            name: button.name.clone(),
+            rect,
+            thumbnail,
+            subpicture,
+            subpicture_colors: button
+                .subpicture
+                .as_ref()
+                .map_or([None; 3], |sub| sub.colors),
+        }
+    };
+    let pages: Vec<Vec<PsdMenuButton>> = std::iter::once(&psd.buttons)
+        .chain(psd.pages.iter().map(|(_, buttons)| buttons))
+        .map(|buttons| buttons.iter().map(convert).collect())
         .collect();
 
     let asset = match session
@@ -2136,7 +2166,7 @@ fn psd_buttons(session: &mut Session, path: &str) -> Result<(Vec<PsdMenuButton>,
             .add_asset(std::path::Path::new(path))
             .map_err(|error| error.to_string())?,
     };
-    Ok((rects, asset))
+    Ok((pages, asset))
 }
 
 /// Encore's 新規ページを追加: an empty page after the menu's last page, with the first page's look and settings.
@@ -2172,7 +2202,8 @@ fn run_replace(session: &mut Session, params: &Value) -> CommandResult {
         params.get("spec"),
     ) {
         (Some(path), None, None) => {
-            let (rects, asset) = psd_buttons(session, &path)?;
+            let (pages, asset) = psd_buttons(session, &path)?;
+            let rects = pages.into_iter().next().unwrap_or_default();
             let groups = psd_groups(&rects);
             disccraft_project::MenuDesign {
                 background: MenuBackground::Image { asset },
@@ -3140,6 +3171,203 @@ mod tests {
             .ok_or("missing menu")?;
         assert_eq!(menu.buttons.len(), 1);
         assert_eq!(menu.texts.len(), 1);
+        Ok(())
+    }
+
+    /// M10.27 (Encore's `(#)` page groups, GitHub issue #13): a PSD with page groups becomes a menu of pages. The top
+    /// level's buttons are the first page's, each group's (the lowest first) its own page's, every page shows the
+    /// PSD by its page; drawn, a page has the shared layers and its own, not the other pages'. A page added later
+    /// shows only the shared layers.
+    #[test]
+    fn a_psds_page_groups_become_the_menus_pages() -> Result<(), Box<dyn Error>> {
+        use disccraft_photo::PsdLayer;
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-import-pages-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let (w, h) = (720u32, 480u32);
+        let fill = |x0: u32, y0: u32, x1: u32, y1: u32, colour: [u8; 4]| {
+            let mut rgba = vec![0u8; (w * h * 4) as usize];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = ((y * w + x) * 4) as usize;
+                    rgba[i..i + 4].copy_from_slice(&colour);
+                }
+            }
+            rgba
+        };
+        let raster = |name: &str, rgba: Vec<u8>| PsdLayer::Raster {
+            name: name.to_owned(),
+            rgba,
+            visible: true,
+        };
+        let button = |name: &str, x: u32, y: u32| PsdLayer::Group {
+            name: format!("(+) {name}"),
+            children: vec![raster(
+                "text",
+                fill(x, y, x + 200, y + 40, [255, 255, 255, 255]),
+            )],
+        };
+        let path = dir.join("Paged.psd");
+        disccraft_photo::write_layered_psd(
+            &path,
+            w,
+            h,
+            &[
+                raster("背景", fill(0, 0, w, h, [0, 0, 120, 255])),
+                button("Play", 100, 300),
+                button("Next", 400, 300),
+                PsdLayer::Group {
+                    name: "(#) Episodes".to_owned(),
+                    children: vec![
+                        raster("art", fill(500, 40, 600, 100, [255, 0, 0, 255])),
+                        button("Episode 1", 100, 380),
+                        button("Back", 400, 380),
+                        button("Episode 2", 100, 200),
+                    ],
+                },
+            ],
+        )?;
+        let path_text = path.to_string_lossy().into_owned();
+        let mut session = Session::new();
+        let imported = session.execute("menu.import", &serde_json::json!({ "path": path_text }))?;
+        let first = MenuId(value_u64(&imported, "menu")?);
+        let pages = session.project.menu_pages(first);
+        assert_eq!(pages.len(), 2);
+        let second = *pages.get(1).ok_or("missing page")?;
+        let names = |project: &disccraft_project::Project, id: MenuId| -> Vec<String> {
+            project
+                .menu(id)
+                .map(|menu| {
+                    menu.buttons
+                        .iter()
+                        .map(|button| button.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(names(&session.project, first), ["Play", "Next"]);
+        assert_eq!(
+            names(&session.project, second),
+            ["Episode 1", "Back", "Episode 2"]
+        );
+        let page_of = |project: &disccraft_project::Project, id: MenuId| {
+            project.menu(id).and_then(|menu| menu.psd_page)
+        };
+        assert_eq!(
+            (
+                page_of(&session.project, first),
+                page_of(&session.project, second)
+            ),
+            (Some(0), Some(1))
+        );
+        let second_menu = session.project.menu(second).ok_or("missing page")?;
+        assert_eq!(
+            second_menu.background,
+            session
+                .project
+                .menu(first)
+                .ok_or("missing menu")?
+                .background
+        );
+
+        // Drawn: the shared background everywhere, each page's own layers only on it.
+        let at = |project: &disccraft_project::Project,
+                  menu: MenuId,
+                  x: usize,
+                  y: usize|
+         -> Result<[u8; 3], Box<dyn Error>> {
+            let menu = project.menu(menu).ok_or("missing menu")?;
+            let drawn = disccraft_menu::render_menu(project, menu)?;
+            let i = (y * usize::from(drawn.width) + x) * 3;
+            Ok([drawn.rgb[i], drawn.rgb[i + 1], drawn.rgb[i + 2]])
+        };
+        let white = |colour: [u8; 3]| colour.iter().all(|value| *value > 200);
+        assert!(
+            white(at(&session.project, first, 150, 310)?),
+            "Play on the first page"
+        );
+        assert!(
+            !white(at(&session.project, first, 150, 390)?),
+            "Episode 1 not on the first page"
+        );
+        assert!(
+            white(at(&session.project, second, 150, 390)?),
+            "Episode 1 on the second page"
+        );
+        assert!(
+            !white(at(&session.project, second, 150, 310)?),
+            "Play not on the second page"
+        );
+        assert!(
+            at(&session.project, second, 550, 70)?[0] > 200,
+            "the page's art"
+        );
+        assert!(
+            at(&session.project, first, 550, 70)?[0] < 50,
+            "no page art on the first page"
+        );
+        assert!(
+            at(&session.project, first, 20, 20)?[2] > 100,
+            "the shared background"
+        );
+
+        // The issue's form: no buttons at the top level, two page groups: they are the two pages.
+        let bare = dir.join("Bare.psd");
+        disccraft_photo::write_layered_psd(
+            &bare,
+            w,
+            h,
+            &[
+                raster("背景", fill(0, 0, w, h, [0, 60, 0, 255])),
+                PsdLayer::Group {
+                    name: "(#) Main Page".to_owned(),
+                    children: vec![button("Play", 100, 300), button("Episodes", 400, 300)],
+                },
+                PsdLayer::Group {
+                    name: "(#) Episodes Page".to_owned(),
+                    children: vec![button("Episode 1", 100, 380), button("Back", 400, 380)],
+                },
+            ],
+        )?;
+        let imported = session.execute(
+            "menu.import",
+            &serde_json::json!({ "path": bare.to_string_lossy() }),
+        )?;
+        let main = MenuId(value_u64(&imported, "menu")?);
+        let bare_pages = session.project.menu_pages(main);
+        assert_eq!(bare_pages.len(), 2);
+        let episodes = *bare_pages.get(1).ok_or("missing page")?;
+        assert_eq!(names(&session.project, main), ["Play", "Episodes"]);
+        assert_eq!(names(&session.project, episodes), ["Episode 1", "Back"]);
+        assert_eq!(
+            (
+                page_of(&session.project, main),
+                page_of(&session.project, episodes)
+            ),
+            (Some(1), Some(2))
+        );
+
+        // A page added later: the shared layers only.
+        let added = session.project.add_menu_page(first)?;
+        if let Some(menu) = session.project.menu_mut(added) {
+            menu.buttons.clear();
+        }
+        session.project.add_button(
+            added,
+            "Go".to_owned(),
+            None,
+            disccraft_project::Link::NotSet,
+        )?;
+        assert_eq!(
+            page_of(&session.project, added),
+            Some(disccraft_project::NO_PSD_PAGE)
+        );
+        assert!(
+            !white(at(&session.project, added, 150, 310)?)
+                && !white(at(&session.project, added, 150, 390)?)
+        );
+        assert!(at(&session.project, added, 550, 70)?[0] < 50);
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 

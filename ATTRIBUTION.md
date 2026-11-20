@@ -31,7 +31,4 @@ Adobe Encore の素材（テンプレート、ボタン、背景、アイコン�
 | パス | 作者 | ライセンス | 出典 |
 |---|---|---|---|
 | assets/icons/photocraft-48.png | PhotoCraft のオーナー（ArtCraft で描いた原画をベクター化した PhotoCraft のアプリのアイコン） | MIT OR Apache-2.0 | [PhotoCraft の assets/app-icon（0fb40c5）](https://github.com/storytold/photocraft/blob/0fb40c534a8f2ca2e1aa6182f7ab06ae9fbed32e/assets/app-icon/hicolor/48x48/apps/ai.storyteller.photocraft.png)。改変なし。ツールバーの「メニューを PhotoCraft で編集」 |
-| assets/app-icon/disccraft.svg | DiscCraft プロジェクト（2026-11-19 に DiscCraft のために描いた仮のアプリのアイコン） | MIT OR Apache-2.0 | このリポジトリ。リリースのパッケージ（Linux のデスクトップ登録、AppImage、Flatpak）のアイコン |
-| assets/app-icon/disccraft.png | DiscCraft プロジェクト（上の SVG を resvg で 512 px に描いたもの） | MIT OR Apache-2.0 | このリポジトリ。リリースのパッケージのアイコン |
-| assets/app-icon/disccraft.ico | DiscCraft プロジェクト（上の SVG を resvg で 16〜256 px に描いて ICO にしたもの） | MIT OR Apache-2.0 | このリポジトリ。Windows のインストーラーとショートカットのアイコン |
-| assets/app-icon/disccraft.icns | DiscCraft プロジェクト（上の SVG を resvg で 16〜1024 px に描いて ICNS にしたもの） | MIT OR Apache-2.0 | このリポジトリ。macOS のアプリのアイコン |
+| assets/app-icon/ | DiscCraft プロジェクト（ビーバーのアプリのアイコン。2026-11-20 に作者が Google の Gemini の画像生成で作った 1024 × 1024 の原画 disccraft.png と、そこから元のリポジトリの開発用のツールで作った各サイズ: hicolor/、disccraft.ico、disccraft-1024.png、disccraft.icns。フォルダーの LICENSE.txt） | MIT OR Apache-2.0 | このリポジトリ。プログラムのウィンドウと exe、インストーラーとショートカット、macOS のアプリ、Linux のデスクトップ登録・AppImage・Flatpak のアイコン |

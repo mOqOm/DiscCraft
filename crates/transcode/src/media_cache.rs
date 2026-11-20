@@ -5,7 +5,8 @@
 //! - An opened source is kept and shared while the program runs ([`crate::source::Source`] opens through
 //!   [`slot`]), the last few files.
 //! - What a file was found to be (its length and picture size) is remembered on disk between runs, once the
-//!   application names a folder for it ([`enable_probe_cache`]), by the file's path, size and time.
+//!   application names a folder for it ([`enable_probe_cache`]), by the file's path, size and time. So are the
+//!   indexes craft-media builds of Matroska files and of transport and program streams.
 //! - A file can be opened ahead on a thread of its own ([`warm`]) while the caller asks [`probe_ready`] instead
 //!   of waiting.
 
@@ -132,6 +133,112 @@ pub fn enable_probe_cache(dir: &Path) {
             values: lines.into_iter().collect(),
         });
     }
+    // M12.27: the sample tables of Matroska files are kept here too, so a large MKV is not scanned again each
+    // run (craft-media reads most of the file to build them).
+    craft_media::matroska::set_index_store(Some(std::sync::Arc::new(IndexFiles {
+        dir: dir.join(MKV_INDEX_DIR),
+    })));
+    // M12.31: and the indexes of transport and program streams (`.m2ts`, `.ts`, `.mpg`, `.vob`), which
+    // craft-media builds by reading the whole file.
+    craft_media::mpegts::set_index_store(Some(std::sync::Arc::new(IndexFiles {
+        dir: dir.join(TS_INDEX_DIR),
+    })));
+}
+
+/// The folder in the probe cache the Matroska indexes are kept in.
+const MKV_INDEX_DIR: &str = "mkv-index";
+/// The folder in the probe cache the transport and program stream indexes are kept in.
+const TS_INDEX_DIR: &str = "ts-index";
+/// The most bytes the indexes of one folder take: past it, the least lately written go.
+const INDEX_BYTES: u64 = 1 << 30;
+
+/// Indexes craft-media keeps between runs (its index stores: Matroska, M12.27; MPEG-2 transport and program
+/// streams, M12.31), a file each in `dir`, named by the key craft-media gives (the file's length and hashes of
+/// its start and end).
+struct IndexFiles {
+    dir: PathBuf,
+}
+
+impl IndexFiles {
+    /// The file of `key`, when the key is one craft-media makes (letters, digits and dashes).
+    fn file(&self, key: &str) -> Option<PathBuf> {
+        (!key.is_empty()
+            && key.len() <= 96
+            && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .then(|| self.dir.join(format!("{key}.idx")))
+    }
+
+    /// Takes the least lately written indexes away until they take at most [`INDEX_BYTES`].
+    fn trim(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+        let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let meta = entry.metadata().ok()?;
+                let path = entry.path();
+                (meta.is_file() && path.extension().is_some_and(|ext| ext == "idx")).then(|| {
+                    (
+                        meta.modified().ok().unwrap_or(std::time::UNIX_EPOCH),
+                        meta.len(),
+                        path,
+                    )
+                })
+            })
+            .collect();
+        let mut total: u64 = files.iter().map(|(_, len, _)| *len).sum();
+        files.sort();
+        for (_, len, path) in files {
+            if total <= INDEX_BYTES {
+                break;
+            }
+            if std::fs::remove_file(&path).is_ok() {
+                total = total.saturating_sub(len);
+            }
+        }
+    }
+
+    /// The index saved under `key`.
+    fn load_index(&self, key: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.file(key)?).ok()
+    }
+
+    /// Keeps `index` under `key` (written whole under another name first), then trims the folder.
+    fn save_index(&self, key: &str, index: &[u8]) {
+        let Some(file) = self.file(key) else {
+            return;
+        };
+        if std::fs::create_dir_all(&self.dir).is_err() || index.len() as u64 > INDEX_BYTES {
+            return;
+        }
+        let part = file.with_extension(format!("idx.{}.part", std::process::id()));
+        if std::fs::write(&part, index).is_err() || std::fs::rename(&part, &file).is_err() {
+            let _ = std::fs::remove_file(&part);
+            return;
+        }
+        self.trim();
+    }
+}
+
+impl craft_media::matroska::IndexStore for IndexFiles {
+    fn load(&self, key: &str) -> Option<Vec<u8>> {
+        self.load_index(key)
+    }
+
+    fn save(&self, key: &str, index: &[u8]) {
+        self.save_index(key, index);
+    }
+}
+
+impl craft_media::mpegts::IndexStore for IndexFiles {
+    fn load(&self, key: &str) -> Option<Vec<u8>> {
+        self.load_index(key)
+    }
+
+    fn save(&self, key: &str, index: &[u8]) {
+        self.save_index(key, index);
+    }
 }
 
 /// The folder what is remembered of media files is kept in ([`enable_probe_cache`]); `None` when nothing is kept.
@@ -182,6 +289,21 @@ pub fn clear_probe_cache() -> usize {
             });
         if ours && path.is_file() && std::fs::remove_file(&path).is_ok() {
             removed += 1;
+        }
+    }
+    // The Matroska indexes (M12.27) and the transport and program stream indexes (M12.31).
+    for folder in [MKV_INDEX_DIR, TS_INDEX_DIR] {
+        let Ok(entries) = std::fs::read_dir(dir.join(folder)) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "idx")
+                && path.is_file()
+                && std::fs::remove_file(&path).is_ok()
+            {
+                removed += 1;
+            }
         }
     }
     removed

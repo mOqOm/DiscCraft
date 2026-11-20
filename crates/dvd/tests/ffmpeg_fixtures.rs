@@ -965,3 +965,57 @@ fn expect_contains(haystack: &str, needle: &str) -> Result<(), Box<dyn Error>> {
         Err(format!("expected {needle:?} in ffprobe output {haystack:?}").into())
     }
 }
+
+/// M6.376: why a video is converted for a Blu-ray title rather than going on as it is: the first thing that does
+/// not fit (H.264 level 5.1, HEVC, another size, interlaced on a progressive format), and nothing for one that fits.
+#[test]
+fn a_blu_ray_conversion_says_why() -> Result<(), Box<dyn Error>> {
+    use disccraft_dvd::{BdMismatch, BdVideoFormat, bd_mismatch};
+    use disccraft_project::BdVideo;
+    let ffmpeg = ffmpeg_path();
+    if !tool_available(&ffmpeg) {
+        println!("skipped: ffmpeg not found");
+        return Ok(());
+    }
+    let _guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
+    let fixtures = fixtures_dir();
+    fs::create_dir_all(&fixtures)?;
+    let make = |name: &str, codec: &[&str]| -> Result<PathBuf, Box<dyn Error>> {
+        let path = fixtures.join(name);
+        if !path.is_file() {
+            let made = Command::new(&ffmpeg)
+                .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+                .arg("testsrc2=size=1920x1080:rate=24000/1001")
+                .args(["-t", "1", "-pix_fmt", "yuv420p"])
+                .args(codec)
+                .arg(&path)
+                .status()?;
+            assert!(made.success(), "ffmpeg could not make {name}");
+        }
+        Ok(path)
+    };
+    let p23 = BdVideoFormat::of_video(BdVideo::Hd1080p23).ok_or("no format")?;
+    let fits = make(
+        "why_fits.mkv",
+        &["-c:v", "libx264", "-profile:v", "high", "-level", "4.1"],
+    )?;
+    let level = make(
+        "why_level51.mkv",
+        &["-c:v", "libx264", "-profile:v", "high", "-level", "5.1"],
+    )?;
+    let hevc = make(
+        "why_hevc.mkv",
+        &["-c:v", "libx265", "-x265-params", "log-level=error"],
+    )?;
+    assert_eq!(bd_mismatch(&fits, p23), None);
+    assert_eq!(bd_mismatch(&level, p23), Some(BdMismatch::Level(51)));
+    assert_eq!(bd_mismatch(&hevc, p23), Some(BdMismatch::Codec));
+    // The same file on a 720p disc: another size. Interlaced H.264 on a progressive disc.
+    let p720 = BdVideoFormat::of_video(BdVideo::Hd720p23).ok_or("no format")?;
+    assert_eq!(bd_mismatch(&fits, p720), Some(BdMismatch::Size(1920, 1080)));
+    let interlaced = fixtures.join("h264_1080i.mkv");
+    if interlaced.is_file() {
+        assert_eq!(bd_mismatch(&interlaced, p23), Some(BdMismatch::Scan(true)));
+    }
+    Ok(())
+}

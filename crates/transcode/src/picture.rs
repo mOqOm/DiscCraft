@@ -3,7 +3,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use disccraft_mpeg2venc::encoder::{Encoder, EncoderConfig};
-use disccraft_mpeg2venc::{Standard, rgb_to_frame420};
+use disccraft_mpeg2venc::{Standard, rgb_to_frame420, rgb_to_frame420_fields};
 use filmcraft_frame::VideoFrame;
 use filmcraft_time::{FrameRate, Tick};
 
@@ -65,14 +65,18 @@ pub(crate) fn encode_video(
     progress: &mut dyn FnMut(f32),
 ) -> Result<(), TranscodeError> {
     let config = encoder_config(options, max_bitrate);
+    let fields = interlaced_output(source, options);
     let two_pass = options.mode == crate::RateMode::Vbr2Pass && frames > 1;
     let first = if two_pass {
         let mut encoder =
             Encoder::new(config.clone()).map_err(|e| TranscodeError::Encode(e.to_string()))?;
         encoder.set_quality(options.quality);
+        if let Some(top_first) = fields {
+            encoder.set_field_order(top_first);
+        }
         let mut stats = Vec::new();
         encode_pass(
-            source,
+            (source, fields),
             options,
             frames,
             &mut encoder,
@@ -91,12 +95,15 @@ pub(crate) fn encode_video(
     let mut writer = BufWriter::new(file);
     let mut encoder = Encoder::new(config).map_err(|e| TranscodeError::Encode(e.to_string()))?;
     encoder.set_quality(options.quality);
+    if let Some(top_first) = fields {
+        encoder.set_field_order(top_first);
+    }
     if let Some(first) = &first {
         encoder.plan_second_pass(first);
     }
     let (from, span) = if two_pass { (0.5, 0.5) } else { (0.0, 1.0) };
     encode_pass(
-        source,
+        (source, fields),
         options,
         frames,
         &mut encoder,
@@ -123,10 +130,31 @@ pub(crate) fn encode_video(
     Ok(())
 }
 
+/// Whether the DVD made from `source` keeps its fields apart (M12.26), and the field that comes first (`true` for
+/// the top one): interlaced video (by its MPEG-2 or H.264 headers) at the disc's own frame rate (1080i 59.94 or
+/// 480i for NTSC, 1080i 50 or 576i for PAL), not made as film. Its fields are then scaled each on its own and the
+/// pictures marked interlaced; anything else is scaled as whole frames.
+fn interlaced_output(source: &Source, options: &crate::TranscodeOptions) -> Option<bool> {
+    if options.film && options.standard == Standard::Ntsc {
+        return None;
+    }
+    let top_first = match crate::field_type::field_type(source.path())? {
+        crate::field_type::FieldType::UpperFirst => true,
+        crate::field_type::FieldType::LowerFirst => false,
+        crate::field_type::FieldType::Progressive => return None,
+    };
+    let rate = source.info().video.as_ref()?.frame_rate;
+    let wanted = frame_rate(options.standard);
+    let same = i128::from(rate.num) * i128::from(wanted.den)
+        == i128::from(wanted.num) * i128::from(rate.den);
+    (same && rate.den != 0).then_some(top_first)
+}
+
 /// One pass over the output frames: each is decoded, scaled and converted on a thread of its own, a few ahead of
 /// `encoder` (which runs here, its slices on threads of their own), and each access unit goes to `sink`.
+/// `fields`: an interlaced source whose fields stay apart ([`interlaced_output`]).
 fn encode_pass(
-    source: &Source,
+    (source, fields): (&Source, Option<bool>),
     options: &crate::TranscodeOptions,
     frames: u64,
     encoder: &mut Encoder,
@@ -163,10 +191,23 @@ fn encode_pass(
                     let rendering = options.rendering;
                     let rgb =
                         crate::blend::picture_at(source, time, rendering.frame_blend, &|frame| {
-                            render_frame_with(frame, output_height, target, rendering.max_quality)
+                            if fields.is_some() {
+                                render_fields(frame, output_height, target)
+                            } else {
+                                render_frame_with(
+                                    frame,
+                                    output_height,
+                                    target,
+                                    rendering.max_quality,
+                                )
+                            }
                         })?;
-                    rgb_to_frame420(out_width, out_height, &rgb)
-                        .map_err(|error| TranscodeError::Encode(error.to_string()))
+                    if fields.is_some() {
+                        rgb_to_frame420_fields(out_width, out_height, &rgb)
+                    } else {
+                        rgb_to_frame420(out_width, out_height, &rgb)
+                    }
+                    .map_err(|error| TranscodeError::Encode(error.to_string()))
                 })();
                 let failed = picture.is_err();
                 // A closed channel: the encoder stopped (an error); nothing more to do.
@@ -432,6 +473,25 @@ fn render_frame_with(
         render_rgb(&rgba, frame.width, frame.height, geometry, output_height)
     };
     rendered.ok_or_else(|| TranscodeError::Unsupported("failed to render frame".to_string()))
+}
+
+/// `frame` (interlaced) in the DVD frame, each of its fields scaled on its own (M12.26): the bilinear scaler, also
+/// with Encore's "Use Maximum Render Quality" (the filtered scaler takes whole frames).
+fn render_fields(
+    frame: &VideoFrame,
+    output_height: u32,
+    target: Target,
+) -> Result<Vec<u8>, TranscodeError> {
+    let geometry = target_geometry(frame.width, frame.height, frame.par, output_height, target)
+        .ok_or_else(|| TranscodeError::Unsupported("invalid frame geometry".to_string()))?;
+    let rgba = frame.to_rgba8();
+    crate::hd::render_rgb_fields_at(
+        &rgba,
+        (frame.width, frame.height),
+        (geometry.x, geometry.y, geometry.width, geometry.height),
+        (OUTPUT_WIDTH, output_height),
+    )
+    .ok_or_else(|| TranscodeError::Unsupported("failed to render frame".to_string()))
 }
 
 /// The source picture scaled into `geometry` of the DVD frame, black around it. The work is the HD transcode's

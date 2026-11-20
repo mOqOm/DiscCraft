@@ -6,6 +6,18 @@ pub(crate) fn rgb_to_frame420(
     height: u16,
     rgb: &[u8],
 ) -> Result<Frame420, EncodeError> {
+    rgb_to_frame420_as(width, height, rgb, false)
+}
+
+/// [`rgb_to_frame420`], with `interlaced` the chroma of each field on its own (M12.26): chroma row `cy` belongs to
+/// the top field when even and the bottom one when odd (13818-2 6.1.1.8, figure 6-1), and is the mean of two lines
+/// of that field, so the colours of the two moments are not mixed.
+pub(crate) fn rgb_to_frame420_as(
+    width: u16,
+    height: u16,
+    rgb: &[u8],
+    interlaced: bool,
+) -> Result<Frame420, EncodeError> {
     let w = usize::from(width);
     let h = usize::from(height);
     let expected = w
@@ -49,13 +61,25 @@ pub(crate) fn rgb_to_frame420(
         .enumerate();
     if bands == 1 {
         for (index, ((y_band, cb_band), cr_band)) in jobs {
-            convert_band(rgb, (w, h), index * band, y_band, (cb_band, cr_band));
+            convert_band(
+                rgb,
+                (w, h, interlaced),
+                index * band,
+                y_band,
+                (cb_band, cr_band),
+            );
         }
     } else {
         std::thread::scope(|scope| {
             for (index, ((y_band, cb_band), cr_band)) in jobs {
                 let _ = scope.spawn(move || {
-                    convert_band(rgb, (w, h), index * band, y_band, (cb_band, cr_band));
+                    convert_band(
+                        rgb,
+                        (w, h, interlaced),
+                        index * band,
+                        y_band,
+                        (cb_band, cr_band),
+                    );
                 });
             }
         });
@@ -75,10 +99,11 @@ const BAND_ROWS: usize = 48;
 
 /// Converts the picture rows of the chroma rows from `first_cy` on: their luma into `y_band` (whole rows of
 /// `width`), their chroma into `cb_band` / `cr_band` (whole rows of half the width). A chroma sample is the mean
-/// of the chroma of the (up to four) pixels it covers, each worked out on its own, rounded half up.
+/// of the chroma of the (up to four) pixels it covers, each worked out on its own, rounded half up; `interlaced`:
+/// of the two lines of its field ([`rgb_to_frame420_as`]).
 fn convert_band(
     rgb: &[u8],
-    (width, height): (usize, usize),
+    (width, height, interlaced): (usize, usize, bool),
     first_cy: usize,
     y_band: &mut [u8],
     (cb_band, cr_band): (&mut [u8], &mut [u8]),
@@ -98,6 +123,18 @@ fn convert_band(
                 .flatten()
         };
         let rows = [source(top), source(top + 1)];
+        // The chroma of a field's chroma row: lines 2cy and 2cy + 2 for the top field, 2cy - 1 and 2cy + 1 for the
+        // bottom one (the last line of the field again past the picture's bottom).
+        let field_rows = if !interlaced {
+            rows
+        } else if cy.is_multiple_of(2) {
+            [source(top), source(top + 2).or(source(top))]
+        } else {
+            [
+                top.checked_sub(1).and_then(source),
+                source(top + 1).or(source(top.saturating_sub(1))),
+            ]
+        };
         for (dy, row) in rows.iter().enumerate() {
             let Some(row) = row else {
                 continue;
@@ -112,7 +149,7 @@ fn convert_band(
         }
         for (cx, (cb_slot, cr_slot)) in cb_row.iter_mut().zip(cr_row.iter_mut()).enumerate() {
             let (mut sum_cb, mut sum_cr, mut count) = (0i32, 0i32, 0i32);
-            for row in rows.iter().flatten() {
+            for row in field_rows.iter().flatten() {
                 for px in [cx * 2, cx * 2 + 1] {
                     if px >= width {
                         continue;
@@ -232,6 +269,49 @@ mod tests {
                 "{width}x{height}"
             );
         }
+        Ok(())
+    }
+
+    /// M12.26: interlaced, each chroma row is of one field: a picture whose top field is red and bottom field blue
+    /// has red chroma rows (even) and blue ones (odd); as a progressive frame every row is their mix.
+    #[test]
+    fn interlaced_chroma_keeps_the_fields_apart() -> Result<(), String> {
+        let (width, height) = (8_usize, 8_usize);
+        let mut rgb = Vec::with_capacity(width * height * 3);
+        for row in 0..height {
+            let pixel = if row.is_multiple_of(2) {
+                [255, 0, 0]
+            } else {
+                [0, 0, 255]
+            };
+            for _ in 0..width {
+                rgb.extend_from_slice(&pixel);
+            }
+        }
+        let fields = super::rgb_to_frame420_as(8, 8, &rgb, true).map_err(|e| e.to_string())?;
+        let frame = rgb_to_frame420(8, 8, &rgb).map_err(|e| e.to_string())?;
+        let cr_row =
+            |frame: &crate::Frame420, row: usize| frame.cr.get(row * 4).copied().unwrap_or(0);
+        // Red has a high Cr, blue a low one.
+        for row in 0..4_usize {
+            if row.is_multiple_of(2) {
+                assert!(
+                    cr_row(&fields, row) > 200,
+                    "row {row}: {}",
+                    cr_row(&fields, row)
+                );
+            } else {
+                assert!(
+                    cr_row(&fields, row) < 130,
+                    "row {row}: {}",
+                    cr_row(&fields, row)
+                );
+            }
+            let mixed = cr_row(&frame, row);
+            assert!((140..200).contains(&mixed), "row {row}: {mixed}");
+        }
+        // The luma is the same either way.
+        assert_eq!(fields.y, frame.y);
         Ok(())
     }
 

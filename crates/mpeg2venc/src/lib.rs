@@ -89,6 +89,15 @@ pub fn rgb_to_frame420(width: u16, height: u16, rgb: &[u8]) -> Result<Frame420, 
     color::rgb_to_frame420(width, height, rgb)
 }
 
+/// [`rgb_to_frame420`] for an interlaced picture (M12.26): each chroma row is made of the lines of its own field.
+pub fn rgb_to_frame420_fields(
+    width: u16,
+    height: u16,
+    rgb: &[u8],
+) -> Result<Frame420, EncodeError> {
+    color::rgb_to_frame420_as(width, height, rgb, true)
+}
+
 /// Encode one 4:2:0 frame as an MPEG-2 I picture.
 pub fn encode_still(frame: &Frame420, options: &StillOptions) -> Result<Vec<u8>, EncodeError> {
     still::encode_still(frame, options)

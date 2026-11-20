@@ -20,15 +20,17 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use disccraft_bd::{BdBuildReport, build_bdmv_with};
+/// A Blu-ray menu's pages built as one interactive composition (M10.26), for the preview.
+pub use disccraft_bd::{PAGE_PICTURE_BUTTON, menu_page_groups};
 pub use disccraft_dvd::TranscodeStatus;
-/// The usual target and peak bitrate (kbit/s) of HD video, MPEG-2 or H.264 (the New Project dialog says them).
-pub use disccraft_dvd::hd_default_kbps;
 /// Whether a video asset fits the project's disc as it is (a DVD preset of its own transcodes it all the same).
 pub use disccraft_dvd::video_fits_as_is;
 /// Whether a video asset would fit a Blu-ray title in a format as it is (for a format being chosen).
 pub use disccraft_dvd::video_fits_bluray_as;
 /// Whether a video asset would fit a disc of a kind as it is (for the column of the other kind of disc).
 pub use disccraft_dvd::video_fits_disc;
+/// The usual target and peak bitrate (kbit/s) of HD video, MPEG-2 or H.264 (the New Project dialog says them).
+pub use disccraft_dvd::{BdMismatch, BdVideoFormat, bd_mismatch, hd_default_kbps};
 use disccraft_dvd::{DvdBuildReport, DvdError, build_video_ts_with};
 /// A slide's pan and zoom as the build moves its picture (the preview shows it the same way).
 pub use disccraft_dvd::{SlideMotion, slide_motion};
@@ -73,12 +75,15 @@ pub fn transcode_status(
     all
 }
 
-/// The project as a build sees it: button transitions become hidden titles (Encore's button Transition), and
-/// transcoded files located for the disc's kind take their assets' place (Encore's Locate Transcoded File).
+/// The project as a build sees it: button transitions become hidden titles (Encore's button Transition),
+/// transcoded files located for the disc's kind take their assets' place (Encore's Locate Transcoded File), and a
+/// title of several clips without audio tracks gets its clips' own sound.
 fn for_build(project: &Project) -> Result<Project, String> {
     project
         .with_transitions_expanded()
         .and_then(|expanded| expanded.with_located_transcodes())
+        // A title of several clips without audio tracks plays its clips' own sound (M6.378).
+        .map(|located| disccraft_dvd::with_clip_sounds(&located))
         .map_err(|error| error.to_string())
 }
 use disccraft_project::{DiscKind, Project};
@@ -214,15 +219,15 @@ pub fn transcode_now(
 pub enum Render {
     /// Everything a build would transcode (as Transcode Now of every asset).
     Project,
-    /// The motion menus' pictures (`Some`: one menu). An HD Blu-ray's are made at the build.
+    /// The motion menus' pictures (`Some`: one menu); an HD Blu-ray's at its HD size (M6.387).
     MotionMenus(Option<disccraft_project::MenuId>),
     /// The slideshows (`Some`: one).
     Slideshows(Option<u64>),
 }
 
 /// The motion menu `menu` as File ▸ Render ▸ Motion Menu (or a build with `options`) left it in the build's cache,
-/// when it is there and still the menu as it is: its MPEG-2 video, for the project preview to play (M6.334). `None`
-/// for an HD Blu-ray (its motion menus are made at the build) and a menu not rendered.
+/// when it is there and still the menu as it is, for the project preview to play (M6.334): its MPEG-2 video, or an
+/// HD Blu-ray's pictures in a transport stream (M6.387). `None` for a menu not rendered.
 #[must_use]
 pub fn rendered_motion_menu(
     project: &Project,
@@ -230,10 +235,11 @@ pub fn rendered_motion_menu(
     menu: disccraft_project::MenuId,
 ) -> Option<std::path::PathBuf> {
     let expanded = for_build(project).ok()?;
-    if expanded.settings.kind == DiscKind::BluRay && expanded.settings.bd_video.hd().is_some() {
-        return None;
+    let cache = cache_dir(options);
+    match expanded.settings.kind {
+        DiscKind::Dvd => disccraft_dvd::rendered_motion_menu(&expanded, menu, &cache),
+        DiscKind::BluRay => disccraft_bd::rendered_motion_menu(&expanded, menu, &cache),
     }
-    disccraft_dvd::rendered_motion_menu(&expanded, menu, &cache_dir(options))
 }
 
 /// File ▸ Render: makes `what` into the cache a build with `options` uses, so the build takes it as it is.
@@ -256,17 +262,16 @@ pub fn render(
     disccraft_dvd::sync_media_choices(project);
     let expanded = for_build(project)?;
     let cache = cache_dir(options);
-    let hd =
-        expanded.settings.kind == DiscKind::BluRay && expanded.settings.bd_video.hd().is_some();
     match what {
         Render::Project => Ok(0),
-        Render::MotionMenus(_) if hd => {
-            Err("an HD Blu-ray's motion menus are made when the disc is built".to_string())
-        }
-        Render::MotionMenus(only) => {
-            disccraft_dvd::render_motion_menus(&expanded, &cache, only, progress)
-                .map_err(|error| error.to_string())
-        }
+        Render::MotionMenus(only) => match expanded.settings.kind {
+            DiscKind::Dvd => disccraft_dvd::render_motion_menus(&expanded, &cache, only, progress)
+                .map_err(|error| error.to_string()),
+            DiscKind::BluRay => {
+                disccraft_bd::render_motion_menus(&expanded, &cache, only, progress)
+                    .map_err(|error| error.to_string())
+            }
+        },
         Render::Slideshows(only) => match expanded.settings.kind {
             DiscKind::Dvd => disccraft_dvd::render_slideshows(&expanded, &cache, only, progress)
                 .map_err(|error| error.to_string()),

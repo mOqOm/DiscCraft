@@ -383,6 +383,7 @@ mod tests {
             vertical: false,
             hidden: false,
             locked: false,
+            spans: Vec::new(),
         });
         let glow = LayerEffects {
             outer_glow: Some(disccraft_project::GlowEffect {

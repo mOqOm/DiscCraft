@@ -922,16 +922,43 @@ mod tests {
         })
     }
 
-    /// M12.18: a video whose picture the decoder does not read (interlaced H.264) plays its sound, with black
-    /// frames that tell the time; without sound to play, it fails as before.
+    /// An MKV of MPEG-4 Part 2 video (DivX / Xvid, which craft-video does not decode) and AC-3, made with ffmpeg
+    /// into the fixtures; `None` without ffmpeg.
+    fn mpeg4_part2_fixture() -> Option<PathBuf> {
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures");
+        let video = fixtures.join("mpeg4_part2_ac3.mkv");
+        if video.is_file() {
+            return Some(video);
+        }
+        let ffmpeg = std::env::var_os("DISCCRAFT_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
+        std::fs::create_dir_all(&fixtures).ok()?;
+        let part = fixtures.join(format!("mpeg4_part2_ac3.{}.mkv", std::process::id()));
+        let made = std::process::Command::new(ffmpeg)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("testsrc2=size=640x480:rate=25")
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"])
+            .args([
+                "-t", "2", "-c:v", "mpeg4", "-q:v", "4", "-c:a", "ac3", "-b:a", "192k",
+            ])
+            .arg(&part)
+            .status()
+            .ok()?;
+        if !made.success() || std::fs::rename(&part, &video).is_err() {
+            let _ = std::fs::remove_file(&part);
+            return None;
+        }
+        Some(video)
+    }
+
+    /// M12.18: a video whose picture the decoder does not read (MPEG-4 Part 2: interlaced H.264 was the example
+    /// until craft-video decoded it, M12.25) plays its sound, with black frames that tell the time; without sound
+    /// to play, it fails as before.
     #[test]
     fn a_video_without_a_readable_picture_plays_its_sound() {
-        let video =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/h264_1080i.mkv");
-        if !video.is_file() {
-            eprintln!("h264_1080i.mkv fixture not found; skipping");
+        let Some(video) = mpeg4_part2_fixture() else {
+            eprintln!("no ffmpeg for the MPEG-4 Part 2 fixture; skipping");
             return;
-        }
+        };
         let wait = |what: &str, done: &dyn Fn() -> bool| {
             let start = Instant::now();
             while !done() {
@@ -939,7 +966,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(5));
             }
         };
-        let silent = Player::start_sized(video.clone(), None, 0.5, 30.0, Some((1920, 1080)));
+        let silent = Player::start_sized(video.clone(), None, 0.5, 30.0, Some((640, 480)));
         wait("never failed", &|| silent.status() != PlayerStatus::Playing);
         assert!(matches!(silent.status(), PlayerStatus::Failed(_)));
         assert!(silent.no_picture().is_none());
@@ -951,16 +978,16 @@ mod tests {
             from: None,
             until: None,
         };
-        let player = Player::start_sized(video, Some(audio), 0.5, 30.0, Some((1920, 1080)));
+        let player = Player::start_sized(video, Some(audio), 0.5, 30.0, Some((640, 480)));
         let frame = std::cell::RefCell::new(None);
         wait("no frame", &|| {
             *frame.borrow_mut() = player.take_frame();
             frame.borrow().is_some() || player.status() != PlayerStatus::Playing
         });
         let frame = frame.into_inner().expect("a frame");
-        assert_eq!((frame.width, frame.height), (64, 36));
+        assert_eq!((frame.width, frame.height), (64, 48));
         assert!(frame.seconds >= 0.5 && frame.rgb.iter().all(|byte| *byte == 0));
-        assert!(player.no_picture().is_some_and(|why| why.contains("H.264")));
+        assert!(player.no_picture().is_some());
         assert_eq!(player.status(), PlayerStatus::Playing);
         // The sound comes: the fixture's tone.
         let feed = player.audio().expect("a feed");
@@ -972,9 +999,39 @@ mod tests {
             heard.get() || feed.error().is_some()
         });
         assert!(heard.get(), "{:?}", feed.error());
-        // It ends at the end of the file (3 seconds).
+        // It ends at the end of the file (2 seconds).
         wait("never ended", &|| player.status() != PlayerStatus::Playing);
         assert_eq!(player.status(), PlayerStatus::Ended);
+    }
+
+    /// M12.25: interlaced H.264 (a camcorder's 1080i, made by x264 as MBAFF) plays its picture: craft-video decodes
+    /// it now (storytold/craft-libs PRs #1992 and #2017, through the mOqOm fork).
+    #[test]
+    fn interlaced_h264_plays_its_picture() {
+        let video =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/h264_1080i.mkv");
+        if !video.is_file() {
+            eprintln!("h264_1080i.mkv fixture not found; skipping");
+            return;
+        }
+        let player = Player::start_sized(video, None, 0.5, 30.0, Some((480, 270)));
+        let start = Instant::now();
+        let frame = loop {
+            if let Some(frame) = player.take_frame() {
+                break frame;
+            }
+            assert!(
+                player.status() == PlayerStatus::Playing,
+                "{:?}",
+                player.status()
+            );
+            assert!(start.elapsed() < Duration::from_secs(30), "no frame");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!((frame.width, frame.height), (480, 270));
+        assert!(player.no_picture().is_none());
+        // A picture, not black.
+        assert!(frame.rgb.iter().filter(|byte| **byte > 40).count() > frame.rgb.len() / 4);
     }
 
     /// M12.19: still frames are decoded off the caller's thread; a request replaces the one still waiting.

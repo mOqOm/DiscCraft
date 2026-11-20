@@ -50,6 +50,17 @@ impl Params {
                 f_code: 4,
                 search: 63,
             },
+            // MP@H-14 (M6.393): HDV's 1440 x 1080, shown 16:9; a 7,340,032-bit VBV buffer (448 x 16,384), and at
+            // most 40 Mbps as on a Blu-ray.
+            Format::Hd1440 => Self {
+                coded: (1440, 1088),
+                display: (1440, 1080),
+                max_bitrate: 40_000_000,
+                vbv_bits: 7_340_032,
+                profile_level: 0x46,
+                f_code: 4,
+                search: 63,
+            },
         }
     }
 }
@@ -71,6 +82,10 @@ pub enum Format {
     /// always 16:9: a Blu-ray's interlaced HD video. The frames given are 1920 x 1088 (the coded size: the last
     /// eight lines are not shown); each is coded as one frame picture of two fields from the same moment.
     Hd1080,
+    /// 1440 x 1080 (pixels a third wider than tall, shown 16:9), MP@H-14, otherwise as [`Format::Hd1080`]: an HDV
+    /// camcorder's size, so a Blu-ray title of HDV clips can have other clips encoded beside them (M6.393). The
+    /// frames given are 1440 x 1088.
+    Hd1440,
 }
 
 impl Format {
@@ -180,6 +195,12 @@ pub struct Encoder {
     /// Interlaced pictures (M6.371): the field that comes first, `true` for the top one; `None` codes frames
     /// as progressive.
     interlaced: Option<bool>,
+    /// With [`Encoder::interlaced`], whether macroblocks may also be coded as fields (dct_type); `false` keeps
+    /// frame coding and only marks the pictures interlaced (M12.26).
+    field_tools: bool,
+    /// The last picture's vector of each macroblock (half pixels; empty after an I picture): where the search of
+    /// the next picture's macroblock at the same place also starts (M6.394).
+    vectors: Vec<(i32, i32)>,
 }
 
 /// The best quality (Encore's presets' 5, its "High quality"): the whole search range, to half a pixel.
@@ -471,6 +492,8 @@ impl Encoder {
             last: None,
             quality: BEST_QUALITY,
             interlaced: None,
+            field_tools: false,
+            vectors: Vec::new(),
         })
     }
 
@@ -489,6 +512,16 @@ impl Encoder {
     /// interlaced material better than progressive frames (see the backlog).
     pub fn set_interlaced(&mut self, top_first: bool) {
         self.interlaced = Some(top_first);
+        self.field_tools = true;
+    }
+
+    /// Marks the pictures interlaced, the top field first when `top_first` (M12.26: a DVD made from interlaced
+    /// video, whose fields were scaled each on its own): progressive_frame 0, top_field_first as given, chroma
+    /// 4:2:0 of fields. The macroblocks are coded as frames, as for progressive pictures: on such material that
+    /// coded better than the field tools of [`Encoder::set_interlaced`] (M6.394). Not with 3:2 pulldown.
+    pub fn set_field_order(&mut self, top_first: bool) {
+        self.interlaced = Some(top_first);
+        self.field_tools = false;
     }
 
     /// The motion search range and whether vectors are refined to half a pixel, at the encoder's quality.
@@ -565,7 +598,7 @@ impl Encoder {
         let mut attempts = 0u32;
         let mut bits;
 
-        let (data, recon) = loop {
+        let (data, recon, vectors) = loop {
             let encoded =
                 self.encode_picture(frame, picture_type, is_gop_start, temporal_reference, code)?;
 
@@ -608,6 +641,7 @@ impl Encoder {
         self.frames_in_gop += 1;
         self.reference = Some(recon.clone());
         self.reconstruction = Some(recon);
+        self.vectors = vectors;
 
         Ok(data)
     }
@@ -710,7 +744,7 @@ impl Encoder {
         is_gop_start: bool,
         temporal_reference: u32,
         code: u8,
-    ) -> Result<(Vec<u8>, Frame420), EncodeError> {
+    ) -> Result<(Vec<u8>, Frame420, Vec<(i32, i32)>), EncodeError> {
         let mut writer = BitWriter::new();
         let mut recon = empty_frame(frame.width, frame.height);
 
@@ -735,7 +769,7 @@ impl Encoder {
             picture_type,
             self.params.f_code,
             fields,
-            field.is_some(),
+            (field.is_some(), field.is_some() && self.field_tools),
         );
 
         let qs = u16::from(code).saturating_mul(2);
@@ -757,15 +791,21 @@ impl Encoder {
             f_code: self.params.f_code,
             search,
             half_pel,
-            field: field.is_some(),
+            field: field.is_some() && self.field_tools,
         };
-        encode_slices(frame, reference, &mut recon, (coding, workers), &mut data)?;
-        Ok((data, recon))
+        let vectors = encode_slices(
+            frame,
+            (reference, &self.vectors),
+            &mut recon,
+            (coding, workers),
+            &mut data,
+        )?;
+        Ok((data, recon, vectors))
     }
 
     /// The sequence header and its extensions, as every GOP starts.
     fn write_sequence_headers(&self, writer: &mut BitWriter) {
-        let hd = self.config.format == Format::Hd1080;
+        let hd = self.config.format != Format::Sd;
         write_sequence_header(
             writer,
             self.params,
@@ -790,7 +830,7 @@ impl Encoder {
         validate_frame(frame, self.params.coded)?;
         let mut code = code.clamp(1, 31);
         loop {
-            let (mut data, _) = self.encode_picture(frame, PictureType::I, true, 0, code)?;
+            let (mut data, _, _) = self.encode_picture(frame, PictureType::I, true, 0, code)?;
             let bits = u64::try_from(data.len())
                 .unwrap_or(u64::MAX)
                 .saturating_mul(8);
@@ -828,30 +868,41 @@ struct Coding {
 /// Encodes the picture's slices (one per macroblock row) into `out` and `recon`, the rows in bands on several
 /// threads. Every slice is independent (its predictors start afresh; it reads the picture and the reference and
 /// writes only its own rows of the reconstruction), and a slice starts byte-aligned with a start code, so the
-/// bands' bytes joined in order are the same as encoding the rows one after another.
+/// bands' bytes joined in order are the same as encoding the rows one after another. `previous`: the last picture's
+/// vector of each macroblock (M6.394). Returns this picture's.
 fn encode_slices(
     frame: &Frame420,
-    reference: Option<&Frame420>,
+    (reference, previous): (Option<&Frame420>, &[(i32, i32)]),
     recon: &mut Frame420,
     (coding, workers): (Coding, usize),
     out: &mut Vec<u8>,
-) -> Result<(), EncodeError> {
+) -> Result<Vec<(i32, i32)>, EncodeError> {
     let mb_rows = usize::from(frame.height) / 16;
+    let mb_cols = usize::from(frame.width) / 16;
     let workers = workers.min(mb_rows).max(1);
+    let mut vectors = vec![(0, 0); mb_rows * mb_cols];
     if workers == 1 {
         let mut writer = BitWriter::new();
-        for row in 0..mb_rows {
-            encode_row(&mut writer, frame, reference, recon, row, coding);
+        for (row, row_vectors) in vectors.chunks_mut(mb_cols.max(1)).enumerate() {
+            encode_row(
+                &mut writer,
+                frame,
+                (reference, previous),
+                recon,
+                (row, row_vectors),
+                coding,
+            );
         }
         out.extend_from_slice(&writer.finish());
-        return Ok(());
+        return Ok(vectors);
     }
     let per_band = mb_rows.div_ceil(workers);
     let bands: Vec<std::ops::Range<usize>> = (0..workers)
         .map(|band| (band * per_band).min(mb_rows)..((band + 1) * per_band).min(mb_rows))
         .filter(|rows| !rows.is_empty())
         .collect();
-    let encoded: Vec<Option<(Vec<u8>, Frame420)>> = std::thread::scope(|scope| {
+    #[allow(clippy::type_complexity)]
+    let encoded: Vec<Option<(Vec<u8>, Frame420, Vec<(i32, i32)>)>> = std::thread::scope(|scope| {
         let handles: Vec<_> = bands
             .iter()
             .map(|rows| {
@@ -859,10 +910,18 @@ fn encode_slices(
                 scope.spawn(move || {
                     let mut writer = BitWriter::new();
                     let mut band_recon = empty_frame(frame.width, frame.height);
-                    for row in rows {
-                        encode_row(&mut writer, frame, reference, &mut band_recon, row, coding);
+                    let mut band_vectors = vec![(0, 0); rows.len() * mb_cols];
+                    for (row, row_vectors) in rows.zip(band_vectors.chunks_mut(mb_cols.max(1))) {
+                        encode_row(
+                            &mut writer,
+                            frame,
+                            (reference, previous),
+                            &mut band_recon,
+                            (row, row_vectors),
+                            coding,
+                        );
                     }
-                    (writer.finish(), band_recon)
+                    (writer.finish(), band_recon, band_vectors)
                 })
             })
             .collect();
@@ -873,9 +932,12 @@ fn encode_slices(
     });
     let (width, chroma_width) = (usize::from(frame.width), usize::from(frame.width) / 2);
     for (rows, band) in bands.iter().zip(encoded) {
-        let (bytes, band_recon) =
+        let (bytes, band_recon, band_vectors) =
             band.ok_or_else(|| EncodeError("a slice thread failed".to_string()))?;
         out.extend_from_slice(&bytes);
+        if let Some(slot) = vectors.get_mut(rows.start * mb_cols..rows.end * mb_cols) {
+            slot.copy_from_slice(band_vectors.get(..slot.len()).unwrap_or_default());
+        }
         copy_rows(
             &band_recon.y,
             &mut recon.y,
@@ -895,7 +957,7 @@ fn encode_slices(
             rows.start * 8..rows.end * 8,
         );
     }
-    Ok(())
+    Ok(vectors)
 }
 
 /// Most threads one picture's slices use.
@@ -918,13 +980,14 @@ fn copy_rows(from: &[u8], to: &mut [u8], width: usize, lines: std::ops::Range<us
     }
 }
 
-/// Encodes macroblock row `row` as one slice: intra without a reference, else P.
+/// Encodes macroblock row `row` as one slice: intra without a reference, else P (`previous`: the last picture's
+/// vectors, M6.394); each macroblock's vector into `vectors`.
 fn encode_row(
     writer: &mut BitWriter,
     frame: &Frame420,
-    reference: Option<&Frame420>,
+    (reference, previous): (Option<&Frame420>, &[(i32, i32)]),
     recon: &mut Frame420,
-    row: usize,
+    (row, vectors): (usize, &mut [(i32, i32)]),
     coding: Coding,
 ) {
     let mb_cols = usize::from(frame.width) / 16;
@@ -951,10 +1014,11 @@ fn encode_row(
             let mut pmv_y = 0i32;
             let mut skipped = 0u32;
             for col in 0..mb_cols {
-                encode_p_macroblock(
+                let temporal = previous.get(row * mb_cols + col).copied().unwrap_or((0, 0));
+                let chosen = encode_p_macroblock(
                     writer,
                     frame,
-                    reference,
+                    (reference, temporal),
                     recon,
                     col * 16,
                     y,
@@ -967,6 +1031,9 @@ fn encode_row(
                     // A slice's first and last macroblocks are always coded (13818-2 6.3.16).
                     col > 0 && col + 1 < mb_cols,
                 );
+                if let Some(slot) = vectors.get_mut(col) {
+                    *slot = chosen;
+                }
             }
         }
     }
@@ -1124,7 +1191,7 @@ fn write_picture_coding_extension(
     picture_type: PictureType,
     f_code: u8,
     (top_field_first, repeat_first_field): (bool, bool),
-    interlaced: bool,
+    (interlaced, field_tools): (bool, bool),
 ) {
     let (f00, f01) = match picture_type {
         PictureType::I => (15, 15),
@@ -1140,14 +1207,16 @@ fn write_picture_coding_extension(
     writer.write_bits(0, 2); // intra_dc_precision: 8 bits
     writer.write_bits(3, 2); // picture_structure: frame
     writer.write_bits(u32::from(top_field_first), 1);
-    // frame_pred_frame_dct: 0 lets each macroblock choose frame or field DCT (with frame prediction).
-    writer.write_bits(u32::from(!interlaced), 1);
+    // frame_pred_frame_dct: 0 lets each macroblock choose frame or field DCT (with frame prediction); an
+    // interlaced picture coded with frame tools only keeps 1 (M12.26).
+    writer.write_bits(u32::from(!field_tools), 1);
     writer.write_bits(0, 1); // concealment_motion_vectors
     writer.write_bits(0, 1); // q_scale_type: linear
     writer.write_bits(1, 1); // intra_vlc_format: table one (B.15) for intra AC coefficients
     writer.write_bits(0, 1); // alternate_scan
     writer.write_bits(u32::from(repeat_first_field), 1);
-    writer.write_bits(1, 1); // chroma_420_type
+    // chroma_420_type: as progressive_frame (13818-2 6.3.10; M6.394).
+    writer.write_bits(u32::from(!interlaced), 1);
     writer.write_bits(u32::from(!interlaced), 1); // progressive_frame
     writer.write_bits(0, 1); // composite_display_flag
 }
@@ -1326,7 +1395,7 @@ fn reverse_cbp(cbp: u8) -> u8 {
 fn encode_p_macroblock(
     writer: &mut BitWriter,
     cur: &Frame420,
-    reference: &Frame420,
+    (reference, temporal): (&Frame420, (i32, i32)),
     recon: &mut Frame420,
     x: usize,
     y: usize,
@@ -1337,15 +1406,17 @@ fn encode_p_macroblock(
     pmv_y: &mut i32,
     skipped: &mut u32,
     can_skip: bool,
-) {
+) -> (i32, i32) {
     let (qs, f_code) = (coding.qs, coding.f_code);
+    // The search starts from the best of no motion, the vector before this one, and (M6.394) the last picture's
+    // vector here: started from no motion alone, interlaced pictures fell into vectors that take one field for the
+    // other.
     let (dx, dy, sad) = motion::search_fast(
         cur,
         reference,
-        x,
-        y,
+        (x, y),
         coding.search,
-        (*pmv_x / 2, *pmv_y / 2),
+        &[(*pmv_x / 2, *pmv_y / 2), (temporal.0 / 2, temporal.1 / 2)],
     );
     // To half a pixel around the best whole-pixel vector (a low quality keeps whole pixels).
     let (mv_x, mv_y, sad) = if coding.half_pel {
@@ -1373,7 +1444,7 @@ fn encode_p_macroblock(
         *prev_intra = true;
         *pmv_x = 0;
         *pmv_y = 0;
-        return;
+        return (0, 0);
     }
 
     let (pred_y, pred_cb, pred_cr) = motion::predict(reference, x, y, mv_x, mv_y);
@@ -1521,6 +1592,7 @@ fn encode_p_macroblock(
     }
 
     *prev_intra = false;
+    (mv_x, mv_y)
 }
 
 fn block8x8(plane: &[u8], width: usize, x: usize, y: usize) -> [u8; 64] {
@@ -1823,8 +1895,14 @@ mod tests {
                 half_pel: true,
                 field: false,
             };
-            encode_slices(frame, reference, &mut recon, (coding, workers), &mut out)
-                .map(|()| (out, recon))
+            encode_slices(
+                frame,
+                (reference, &[]),
+                &mut recon,
+                (coding, workers),
+                &mut out,
+            )
+            .map(|_| (out, recon))
         };
         let (intra, intra_recon) = encode(&first, None, 1)?;
         for workers in [2, 7, 30] {

@@ -4,11 +4,13 @@
 //!
 //! The interpreter runs the commands the Blu-ray build writes (BD-ROM Part 3, the HDMV navigation commands): the
 //! branches (GoTo, JumpObject, JumpTitle, PlayPL, PlayPL at a mark), the compares, the GPR Set commands
-//! (Move, Add, Sub) and the SetSystem commands SetStream and SetButtonPage. Others are an error. A movie object
-//! that plays a playlist waits there; when the playlist ends ([`BdVm::finish`]) the object goes on from the next
-//! command. A menu is the interactive composition of the playing playlist's clip: the arrows move between the
-//! buttons by their neighbours, Enter runs the button's commands. A pop-up composition is shown with the pop-up
-//! key over the playing title.
+//! (Move, Add, Sub, Mul) and the SetSystem commands SetStream and SetButtonPage. Others are an error. A movie
+//! object that plays a playlist waits there; when the playlist ends ([`BdVm::finish`]) the object goes on from the
+//! next command. A menu is the interactive composition of the playing playlist's clip: the arrows move between the
+//! buttons by their neighbours, Enter runs the button's commands. A button's SetButtonPage turns the menu to that
+//! page (and button) at once (M10.25), and a button that is selected when a menu or page comes up and has
+//! auto-action runs its commands then (a menu's pages in one composition start with such a button that picks the
+//! page). A pop-up composition is shown with the pop-up key over the playing title.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -25,6 +27,9 @@ use crate::{Key, VmError};
 const IG_SCAN_BYTES: u64 = 16 * 1024 * 1024;
 /// How many commands one key press may run before the navigation counts as looping.
 const MAX_STEPS: usize = 100_000;
+/// How many auto-action buttons may run one after another as menus and pages come up before the navigation counts
+/// as looping.
+const MAX_AUTO: usize = 1_000;
 /// The GPRs an HDMV player has.
 const GPR_COUNT: u32 = 4096;
 /// No button.
@@ -240,6 +245,7 @@ enum SetOp {
     Move,
     Add,
     Sub,
+    Mul,
 }
 
 /// An operand: an immediate value, or a register (GPR, or PSR with its flag).
@@ -302,6 +308,7 @@ fn decode(command: &disccraft_bdmv::mobj::NavCommand) -> Result<Command, VmError
                 1 => SetOp::Move,
                 3 => SetOp::Add,
                 4 => SetOp::Sub,
+                5 => SetOp::Mul,
                 _ => return Err(unsupported()),
             };
             if immediate_dst {
@@ -323,6 +330,8 @@ fn decode(command: &disccraft_bdmv::mobj::NavCommand) -> Result<Command, VmError
 pub struct BdVm<'a> {
     disc: &'a BdDisc,
     state: BdState,
+    /// A menu or a page has just come up: its selected button runs when it has auto-action ([`BdVm::settle`]).
+    shown: bool,
 }
 
 /// What running commands came to.
@@ -359,14 +368,42 @@ impl<'a> BdVm<'a> {
                 languages,
                 ..BdState::default()
             },
+            shown: false,
         };
         vm.run_object(disc.first_playback, 0)?;
+        vm.settle()?;
         Ok(vm)
     }
 
     /// Go on from `state` (a preview between key presses).
     pub fn restore(disc: &'a BdDisc, state: BdState) -> Self {
-        Self { disc, state }
+        Self {
+            disc,
+            state,
+            shown: false,
+        }
+    }
+
+    /// A menu or page that has just come up runs its selected button when that has auto-action (as a player does
+    /// when the button is selected), and so on for the menus and pages that brings up.
+    fn settle(&mut self) -> Result<(), VmError> {
+        for _ in 0..MAX_AUTO {
+            if !std::mem::take(&mut self.shown) {
+                return Ok(());
+            }
+            let Some((menu, view)) = self.menu() else {
+                return Ok(());
+            };
+            let auto = menu
+                .pages
+                .get(usize::from(view.page))
+                .and_then(|page| page.buttons.iter().find(|button| button.id == view.button))
+                .is_some_and(|button| button.auto_action);
+            if auto {
+                self.activate(view.page, view.button)?;
+            }
+        }
+        Err(VmError::Invalid("the navigation loops".to_string()))
     }
 
     /// Where the disc is and what it keeps.
@@ -401,6 +438,11 @@ impl<'a> BdVm<'a> {
     ///
     /// Commands outside the supported subset, a missing object, title or playlist, or navigation that loops.
     pub fn press(&mut self, key: Key) -> Result<(), VmError> {
+        self.press_key(key)?;
+        self.settle()
+    }
+
+    fn press_key(&mut self, key: Key) -> Result<(), VmError> {
         let Some((menu, view)) = self.menu() else {
             return Ok(());
         };
@@ -471,12 +513,10 @@ impl<'a> BdVm<'a> {
     /// As [`BdVm::press`].
     pub fn finish(&mut self) -> Result<(), VmError> {
         match self.state.resume.take() {
-            Some((object, line)) => self.run_object(object, line),
-            None => {
-                self.stop();
-                Ok(())
-            }
+            Some((object, line)) => self.run_object(object, line)?,
+            None => self.stop(),
         }
+        self.settle()
     }
 
     /// The Top Menu key: the disc's top menu object.
@@ -485,7 +525,8 @@ impl<'a> BdVm<'a> {
     ///
     /// As [`BdVm::press`].
     pub fn top_menu(&mut self) -> Result<(), VmError> {
-        self.run_object(self.disc.top_menu, 0)
+        self.run_object(self.disc.top_menu, 0)?;
+        self.settle()
     }
 
     /// The pop-up menu key: shows or hides the playing playlist's pop-up menu. Without one nothing happens.
@@ -620,6 +661,7 @@ impl<'a> BdVm<'a> {
                         SetOp::Move => value,
                         SetOp::Add => current.wrapping_add(value),
                         SetOp::Sub => current.saturating_sub(value),
+                        SetOp::Mul => current.wrapping_mul(value),
                     };
                     self.set_register(register, result)?;
                 }
@@ -637,17 +679,55 @@ impl<'a> BdVm<'a> {
                     }
                 }
                 Command::SetButtonPage(button, page) => {
-                    if button & 0x8000_0000 != 0 {
-                        self.state.button_page.0 =
-                            Some(u16::try_from(button & 0xFFFF).unwrap_or(NO_BUTTON));
-                    }
-                    if page & 0x8000_0000 != 0 {
-                        self.state.button_page.1 = Some(u16::try_from(page & 0xFFFF).unwrap_or(0));
+                    let button = (button & 0x8000_0000 != 0)
+                        .then(|| u16::try_from(button & 0xFFFF).unwrap_or(NO_BUTTON));
+                    let page = (page & 0x8000_0000 != 0)
+                        .then(|| u16::try_from(page & 0xFFFF).unwrap_or(0));
+                    // A button's: the menu on screen turns to that page and button at once (M10.25). A movie
+                    // object's: for the menu its next playlist brings up.
+                    if object.is_none() && self.menu().is_some() {
+                        self.turn_page(button, page);
+                    } else {
+                        if button.is_some() {
+                            self.state.button_page.0 = button;
+                        }
+                        if page.is_some() {
+                            self.state.button_page.1 = page;
+                        }
                     }
                 }
             }
         }
         Err(VmError::Invalid("the navigation loops".to_string()))
+    }
+
+    /// The menu on screen turns to `page` (when it has it; else stays on its page) with `button` selected (when the
+    /// page has it; else the page's default, else its first).
+    fn turn_page(&mut self, button: Option<u16>, page: Option<u16>) {
+        let Some((menu, view)) = self.menu() else {
+            return;
+        };
+        let index = page
+            .filter(|page| usize::from(*page) < menu.pages.len())
+            .and_then(|page| u8::try_from(page).ok())
+            .unwrap_or(view.page);
+        let Some(shown) = menu.pages.get(usize::from(index)) else {
+            return;
+        };
+        let has = |id: u16| shown.buttons.iter().any(|found| found.id == id);
+        let selected = button
+            .filter(|id| has(*id))
+            .or(Some(shown.default_selected).filter(|id| has(*id)))
+            .or_else(|| shown.buttons.first().map(|found| found.id));
+        if let Some(selected) = selected
+            && let Some(view) = self.state.menu.as_mut()
+        {
+            let changed = view.page != index || view.button != selected;
+            view.page = index;
+            view.button = selected;
+            // Another page or button comes up selected: its auto-action runs.
+            self.shown |= changed;
+        }
     }
 
     fn object_commands(
@@ -709,6 +789,8 @@ impl<'a> BdVm<'a> {
                 open: false,
             })
         });
+        // A menu comes up: its selected button's auto-action runs (settle).
+        self.shown = self.state.menu.is_some();
         Ok(())
     }
 
@@ -726,6 +808,7 @@ impl<'a> BdVm<'a> {
                         }
                 }
                 10 => u32::from(self.state.menu.map_or(NO_BUTTON, |view| view.button)),
+                11 => u32::from(self.state.menu.map_or(0, |view| view.page)),
                 _ => 0,
             },
             Operand::Register(register) => self.state.gpr.get(&register).copied().unwrap_or(0),
@@ -854,6 +937,154 @@ mod tests {
             ],
             playlists,
         }
+    }
+
+    /// A menu of two pages in one composition, as the build writes a menu's pages (M10.26): its page 0 has one
+    /// auto-action button that turns to the page (and button) GPR 4 names (page × 256 + button + 1, or page × 256
+    /// for the page's default button). Page 1's button turns to page 2; page 2's first button turns back to page
+    /// 1, its second plays the title. The menu object makes GPR 4 one of those values (page 1 when it is not), plays
+    /// the menu, then puts the page and button on screen back into GPR 4 and plays it again.
+    fn paged_disc() -> BdDisc {
+        use disccraft_bdmv::mobj::PSR_OPERAND;
+        let dispatcher = IgButton {
+            auto_action: true,
+            ..button(
+                0,
+                0,
+                vec![
+                    NavCommand::if_eq(4, 0x0201),
+                    NavCommand::set_button_page(1, 2),
+                    NavCommand::if_eq(4, 0x0101),
+                    NavCommand::set_button_page(0, 1),
+                    NavCommand::if_eq(4, 0x0100),
+                    NavCommand::set_page(1),
+                    NavCommand::if_eq(4, 0x0200),
+                    NavCommand::set_page(2),
+                ],
+            )
+        };
+        let page = |id: u8, buttons: Vec<IgButton>| IgPage {
+            id,
+            default_selected: 0,
+            palette_id: id,
+            buttons,
+        };
+        let menu = BdMenu {
+            popup: false,
+            pages: vec![
+                page(0, vec![dispatcher]),
+                page(
+                    1,
+                    vec![button(
+                        0,
+                        0,
+                        vec![
+                            NavCommand::set_reg(4, 0x0201),
+                            NavCommand::set_button_page(1, 2),
+                        ],
+                    )],
+                ),
+                page(
+                    2,
+                    vec![
+                        button(0, 1, vec![NavCommand::set_page(1)]),
+                        button(1, 0, vec![NavCommand::jump_title(1)]),
+                    ],
+                ),
+            ],
+        };
+        let mut playlists = BTreeMap::new();
+        let _ = playlists.insert(
+            1,
+            BdPlaylist {
+                marks: 1,
+                ..BdPlaylist::default()
+            },
+        );
+        let _ = playlists.insert(
+            2,
+            BdPlaylist {
+                marks: 1,
+                menu: Some(menu),
+                ..BdPlaylist::default()
+            },
+        );
+        BdDisc {
+            first_playback: 0,
+            top_menu: 1,
+            titles: vec![2],
+            objects: vec![
+                object(vec![NavCommand::jump_object(3)]),
+                object(vec![
+                    NavCommand::set_reg(4, 0x0200),
+                    NavCommand::jump_object(3),
+                ]),
+                object(vec![NavCommand::play_pl(1), NavCommand::jump_object(3)]),
+                // The menu: GPR 4 one of the dispatcher's values (else page 1), play, then the page and button on
+                // screen back into GPR 4, and again.
+                object(vec![
+                    NavCommand::if_eq(4, 0x0201),
+                    NavCommand::goto_line(9),
+                    NavCommand::if_eq(4, 0x0101),
+                    NavCommand::goto_line(9),
+                    NavCommand::if_eq(4, 0x0100),
+                    NavCommand::goto_line(9),
+                    NavCommand::if_eq(4, 0x0200),
+                    NavCommand::goto_line(9),
+                    NavCommand::set_reg(4, 0x0100),
+                    NavCommand::play_pl(2),
+                    NavCommand::move_reg(4, PSR_OPERAND | 11),
+                    NavCommand::mul_reg(4, 256),
+                    NavCommand::add_reg_reg(4, PSR_OPERAND | 10),
+                    NavCommand::add_reg(4, 1),
+                    NavCommand::goto_line(0),
+                ]),
+            ],
+            playlists,
+        }
+    }
+
+    /// M10.25: a menu's page 0 runs its auto-action button as it comes up, which turns to the page GPR 4 names; a
+    /// button's Set_ButtonPage turns the menu on screen to another page at once (the playlist plays on); PSR 11
+    /// is the page on screen and Set_Mul multiplies.
+    #[test]
+    fn a_buttons_set_button_page_turns_the_page_on_screen() -> Result<(), crate::VmError> {
+        let disc = paged_disc();
+        let mut vm = BdVm::start(&disc)?;
+        let view = |vm: &BdVm<'_>| vm.state().menu.map(|view| (view.page, view.button));
+        // GPR 4 is 0: the dispatcher turns to page 1.
+        assert_eq!(view(&vm), Some((1, 0)));
+        assert_eq!(
+            vm.state().location,
+            BdLocation::Playing {
+                playlist: 2,
+                mark: 0
+            }
+        );
+        // Page 1's button: page 2, its second button, the same play of the menu.
+        vm.press(Key::Enter)?;
+        assert_eq!(view(&vm), Some((2, 1)));
+        assert_eq!(
+            vm.state().location,
+            BdLocation::Playing {
+                playlist: 2,
+                mark: 0
+            }
+        );
+        assert_eq!(vm.state().gpr.get(&4), Some(&0x0201));
+        // Back to page 1 (its default button).
+        vm.press(Key::Up)?;
+        vm.press(Key::Enter)?;
+        assert_eq!(view(&vm), Some((1, 0)));
+        // The menu plays to its end: page 1, button 0 go into GPR 4 (1 × 256 + 0 + 1), and the next play comes
+        // back to them.
+        vm.finish()?;
+        assert_eq!(vm.state().gpr.get(&4), Some(&0x0101));
+        assert_eq!(view(&vm), Some((1, 0)));
+        // The top menu asks for page 2 (its default button).
+        vm.top_menu()?;
+        assert_eq!(view(&vm), Some((2, 0)));
+        Ok(())
     }
 
     /// M6.369: a player with languages of its own plays a playlist's first audio and subtitle streams in them

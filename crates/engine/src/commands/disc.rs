@@ -132,6 +132,16 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "disc.setBlurayCodec",
+        label: "Blu-ray のコーデックを設定",
+        menu: &["ディスク"],
+        shortcut: None,
+        params: r#"{"codec": "auto"|"h264"|"mpeg2"}"#,
+        enabled: always_enabled,
+        run: run_set_bluray_codec,
+        journal: true,
+    },
+    CommandSpec {
         id: "disc.setCapacity",
         label: "容量を設定",
         menu: &["ディスク"],
@@ -371,6 +381,15 @@ fn run_set_bluray_video(session: &mut Session, params: &Value) -> CommandResult 
     Ok(empty_object())
 }
 
+/// Encore's Project Settings ▸ Codec of a Blu-ray disc (M12.28).
+fn run_set_bluray_codec(session: &mut Session, params: &Value) -> CommandResult {
+    let id = crate::params::req_str(params, "codec")?;
+    let codec = disccraft_project::BdCodec::from_id(&id)
+        .ok_or_else(|| "parameter \"codec\" must be auto, h264 or mpeg2".to_string())?;
+    session.project.settings.bd_codec = codec;
+    Ok(empty_object())
+}
+
 fn run_set_capacity(session: &mut Session, params: &Value) -> CommandResult {
     let value = req_value(params, "capacity")?;
     let capacity: Capacity = serde_json::from_value(value.clone())
@@ -587,6 +606,42 @@ mod tests {
             let read: disccraft_project::BdVideo = serde_json::from_value(json!(old))?;
             assert_eq!(read.id(), now);
         }
+        Ok(())
+    }
+
+    /// M12.28: the disc's codec is set by its name, kept in the project file (not written while automatic), refused
+    /// by an unknown name, and undone.
+    #[test]
+    fn the_blu_ray_codec_is_set_kept_and_undone() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::{BdCodec, BdVideo};
+        let mut session = Session::new();
+        assert_eq!(session.project.settings.bd_codec, BdCodec::Auto);
+        let text = serde_json::to_string(&session.project.settings)?;
+        assert!(!text.contains("bdCodec"), "{text}");
+        session.execute("disc.setBlurayCodec", &json!({"codec": "h264"}))?;
+        assert_eq!(session.project.settings.bd_codec, BdCodec::H264);
+        let text = serde_json::to_string(&session.project.settings)?;
+        assert!(text.contains("\"bdCodec\":\"h264\""), "{text}");
+        let read: disccraft_project::DiscSettings = serde_json::from_str(&text)?;
+        assert_eq!(read.bd_codec, BdCodec::H264);
+        assert!(
+            session
+                .execute("disc.setBlurayCodec", &json!({"codec": "vc1"}))
+                .is_err()
+        );
+        // 1080i is MPEG-2 unless the disc asks for H.264; the progressive formats are H.264 whatever it asks.
+        assert!(!BdCodec::H264.mpeg2(BdVideo::Hd1080i50));
+        assert!(BdCodec::Auto.mpeg2(BdVideo::Hd1080i50));
+        assert!(BdCodec::Mpeg2.mpeg2(BdVideo::Hd1080i59));
+        assert!(!BdCodec::Mpeg2.mpeg2(BdVideo::Hd720p59));
+        for codec in BdCodec::ALL {
+            assert_eq!(
+                serde_json::to_value(codec)?,
+                serde_json::Value::String(codec.id().to_string())
+            );
+        }
+        session.execute("edit.undo", &json!({}))?;
+        assert_eq!(session.project.settings.bd_codec, BdCodec::Auto);
         Ok(())
     }
 

@@ -3,8 +3,8 @@
 use crate::MenuError;
 use disccraft_project::{
     AssetId, Button, DropShadow, MAX_TEXT_SCALE, MAX_TEXT_SIZE, MIN_TEXT_SCALE, MIN_TEXT_SIZE,
-    Menu, MenuBackground, MenuText, Orientation, Project, Rect, TextAntialias, TextFormat,
-    TextScript,
+    Menu, MenuBackground, MenuText, Orientation, Project, Rect, SpanStyle, TextAntialias,
+    TextFormat, TextScript,
 };
 use filmcraft_text::{
     Caps, Layout, Mask, ParagraphStyle, StyleRun, TextStyle, families, layout, layout_rich, render,
@@ -57,7 +57,11 @@ pub(crate) fn draw_background(
             Ok(())
         }
         MenuBackground::Image { asset } => {
-            let source = load_image(project, *asset, width, height)?;
+            // A PSD shown by page (M10.27): the layers every page shows.
+            let source = match psd_pages(project, menu)? {
+                Some(pages) => rgba_source(pages.shared.clone())?,
+                None => load_image(project, *asset, width, height)?,
+            };
             scale_bilinear(&source, width, height, rgb);
             Ok(())
         }
@@ -65,6 +69,179 @@ pub(crate) fn draw_background(
         MenuBackground::Video { .. } => {
             fill_color(rgb, [0, 0, 0]);
             Ok(())
+        }
+    }
+}
+
+/// Draws over the frame what the menu's page of its PSD background draws (M10.27, Encore's `(#)` groups: page 0
+/// the top level's buttons, page n the n-th group), stretched as the background is. Nothing for a menu that names
+/// no page or whose background is no PSD.
+pub(crate) fn draw_psd_page(
+    project: &Project,
+    menu: &Menu,
+    width: u16,
+    height: u16,
+    rgb: &mut [u8],
+) -> Result<(), MenuError> {
+    let Some(pages) = psd_pages(project, menu)? else {
+        return Ok(());
+    };
+    let Some(page) = menu
+        .psd_page
+        .and_then(|page| pages.pages.get(usize::from(page)))
+    else {
+        return Ok(());
+    };
+    blend_scaled(&rgba_source(page.clone())?, width, height, rgb);
+    Ok(())
+}
+
+/// Where the menu's page of its PSD background draws (M10.27), in the frame: the bounds of what the page's own
+/// layers cover, as [`draw_psd_page`] stretches them; `None` when it draws nothing.
+pub(crate) fn psd_page_rect(
+    project: &Project,
+    menu: &Menu,
+    width: u16,
+    height: u16,
+) -> Option<Rect> {
+    let pages = psd_pages(project, menu).ok().flatten()?;
+    let page = pages.pages.get(usize::from(menu.psd_page?))?;
+    let (w, h) = (
+        usize::try_from(page.width).ok()?,
+        usize::try_from(page.height).ok()?,
+    );
+    let mut bounds: Option<(usize, usize, usize, usize)> = None;
+    for (index, pixel) in page.rgba.as_chunks::<4>().0.iter().enumerate() {
+        if pixel[3] == 0 {
+            continue;
+        }
+        let (x, y) = (index % w.max(1), index / w.max(1));
+        bounds = Some(match bounds {
+            None => (x, y, x, y),
+            Some((x1, y1, x2, y2)) => (x1.min(x), y1.min(y), x2.max(x), y2.max(y)),
+        });
+    }
+    let (x1, y1, x2, y2) = bounds?;
+    // Stretched to the frame, rounded outwards.
+    let scale = |value: usize, from: usize, to: u16| -> u64 {
+        u64::try_from(value).unwrap_or(u64::MAX) * u64::from(to)
+            / u64::try_from(from.max(1)).unwrap_or(1)
+    };
+    let left = scale(x1, w, width);
+    let top = scale(y1, h, height);
+    let right = scale(x2 + 1, w, width)
+        .saturating_add(1)
+        .min(u64::from(width));
+    let bottom = scale(y2 + 1, h, height)
+        .saturating_add(1)
+        .min(u64::from(height));
+    Some(Rect {
+        x: u16::try_from(left).ok()?,
+        y: u16::try_from(top).ok()?,
+        w: u16::try_from(right.saturating_sub(left)).ok()?,
+        h: u16::try_from(bottom.saturating_sub(top)).ok()?,
+    })
+}
+
+/// The pictures by page of the menu's PSD background (M10.27), when the menu names a page and its background is a
+/// layered document; kept for the last few files (a menu is drawn again and again as it is edited).
+fn psd_pages(
+    project: &Project,
+    menu: &Menu,
+) -> Result<Option<Arc<disccraft_photo::PsdPages>>, MenuError> {
+    type Kept = Vec<(
+        (std::path::PathBuf, u64, Option<std::time::SystemTime>),
+        Arc<disccraft_photo::PsdPages>,
+    )>;
+    static KEPT: std::sync::Mutex<Kept> = std::sync::Mutex::new(Vec::new());
+    if menu.psd_page.is_none() {
+        return Ok(None);
+    }
+    let MenuBackground::Image { asset } = &menu.background else {
+        return Ok(None);
+    };
+    let Some(asset) = project.assets.get(asset) else {
+        return Ok(None);
+    };
+    let path = Path::new(&asset.path);
+    if !disccraft_photo::is_document(path) {
+        return Ok(None);
+    }
+    let metadata = std::fs::metadata(path).ok();
+    let key = (
+        path.to_path_buf(),
+        metadata.as_ref().map_or(0, std::fs::Metadata::len),
+        metadata.and_then(|metadata| metadata.modified().ok()),
+    );
+    if let Ok(kept) = KEPT.lock()
+        && let Some((_, pages)) = kept.iter().find(|(known, _)| *known == key)
+    {
+        return Ok(Some(Arc::clone(pages)));
+    }
+    let pages = Arc::new(
+        disccraft_photo::load_menu_pages(path)
+            .map_err(|error| MenuError::Invalid(error.to_string()))?,
+    );
+    if let Ok(mut kept) = KEPT.lock() {
+        kept.retain(|(known, _)| known.0 != key.0);
+        kept.push((key, Arc::clone(&pages)));
+        if kept.len() > 4 {
+            let _ = kept.remove(0);
+        }
+    }
+    Ok(Some(pages))
+}
+
+/// Draws the RGBA picture `src` stretched over the frame onto `rgb` by its opacity (bilinear, on premultiplied
+/// colours so transparent pixels do not darken the edges).
+fn blend_scaled(src: &SourceImage, dst_w: u16, dst_h: u16, rgb: &mut [u8]) {
+    if src.channels != 4 || src.width == 0 || src.height == 0 {
+        return;
+    }
+    let (dst_w, dst_h) = (usize::from(dst_w), usize::from(dst_h));
+    let pixel = |x: usize, y: usize| -> [f32; 4] {
+        let at = y
+            .saturating_mul(src.width)
+            .saturating_add(x)
+            .saturating_mul(4);
+        match src.data.get(at..at + 4) {
+            Some(&[r, g, b, a]) => {
+                let a = f32::from(a) / 255.0;
+                [f32::from(r) * a, f32::from(g) * a, f32::from(b) * a, a]
+            }
+            _ => [0.0; 4],
+        }
+    };
+    for dy in 0..dst_h {
+        let sy = dest_to_source(dy, dst_h, src.height);
+        // sy is clamped to [0, height - 1], so the cast cannot wrap.
+        let y0 = sy.floor() as usize;
+        let y1 = y0.saturating_add(1).min(src.height - 1);
+        let fy = sy - y0 as f32;
+        for dx in 0..dst_w {
+            let sx = dest_to_source(dx, dst_w, src.width);
+            let x0 = sx.floor() as usize;
+            let x1 = x0.saturating_add(1).min(src.width - 1);
+            let fx = sx - x0 as f32;
+            let (p00, p10, p01, p11) = (pixel(x0, y0), pixel(x1, y0), pixel(x0, y1), pixel(x1, y1));
+            let mut mixed = [0.0_f32; 4];
+            for (channel, value) in mixed.iter_mut().enumerate() {
+                let top = p00[channel] + (p10[channel] - p00[channel]) * fx;
+                let bottom = p01[channel] + (p11[channel] - p01[channel]) * fx;
+                *value = top + (bottom - top) * fy;
+            }
+            let alpha = mixed[3];
+            if alpha <= 0.0 {
+                continue;
+            }
+            let at = (dy * dst_w + dx) * 3;
+            if let Some(out) = rgb.get_mut(at..at + 3) {
+                for (channel, value) in out.iter_mut().enumerate() {
+                    let blended = mixed[channel] + f32::from(*value) * (1.0 - alpha);
+                    // Clamped to a byte.
+                    *value = blended.round().clamp(0.0, 255.0) as u8;
+                }
+            }
         }
     }
 }
@@ -218,7 +395,7 @@ pub(crate) fn draw_texts(menu: &Menu, width: u16, height: u16, rgb: &mut [u8]) {
     let sx = squeeze(menu);
     for text in menu.texts.iter().filter(|text| !text.hidden) {
         let family = family_for(text.font.as_deref());
-        let Some((pieces, _, _)) = text_layout(text, &family, sx) else {
+        let Some((pieces, _, _, paints)) = text_layout(text, &family, sx) else {
             continue;
         };
         let (mask, mask_x, mask_y) = crate::text_block::rasterize_pieces(&pieces);
@@ -227,6 +404,12 @@ pub(crate) fn draw_texts(menu: &Menu, width: u16, height: u16, rgb: &mut [u8]) {
             continue;
         }
         let color = text.color.unwrap_or(menu.text_color);
+        let fills = paints.fills(
+            &pieces,
+            (&mask, mask_x, mask_y),
+            color,
+            text.format.antialias,
+        );
         blend_shadow(
             &mask,
             mask_x,
@@ -242,7 +425,9 @@ pub(crate) fn draw_texts(menu: &Menu, width: u16, height: u16, rgb: &mut [u8]) {
             rgb,
             (width, height),
         );
-        blend_mask(&mask, mask_x, mask_y, color, rgb, width, height);
+        for (fill, x, y, color) in &fills {
+            blend_mask(fill, *x, *y, *color, rgb, width, height);
+        }
         blend_effects(
             crate::effects::over(&mask, mask_x, mask_y, &text.effects),
             rgb,
@@ -285,7 +470,7 @@ pub(crate) fn text_rect(menu: &Menu, text: &MenuText) -> Rect {
     let family = family_for(text.font.as_deref());
     let sx = squeeze(menu);
     let (w, h) = match text_layout(text, &family, sx) {
-        Some((_, (w, h), _)) => (to_side(w), to_side(h)),
+        Some((_, (w, h), _, _)) => (to_side(w), to_side(h)),
         None => (size, size),
     };
     // A text standing up (turned on its side, or vertical) is at least its size wide.
@@ -318,15 +503,271 @@ fn to_side(length: f32) -> u16 {
     }
 }
 
+/// The parts of a text drawn in colours of their own (M6.389: characters given a colour in the Character panel):
+/// byte ranges of its (single) laid-out piece's string with their colours, and the colour of each of its
+/// decorations that has one (parallel to the layout's underlines).
+#[derive(Default)]
+struct Paints {
+    /// Byte ranges of the laid-out string and their colours.
+    glyphs: Vec<(std::ops::Range<usize>, [u8; 3])>,
+    /// The colour of each underline or strikethrough, `None`: the text's.
+    decorations: Vec<Option<[u8; 3]>>,
+    /// A vertical text's: the colour of each of its pieces, `None`: the text's.
+    pieces: Vec<Option<[u8; 3]>>,
+}
+
+impl Paints {
+    /// The colour of the character at byte `at` of the laid-out string (`None`: the text's).
+    fn color_at(&self, at: usize) -> Option<[u8; 3]> {
+        self.glyphs
+            .iter()
+            .find(|(range, _)| range.contains(&at))
+            .map(|(_, color)| *color)
+    }
+
+    /// What is drawn in each colour: the whole mask in `color` when no character has a colour of its own, else
+    /// the characters (and decorations) in the text's colour, then those in each other one, each rasterized from
+    /// the single piece.
+    fn fills(
+        &self,
+        pieces: &[crate::text_block::Piece],
+        (mask, x, y): (&Mask, i32, i32),
+        color: [u8; 3],
+        antialias: TextAntialias,
+    ) -> Vec<(Mask, i32, i32, [u8; 3])> {
+        // A vertical text: its pieces by colour.
+        if self.pieces.iter().any(Option::is_some) {
+            let mut colors: Vec<Option<[u8; 3]>> = vec![None];
+            for own in self.pieces.iter().flatten() {
+                if !colors.contains(&Some(*own)) {
+                    colors.push(Some(*own));
+                }
+            }
+            return colors
+                .into_iter()
+                .filter_map(|wanted| {
+                    let part: Vec<crate::text_block::Piece> = pieces
+                        .iter()
+                        .zip(self.pieces.iter().chain(std::iter::repeat(&None)))
+                        .filter(|(_, own)| **own == wanted)
+                        .map(|(piece, _)| piece.clone())
+                        .collect();
+                    let (fill, fx, fy) = crate::text_block::rasterize_pieces(&part);
+                    let fill = antialiased(fill, antialias);
+                    (fill.w > 0 && fill.h > 0).then_some((fill, fx, fy, wanted.unwrap_or(color)))
+                })
+                .collect();
+        }
+        let [(laid, xf)] = pieces else {
+            return vec![(mask.clone(), x, y, color)];
+        };
+        if self.glyphs.is_empty() {
+            return vec![(mask.clone(), x, y, color)];
+        }
+        let mut colors: Vec<Option<[u8; 3]>> = vec![None];
+        for (_, own) in &self.glyphs {
+            if !colors.contains(&Some(*own)) {
+                colors.push(Some(*own));
+            }
+        }
+        colors
+            .into_iter()
+            .filter_map(|wanted| {
+                let mut part = (**laid).clone();
+                part.glyphs
+                    .retain(|glyph| self.color_at(glyph.cluster) == wanted);
+                let kept: Vec<bool> = (0..part.underlines.len())
+                    .map(|index| self.decorations.get(index).copied().flatten() == wanted)
+                    .collect();
+                let mut keep = kept.iter();
+                part.underlines
+                    .retain(|_| keep.next().copied().unwrap_or(wanted.is_none()));
+                let mut keep = kept.iter();
+                part.underline_runs
+                    .retain(|_| keep.next().copied().unwrap_or(wanted.is_none()));
+                if part.glyphs.is_empty() && part.underlines.is_empty() {
+                    return None;
+                }
+                let (fill, fx, fy) = render::rasterize(&part, xf);
+                let fill = antialiased(fill, antialias);
+                (fill.w > 0 && fill.h > 0).then_some((fill, fx, fy, wanted.unwrap_or(color)))
+            })
+            .collect()
+    }
+}
+
+/// The family, size, face and format of characters in `span` of a text set in `family`, `size`, `face` and
+/// `format` (M6.390: a vertical text's parts are laid out in them).
+pub(crate) fn span_setting(
+    family: &str,
+    (size, face, format): (f32, Option<&str>, &TextFormat),
+    span: &SpanStyle,
+) -> (String, f32, Option<String>, TextFormat) {
+    let family = span
+        .font
+        .as_deref()
+        .map_or_else(|| family.to_owned(), |font| family_for(Some(font)));
+    let size = span.size.map_or(size, |own| {
+        f32::from(own.clamp(MIN_TEXT_SIZE, MAX_TEXT_SIZE))
+    });
+    let face = span.font_style.clone().or_else(|| face.map(str::to_owned));
+    let mut format = *format;
+    format.bold = span.bold.unwrap_or(format.bold);
+    format.italic = span.italic.unwrap_or(format.italic);
+    format.underline = span.underline.unwrap_or(format.underline);
+    format.strikethrough = span.strikethrough.unwrap_or(format.strikethrough);
+    format.caps = span.caps.unwrap_or(format.caps);
+    format.tracking = span.tracking.unwrap_or(format.tracking);
+    format.baseline = span.baseline.unwrap_or(format.baseline);
+    (family, size, face, format)
+}
+
+/// A text's spans as byte ranges of its text (M6.389).
+fn byte_spans(text: &MenuText) -> Vec<(std::ops::Range<usize>, SpanStyle)> {
+    let mut offsets: Vec<usize> = text.text.char_indices().map(|(at, _)| at).collect();
+    offsets.push(text.text.len());
+    let last = offsets.len().saturating_sub(1);
+    text.spans
+        .iter()
+        .filter_map(|span| {
+            let start = *offsets.get((span.start as usize).min(last))?;
+            let end = *offsets.get((span.end as usize).min(last))?;
+            (start < end).then(|| (start..end, span.style.clone()))
+        })
+        .collect()
+}
+
+/// The parts of `spans` inside `range`, counted from its start.
+fn spans_in(
+    spans: &[(std::ops::Range<usize>, SpanStyle)],
+    range: &std::ops::Range<usize>,
+) -> Vec<(std::ops::Range<usize>, SpanStyle)> {
+    spans
+        .iter()
+        .filter_map(|(span, style)| {
+            let start = span.start.max(range.start);
+            let end = span.end.min(range.end);
+            (start < end).then(|| (start - range.start..end - range.start, style.clone()))
+        })
+        .collect()
+}
+
+/// `spans` (byte ranges of a text) moved onto the text's `lines` (byte ranges of it) laid one after another, each
+/// after a line break.
+fn spans_on_lines(
+    spans: &[(std::ops::Range<usize>, SpanStyle)],
+    lines: &[std::ops::Range<usize>],
+) -> Vec<(std::ops::Range<usize>, SpanStyle)> {
+    let mut moved = Vec::new();
+    let mut at = 0_usize;
+    for line in lines {
+        moved.extend(
+            spans_in(spans, line)
+                .into_iter()
+                .map(|(range, style)| (range.start + at..range.end + at, style)),
+        );
+        at = at.saturating_add(line.len()).saturating_add(1);
+    }
+    moved
+}
+
+/// The layout of a horizontal text whose characters have formatting of their own (M6.389): its lines wrapped with
+/// each line measured as it is set, those past the box's height left out, and the colours of its characters.
+/// (laid, overset, paints).
+fn rich_layout(
+    text: &MenuText,
+    family: &str,
+    (size, face, format): (f32, Option<&str>, &TextFormat),
+    (limit, tall): (Option<f32>, Option<f32>),
+) -> (Arc<Layout>, bool, Paints) {
+    let spans = byte_spans(text);
+    let source = text.text.as_str();
+    let measure = |range: std::ops::Range<usize>| {
+        let line = source.get(range.clone()).unwrap_or("");
+        let laid = formatted_layout_spans(
+            line,
+            family,
+            (size, face, format),
+            (false, &[]),
+            &spans_in(&spans, &range),
+        )
+        .0;
+        let [x0, _, x1, _] = laid.bounds;
+        x1 - x0
+    };
+    let rules = crate::wrap::Rules::of(format);
+    let em = room_em(size, format);
+    let (mut lines, mut room, ranges) = match (limit, format.align) {
+        (Some(limit), disccraft_project::TextAlign::Justify) => {
+            crate::wrap::justify_lines(source, limit, rules, &measure, em)
+        }
+        (limit, _) => {
+            let ranges =
+                crate::wrap::wrap_lines(source, limit.unwrap_or(f32::NAN), rules, &measure);
+            (crate::wrap::joined(source, &ranges), Vec::new(), ranges)
+        }
+    };
+    let laid_spans = spans_on_lines(&spans, &ranges);
+    let mut overset = false;
+    if let Some(tall) = tall {
+        let high = |lines: &str| {
+            let [_, y0, _, y1] = formatted_layout_spans(
+                lines,
+                family,
+                (size, face, format),
+                (false, &room),
+                &laid_spans,
+            )
+            .0
+            .bounds;
+            y1 - y0
+        };
+        let kept = fitting_lines(&lines, tall, &high);
+        if kept < lines.len() {
+            overset = true;
+            lines.truncate(kept);
+            room.retain(|(range, _)| range.end <= kept);
+        }
+    }
+    let (laid, runs) = formatted_layout_spans(
+        &lines,
+        family,
+        (size, face, format),
+        (false, &room),
+        &laid_spans,
+    );
+    let glyphs: Vec<(std::ops::Range<usize>, [u8; 3])> = laid_spans
+        .iter()
+        .filter_map(|(range, style)| Some((range.clone(), style.color?)))
+        .collect();
+    let paints = Paints {
+        decorations: laid
+            .underline_runs
+            .iter()
+            .map(|run| {
+                let start = runs.get(usize::from(*run).checked_sub(1)?)?.start;
+                glyphs
+                    .iter()
+                    .find(|(range, _)| range.contains(&start))
+                    .map(|(_, color)| *color)
+            })
+            .collect(),
+        glyphs,
+        pieces: Vec::new(),
+    };
+    (laid, overset, paints)
+}
+
 /// Lays out a text object: the pieces to draw (each a layout and its transform into the frame; one for a horizontal
-/// text) and the drawn size of its box, whose top-left corner is the text's x, y before a free turn (`sx`: the
-/// horizontal squeeze the text is drawn with).
+/// text), the drawn size of its box, whose top-left corner is the text's x, y before a free turn (`sx`: the
+/// horizontal squeeze the text is drawn with), whether lines are left out of its box, and the colours of its
+/// characters that have their own.
 #[allow(clippy::type_complexity)]
 fn text_layout(
     text: &MenuText,
     family: &str,
     sx: f32,
-) -> Option<(Vec<crate::text_block::Piece>, (f32, f32), bool)> {
+) -> Option<(Vec<crate::text_block::Piece>, (f32, f32), bool, Paints)> {
     if text.text.trim().is_empty() {
         return None;
     }
@@ -359,27 +800,41 @@ fn text_layout(
             .filter(|tall| tall.is_finite() && *tall > 0.0)
     };
     let mut overset = false;
+    let mut paints = Paints::default();
     let em = room_em(size, &format);
     let (pieces, bounds) = if text.vertical {
         let rules = crate::wrap::Rules::of(&format);
-        let column_length = |line: &str| {
-            let [_, y0, _, y1] =
-                crate::text_block::vertical_block(line, family, size, face, &format).1;
+        // Characters with formatting of their own (M6.389) are measured and set as they are.
+        let spans = byte_spans(text);
+        let source = text.text.as_str();
+        let column_length = |range: std::ops::Range<usize>| {
+            let line = source.get(range.clone()).unwrap_or("");
+            let [_, y0, _, y1] = crate::text_block::vertical_block_spans(
+                line,
+                family,
+                (size, face, &format),
+                &[],
+                &spans_in(&spans, &range),
+            )
+            .1;
             y1 - y0
         };
-        let (mut columns, mut room) = match (limit(scale.1), format.align) {
+        let (mut columns, mut room, ranges) = match (limit(scale.1), format.align) {
             // Justified: each column but a paragraph's last spread down to the box.
             (Some(limit), disccraft_project::TextAlign::Justify) => {
-                crate::wrap::justify(&text.text, limit, rules, &column_length, em)
+                crate::wrap::justify_lines(source, limit, rules, &column_length, em)
             }
-            (limit, _) => (
-                limit.map_or_else(
-                    || text.text.clone(),
-                    |limit| crate::wrap::wrap(&text.text, limit, rules, &column_length),
-                ),
-                Vec::new(),
-            ),
+            (limit, _) => {
+                let ranges = crate::wrap::wrap_lines(
+                    source,
+                    limit.unwrap_or(f32::NAN),
+                    rules,
+                    &column_length,
+                );
+                (crate::wrap::joined(source, &ranges), Vec::new(), ranges)
+            }
         };
+        let laid_spans = spans_on_lines(&spans, &ranges);
         // Columns past the box's reach are left out.
         if let Some(reach) = tall(scale.0 * sx) {
             let wide = |columns: &str| {
@@ -394,8 +849,14 @@ fn text_layout(
                 room.retain(|(range, _)| range.end <= kept);
             }
         }
-        let (pieces, [x0, y0, x1, y1]) =
-            crate::text_block::vertical_block_with(&columns, family, size, face, &format, &room);
+        let (pieces, [x0, y0, x1, y1], colors) = crate::text_block::vertical_block_spans(
+            &columns,
+            family,
+            (size, face, &format),
+            &room,
+            &laid_spans,
+        );
+        paints.pieces = colors;
         // The box keeps the size it was drawn, whatever the columns in it (as a horizontal box does): as long as
         // its columns may be, the columns placed in it by the alignment (top, middle, bottom), and as wide as its
         // reach, the columns from its right edge.
@@ -417,41 +878,59 @@ fn text_layout(
         (pieces, [left, top, x1, bottom])
     } else {
         let limit = limit(scale.0 * sx);
+        let tall = tall(scale.1);
         let measure = |line: &str| {
             let [x0, _, x1, _] = formatted_layout(line, family, size, face, &format).bounds;
             x1 - x0
         };
         let rules = crate::wrap::Rules::of(&format);
-        let (mut lines, mut room) = match (limit, format.align) {
-            // Justified: each line but a paragraph's last spread to the box.
-            (Some(limit), disccraft_project::TextAlign::Justify) => {
-                crate::wrap::justify(&text.text, limit, rules, &measure, em)
+        // Characters with formatting of their own (M6.389) are measured and set as they are.
+        let rich = (!text.spans.is_empty())
+            .then(|| rich_layout(text, family, (size, face, &format), (limit, tall)));
+        let mut laid = match rich {
+            Some((laid, cut, own)) => {
+                overset = cut;
+                paints = own;
+                laid
             }
-            _ => (
-                limit.map_or_else(
-                    || text.text.clone(),
-                    |limit| crate::wrap::wrap(&text.text, limit, rules, &measure),
-                ),
-                Vec::new(),
-            ),
-        };
-        // Lines below the box's height are left out (Encore's overset text).
-        let tall = tall(scale.1);
-        if let Some(tall) = tall {
-            let high = |lines: &str| {
-                let [_, y0, _, y1] =
-                    formatted_layout_with(lines, family, size, face, &format, (false, &room))
+            None => {
+                let (mut lines, mut room) = match (limit, format.align) {
+                    // Justified: each line but a paragraph's last spread to the box.
+                    (Some(limit), disccraft_project::TextAlign::Justify) => {
+                        crate::wrap::justify(&text.text, limit, rules, &measure, em)
+                    }
+                    _ => (
+                        limit.map_or_else(
+                            || text.text.clone(),
+                            |limit| crate::wrap::wrap(&text.text, limit, rules, &measure),
+                        ),
+                        Vec::new(),
+                    ),
+                };
+                // Lines below the box's height are left out (Encore's overset text).
+                if let Some(tall) = tall {
+                    let high = |lines: &str| {
+                        let [_, y0, _, y1] = formatted_layout_with(
+                            lines,
+                            family,
+                            size,
+                            face,
+                            &format,
+                            (false, &room),
+                        )
                         .bounds;
-                y1 - y0
-            };
-            let kept = fitting_lines(&lines, tall, &high);
-            if kept < lines.len() {
-                overset = true;
-                lines.truncate(kept);
-                room.retain(|(range, _)| range.end <= kept);
+                        y1 - y0
+                    };
+                    let kept = fitting_lines(&lines, tall, &high);
+                    if kept < lines.len() {
+                        overset = true;
+                        lines.truncate(kept);
+                        room.retain(|(range, _)| range.end <= kept);
+                    }
+                }
+                formatted_layout_with(&lines, family, size, face, &format, (false, &room))
             }
-        }
-        let mut laid = formatted_layout_with(&lines, family, size, face, &format, (false, &room));
+        };
         // The box is as wide as it was drawn, whatever the lines in it: they are aligned inside it.
         if let Some(limit) = limit {
             let [x0, y0, x1, y1] = laid.bounds;
@@ -481,7 +960,7 @@ fn text_layout(
     let finite = pieces
         .iter()
         .all(|(_, xf)| xf.iter().all(|value| value.is_finite()));
-    (finite && w.is_finite() && h.is_finite()).then_some((pieces, (w, h), overset))
+    (finite && w.is_finite() && h.is_finite()).then_some((pieces, (w, h), overset, paints))
 }
 
 /// How much of `lines` (whole lines, a byte length) fits in `room`, by `extent` (the size of some lines): all of
@@ -521,7 +1000,7 @@ pub(crate) fn room_em(size: f32, format: &TextFormat) -> f32 {
 /// Whether a paragraph text has lines (columns) its box's height leaves out (Encore's overset text).
 pub(crate) fn text_overset(menu: &Menu, text: &MenuText) -> bool {
     let family = family_for(text.font.as_deref());
-    text_layout(text, &family, squeeze(menu)).is_some_and(|(_, _, overset)| overset)
+    text_layout(text, &family, squeeze(menu)).is_some_and(|(_, _, overset, _)| overset)
 }
 
 /// How much of an em (in 1/1000) tsume at 100 per cent takes off the room after a kana or a kanji: about the
@@ -711,6 +1190,20 @@ pub(crate) fn formatted_layout_with(
     format: &TextFormat,
     (vertical, room): (bool, &[(std::ops::Range<usize>, f32)]),
 ) -> Arc<Layout> {
+    formatted_layout_spans(text, family, (size, face, format), (vertical, room), &[]).0
+}
+
+/// [`formatted_layout_with`] with characters set in formatting of their own (`spans`: byte ranges of `text` and
+/// what they set over `format`, M6.389). Also the byte range of each style run the layout was given (a glyph's or
+/// a decoration's run `i + 1` is the `i`th).
+#[allow(clippy::type_complexity)]
+fn formatted_layout_spans(
+    text: &str,
+    family: &str,
+    (size, face, format): (f32, Option<&str>, &TextFormat),
+    (vertical, room): (bool, &[(std::ops::Range<usize>, f32)]),
+    spans: &[(std::ops::Range<usize>, SpanStyle)],
+) -> (Arc<Layout>, Vec<std::ops::Range<usize>>) {
     let mut style = text_style(family, size);
     if let Some(face) = face.map(str::trim).filter(|face| !face.is_empty()) {
         style.style = face.to_owned();
@@ -770,31 +1263,91 @@ pub(crate) fn formatted_layout_with(
         }
     }
     spacing.retain(|(_, less)| *less != 0.0);
+    // A span's characters in the text's style with the span's fields over it.
+    let own = |base: &TextStyle, span: &SpanStyle| {
+        let mut set = base.clone();
+        if let Some(font) = span.font.as_deref() {
+            set.family = family_for(Some(font));
+        }
+        if let Some(face) = span
+            .font_style
+            .as_deref()
+            .map(str::trim)
+            .filter(|face| !face.is_empty())
+        {
+            set.style = face.to_owned();
+        }
+        if let Some(bold) = span.bold {
+            set.faux_bold = bold;
+        }
+        if let Some(italic) = span.italic {
+            set.faux_italic = italic;
+        }
+        if let Some(underline) = span.underline {
+            set.underline = underline;
+        }
+        if let Some(strikethrough) = span.strikethrough {
+            set.strikethrough = strikethrough;
+        }
+        if let Some(caps) = span.caps {
+            set.caps = match caps {
+                disccraft_project::TextCaps::Normal => Caps::Normal,
+                disccraft_project::TextCaps::All => Caps::All,
+                disccraft_project::TextCaps::Small => Caps::Small,
+            };
+        }
+        if let Some(tracking) = span.tracking {
+            set.tracking = f32::from(tracking) + manual;
+        }
+        // Its own size and baseline shift, made smaller and moved as the text's are for superscript / subscript.
+        let own_size = span.size.map_or(size, |own| {
+            f32::from(own.clamp(MIN_TEXT_SIZE, MAX_TEXT_SIZE))
+        });
+        let own_shift = f32::from(span.baseline.unwrap_or(format.baseline));
+        let scale = base.size / size.max(1.0);
+        set.size = own_size * scale;
+        set.baseline_shift = match format.script {
+            TextScript::Normal => own_shift,
+            TextScript::Superscript => own_shift + own_size * SCRIPT_POSITION,
+            TextScript::Subscript => own_shift - own_size * SCRIPT_POSITION,
+        };
+        set
+    };
     let lay = |style: &TextStyle| {
         let mut paragraph = paragraph.clone();
         // (A column of a vertical text is one line: its columns are placed by the caller.)
         if !vertical {
             paragraph.leading = pitch - own_line_height(style);
         }
-        if spacing.is_empty() {
-            return layout(text, style, &paragraph);
+        if spacing.is_empty() && spans.is_empty() {
+            return (layout(text, style, &paragraph), Vec::new());
         }
-        let runs: Vec<StyleRun> = spacing
+        // The spans' characters in their own style, then each character set closer or spread (in its span's
+        // style), which wins where they meet.
+        let mut runs: Vec<StyleRun> = spans
             .iter()
-            .map(|(range, less)| {
-                let mut tighter = style.clone();
-                tighter.tracking -= *less;
-                StyleRun {
-                    range: range.clone(),
-                    style: tighter,
-                }
+            .map(|(range, span)| StyleRun {
+                range: range.clone(),
+                style: own(style, span),
             })
             .collect();
-        layout_rich(text, style, &runs, &paragraph)
+        runs.extend(spacing.iter().map(|(range, less)| {
+            let mut tighter = spans
+                .iter()
+                .find(|(span, _)| span.contains(&range.start))
+                .map_or_else(|| style.clone(), |(_, span)| own(style, span));
+            tighter.tracking -= *less;
+            StyleRun {
+                range: range.clone(),
+                style: tighter,
+            }
+        }));
+        let ranges = runs.iter().map(|run| run.range.clone()).collect();
+        (layout_rich(text, style, &runs, &paragraph), ranges)
     };
-    let mut laid = lay(&style);
+    let (mut laid, runs) = lay(&style);
     if let (Some(full_style), Some(shift)) = (full_style, script_shift) {
-        let full = lay(&full_style);
+        let full = lay(&full_style).0;
         let mut bounds = laid.bounds;
         // The moved small text and the full-size line boxes together.
         bounds[1] = (bounds[1] - shift).min(full.bounds[1]);
@@ -803,7 +1356,7 @@ pub(crate) fn formatted_layout_with(
         owned.bounds = bounds;
         laid = Arc::new(owned);
     }
-    laid
+    (laid, runs)
 }
 
 /// How far apart the layout puts two lines of `style` with no leading: the font's own line height.
@@ -1550,10 +2103,16 @@ pub(crate) fn text_rgba(menu: &Menu, text: &MenuText, width: u16, height: u16) -
     let mut rgba = vec![0u8; usize::from(width) * usize::from(height) * 4];
     let family = family_for(text.font.as_deref());
     let sx = squeeze(menu);
-    if let Some((pieces, _, _)) = text_layout(text, &family, sx) {
+    if let Some((pieces, _, _, paints)) = text_layout(text, &family, sx) {
         let (mask, mask_x, mask_y) = crate::text_block::rasterize_pieces(&pieces);
         let mask = antialiased(mask, text.format.antialias);
         let color = text.color.unwrap_or(menu.text_color);
+        let fills = paints.fills(
+            &pieces,
+            (&mask, mask_x, mask_y),
+            color,
+            text.format.antialias,
+        );
         if let Some(shadow) = &text.shadow
             && let Some((shade, sx2, sy2)) =
                 crate::shadow::shadow_mask(&mask, mask_x, mask_y, shadow)
@@ -1562,14 +2121,17 @@ pub(crate) fn text_rgba(menu: &Menu, text: &MenuText, width: u16, height: u16) -
         }
         let under = crate::effects::under(&mask, mask_x, mask_y, &text.effects);
         let over = crate::effects::over(&mask, mask_x, mask_y, &text.effects);
-        if under.is_empty() && over.is_empty() {
+        if under.is_empty() && over.is_empty() && fills.len() == 1 {
             mask_into_rgba(&mask, mask_x, mask_y, color, width, height, &mut rgba);
         } else {
-            // With layer effects (M6.342) each is laid over what is below it.
+            // With layer effects (M6.342), or characters in colours of their own (M6.389), each is laid over what
+            // is below it.
             for (effect, ex, ey, effect_color) in under {
                 mask_over_rgba(&effect, (ex, ey), effect_color, (width, height), &mut rgba);
             }
-            mask_over_rgba(&mask, (mask_x, mask_y), color, (width, height), &mut rgba);
+            for (fill, x, y, color) in &fills {
+                mask_over_rgba(fill, (*x, *y), *color, (width, height), &mut rgba);
+            }
             for (effect, ex, ey, effect_color) in over {
                 mask_over_rgba(&effect, (ex, ey), effect_color, (width, height), &mut rgba);
             }

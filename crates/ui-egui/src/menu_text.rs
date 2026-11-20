@@ -647,8 +647,12 @@ impl DiscCraftApp {
         ui.horizontal_top(|ui| {
             crate::properties::prop_label(ui, tl!("Text:"));
             let focus = std::mem::take(&mut self.focus_rename);
-            let (response, value) =
-                crate::properties::committed_text(ui, "menu_text_value", &text.text, true);
+            let (response, value) = crate::properties::committed_text(
+                ui,
+                &text_field_salt(menu, index),
+                &text.text,
+                true,
+            );
             if focus {
                 response.request_focus();
             }
@@ -667,9 +671,33 @@ impl DiscCraftApp {
     /// The character rows of text `index` of `menu` (Encore's Character panel): size, direction, colour, font,
     /// font style and formatting. In the text's property sheet and in the Character panel.
     pub(crate) fn text_character_rows(&mut self, ui: &mut Ui, menu: MenuId, index: usize) {
-        let Some(text) = self.menu_text(menu, index) else {
+        let Some(stored) = self.menu_text(menu, index) else {
             return;
         };
+        // M6.389: with characters selected in the text's field, the character rows show and set theirs (Encore:
+        // characters selected with the text tool); else the whole text's.
+        let chars = selected_chars(ui.ctx(), menu, index, &stored);
+        let text = with_chars(&stored, chars.as_ref());
+        if let Some(range) = &chars {
+            let mut whole = false;
+            ui.horizontal(|ui| {
+                crate::properties::prop_label(ui, tl!("Characters:"));
+                let _ = ui.label(
+                    tl!("{start} to {end} (selected in the text)")
+                        .replace("{start}", &(range.start + 1).to_string())
+                        .replace("{end}", &range.end.to_string()),
+                );
+                whole = ui
+                    .small_button(tl!("Whole text"))
+                    .on_hover_text(tl!(
+                        "Set the size, colour, font and style of the whole text instead"
+                    ))
+                    .clicked();
+            });
+            if whole {
+                clear_selected_chars(ui.ctx(), menu, index);
+            }
+        }
         let menu_color = self
             .session
             .project
@@ -689,7 +717,7 @@ impl DiscCraftApp {
                 && size != text.size;
         });
         if size_changed {
-            self.set_text_field(menu, index, json!({ "size": size }));
+            self.set_char_field(menu, index, json!({ "size": size }), chars.as_ref());
         }
 
         // Encore's text orientation: written across (horizontal text tool) or top to bottom (vertical one).
@@ -804,7 +832,7 @@ impl DiscCraftApp {
         });
         if let Some(color) = color_changed {
             let value = color.map(|[r, g, b]| format!("#{r:02X}{g:02X}{b:02X}"));
-            self.set_text_field(menu, index, json!({ "color": value }));
+            self.set_char_field(menu, index, json!({ "color": value }), chars.as_ref());
         }
 
         if let Some(font) = self.font_row(ui, "menu_text_font", text.font.as_deref()) {
@@ -813,11 +841,12 @@ impl DiscCraftApp {
                 .font_style
                 .as_ref()
                 .is_none_or(|style| disccraft_menu::font_styles(font.as_deref()).contains(style));
-            if keeps_style {
-                self.set_text_field(menu, index, json!({ "font": font }));
+            let fields = if keeps_style {
+                json!({ "font": font })
             } else {
-                self.set_text_field(menu, index, json!({ "font": font, "fontStyle": null }));
-            }
+                json!({ "font": font, "fontStyle": null })
+            };
+            self.set_char_field(menu, index, fields, chars.as_ref());
         }
         if let Some(style) = font_style_row(
             ui,
@@ -825,13 +854,29 @@ impl DiscCraftApp {
             text.font.as_deref(),
             text.font_style.as_deref(),
         ) {
-            self.set_text_field(menu, index, json!({ "fontStyle": style }));
+            self.set_char_field(menu, index, json!({ "fontStyle": style }), chars.as_ref());
         }
 
         let change = self.format_rows(ui, text.format);
         if let Some(fields) = change {
-            self.set_text_field(menu, index, fields);
+            self.set_char_field(menu, index, fields, chars.as_ref());
         }
+    }
+
+    /// [`Self::set_text_field`] for character fields: of the characters `chars` alone when some are selected
+    /// (M6.389; the engine sets the paragraph fields among them for the whole text).
+    fn set_char_field(
+        &mut self,
+        menu: MenuId,
+        index: usize,
+        mut fields: serde_json::Value,
+        chars: Option<&std::ops::Range<usize>>,
+    ) {
+        if let (Some(range), Some(object)) = (chars, fields.as_object_mut()) {
+            let _ = object.insert("from".to_owned(), json!(range.start));
+            let _ = object.insert("to".to_owned(), json!(range.end));
+        }
+        self.set_text_field(menu, index, fields);
     }
 
     /// Encore の文字パネルのうち DiscCraft が描けるもの（テキストとボタンの文字で共通）: スタイル、行揃えと
@@ -1378,6 +1423,68 @@ impl DiscCraftApp {
 
 /// The font style list under the font (Encore's second font list: R, B, ...). Lists the family's styles when it
 /// is opened; `Some(None)` chooses the regular face.
+/// The salt of the field text `index` of `menu` is typed in (one per text, so that a selection in it stays with
+/// its text).
+fn text_field_salt(menu: MenuId, index: usize) -> String {
+    format!("menu_text_value_{}_{index}", menu.0)
+}
+
+/// The characters selected in the field of text `index` of `menu` (M6.389), when some are and they are inside
+/// `text`: counted in characters.
+fn selected_chars(
+    ctx: &egui::Context,
+    menu: MenuId,
+    index: usize,
+    text: &MenuText,
+) -> Option<std::ops::Range<usize>> {
+    let id = egui::Id::unique(text_field_salt(menu, index).as_str());
+    let range = egui::TextEdit::load_state(ctx, id)?.cursor.char_range()?;
+    let (a, b): (usize, usize) = (range.primary.index.into(), range.secondary.index.into());
+    let (start, end) = (a.min(b), a.max(b));
+    (start < end && end <= text.text.chars().count()).then_some(start..end)
+}
+
+/// Lets go of the characters selected in the field of text `index` of `menu`: the character rows set the whole
+/// text again.
+fn clear_selected_chars(ctx: &egui::Context, menu: MenuId, index: usize) {
+    let id = egui::Id::unique(text_field_salt(menu, index).as_str());
+    if let Some(mut state) = egui::TextEdit::load_state(ctx, id) {
+        state.cursor.set_char_range(None);
+        state.store(ctx, id);
+    }
+}
+
+/// `text` as its characters `chars` (when some are selected) are set: its character fields replaced by those the
+/// first of them has of its own (M6.389).
+fn with_chars(text: &MenuText, chars: Option<&std::ops::Range<usize>>) -> MenuText {
+    let Some(range) = chars else {
+        return text.clone();
+    };
+    let own = text.span_style_at(range.start);
+    let mut shown = text.clone();
+    if let Some(size) = own.size {
+        shown.size = size;
+    }
+    if let Some(color) = own.color {
+        shown.color = Some(color);
+    }
+    if own.font.is_some() {
+        shown.font.clone_from(&own.font);
+    }
+    if own.font_style.is_some() {
+        shown.font_style.clone_from(&own.font_style);
+    }
+    let format = &mut shown.format;
+    format.bold = own.bold.unwrap_or(format.bold);
+    format.italic = own.italic.unwrap_or(format.italic);
+    format.underline = own.underline.unwrap_or(format.underline);
+    format.strikethrough = own.strikethrough.unwrap_or(format.strikethrough);
+    format.caps = own.caps.unwrap_or(format.caps);
+    format.tracking = own.tracking.unwrap_or(format.tracking);
+    format.baseline = own.baseline.unwrap_or(format.baseline);
+    shown
+}
+
 pub(crate) fn font_style_row(
     ui: &mut Ui,
     salt: &str,
@@ -1449,6 +1556,65 @@ fn decode_rgba_png(bytes: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
 
 #[cfg(test)]
 mod tests {
+    /// M6.389: the characters selected in a text's field are the ones the character rows set, shown with their own
+    /// formatting; a selection of another text's field, an empty one or one past the text is not, and letting go
+    /// of it leaves the whole text.
+    #[test]
+    fn the_characters_selected_in_the_field_are_the_ones_set() {
+        use egui::text::{CCursor, CCursorRange};
+        let ctx = egui::Context::default();
+        let menu = disccraft_project::MenuId(1);
+        let mut text = hello();
+        text.style_chars(6..11, &|style| style.size = Some(60));
+        let select = |index: usize, from: usize, to: usize| {
+            let id = egui::Id::unique(super::text_field_salt(menu, index).as_str());
+            let mut state = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
+            state.cursor.set_char_range(Some(CCursorRange::two(
+                CCursor::new(from),
+                CCursor::new(to),
+            )));
+            state.store(&ctx, id);
+        };
+        assert_eq!(super::selected_chars(&ctx, menu, 0, &text), None);
+        // Selected backwards: the same characters.
+        select(0, 9, 6);
+        assert_eq!(super::selected_chars(&ctx, menu, 0, &text), Some(6..9));
+        assert_eq!(super::selected_chars(&ctx, menu, 1, &text), None);
+        let shown = super::with_chars(&text, Some(&(6..9)));
+        assert_eq!(shown.size, 60);
+        assert_eq!(super::with_chars(&text, None).size, text.size);
+        select(0, 4, 4);
+        assert_eq!(super::selected_chars(&ctx, menu, 0, &text), None);
+        select(0, 4, 40);
+        assert_eq!(super::selected_chars(&ctx, menu, 0, &text), None);
+        select(0, 0, 5);
+        super::clear_selected_chars(&ctx, menu, 0);
+        assert_eq!(super::selected_chars(&ctx, menu, 0, &text), None);
+    }
+
+    /// A text "Hello world" of 32 px.
+    fn hello() -> disccraft_project::MenuText {
+        disccraft_project::MenuText {
+            effects: Default::default(),
+            box_width: None,
+            box_height: None,
+            text: "Hello world".to_owned(),
+            x: 0,
+            y: 0,
+            size: 32,
+            color: None,
+            font: None,
+            font_style: None,
+            format: Default::default(),
+            shadow: None,
+            orientation: Default::default(),
+            hidden: false,
+            locked: false,
+            vertical: false,
+            spans: Vec::new(),
+        }
+    }
+
     /// The built-in PhotoCraft icon reads as a 48 px RGBA picture; other bytes do not.
     #[test]
     fn the_photocraft_icon_is_built_in() {

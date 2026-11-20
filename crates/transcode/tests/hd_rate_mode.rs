@@ -86,6 +86,7 @@ fn a_blu_ray_encode_keeps_its_rate_its_own_way() {
             quality: disccraft_transcode::BEST_QUALITY,
             rendering: disccraft_transcode::Rendering::default(),
             mode,
+            interlaced: false,
         };
         let encode = |mode: RateMode, name: &str, progress: &mut dyn FnMut(f32)| {
             let es = dir.join(format!("{name}.es"));

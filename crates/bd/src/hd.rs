@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use disccraft_bdmv::StreamCoding;
 use disccraft_dvd::{SubtitleTrack, TitleSource, TitleStreams};
 use disccraft_m2tsmux::StreamKind;
-use disccraft_project::BdVideo;
 use disccraft_project::Tick;
+use disccraft_project::{BdCodec, BdVideo};
 use disccraft_project::{Project, TimelineId};
 use disccraft_transcode::hd::{
     AccessUnit, HdCodec, HdOptions, read_h264_index, transcode_h264_range,
@@ -24,17 +24,17 @@ use crate::{BdError, invalid, io_error};
 const MENU_H264_KBPS: (u32, u32) = (15_000, 30_000);
 
 /// The bitrates of the disc's HD menus (a still ignores them: it is coded at a fixed quantiser).
-pub(crate) fn menu_rates(video: BdVideo) -> (u32, u32) {
-    match codec(video) {
+pub(crate) fn menu_rates(choice: BdCodec, video: BdVideo) -> (u32, u32) {
+    match codec(choice, video) {
         HdCodec::Mpeg2 => disccraft_dvd::hd_default_kbps(true),
         HdCodec::H264 => MENU_H264_KBPS,
     }
 }
 
-/// How the disc's HD video is coded: MPEG-2 for the interlaced formats (the H.264 encoder codes progressive
-/// frames only), else H.264.
-pub(crate) fn codec(video: BdVideo) -> HdCodec {
-    if video.interlaced() {
+/// How the disc's HD video in format `video` is coded on a disc whose codec is `choice` (M12.28): MPEG-2 for the
+/// interlaced formats unless the disc asks for H.264 (then coded as interlaced frames), else H.264.
+pub(crate) fn codec(choice: BdCodec, video: BdVideo) -> HdCodec {
+    if choice.mpeg2(video) {
         HdCodec::Mpeg2
     } else {
         HdCodec::H264
@@ -42,8 +42,8 @@ pub(crate) fn codec(video: BdVideo) -> HdCodec {
 }
 
 /// The multiplexer's stream kind of the disc's HD video.
-pub(crate) fn kind(video: BdVideo) -> StreamKind {
-    kind_of(codec(video))
+pub(crate) fn kind(choice: BdCodec, video: BdVideo) -> StreamKind {
+    kind_of(codec(choice, video))
 }
 
 /// The multiplexer's stream kind of HD video coded as `codec`.
@@ -57,8 +57,8 @@ pub(crate) fn kind_of(codec: HdCodec) -> StreamKind {
 /// The clip and playlist attributes of video in the HD format `video` (`None` for SD): the format code (4 for
 /// 1080i, 5 for 720p, 6 for 1080p), the frame rate code (1 23.976, 2 24, 3 25, 4 29.97, 6 50, 7 59.94; an
 /// interlaced format has its frames' rate) and 16:9 (a 4:3 source is pillarboxed in the HD frame).
-pub(crate) fn coding(video: BdVideo) -> Option<StreamCoding> {
-    coding_of(video, codec(video))
+pub(crate) fn coding(choice: BdCodec, video: BdVideo) -> Option<StreamCoding> {
+    coding_of(video, codec(choice, video))
 }
 
 /// [`coding`] of video in the format `video` that is coded as `codec` (a title whose own H.264 went on the disc as
@@ -96,9 +96,13 @@ pub(crate) fn coding_of(video: BdVideo, codec: HdCodec) -> Option<StreamCoding> 
 
 /// The encoder's settings for the disc's HD format at a target and peak bitrate in kilobits per second; `None`
 /// for SD.
-pub(crate) fn options(video: BdVideo, (target_kbps, max_kbps): (u32, u32)) -> Option<HdOptions> {
+pub(crate) fn options(
+    choice: BdCodec,
+    video: BdVideo,
+    (target_kbps, max_kbps): (u32, u32),
+) -> Option<HdOptions> {
     let (width, height, fps_num, fps_den) = video.hd()?;
-    let codec = codec(video);
+    let codec = codec(choice, video);
     Some(HdOptions {
         width,
         height,
@@ -110,6 +114,8 @@ pub(crate) fn options(video: BdVideo, (target_kbps, max_kbps): (u32, u32)) -> Op
         quality: disccraft_transcode::BEST_QUALITY,
         rendering: disccraft_transcode::Rendering::default(),
         mode: disccraft_transcode::RateMode::Vbr,
+        // H.264 of a 1080i format: coded as interlaced frames (M12.28).
+        interlaced: codec == HdCodec::H264 && video.interlaced(),
     })
 }
 
@@ -167,7 +173,7 @@ pub(crate) enum HdSource {
     /// The pictures of a Matroska or MP4 file whose H.264 goes on the disc as it is, left in that file.
     Samples(std::sync::Arc<disccraft_dvd::H264Samples>),
     /// The pictures of a transport stream whose H.264 goes on the disc as it is, left in that file (M6.367).
-    Transport(std::sync::Arc<disccraft_dvd::TsH264>),
+    Transport(std::sync::Arc<disccraft_dvd::TsUnits>),
 }
 
 impl HdSource {
@@ -371,7 +377,7 @@ pub(crate) fn hd_title(
     let video = title_video(project, title);
     let video_format = video;
     let format_id = video.id();
-    let Some(options) = options(video, rates) else {
+    let Some(options) = options(project.settings.bd_codec, video, rates) else {
         return Ok(None);
     };
     let (width, height, fps_num, fps_den) = (
@@ -426,157 +432,203 @@ pub(crate) fn hd_title(
         (25, 1)
     };
     let videos = timeline.videos();
-    let mut parts = Vec::with_capacity(videos.len());
-    let mut title_codec = options.codec;
-    for (clip, video) in videos.iter().enumerate() {
-        let asset = project
-            .assets
-            .get(video)
-            .ok_or_else(|| invalid("timeline video does not exist"))?;
-        let media = asset.media_file();
-        let source: &Path = &media;
-        let trim = timeline.video_trim(clip);
-        // The empty stretch in front of the clip plays black.
-        let gap = timeline.video_gap(clip);
-        if gap > 0 {
-            parts.push(black_part(
-                cache_dir,
-                gap_frames(gap, standard_rate, (fps_num, fps_den)),
-                format_id,
-                &options,
-            )?);
-        }
-        // A Blu-ray's own H.264 (in an .m2ts, .mkv or .mp4) that fits the disc goes on it as it is: a clip used
-        // whole, or trimmed at its key pictures. Anything else is encoded. On a disc whose encoded video is
-        // MPEG-2 (1080i), only a title of that one clip: H.264 and MPEG-2 do not join into one stream.
-        let whole = trim.start == 0 && trim.end.is_none();
-        let alone = videos.len() == 1 && gap == 0;
-        // A Blu-ray preset of its own transcodes it all the same (Encore's preset picked for a compliant asset).
-        let forced = asset.bluray_transcode.is_some();
-        let format = disccraft_dvd::BdVideoFormat {
-            width,
-            height,
-            rate: (fps_num, fps_den),
-            interlaced: video_format.interlaced(),
-        };
-        let passthrough = if (options.codec == HdCodec::H264 || alone) && !forced {
-            let label = format!("HD: {}", asset.name);
-            disccraft_dvd::demux_h264_for_bd(source, cache_dir, format, &mut |fraction| {
-                progress(&label, fraction);
-            })
-            .map_err(|error| BdError::Prepare(error.to_string()))?
-        } else {
-            None
-        };
-        // HD MPEG-2 in a transport stream (HDV, a broadcast recording: M10.22) goes on the disc as it is too,
-        // as the only clip of its title, used whole (its sequence does not join with another's).
-        let passthrough = match passthrough {
-            None if alone && whole && !forced => {
-                disccraft_dvd::demux_mpeg2_for_bd(source, cache_dir, format)
-                    .map_err(|error| BdError::Prepare(error.to_string()))?
+    let format = disccraft_dvd::BdVideoFormat {
+        width,
+        height,
+        rate: (fps_num, fps_den),
+        interlaced: video_format.interlaced(),
+    };
+    // M6.388 / M6.393: a title whose clips that go on as they are are mostly HDV's 1440 x 1080 is made at 1440: those
+    // join as they are, and its other clips and gaps are encoded at 1440 (shown 16:9). The disc's graphics stay
+    // 1920 x 1080.
+    let narrow = if options.codec == HdCodec::Mpeg2 {
+        disccraft_dvd::narrow_mpeg2_width(project, timeline, format)
+    } else {
+        None
+    };
+    let title_width = narrow.unwrap_or(width);
+    let options = HdOptions {
+        width: title_width,
+        ..options
+    };
+    let format_key = match narrow {
+        Some(narrow) => format!("{format_id}-{narrow}"),
+        // 1080i coded as H.264 (M12.28) is another stream than the format's MPEG-2: another cache file.
+        None if options.interlaced => format!("{format_id}-h264"),
+        None => format_id.to_string(),
+    };
+    let format_id = format_key.as_str();
+    let (parts, title_codec) = {
+        let mut parts = Vec::with_capacity(videos.len());
+        let mut title_codec = options.codec;
+        for (clip, video) in videos.iter().enumerate() {
+            let asset = project
+                .assets
+                .get(video)
+                .ok_or_else(|| invalid("timeline video does not exist"))?;
+            let media = asset.media_file();
+            let source: &Path = &media;
+            let trim = timeline.video_trim(clip);
+            // The empty stretch in front of the clip plays black.
+            let gap = timeline.video_gap(clip);
+            if gap > 0 {
+                parts.push(black_part(
+                    cache_dir,
+                    gap_frames(gap, standard_rate, (fps_num, fps_den)),
+                    format_id,
+                    &options,
+                )?);
             }
-            other => other,
-        };
-        // A trimmed clip: the pictures between its in and out points, when the stream can be cut there.
-        let passthrough = match passthrough {
-            Some(found) if !whole => {
-                match found
-                    .trimmed(trim, standard_rate)
-                    .map_err(|error| BdError::Prepare(error.to_string()))?
-                {
-                    Some(disccraft_dvd::TrimmedPassthrough::Samples(samples)) => {
-                        let units = samples.units().to_vec();
-                        parts.push((HdSource::Samples(std::sync::Arc::new(samples)), units));
-                        title_codec = HdCodec::H264;
-                        continue;
-                    }
-                    Some(disccraft_dvd::TrimmedPassthrough::Transport(ts)) => {
-                        let units = ts.units().to_vec();
-                        parts.push((HdSource::Transport(std::sync::Arc::new(ts)), units));
-                        title_codec = HdCodec::H264;
-                        continue;
-                    }
-                    Some(disccraft_dvd::TrimmedPassthrough::Stream { es, units }) => {
-                        parts.push((HdSource::File(es), units));
-                        title_codec = HdCodec::H264;
-                        continue;
-                    }
-                    None => None,
-                }
-            }
-            other => other,
-        };
-        match &passthrough {
-            Some(disccraft_dvd::Passthrough::Mpeg2 { .. }) => title_codec = HdCodec::Mpeg2,
-            Some(_) => title_codec = HdCodec::H264,
-            None => {}
-        }
-        let (es, index) = match passthrough {
-            Some(disccraft_dvd::Passthrough::Samples(samples)) => {
-                let units = samples.units().to_vec();
-                parts.push((HdSource::Samples(std::sync::Arc::new(samples)), units));
-                continue;
-            }
-            Some(disccraft_dvd::Passthrough::Transport(ts)) => {
-                let units = ts.units().to_vec();
-                parts.push((HdSource::Transport(std::sync::Arc::new(ts)), units));
-                continue;
-            }
-            Some(
-                disccraft_dvd::Passthrough::Stream { es, index }
-                | disccraft_dvd::Passthrough::Mpeg2 { es, index },
-            ) => (es, index),
-            None => cached_paths(
-                cache_dir,
-                source,
-                (format_id, clip_rates(asset, rates), clip_coding(asset)),
-                trim,
-            )?,
-        };
-        // The clip's own bit rate (M6.251), when its asset has one.
-        let options = {
-            let (target_kbps, max_kbps) = clip_rates(asset, rates);
-            HdOptions {
-                target_kbps,
-                max_kbps,
-                quality: clip_quality(asset),
-                rendering: clip_rendering(asset),
-                mode: clip_mode(asset),
-                ..options.clone()
-            }
-        };
-        let lock = making(&es);
-        let _made_alone = lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !(es.is_file() && index.is_file()) {
-            std::fs::create_dir_all(cache_dir).map_err(|error| io_error(cache_dir, error))?;
-            let es_part = es.with_extension("h264.part");
-            let index_part = es.with_extension("idx.part");
-            let label = format!("HD: {}", asset.name);
-            let range = (
-                trim_tick(trim.start, standard_rate)?,
-                trim.end
-                    .map(|end| trim_tick(end, standard_rate))
-                    .transpose()?,
-            );
-            let _ = transcode_h264_range(
-                source,
-                &es_part,
-                &index_part,
-                &options,
-                range,
-                &mut |fraction| {
+            // A Blu-ray's own H.264 (in an .m2ts, .mkv or .mp4) that fits the disc goes on it as it is: a clip used
+            // whole, or trimmed at its key pictures. Anything else is encoded. On a disc whose encoded video is
+            // MPEG-2 (1080i), only a title of that one clip: H.264 and MPEG-2 do not join into one stream.
+            let whole = trim.start == 0 && trim.end.is_none();
+            let alone = videos.len() == 1 && gap == 0;
+            // A Blu-ray preset of its own transcodes it all the same (Encore's preset picked for a compliant asset).
+            let forced = asset.bluray_transcode.is_some();
+            let passthrough = if (options.codec == HdCodec::H264 || alone) && !forced {
+                let label = format!("HD: {}", asset.name);
+                disccraft_dvd::demux_h264_for_bd(source, cache_dir, format, &mut |fraction| {
                     progress(&label, fraction);
-                },
-            )
-            .map_err(|error| BdError::Prepare(error.to_string()))?;
-            std::fs::rename(&es_part, &es).map_err(|error| io_error(&es, error))?;
-            std::fs::rename(&index_part, &index).map_err(|error| io_error(&index, error))?;
+                })
+                .map_err(|error| BdError::Prepare(error.to_string()))?
+            } else {
+                None
+            };
+            // HD MPEG-2 (HDV, a broadcast recording: M10.22; an .m2v: M6.370) goes on the disc as it is too: as the
+            // only clip of its title, or (M6.385) beside the title's other clips when the title's video is MPEG-2 and
+            // the file's pictures are the title's width (the disc's 1920, or HDV's 1440: M6.388 / M6.393). Trimmed,
+            // it is cut at its GOPs.
+            let joins = options.codec == HdCodec::Mpeg2
+                && disccraft_transcode::probe_video(source)
+                    .is_ok_and(|probe| probe.width == title_width);
+            let passthrough = match passthrough {
+                None if (alone || joins) && !forced => {
+                    disccraft_dvd::demux_mpeg2_for_bd(source, cache_dir, format)
+                        .map_err(|error| BdError::Prepare(error.to_string()))?
+                }
+                other => other,
+            };
+            // A trimmed clip: the pictures between its in and out points, when the stream can be cut there.
+            let passthrough = match passthrough {
+                Some(found) if !whole => {
+                    match found
+                        .trimmed(trim, standard_rate)
+                        .map_err(|error| BdError::Prepare(error.to_string()))?
+                    {
+                        Some(disccraft_dvd::TrimmedPassthrough::Samples(samples)) => {
+                            let units = samples.units().to_vec();
+                            parts.push((HdSource::Samples(std::sync::Arc::new(samples)), units));
+                            title_codec = HdCodec::H264;
+                            continue;
+                        }
+                        Some(disccraft_dvd::TrimmedPassthrough::Transport(ts)) => {
+                            let units = ts.units().to_vec();
+                            parts.push((HdSource::Transport(std::sync::Arc::new(ts)), units));
+                            title_codec = HdCodec::H264;
+                            continue;
+                        }
+                        Some(disccraft_dvd::TrimmedPassthrough::Stream { es, units }) => {
+                            parts.push((HdSource::File(es), units));
+                            title_codec = HdCodec::H264;
+                            continue;
+                        }
+                        Some(disccraft_dvd::TrimmedPassthrough::Mpeg2Stream { es, units }) => {
+                            parts.push((HdSource::File(es), units));
+                            title_codec = HdCodec::Mpeg2;
+                            continue;
+                        }
+                        Some(disccraft_dvd::TrimmedPassthrough::Mpeg2Transport(ts)) => {
+                            let units = ts.units().to_vec();
+                            parts.push((HdSource::Transport(std::sync::Arc::new(ts)), units));
+                            title_codec = HdCodec::Mpeg2;
+                            continue;
+                        }
+                        None => None,
+                    }
+                }
+                other => other,
+            };
+            match &passthrough {
+                Some(
+                    disccraft_dvd::Passthrough::Mpeg2 { .. }
+                    | disccraft_dvd::Passthrough::TransportMpeg2(_),
+                ) => title_codec = HdCodec::Mpeg2,
+                Some(_) => title_codec = HdCodec::H264,
+                None => {}
+            }
+            let (es, index) = match passthrough {
+                Some(disccraft_dvd::Passthrough::Samples(samples)) => {
+                    let units = samples.units().to_vec();
+                    parts.push((HdSource::Samples(std::sync::Arc::new(samples)), units));
+                    continue;
+                }
+                Some(
+                    disccraft_dvd::Passthrough::Transport(ts)
+                    | disccraft_dvd::Passthrough::TransportMpeg2(ts),
+                ) => {
+                    let units = ts.units().to_vec();
+                    parts.push((HdSource::Transport(std::sync::Arc::new(ts)), units));
+                    continue;
+                }
+                Some(
+                    disccraft_dvd::Passthrough::Stream { es, index }
+                    | disccraft_dvd::Passthrough::Mpeg2 { es, index },
+                ) => (es, index),
+                None => cached_paths(
+                    cache_dir,
+                    source,
+                    (format_id, clip_rates(asset, rates), clip_coding(asset)),
+                    trim,
+                )?,
+            };
+            // The clip's own bit rate (M6.251), when its asset has one.
+            let options = {
+                let (target_kbps, max_kbps) = clip_rates(asset, rates);
+                HdOptions {
+                    target_kbps,
+                    max_kbps,
+                    quality: clip_quality(asset),
+                    rendering: clip_rendering(asset),
+                    mode: clip_mode(asset),
+                    ..options.clone()
+                }
+            };
+            let lock = making(&es);
+            let _made_alone = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !(es.is_file() && index.is_file()) {
+                std::fs::create_dir_all(cache_dir).map_err(|error| io_error(cache_dir, error))?;
+                let es_part = es.with_extension("h264.part");
+                let index_part = es.with_extension("idx.part");
+                let label = format!("HD: {}", asset.name);
+                let range = (
+                    trim_tick(trim.start, standard_rate)?,
+                    trim.end
+                        .map(|end| trim_tick(end, standard_rate))
+                        .transpose()?,
+                );
+                let _ = transcode_h264_range(
+                    source,
+                    &es_part,
+                    &index_part,
+                    &options,
+                    range,
+                    &mut |fraction| {
+                        progress(&label, fraction);
+                    },
+                )
+                .map_err(|error| BdError::Prepare(error.to_string()))?;
+                std::fs::rename(&es_part, &es).map_err(|error| io_error(&es, error))?;
+                std::fs::rename(&index_part, &index).map_err(|error| io_error(&index, error))?;
+            }
+            let units =
+                read_h264_index(&index).map_err(|error| BdError::Prepare(error.to_string()))?;
+            parts.push((HdSource::File(es), units));
         }
-        let units = read_h264_index(&index).map_err(|error| BdError::Prepare(error.to_string()))?;
-        parts.push((HdSource::File(es), units));
-    }
+        (parts, title_codec)
+    };
     // The clips and gaps one after another. Each is read from its own cache file as the clip is written: hours
     // of video are never held in memory, nor written a second time as one file.
     let (streams, units) = join_hd_clips(parts, (fps_num, fps_den))?;
@@ -962,10 +1014,10 @@ fn cached_paths(
 
 #[cfg(test)]
 mod tests {
-    use super::{HdSource, HdTitle, coding, coding_of, kind, kind_of, options};
+    use super::{HdSource, HdTitle, MENU_H264_KBPS, coding, coding_of, kind, kind_of, options};
     use disccraft_bdmv::StreamCoding;
     use disccraft_m2tsmux::StreamKind;
-    use disccraft_project::BdVideo;
+    use disccraft_project::{BdCodec, BdVideo};
     use disccraft_transcode::hd::HdCodec;
 
     #[test]
@@ -979,7 +1031,10 @@ mod tests {
             })
         );
         assert_eq!(kind_of(HdCodec::H264), StreamKind::H264Video);
-        assert_eq!(kind(BdVideo::Hd1080i59), StreamKind::Mpeg2Video);
+        assert_eq!(
+            kind(BdCodec::Auto, BdVideo::Hd1080i59),
+            StreamKind::Mpeg2Video
+        );
     }
 
     fn title(rate: (u32, u32), height: u16) -> HdTitle {
@@ -997,7 +1052,7 @@ mod tests {
 
     #[test]
     fn every_hd_format_has_its_codes() {
-        assert_eq!(coding(BdVideo::Sd), None);
+        assert_eq!(coding(BdCodec::Auto, BdVideo::Sd), None);
         for video in BdVideo::ALL {
             let Some((_, height, num, den)) = video.hd() else {
                 continue;
@@ -1016,7 +1071,7 @@ mod tests {
                 _ => 5,
             };
             // An interlaced format is MPEG-2 everywhere (encoder, multiplexer, clip attributes); the others H.264.
-            let (format, rate, mpeg2) = match coding(video) {
+            let (format, rate, mpeg2) = match coding(BdCodec::Auto, video) {
                 Some(StreamCoding::Mpeg2Video {
                     video_format,
                     frame_rate,
@@ -1036,15 +1091,15 @@ mod tests {
             );
             assert_eq!(mpeg2, video.interlaced(), "{video:?}");
             assert_eq!(
-                kind(video) == StreamKind::Mpeg2Video,
+                kind(BdCodec::Auto, video) == StreamKind::Mpeg2Video,
                 video.interlaced(),
                 "{video:?}"
             );
             let rates = disccraft_dvd::hd_default_kbps(video.interlaced());
-            let options = options(video, rates).unwrap();
+            let options = options(BdCodec::Auto, video, rates).unwrap();
             assert_eq!(options.codec == HdCodec::Mpeg2, video.interlaced());
             // Within a Blu-ray's 40 Mbps of video, the menus too.
-            for (target, max) in [rates, super::menu_rates(video)] {
+            for (target, max) in [rates, super::menu_rates(BdCodec::Auto, video)] {
                 assert!(target <= max && max <= 40_000, "{video:?}");
             }
         }
@@ -1053,7 +1108,7 @@ mod tests {
     #[test]
     fn interlaced_formats_are_1080i_mpeg2() {
         assert_eq!(
-            coding(BdVideo::Hd1080i59),
+            coding(BdCodec::Auto, BdVideo::Hd1080i59),
             Some(StreamCoding::Mpeg2Video {
                 video_format: 4,
                 frame_rate: 4,
@@ -1061,15 +1116,59 @@ mod tests {
             })
         );
         assert_eq!(
-            coding(BdVideo::Hd1080i50),
+            coding(BdCodec::Auto, BdVideo::Hd1080i50),
             Some(StreamCoding::Mpeg2Video {
                 video_format: 4,
                 frame_rate: 3,
                 aspect: 3
             })
         );
-        assert_eq!(super::menu_rates(BdVideo::Hd1080i59), (25_000, 35_000));
-        assert_eq!(super::menu_rates(BdVideo::Hd1080p23), (15_000, 30_000));
+        assert_eq!(
+            super::menu_rates(BdCodec::Auto, BdVideo::Hd1080i59),
+            (25_000, 35_000)
+        );
+        assert_eq!(
+            super::menu_rates(BdCodec::Auto, BdVideo::Hd1080p23),
+            (15_000, 30_000)
+        );
+    }
+
+    /// M12.28: with the disc's codec set to H.264, 1080i is H.264 coded as interlaced frames (the clip says H.264,
+    /// 1080i); MPEG-2 and the automatic choice keep MPEG-2 for 1080i; the progressive formats are H.264 whatever
+    /// the choice.
+    #[test]
+    fn the_disc_codec_chooses_1080i_h264_or_mpeg2() {
+        let h264 = options(BdCodec::H264, BdVideo::Hd1080i59, (20_000, 30_000)).unwrap();
+        assert_eq!(h264.codec, HdCodec::H264);
+        assert!(h264.interlaced);
+        assert_eq!(
+            kind(BdCodec::H264, BdVideo::Hd1080i50),
+            StreamKind::H264Video
+        );
+        assert_eq!(
+            coding(BdCodec::H264, BdVideo::Hd1080i59),
+            Some(StreamCoding::H264Video {
+                video_format: 4,
+                frame_rate: 4,
+                aspect: 3
+            })
+        );
+        assert_eq!(
+            super::menu_rates(BdCodec::H264, BdVideo::Hd1080i59),
+            MENU_H264_KBPS
+        );
+        for choice in [BdCodec::Auto, BdCodec::Mpeg2] {
+            let mpeg2 = options(choice, BdVideo::Hd1080i59, (20_000, 30_000)).unwrap();
+            assert_eq!(mpeg2.codec, HdCodec::Mpeg2);
+            assert!(!mpeg2.interlaced);
+        }
+        for choice in BdCodec::ALL {
+            let progressive = options(choice, BdVideo::Hd1080p23, (20_000, 30_000)).unwrap();
+            assert_eq!(
+                (progressive.codec, progressive.interlaced),
+                (HdCodec::H264, false)
+            );
+        }
     }
 
     /// Clips are joined without being copied: each unit is read from its own clip's file, and the second clip's

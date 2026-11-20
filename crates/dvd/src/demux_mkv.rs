@@ -24,6 +24,9 @@ const MAX_PICTURES: usize = 60 * 60 * 24 * 60;
 const DELIMITER: [u8; 6] = [0, 0, 0, 1, 9, 0xF0];
 
 /// What an `avcC` record says: the bytes of each NAL's length, and its parameter sets as Annex B.
+/// A sequence parameter set (what the MP4 side names it by).
+pub(crate) type H264Sps = h264_sps::Sps;
+
 pub(crate) struct Config {
     pub length_size: usize,
     pub parameter_sets: Vec<u8>,
@@ -261,6 +264,23 @@ fn fit(path: &Path, format: BdVideoFormat) -> Option<Fit> {
 /// the pictures themselves are checked when they are taken out).
 pub(crate) fn fits(path: &Path, format: BdVideoFormat) -> bool {
     is_matroska(path) && fit(path, format).is_some()
+}
+
+/// The sequence parameter set of the Matroska file's H.264 video track (from its header); `None` for another
+/// codec or another kind of file.
+pub(crate) fn sps_of(path: &Path) -> Option<h264_sps::Sps> {
+    let source = ReadSeekSource::new(fs::File::open(path).ok()?).ok()?;
+    let options = OpenOptions {
+        index: false,
+        verify_crc: false,
+        index_limit: None,
+    };
+    let demuxer = Demuxer::with_options(source, options).ok()?;
+    let track = demuxer.file().track_of_kind(TrackKind::Video)?;
+    let Codec::Avc { avcc } = &demuxer.tracks().get(track)?.codec else {
+        return None;
+    };
+    config(avcc)?.sps
 }
 
 /// Whether the file starts with an EBML header.

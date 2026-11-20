@@ -25,7 +25,24 @@ pub enum TrimmedPassthrough {
     /// Pictures left in their Matroska or MP4 file.
     Samples(H264Samples),
     /// Pictures left in their transport stream (M6.367).
-    Transport(crate::TsH264),
+    Transport(crate::TsUnits),
+    /// HD MPEG-2 (M6.385): units of an elementary stream (the file itself, or the build cache's), timed from 0.
+    Mpeg2Stream {
+        /// The MPEG-2 video elementary stream.
+        es: PathBuf,
+        /// The units that play, in decoding order.
+        units: Vec<AccessUnit>,
+    },
+    /// HD MPEG-2 pictures left in their transport stream (M6.385).
+    Mpeg2Transport(crate::TsUnits),
+}
+
+impl TrimmedPassthrough {
+    /// Whether the part is MPEG-2 video (else H.264).
+    #[must_use]
+    pub fn is_mpeg2(&self) -> bool {
+        matches!(self, Self::Mpeg2Stream { .. } | Self::Mpeg2Transport(_))
+    }
 }
 
 /// The frame of the standard rate a 90 kHz time (from the first shown picture) rounds to.
@@ -156,7 +173,7 @@ impl Passthrough {
     pub fn units(&self) -> Result<Vec<AccessUnit>, DvdError> {
         match self {
             Self::Samples(samples) => Ok(samples.units().to_vec()),
-            Self::Transport(ts) => Ok(ts.units().to_vec()),
+            Self::Transport(ts) | Self::TransportMpeg2(ts) => Ok(ts.units().to_vec()),
             Self::Stream { index, .. } | Self::Mpeg2 { index, .. } => {
                 disccraft_transcode::hd::read_h264_index(index)
                     .map_err(|error| DvdError::Unsupported(format!("{}: {error}", index.display())))
@@ -176,7 +193,7 @@ impl Passthrough {
                     .read(&mut file, index)
                     .map_err(|error| crate::io_error(path, error))
             }
-            Self::Transport(ts) => {
+            Self::Transport(ts) | Self::TransportMpeg2(ts) => {
                 let path = ts.path();
                 let mut file =
                     std::fs::File::open(path).map_err(|error| crate::io_error(path, error))?;
@@ -203,6 +220,10 @@ impl Passthrough {
     ///
     /// When the unit cannot be read.
     pub fn starts_clean(&self, units: &[AccessUnit], index: usize) -> Result<bool, DvdError> {
+        // MPEG-2 (M6.385): a GOP's I picture starts it (the open GOP's leading B pictures are left out).
+        if matches!(self, Self::Mpeg2 { .. } | Self::TransportMpeg2(_)) {
+            return Ok(units.get(index).is_some_and(|unit| unit.keyframe));
+        }
         Ok(is_idr(&self.read_unit(units, index)?))
     }
 
@@ -218,10 +239,6 @@ impl Passthrough {
         trim: ClipTrim,
         rate: (u32, u32),
     ) -> Result<Option<TrimmedPassthrough>, DvdError> {
-        // MPEG-2 is not cut here: a trimmed clip of it is encoded (it can be decoded).
-        if matches!(self, Self::Mpeg2 { .. }) {
-            return Ok(None);
-        }
         let units = self.units()?;
         let Some((indices, kept)) = trimmed_units(&units, trim, rate) else {
             return Ok(None);
@@ -235,7 +252,12 @@ impl Passthrough {
         Ok(Some(match self {
             Self::Samples(samples) => TrimmedPassthrough::Samples(samples.keep(&indices, kept)),
             Self::Transport(ts) => TrimmedPassthrough::Transport(ts.keep(&indices, kept)),
-            Self::Stream { es, .. } | Self::Mpeg2 { es, .. } => TrimmedPassthrough::Stream {
+            Self::TransportMpeg2(ts) => TrimmedPassthrough::Mpeg2Transport(ts.keep(&indices, kept)),
+            Self::Stream { es, .. } => TrimmedPassthrough::Stream {
+                es: es.clone(),
+                units: kept,
+            },
+            Self::Mpeg2 { es, .. } => TrimmedPassthrough::Mpeg2Stream {
                 es: es.clone(),
                 units: kept,
             },
@@ -296,14 +318,26 @@ pub fn bd_cut_points(
     let Some(format) = crate::BdVideoFormat::of_path(project, path) else {
         return Ok(None);
     };
-    if !crate::h264_fits_bd(path, format) {
-        return Ok(None);
-    }
     let rate = if project.settings.standard == disccraft_project::VideoStandard::Ntsc {
         (30_000, 1001)
     } else {
         (25, 1)
     };
+    // HD MPEG-2 that goes on the disc as it is (M6.385) is cut at its GOPs: every I picture starts one.
+    if !crate::h264_fits_bd(path, format) {
+        if !crate::mpeg2_fits_bd(path, format) {
+            return Ok(None);
+        }
+        let Some(passthrough) = crate::demux_mpeg2_for_bd(path, index_dir, format)? else {
+            return Ok(None);
+        };
+        let units = passthrough.units()?;
+        let keys = key_frames(&units, rate);
+        return Ok(Some(CutPoints {
+            keys,
+            clean: Box::new(move |index| passthrough.starts_clean(&units, index).unwrap_or(false)),
+        }));
+    }
     // A transport stream's pictures are found by its index, without writing its video out first.
     if let Some((units, clean)) = crate::demux::ts_h264_keys(path) {
         return Ok(Some(CutPoints {

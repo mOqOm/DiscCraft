@@ -91,6 +91,38 @@ impl NavCommand {
         Self::new(op, gpr, value)
     }
 
+    /// Set_Move from a register: GPR `gpr` takes register `register`'s value (a GPR index, or a PSR's number
+    /// with [`PSR_OPERAND`]).
+    pub fn move_reg(gpr: u32, register: u32) -> Self {
+        let op = opcode(2, SET_GROUP, 0, false, false, 1, OptionKind::Set);
+        Self::new(op, gpr, register)
+    }
+
+    /// Set_Add from a register: adds register `register`'s value (see [`NavCommand::move_reg`]) to GPR `gpr`.
+    pub fn add_reg_reg(gpr: u32, register: u32) -> Self {
+        let op = opcode(2, SET_GROUP, 0, false, false, 3, OptionKind::Set);
+        Self::new(op, gpr, register)
+    }
+
+    /// Set_Add: group 2 (Set), sub-group 0, set option 3; adds an immediate value to a GPR.
+    pub fn add_reg(gpr: u32, value: u32) -> Self {
+        let op = opcode(2, SET_GROUP, 0, false, true, 3, OptionKind::Set);
+        Self::new(op, gpr, value)
+    }
+
+    /// Set_Mul: group 2 (Set), sub-group 0, set option 5; multiplies a GPR by an immediate value.
+    pub fn mul_reg(gpr: u32, value: u32) -> Self {
+        let op = opcode(2, SET_GROUP, 0, false, true, 5, OptionKind::Set);
+        Self::new(op, gpr, value)
+    }
+
+    /// Set_ButtonPage with the page only: turns to `page`, whose default button is selected (the button flag is
+    /// off).
+    pub fn set_page(page: u16) -> Self {
+        let op = opcode(2, SET_GROUP, 1, true, true, 3, OptionKind::Set);
+        Self::new(op, 0, BUTTON_PAGE_FLAG | u32::from(page))
+    }
+
     /// Set_ButtonPage: group 2 (Set), sub-group 1, set option 3. Selects `button` on `page` of the next interactive
     /// composition (the button and page flags in the top bits say both are set).
     pub fn set_button_page(button: u16, page: u16) -> Self {
@@ -152,6 +184,9 @@ const SET_GROUP: u8 = 2;
 
 /// Set_ButtonPage's button / page flag (the top bit of each operand).
 const BUTTON_PAGE_FLAG: u32 = 0x8000_0000;
+
+/// A register operand that names a PSR (with its number in the low bits) rather than a GPR.
+pub const PSR_OPERAND: u32 = 0x8000_0000;
 
 #[derive(Clone, Copy)]
 enum OptionKind {
@@ -337,7 +372,7 @@ pub fn read_movie_objects(data: &[u8]) -> Result<Vec<MovieObject>, BdmvError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MovieObject, NavCommand, read_movie_objects, write_movie_objects};
+    use super::{MovieObject, NavCommand, PSR_OPERAND, read_movie_objects, write_movie_objects};
 
     fn sample() -> Vec<MovieObject> {
         vec![
@@ -431,6 +466,37 @@ mod tests {
         assert_eq!(sub.opcode() & !0x1F, set.opcode() & !0x1F);
         assert_eq!(sub.opcode() & 0x1F, 4);
         assert_eq!((sub.dst(), sub.src()), (1, 1));
+    }
+
+    /// M10.25: the register Set commands (Move and Add from a register, Add and Mul of an immediate) and
+    /// Set_ButtonPage with the page only.
+    #[test]
+    fn register_set_commands_and_a_page_only() {
+        let fields = |command: NavCommand| {
+            let op = command.opcode();
+            (
+                (op >> 27) & 3,
+                (op >> 24) & 7,
+                (op >> 23) & 1,
+                (op >> 22) & 1,
+                op & 0x1F,
+                command.dst(),
+                command.src(),
+            )
+        };
+        // From PSR 11 (a register operand with the PSR flag): the source is not immediate.
+        assert_eq!(
+            fields(NavCommand::move_reg(4, PSR_OPERAND | 11)),
+            (2, 0, 0, 0, 1, 4, 0x8000_000B)
+        );
+        assert_eq!(fields(NavCommand::add_reg_reg(4, 2)), (2, 0, 0, 0, 3, 4, 2));
+        assert_eq!(fields(NavCommand::add_reg(4, 1)), (2, 0, 0, 1, 3, 4, 1));
+        assert_eq!(fields(NavCommand::mul_reg(4, 256)), (2, 0, 0, 1, 5, 4, 256));
+        // The button flag off, the page flag on.
+        assert_eq!(
+            fields(NavCommand::set_page(3)),
+            (2, 1, 1, 1, 3, 0, 0x8000_0003)
+        );
     }
 
     #[test]

@@ -132,15 +132,15 @@ fn better(best: (i32, i32, u32), dx: i32, dy: i32, sad: u32) -> bool {
     sad < best.2 || (sad == best.2 && closer_to_zero(dx, dy, best.0, best.1))
 }
 
-/// Predictive diamond search (full-pel): start from the better of (0, 0) and `pred`, walk the large diamond until its
-/// centre is best, then refine with the small diamond. About 20–40 SAD evaluations instead of (2·range + 1)².
+/// Predictive diamond search (full-pel): start from the best of (0, 0) and `preds` (the vector before, the last
+/// picture's here), walk the large diamond until its centre is best, then refine with the small diamond. About 20–40
+/// SAD evaluations instead of (2·range + 1)².
 pub(crate) fn search_fast(
     cur: &Frame420,
     reference: &Frame420,
-    mbx: usize,
-    mby: usize,
+    (mbx, mby): (usize, usize),
     range: i32,
-    pred: (i32, i32),
+    preds: &[(i32, i32)],
 ) -> (i32, i32, u32) {
     const LARGE: [(i32, i32); 8] = [
         (0, -2),
@@ -157,10 +157,17 @@ pub(crate) fn search_fast(
         return (0, 0, 0);
     };
     let mut best = (0, 0, sad_block(cur, reference, mbx, mby, 0, 0));
-    if win.contains(pred.0, pred.1) && pred != (0, 0) {
-        let sad = sad_block(cur, reference, mbx, mby, pred.0, pred.1);
-        if better(best, pred.0, pred.1, sad) {
-            best = (pred.0, pred.1, sad);
+    for (index, &pred) in preds.iter().enumerate() {
+        if win.contains(pred.0, pred.1)
+            && pred != (0, 0)
+            && !preds
+                .get(..index)
+                .is_some_and(|before| before.contains(&pred))
+        {
+            let sad = sad_block(cur, reference, mbx, mby, pred.0, pred.1);
+            if better(best, pred.0, pred.1, sad) {
+                best = (pred.0, pred.1, sad);
+            }
         }
     }
     for pattern in [&LARGE[..], &SMALL[..]] {

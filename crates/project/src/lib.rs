@@ -41,6 +41,7 @@ mod remove;
 mod replace;
 mod rom;
 mod subpicture;
+mod text_span;
 mod thumbnail;
 mod timecode;
 mod transition;
@@ -85,7 +86,7 @@ pub use menu::{
     MAX_TRACKING, MIN_LEADING, MIN_TEXT_SIZE, MIN_TRACKING, MenuBackground, MenuText, Rect,
     TextAlign, TextCaps, TextFormat, auto_button_rect, frame_size, safe_area_guides,
 };
-pub use menu::{ButtonDefaults, ButtonKind, PopupBackground, RouteOptions, WrapMode};
+pub use menu::{ButtonDefaults, ButtonKind, NO_PSD_PAGE, PopupBackground, RouteOptions, WrapMode};
 pub use menu::{
     ColorSet, DEFAULT_ACTIVATED_COLOR, Guide, GuideOrientation, HighlightGroup, MAX_BUTTON_OFFSET,
     MAX_MENU_GUIDES,
@@ -109,7 +110,7 @@ pub use model::{
     SubtitleGroup, SubtitleTrack, Timeline, VideoStandard,
 };
 pub use model::{
-    BEST_QUALITY, BlurayTranscode, MAX_TRANSCODE_KBPS, MIN_QUALITY, MIN_TRANSCODE_KBPS,
+    BEST_QUALITY, BdCodec, BlurayTranscode, MAX_TRANSCODE_KBPS, MIN_QUALITY, MIN_TRANSCODE_KBPS,
     TranscodeAudio, TranscodeMode,
 };
 pub use model::{
@@ -121,6 +122,7 @@ pub use quantize::reduce_colors;
 pub use replace::{DesignButton, MenuDesign};
 pub use rom::{MAX_ROM_DEPTH, MAX_ROM_ENTRIES, RomFile, rom_disc_bytes, rom_files};
 pub use subpicture::{ColorLayer, MAX_LAYER_COLORS, MAX_SUBPICTURE_SIDE, Subpicture};
+pub use text_span::{MAX_TEXT_SPANS, SpanStyle, TextSpan};
 pub use thumbnail::{MenuThumbnail, THUMBNAIL_PARTS, ThumbnailArea, ThumbnailSource};
 pub use timecode::{format_frames, format_time, parse_time};
 pub use user_ops::{UserOp, dvd_uop_mask, normalized_ops};

@@ -62,6 +62,8 @@ impl Project {
             graphics: Vec::new(),
             default_button: 0,
             page_of: Some(root),
+            // A page of a PSD shown by page shows only the layers its pages share (M10.27).
+            psd_page: first.psd_page.map(|_| crate::menu::NO_PSD_PAGE),
             ..first
         };
         Ok(id)

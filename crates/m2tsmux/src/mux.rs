@@ -209,8 +209,19 @@ pub fn mux_m2ts_stoppable(
     // a PAT and every EP-map entry points at a PAT that is followed by everything a decoder needs.
     let mut queues = queues;
     let mut ep_map = Vec::new();
+    // M10.28, as Encore multiplexes a menu: no graphics before the first video picture, so the clip's first EP-map
+    // entry (where a player starts) comes before its interactive graphics; those due before the picture is in
+    // follow its first packet.
+    let graphics: Vec<bool> = streams
+        .iter()
+        .map(|stream| matches!(stream.kind, StreamKind::Pgs | StreamKind::Igs))
+        .collect();
+    // (A video stream without units has nothing to wait for.)
+    let mut video_begun = first_video_index
+        .and_then(|index| queues.get(index))
+        .is_none_or(VecDeque::is_empty);
 
-    while let Some(stream_index) = next_stream(&queues) {
+    while let Some(stream_index) = next_stream(&queues, &graphics, video_begun) {
         if stop() {
             return Err(M2tsError(STOPPED.to_string()));
         }
@@ -230,6 +241,37 @@ pub fn mux_m2ts_stoppable(
             .get_mut(stream_index)
             .ok_or_else(|| M2tsError("missing stream packetizer".to_string()))?
             .pes_packets(&pes);
+
+        if !video_begun && first_video_index == Some(stream_index) {
+            video_begun = true;
+            let mut packets = packets.into_iter();
+            let head: Vec<_> = packets.next().into_iter().collect();
+            write_pes_item(&mut scheduler, &item, head, record_ep, &mut ep_map)?;
+            // The graphics due before this picture is in.
+            while let Some(index) = next_stream(&queues, &graphics, true)
+                .filter(|index| graphics.get(*index).copied().unwrap_or(false))
+                .filter(|index| {
+                    queues
+                        .get(*index)
+                        .and_then(VecDeque::front)
+                        .is_some_and(|due| due.send_by <= item.deadline)
+                })
+            {
+                let due = queues
+                    .get_mut(index)
+                    .and_then(VecDeque::pop_front)
+                    .ok_or_else(|| M2tsError("missing scheduled PES packet".to_string()))?;
+                let pes = build_pes(streams, index, due.unit, reader(index))?;
+                let due_packets = scheduler
+                    .streams
+                    .get_mut(index)
+                    .ok_or_else(|| M2tsError("missing stream packetizer".to_string()))?
+                    .pes_packets(&pes);
+                write_pes_item(&mut scheduler, &due, due_packets, false, &mut ep_map)?;
+            }
+            write_pes_item(&mut scheduler, &item, packets.collect(), false, &mut ep_map)?;
+            continue;
+        }
 
         write_pes_item(&mut scheduler, &item, packets, record_ep, &mut ep_map)?;
     }
@@ -441,11 +483,19 @@ fn first_video(streams: &[EsInput]) -> (Option<usize>, u16) {
     (None, 0)
 }
 
-/// Return the stream index whose next PES must be sent first.
-fn next_stream(queues: &[VecDeque<PesItem>]) -> Option<usize> {
+/// Return the stream index whose next PES must be sent first; a graphics stream's (`graphics` by stream) only once
+/// `video_begun`.
+fn next_stream(
+    queues: &[VecDeque<PesItem>],
+    graphics: &[bool],
+    video_begun: bool,
+) -> Option<usize> {
     let mut best: Option<(usize, u64)> = None;
 
     for (index, queue) in queues.iter().enumerate() {
+        if !video_begun && graphics.get(index).copied().unwrap_or(false) {
+            continue;
+        }
         if let Some(item) = queue.front() {
             match best {
                 None => best = Some((index, item.send_by)),
@@ -505,8 +555,8 @@ fn write_pes_item(
 mod tests {
     use super::{STOPPED, mux_m2ts, mux_m2ts_stoppable};
     use crate::{
-        AUDIO_PID, EsInput, EsUnit, M2tsError, MuxConfig, PCR_PID, PMT_PID, SOURCE_PACKET_SIZE,
-        StreamKind, VIDEO_PID,
+        AUDIO_PID, EsInput, EsUnit, IG_PID, M2tsError, MuxConfig, PCR_PID, PMT_PID,
+        SOURCE_PACKET_SIZE, StreamKind, VIDEO_PID,
     };
 
     use std::collections::{HashMap, HashSet};
@@ -539,6 +589,68 @@ mod tests {
             &mut Vec::new(),
         );
         assert!(going.is_ok());
+    }
+
+    /// M10.28, as Encore multiplexes a menu: a menu's interactive graphics, decoded before its still picture,
+    /// come right after the picture's first packet (the clip's first EP-map entry is before them), and nothing is
+    /// late. A video stream without units does not hold the graphics back.
+    #[test]
+    fn graphics_follow_the_first_pictures_first_packet() -> Result<(), M2tsError> {
+        let video = EsInput {
+            pid: VIDEO_PID,
+            kind: StreamKind::Mpeg2Video,
+            units: vec![EsUnit {
+                pts: 27_000,
+                dts: 27_000,
+                data: vec![0_u8; 40_000],
+                random_access: true,
+            }],
+        };
+        let graphics = EsInput {
+            pid: IG_PID,
+            kind: StreamKind::Igs,
+            units: (0..3)
+                .map(|index| EsUnit {
+                    pts: 27_000,
+                    dts: 15_000 + index,
+                    data: vec![0_u8; 3_000],
+                    random_access: true,
+                })
+                .collect(),
+        };
+        let mut out = Vec::new();
+        let layout = mux_m2ts(&[video, graphics.clone()], &MuxConfig::default(), &mut out)?;
+        assert_eq!(layout.late_packets, 0);
+        let pids: Vec<u16> = out
+            .as_chunks::<SOURCE_PACKET_SIZE>()
+            .0
+            .iter()
+            .map(|chunk| (u16::from(chunk[5] & 0x1F) << 8) | u16::from(chunk[6]))
+            .collect();
+        let first_video = pids.iter().position(|pid| *pid == VIDEO_PID);
+        let first_graphics = pids.iter().position(|pid| *pid == IG_PID);
+        assert!(first_video < first_graphics, "{pids:?}");
+        let ep = layout.ep_map.first().map(|entry| entry.spn);
+        assert!(ep.is_some_and(|spn| first_graphics.is_some_and(|at| (spn as usize) < at)));
+        // The graphics before the rest of the picture.
+        let last_graphics = pids.iter().rposition(|pid| *pid == IG_PID);
+        let last_video = pids.iter().rposition(|pid| *pid == VIDEO_PID);
+        assert!(last_graphics < last_video);
+        // No video units: the graphics go all the same.
+        let empty = EsInput {
+            pid: VIDEO_PID,
+            kind: StreamKind::Mpeg2Video,
+            units: Vec::new(),
+        };
+        let mut out = Vec::new();
+        let _ = mux_m2ts(&[empty, graphics], &MuxConfig::default(), &mut out)?;
+        assert!(
+            out.as_chunks::<SOURCE_PACKET_SIZE>()
+                .0
+                .iter()
+                .any(|chunk| ((u16::from(chunk[5] & 0x1F) << 8) | u16::from(chunk[6])) == IG_PID)
+        );
+        Ok(())
     }
 
     #[test]

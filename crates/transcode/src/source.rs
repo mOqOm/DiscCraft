@@ -66,6 +66,11 @@ impl Source {
         }
     }
 
+    /// The file it was opened from.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Borrow source metadata.
     pub(crate) fn info(&self) -> &MediaInfo {
         match &self.timing {

@@ -25,7 +25,11 @@ const FIRST_IN_SEQUENCE: u8 = 0x80;
 const LAST_IN_SEQUENCE: u8 = 0x40;
 const USER_INTERFACE_POPUP: u8 = 0x40;
 const AUTO_ACTION: u8 = 0x80;
-const BUTTON_OBJECT_COMPLETE: u8 = 0x40;
+/// A button state's repeat and complete flags (M10.28: both off, as Encore writes them; PowerDVD showed no button
+/// whose states had the complete flag with the animation frame rate code 0).
+const BUTTON_OBJECT_COMPLETE: u8 = 0x00;
+/// A page's animation frame rate code (M10.28: 1, as Encore writes it).
+const ANIMATION_FRAME_RATE: u8 = 1;
 const NONE_SOUND: u8 = 0xFF;
 const NONE_BUTTON: u16 = 0xFFFF;
 
@@ -224,7 +228,7 @@ fn push_page(out: &mut Vec<u8>, page: &IgPage) -> Result<(), PgsError> {
     out.extend_from_slice(&[0u8; 8]);
     out.extend_from_slice(&[0u8, 0u8]);
     out.extend_from_slice(&[0u8, 0u8]);
-    out.push(0);
+    out.push(ANIMATION_FRAME_RATE);
     out.extend_from_slice(&page.default_selected.to_be_bytes());
     out.extend_from_slice(&NONE_BUTTON.to_be_bytes());
     out.push(page.palette_id);
@@ -406,11 +410,61 @@ fn validate_object_ids(objects: &[IgObject]) -> Result<(), PgsError> {
     Ok(())
 }
 
+/// The rate an interactive graphics decoder decodes objects at (64 Mbit/s), bytes a second.
+const DECODE_RATE: u64 = 8_000_000;
+/// The rate it clears its graphics plane at, at the start of an epoch (128 Mbit/s), bytes a second.
+const CLEAR_RATE: u64 = 16_000_000;
+
+/// The 90 kHz ticks it takes to handle `bytes` at `rate` bytes a second, at least one.
+fn ticks(bytes: u64, rate: u64) -> u64 {
+    bytes.saturating_mul(90_000).div_ceil(rate).max(1)
+}
+
+/// One frame at frame rate code `id`, in 90 kHz ticks.
+fn frame_ticks(id: u8) -> u64 {
+    match id {
+        1 => 3754,
+        2 => 3750,
+        3 => 3600,
+        6 => 1800,
+        7 => 1501,
+        _ => 3003,
+    }
+}
+
+/// How long before its presentation an IG display set starts to be decoded (90 kHz ticks, M10.28): its objects
+/// decoded one after another, or (at an epoch start) the graphics plane cleared, whichever takes longer, in whole
+/// frames, as Encore times a menu's (1920 x 1080 at 29.97: 12,012). A strict player (PowerDVD) shows nothing of a
+/// display set whose objects are not decoded by then.
+#[must_use]
+pub fn display_set_lead(
+    c: &InteractiveComposition,
+    objects: &[IgObject],
+    state: CompositionState,
+) -> u64 {
+    let decode: u64 = objects
+        .iter()
+        .map(|object| {
+            ticks(
+                u64::from(object.width) * u64::from(object.height),
+                DECODE_RATE,
+            )
+        })
+        .sum();
+    let clear = match state {
+        CompositionState::EpochStart => ticks(u64::from(c.width) * u64::from(c.height), CLEAR_RATE),
+        CompositionState::AcquisitionPoint => 0,
+    };
+    let frame = frame_ticks(c.frame_rate_id);
+    decode.max(clear).div_ceil(frame).saturating_mul(frame)
+}
+
 /// Encode a complete IG display set at `pts` that starts an epoch.
 ///
-/// The order is ICS fragments, PDS, every ODS, then END. ICS and END use `dts = pts`.
-/// PDS and ODS keep the display-set `pts` but use `dts = pts - 1`, saturating at zero,
-/// so they are decoded before the composition is presented.
+/// The order is ICS fragments, PDS, every ODS, then END, timed as the decoder model has them (M10.28, as Encore
+/// times them): the ICS is presented at `pts` and decoded [`display_set_lead`] before; the PDS at that time; each
+/// ODS decoded after the one before it, taking the time its pixels need at the decoder's rate; the END when the last
+/// ODS is done. (Before M10.28 every segment was decoded one tick before `pts`, which PowerDVD does not show.)
 pub fn display_set(
     c: &InteractiveComposition,
     palette: &[PaletteEntry],
@@ -428,40 +482,66 @@ pub fn display_set_as(
     pts: u64,
     state: CompositionState,
 ) -> Result<Vec<TimedSegment>, PgsError> {
+    display_set_paletted(c, &[(0, palette)], objects, pts, state)
+}
+
+/// [`display_set_as`] with several palettes (`(palette id, entries)`, a PDS each, in order): the pages of a menu
+/// that each name their own (M10.26).
+pub fn display_set_paletted(
+    c: &InteractiveComposition,
+    palettes: &[(u8, &[PaletteEntry])],
+    objects: &[IgObject],
+    pts: u64,
+    state: CompositionState,
+) -> Result<Vec<TimedSegment>, PgsError> {
     validate_object_ids(objects)?;
+    let mut ids: Vec<u8> = palettes.iter().map(|(id, _)| *id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.len() != palettes.len() {
+        return Err(err("duplicate palette id"));
+    }
 
     let mut output = Vec::new();
-    let pre_dts = pts.saturating_sub(1);
+    let start = pts.saturating_sub(display_set_lead(c, objects, state));
 
     for data in ics_as(c, state)? {
         output.push(TimedSegment {
             pts,
-            dts: pts,
+            dts: start,
             data,
         });
     }
 
-    let pds_segment = pds(0, 0, palette)?;
-    output.push(TimedSegment {
-        pts,
-        dts: pre_dts,
-        data: pds_segment,
-    });
+    for (id, palette) in palettes {
+        output.push(TimedSegment {
+            pts: start,
+            dts: start,
+            data: pds(*id, 0, palette)?,
+        });
+    }
 
+    // Each object decoded after the one before it.
+    let mut at = start;
     for object in objects {
         let rle = rle_encode(object.width, object.height, &object.pixels)?;
+        let done = at.saturating_add(ticks(
+            u64::from(object.width) * u64::from(object.height),
+            DECODE_RATE,
+        ));
         for data in ods(object.id, 0, object.width, object.height, &rle)? {
             output.push(TimedSegment {
-                pts,
-                dts: pre_dts,
+                pts: done,
+                dts: at,
                 data,
             });
         }
+        at = done;
     }
 
     output.push(TimedSegment {
-        pts,
-        dts: pts,
+        pts: at,
+        dts: at,
         data: end(),
     });
 
@@ -551,15 +631,15 @@ mod tests {
         body.extend([0x00, 0x00]); // page id, version
         body.extend([0x00; 8]); // UO mask
         body.extend([0x00, 0x00, 0x00, 0x00]); // empty in / out effects
-        body.push(0x00); // animation frame rate code
+        body.push(0x01); // animation frame rate code (M10.28: 1, as Encore)
         body.extend([0x00, 0x00, 0xFF, 0xFF]); // default selected 0, default activated none
         body.extend([0x00, 0x01]); // palette 0, one BOG
         body.extend([0x00, 0x00, 0x01]); // BOG: default valid button 0, one button
         body.extend([0x00, 0x00, 0xFF, 0xFF, 0x00]); // button 0, no numeric value, no auto action
         body.extend([0x00, 0x00, 0x00, 0x00]); // x, y
         body.extend([0x00; 8]); // neighbours (itself)
-        body.extend([0xFF, 0xFF, 0xFF, 0xFF, 0x40]); // normal: no objects, complete flag
-        body.extend([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x40]); // selected: no sound, no objects, complete flag
+        body.extend([0xFF, 0xFF, 0xFF, 0xFF, 0x00]); // normal: no objects, no repeat or complete flag
+        body.extend([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]); // selected: no sound, no objects, no flags
         body.extend([0xFF, 0xFF, 0xFF, 0xFF, 0xFF]); // activated: no sound, no objects
         body.extend([0x00, 0x01]); // one command
         body.extend(make_command());
@@ -592,7 +672,16 @@ mod tests {
         assert_eq!(state_of(&start), Some(0x80));
         assert_eq!(state_of(&again), Some(0x40));
         assert_eq!(start.len(), again.len());
-        assert!(again.iter().all(|segment| segment.pts == 5000));
+        // Presented at 5000, decoded before (no plane to clear: one frame for the object).
+        assert_eq!(
+            again.first().map(|segment| (segment.pts, segment.dts)),
+            Some((5000, 1400))
+        );
+        assert!(
+            again
+                .iter()
+                .all(|segment| segment.dts <= segment.pts && segment.pts <= 5000)
+        );
     }
 
     #[test]
@@ -641,57 +730,64 @@ mod tests {
 
     #[test]
     fn display_set_order_and_timestamps() {
-        let segments = display_set(&make_composition(), &palette(), &[make_object(0)], 1000)
+        let segments = display_set(&make_composition(), &palette(), &[make_object(0)], 100_000)
             .unwrap_or_default();
+        let kinds: Vec<Option<u8>> = segments
+            .iter()
+            .map(|segment| segment.data.first().copied())
+            .collect();
+        assert_eq!(kinds, [Some(0x18), Some(0x14), Some(0x15), Some(0x80)]);
+        // M10.28: 1920 x 1080 at 25 fps clears its plane in 11,664 ticks, four frames (14,400) before the ICS is
+        // presented; the PDS then; the 2 x 2 object decoded in a tick; the END when it is done.
+        let times: Vec<(u64, u64)> = segments
+            .iter()
+            .map(|segment| (segment.pts, segment.dts))
+            .collect();
+        assert_eq!(
+            times,
+            [
+                (100_000, 85_600),
+                (85_600, 85_600),
+                (85_601, 85_600),
+                (85_601, 85_601)
+            ]
+        );
+    }
 
-        assert_eq!(segments.len(), 4);
-
+    /// M10.28: the lead of a menu's display set as Encore times it: 1920 x 1080 at 29.97 with an 8 x 8 object and
+    /// twelve of 320 x 100 decodes in 4,321 ticks, its plane clears in 11,664: four frames, 12,012.
+    #[test]
+    fn the_lead_is_encores() {
+        let composition = InteractiveComposition {
+            frame_rate_id: 4,
+            ..make_composition()
+        };
+        let mut objects = vec![IgObject {
+            id: 0,
+            width: 8,
+            height: 8,
+            pixels: vec![0; 64],
+        }];
+        for id in 1..=12 {
+            objects.push(IgObject {
+                id,
+                width: 320,
+                height: 100,
+                pixels: vec![0; 32_000],
+            });
+        }
         assert_eq!(
-            segments
-                .first()
-                .and_then(|segment| segment.data.first())
-                .copied(),
-            Some(0x18)
+            super::display_set_lead(&composition, &objects, super::CompositionState::EpochStart),
+            12_012
         );
+        // Without a plane to clear, the objects' 4,321 in whole frames.
         assert_eq!(
-            segments.first().map(|segment| (segment.pts, segment.dts)),
-            Some((1000, 1000))
-        );
-
-        assert_eq!(
-            segments
-                .get(1)
-                .and_then(|segment| segment.data.first())
-                .copied(),
-            Some(0x14)
-        );
-        assert_eq!(
-            segments.get(1).map(|segment| (segment.pts, segment.dts)),
-            Some((1000, 999))
-        );
-
-        assert_eq!(
-            segments
-                .get(2)
-                .and_then(|segment| segment.data.first())
-                .copied(),
-            Some(0x15)
-        );
-        assert_eq!(
-            segments.get(2).map(|segment| (segment.pts, segment.dts)),
-            Some((1000, 999))
-        );
-
-        assert_eq!(
-            segments
-                .get(3)
-                .and_then(|segment| segment.data.first())
-                .copied(),
-            Some(0x80)
-        );
-        assert_eq!(
-            segments.get(3).map(|segment| (segment.pts, segment.dts)),
-            Some((1000, 1000))
+            super::display_set_lead(
+                &composition,
+                &objects,
+                super::CompositionState::AcquisitionPoint
+            ),
+            6_006
         );
     }
 

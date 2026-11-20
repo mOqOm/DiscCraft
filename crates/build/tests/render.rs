@@ -162,3 +162,113 @@ fn rendered_menus_and_slideshows_are_taken_by_the_build() {
     assert_eq!(files(&cache, "motion-", ".ok").len(), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The files of a built Blu-ray disc's `BDMV/STREAM`, by name.
+fn streams(disc: &Path) -> Vec<(String, Vec<u8>)> {
+    let stream = disc.join("BDMV").join("STREAM");
+    files(&stream, "", ".m2ts")
+        .into_iter()
+        .map(|name| {
+            let bytes = std::fs::read(stream.join(&name)).unwrap();
+            (name, bytes)
+        })
+        .collect()
+}
+
+/// M6.387: an HD Blu-ray's motion menu is rendered before the build too, at the disc's HD size: the project preview
+/// then plays it (a transport stream the media reader opens), and the build takes it as it is.
+#[test]
+fn an_hd_blu_ray_motion_menu_is_rendered_before_the_build() {
+    let video = fixtures().join("ntsc.m2v");
+    if !video.is_file() {
+        eprintln!("ntsc.m2v fixture not found; skipping");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("disccraft-render-hd-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // A motion menu over the video's first second, and a title of its first 26 frames.
+    let mut project = Project::default();
+    project.settings.kind = disccraft_project::DiscKind::BluRay;
+    project.settings.bd_video = disccraft_project::BdVideo::Hd720p23;
+    let v = project.add_asset(&video).unwrap();
+    let t = project.add_timeline(v, Some("Main".to_string())).unwrap();
+    project.timeline_mut(t).unwrap().video_trims = vec![disccraft_project::ClipTrim {
+        start: 0,
+        end: Some(26),
+    }];
+    let menu = project.add_menu(Some("Motion".to_string())).unwrap();
+    project
+        .add_button(
+            menu,
+            "Play".to_string(),
+            None,
+            Link::Timeline { id: t, chapter: 0 },
+        )
+        .unwrap();
+    project.menu_mut(menu).unwrap().background = MenuBackground::Video {
+        asset: v,
+        seconds: 1,
+    };
+    project.settings.first_play = Link::Menu {
+        id: menu,
+        button: None,
+    };
+    let options = |name: &str, cache: &str| BuildOptions {
+        output: OutputKind::Folder,
+        path: dir.join(name),
+        cache: Some(dir.join(cache)),
+        audio_language: None,
+    };
+
+    let rendered = options("rendered", "cache");
+    let cache = dir.join("cache");
+    assert_eq!(
+        disccraft_build::rendered_motion_menu(&project, &rendered, menu),
+        None
+    );
+    let menus = render(
+        &project,
+        &rendered,
+        Render::MotionMenus(Some(menu)),
+        &mut |_, _| {},
+    )
+    .unwrap();
+    assert_eq!(menus, 1);
+    let markers = files(&cache, "motion-hd-", ".ok");
+    assert_eq!(markers.len(), 1);
+    // The preview finds it: a transport stream of the disc's HD pictures, a second of them.
+    let found = disccraft_build::rendered_motion_menu(&project, &rendered, menu).unwrap();
+    assert!(found.starts_with(&cache) && found.is_file());
+    assert_eq!(found.extension().and_then(|e| e.to_str()), Some("m2ts"));
+    let probe = disccraft_transcode::probe_video(&found).unwrap();
+    assert_eq!((probe.width, probe.height), (1280, 720));
+    assert!((probe.seconds - 1.0).abs() < 0.1, "{}", probe.seconds);
+
+    // The build takes it as it is (its marker is not written again), and writes the disc a build from an empty cache
+    // does.
+    let marker = cache.join(&markers[0]);
+    let written = std::fs::metadata(&marker).unwrap().modified().unwrap();
+    disccraft_build::build(&project, &rendered).unwrap();
+    assert_eq!(
+        std::fs::metadata(&marker).unwrap().modified().unwrap(),
+        written
+    );
+    build(&project, &options("fresh", "fresh-cache")).unwrap();
+    let (taken, fresh) = (streams(&dir.join("rendered")), streams(&dir.join("fresh")));
+    assert!(taken.len() >= 2);
+    assert_eq!(
+        taken.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+        fresh.iter().map(|(name, _)| name).collect::<Vec<_>>()
+    );
+    for ((name, a), (_, b)) in taken.iter().zip(&fresh) {
+        assert!(a == b, "{name} differs");
+    }
+    // The build from the empty cache kept its play too: the preview plays it from there.
+    assert!(
+        disccraft_build::rendered_motion_menu(&project, &options("fresh", "fresh-cache"), menu)
+            .is_some()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -162,10 +162,64 @@ pub struct DiscSettings {
     /// The video of a Blu-ray disc's titles (Encore's Blu-ray transcode settings): SD MPEG-2, or HD H.264.
     #[serde(default, skip_serializing_if = "BdVideo::is_sd")]
     pub bd_video: BdVideo,
+    /// How a Blu-ray disc's HD titles are coded (Encore's Project Settings ▸ Codec, M12.28): automatically (H.264,
+    /// MPEG-2 for 1080i), H.264 (1080i too, coded interlaced), or MPEG-2 (for 1080i; the progressive formats stay
+    /// H.264).
+    #[serde(default, skip_serializing_if = "BdCodec::is_auto")]
+    pub bd_codec: BdCodec,
     /// The folder whose files go on the disc beside the video, for a computer to read (Encore's Build panel:
     /// DVD-ROM content / BD-ROM content). Its files are in the disc's root, its folders with them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rom_content: Option<String>,
+}
+
+/// The coding of a Blu-ray disc's HD video (Encore's Project Settings ▸ Codec, M12.28).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BdCodec {
+    /// H.264, and MPEG-2 for the interlaced 1080 formats (as before M12.28).
+    #[default]
+    Auto,
+    /// H.264 for every format, the interlaced ones coded as interlaced frames.
+    H264,
+    /// MPEG-2 for the interlaced 1080 formats; DiscCraft codes the progressive formats as H.264 still.
+    Mpeg2,
+}
+
+impl BdCodec {
+    /// Every choice, in Encore's order after the automatic one.
+    pub const ALL: [BdCodec; 3] = [BdCodec::Auto, BdCodec::H264, BdCodec::Mpeg2];
+
+    /// The default: automatic.
+    #[must_use]
+    pub fn is_auto(&self) -> bool {
+        *self == BdCodec::Auto
+    }
+
+    /// Whether HD video `video` is coded as MPEG-2 on a disc of this choice (else H.264).
+    #[must_use]
+    pub fn mpeg2(self, video: BdVideo) -> bool {
+        match self {
+            BdCodec::Auto | BdCodec::Mpeg2 => video.interlaced(),
+            BdCodec::H264 => false,
+        }
+    }
+
+    /// The name in command parameters.
+    #[must_use]
+    pub fn id(self) -> &'static str {
+        match self {
+            BdCodec::Auto => "auto",
+            BdCodec::H264 => "h264",
+            BdCodec::Mpeg2 => "mpeg2",
+        }
+    }
+
+    /// The choice named `id` ([`BdCodec::id`]).
+    #[must_use]
+    pub fn from_id(id: &str) -> Option<BdCodec> {
+        BdCodec::ALL.into_iter().find(|codec| codec.id() == id)
+    }
 }
 
 /// The video format of a Blu-ray disc's titles, encoded to H.264 when HD. 1080p 23.976 / 24 and the 720p formats are

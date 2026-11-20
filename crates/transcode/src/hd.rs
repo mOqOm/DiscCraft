@@ -45,6 +45,9 @@ pub struct HdOptions {
     /// How the bit rate is kept: one-pass VBR (Encore's Blu-ray presets), two-pass VBR (the video is gone through
     /// twice, the first time to measure it) or CBR (the target is also the peak).
     pub mode: crate::RateMode,
+    /// H.264 of an interlaced format (1080i, M12.28): the frames are coded as interlaced frames, the top field
+    /// first (craft-video's `EncoderConfig::interlaced`). MPEG-2 HD is always signalled interlaced.
+    pub interlaced: bool,
 }
 
 /// The video coding of an HD stream.
@@ -103,21 +106,26 @@ enum HdStats {
     Mpeg2(Vec<disccraft_mpeg2venc::encoder::PictureStats>),
 }
 
-/// The MPEG-2 encoder's settings for `options`: 1920 x 1080 at 29.97 (NTSC) or 25 (PAL) frames a second.
+/// The MPEG-2 encoder's settings for `options`: 1920 x 1080, or (M6.393) HDV's 1440 x 1080, at 29.97 (NTSC) or 25
+/// (PAL) frames a second.
 fn mpeg2_config(
     options: &HdOptions,
 ) -> Result<disccraft_mpeg2venc::encoder::EncoderConfig, TranscodeError> {
-    let standard = match (
-        options.width,
-        options.height,
-        options.fps_num,
-        options.fps_den,
-    ) {
-        (1920, 1080, 30_000, 1001) => disccraft_mpeg2venc::Standard::Ntsc,
-        (1920, 1080, 25, 1) => disccraft_mpeg2venc::Standard::Pal,
+    let standard = match (options.height, options.fps_num, options.fps_den) {
+        (1080, 30_000, 1001) => disccraft_mpeg2venc::Standard::Ntsc,
+        (1080, 25, 1) => disccraft_mpeg2venc::Standard::Pal,
+        _ => None.ok_or_else(|| {
+            TranscodeError::Unsupported(
+                "MPEG-2 HD is 1080 lines at 29.97 or 25 frames a second".to_string(),
+            )
+        })?,
+    };
+    let format = match options.width {
+        1920 => disccraft_mpeg2venc::encoder::Format::Hd1080,
+        1440 => disccraft_mpeg2venc::encoder::Format::Hd1440,
         _ => {
             return Err(TranscodeError::Unsupported(
-                "MPEG-2 HD is 1920 x 1080 at 29.97 or 25 frames a second".to_string(),
+                "MPEG-2 HD is 1920 or 1440 pixels wide".to_string(),
             ));
         }
     };
@@ -137,7 +145,7 @@ fn mpeg2_config(
             options.max_kbps.saturating_mul(1000)
         },
         wide: true,
-        format: disccraft_mpeg2venc::encoder::Format::Hd1080,
+        format,
         pulldown: false,
     })
 }
@@ -880,6 +888,9 @@ fn encoder_config(options: &HdOptions) -> EncoderConfig {
     config.aud = true;
     config.level = Some(41);
     config.format = PacketFormat::AnnexB;
+    if options.interlaced {
+        config.interlaced = Some(craft_video::h264::FieldOrder::TopFirst);
+    }
     config
 }
 
@@ -950,6 +961,7 @@ pub(crate) fn render_fit(
             quality: crate::BEST_QUALITY,
             rendering: crate::Rendering::default(),
             mode: crate::RateMode::Vbr,
+            interlaced: false,
         },
     )
 }
@@ -986,8 +998,54 @@ fn render_rgb_frame(frame: &VideoFrame, options: &HdOptions) -> Result<Vec<u8>, 
     rendered.ok_or_else(|| TranscodeError::Unsupported("failed to render frame".to_string()))
 }
 
-/// Compute letterbox/pillarbox geometry for an HD output frame.
+/// The shape of an HD output frame's pixels: HDV's 1440 x 1080 is shown 16:9, its pixels 4:3 wide (M6.393); the
+/// other HD sizes have square pixels.
+fn output_pixel_aspect(width: u32, height: u32) -> (u32, u32) {
+    if (width, height) == (1440, 1080) {
+        (4, 3)
+    } else {
+        (1, 1)
+    }
+}
+
+/// Compute letterbox/pillarbox geometry for an HD output frame (of pixels shaped as [`output_pixel_aspect`] says).
 fn target_geometry(
+    source_width: u32,
+    source_height: u32,
+    par: (u32, u32),
+    output_width: u32,
+    output_height: u32,
+) -> Option<Geometry> {
+    let (wide, tall) = output_pixel_aspect(output_width, output_height);
+    if (wide, tall) == (1, 1) {
+        return square_geometry(
+            source_width,
+            source_height,
+            par,
+            output_width,
+            output_height,
+        );
+    }
+    // Fitted into the frame as it is shown, then back to its pixels.
+    let shown = square_geometry(
+        source_width,
+        source_height,
+        par,
+        output_width.checked_mul(wide)?,
+        output_height.checked_mul(tall)?,
+    )?;
+    let width = (shown.width.saturating_add(wide / 2) / wide).clamp(1, output_width);
+    let height = (shown.height.saturating_add(tall / 2) / tall).clamp(1, output_height);
+    Some(Geometry {
+        x: output_width.saturating_sub(width) / 2,
+        y: output_height.saturating_sub(height) / 2,
+        width,
+        height,
+    })
+}
+
+/// [`target_geometry`] for an output frame of square pixels.
+fn square_geometry(
     source_width: u32,
     source_height: u32,
     par: (u32, u32),
@@ -1084,6 +1142,59 @@ pub(crate) fn render_rgb_at(
     render_rgb(rgba, source.0, source.1, geometry, output.0, output.1)
 }
 
+/// [`render_rgb_at`] for an interlaced picture (M12.26): each output line is made of the source lines of its own
+/// field (the even lines of the top field, the odd ones of the bottom field), at the place the line has in the
+/// frame, so the two moments of the picture stay apart when it is scaled.
+pub(crate) fn render_rgb_fields_at(
+    rgba: &[u8],
+    source: (u32, u32),
+    (x, y, width, height): (u32, u32, u32, u32),
+    output: (u32, u32),
+) -> Option<Vec<u8>> {
+    let geometry = Geometry {
+        x,
+        y,
+        width,
+        height,
+    };
+    render_rgb_rows(
+        rgba,
+        (source.0, source.1),
+        geometry,
+        (output.0, output.1),
+        true,
+    )
+}
+
+/// The two source lines (and the weight of the second, in [`FIXED_POINT_SHIFT`] bits) of output line `position` of an
+/// interlaced picture: its place in the frame ([`source_coordinate`]), taken to the lines of its field (the
+/// output line's parity), the second line of the field clamped at the field's last.
+fn field_rows(
+    position: u32,
+    (origin, content): (u32, u32),
+    source: u32,
+    lines: usize,
+) -> (usize, usize, u32) {
+    let parity = usize::try_from(position % 2).unwrap_or(0);
+    let frame = source_coordinate(position, origin, content, source);
+    // The field's own coordinate: (frame - parity) / 2 lines.
+    let field = frame.saturating_sub(u64::try_from(parity).unwrap_or(0) * FIXED_POINT_ONE) / 2;
+    let last_line = lines.saturating_sub(1);
+    // The field's last line: the last line of that parity (the other field's when the picture has one line).
+    let field_last = if last_line >= parity {
+        (last_line - parity) / 2
+    } else {
+        0
+    };
+    let line = |index: usize| (index * 2 + parity).min(last_line);
+    let first = usize::try_from(field >> FIXED_POINT_SHIFT)
+        .unwrap_or(field_last)
+        .min(field_last);
+    let second = first.saturating_add(1).min(field_last);
+    let weight = u32::try_from(field & (FIXED_POINT_ONE - 1)).unwrap_or(0);
+    (line(first), line(second), weight)
+}
+
 /// Render RGBA source into RGB24 output with bilinear sampling, the picture in `geometry` and black around it.
 ///
 /// The arithmetic is [`sample_bilinear`]'s, pixel for pixel: each source pixel composited onto black once, the
@@ -1096,6 +1207,23 @@ fn render_rgb(
     geometry: Geometry,
     output_width: u32,
     output_height: u32,
+) -> Option<Vec<u8>> {
+    render_rgb_rows(
+        rgba,
+        (source_width, source_height),
+        geometry,
+        (output_width, output_height),
+        false,
+    )
+}
+
+/// [`render_rgb`], with `fields` each output line made of its own field's lines ([`render_rgb_fields_at`]).
+fn render_rgb_rows(
+    rgba: &[u8],
+    (source_width, source_height): (u32, u32),
+    geometry: Geometry,
+    (output_width, output_height): (u32, u32),
+    fields: bool,
 ) -> Option<Vec<u8>> {
     let width = usize::try_from(output_width).ok()?;
     let height = usize::try_from(output_height).ok()?;
@@ -1128,7 +1256,13 @@ fn render_rgb(
         .map(|x| axis(x, geometry.x, geometry.width, source_width, sw - 1))
         .collect();
     let rows: Vec<(usize, usize, u32)> = (geometry.y..end_y)
-        .map(|y| axis(y, geometry.y, geometry.height, source_height, sh - 1))
+        .map(|y| {
+            if fields {
+                field_rows(y, (geometry.y, geometry.height), source_height, sh)
+            } else {
+                axis(y, geometry.y, geometry.height, source_height, sh - 1)
+            }
+        })
         .collect();
 
     let stride = width.checked_mul(3)?;
@@ -1729,6 +1863,7 @@ mod tests {
             quality: crate::BEST_QUALITY,
             rendering: crate::Rendering::default(),
             mode: crate::RateMode::Vbr,
+            interlaced: false,
         }
     }
 
@@ -1739,6 +1874,57 @@ mod tests {
         assert_eq!(
             (geometry.x, geometry.y, geometry.width, geometry.height),
             (0, 0, 1920, 1080)
+        );
+    }
+
+    /// M12.26: scaled as fields, each output line takes only lines of its own field: a picture whose top field is
+    /// white and bottom field black gives white even lines and black odd ones (scaled as a frame, every line is a
+    /// grey mix of the two).
+    #[test]
+    fn fields_are_scaled_each_on_its_own() {
+        let (sw, sh) = (64_u32, 108_u32);
+        let rgba: Vec<u8> = (0..sh)
+            .flat_map(|row| {
+                let value = if row % 2 == 0 { 255 } else { 0 };
+                (0..sw).flat_map(move |_| [value, value, value, 255])
+            })
+            .collect();
+        let fields =
+            super::render_rgb_fields_at(&rgba, (sw, sh), (0, 0, 32, 48), (32, 48)).unwrap();
+        let frame = super::render_rgb_at(&rgba, (sw, sh), (0, 0, 32, 48), (32, 48)).unwrap();
+        for row in 0..48_usize {
+            let value = fields[row * 32 * 3];
+            if row % 2 == 0 {
+                assert_eq!(value, 255, "row {row}");
+            } else {
+                assert_eq!(value, 0, "row {row}");
+            }
+        }
+        assert!(
+            (1..47).any(|row: usize| (20..235).contains(&frame[row * 32 * 3])),
+            "scaled as a frame, the fields mix"
+        );
+        // A letterboxed picture starting on an odd line: the lines keep their field.
+        let boxed = super::render_rgb_fields_at(&rgba, (sw, sh), (0, 7, 32, 33), (32, 48)).unwrap();
+        for row in 7..40_usize {
+            let expected = if row % 2 == 0 { 255 } else { 0 };
+            assert_eq!(boxed[row * 32 * 3], expected, "boxed row {row}");
+        }
+    }
+
+    /// M6.393: HDV's 1440 x 1080 is shown 16:9: a 16:9 source fills it, a 4:3 one is pillarboxed to 1080 pixels
+    /// (1440 shown).
+    #[test]
+    fn geometry_of_the_hdv_frame() {
+        let full = target_geometry(1920, 1080, (1, 1), 1440, 1080).unwrap();
+        assert_eq!(
+            (full.x, full.y, full.width, full.height),
+            (0, 0, 1440, 1080)
+        );
+        let boxed = target_geometry(640, 480, (1, 1), 1440, 1080).unwrap();
+        assert_eq!(
+            (boxed.x, boxed.y, boxed.width, boxed.height),
+            (180, 0, 1080, 1080)
         );
     }
 
@@ -1864,6 +2050,7 @@ mod tests {
             quality: crate::BEST_QUALITY,
             rendering: crate::Rendering::default(),
             mode: crate::RateMode::Vbr,
+            interlaced: false,
         };
         assert_eq!(frame_count(Tick(ticks), &options).unwrap(), 144);
     }
@@ -1926,6 +2113,7 @@ mod tests {
             quality: crate::BEST_QUALITY,
             rendering: crate::Rendering::default(),
             mode: crate::RateMode::Vbr,
+            interlaced: false,
         }
     }
 

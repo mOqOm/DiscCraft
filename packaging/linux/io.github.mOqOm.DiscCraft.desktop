@@ -11,4 +11,4 @@ Terminal=false
 Categories=AudioVideo;Video;DiscBurning;
 MimeType=application/x-disccraft-project;
 Keywords=DVD;Blu-ray;authoring;menu;chapter;subtitle;
-StartupWMClass=disccraft
+StartupWMClass=io.github.mOqOm.DiscCraft

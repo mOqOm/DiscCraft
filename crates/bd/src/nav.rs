@@ -52,6 +52,22 @@ pub(crate) struct MenuNav {
     /// The button selected when the menu is entered without a button of its own (its IG names no default: the
     /// movie object selects one, so a link can choose another and a motion menu's later plays keep the viewer's).
     pub(crate) select: u16,
+    /// The menu's place among its pages built as one interactive composition (M10.26); `None` for a menu of its
+    /// own.
+    pub(crate) pages: Option<MenuPages>,
+}
+
+/// A page of a menu whose pages are built as one interactive composition (M10.26, as Encore builds them): page 0
+/// of the composition has one auto-action button that turns to the page and button [`PAGE_GPR`] names, the
+/// menu's pages follow, and a link from one to another only turns the page (the playlist plays on).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MenuPages {
+    /// The index (among the menus) of the first page, whose movie object plays the composition.
+    pub(crate) first: usize,
+    /// This menu's page in the composition (1 for the first page).
+    pub(crate) page: u8,
+    /// How many buttons each page has, the first page first.
+    pub(crate) buttons: Vec<usize>,
 }
 
 /// How a motion menu's movie object plays its playlist (Encore's ループ回数 and ループポイント).
@@ -73,6 +89,113 @@ const SELECT_GPR: u32 = 2;
 /// The GPR that holds the pending override (its number, 1-based; 0 for none): the title that ends next goes there
 /// instead of to its own end action. Menus clear it.
 const OVERRIDE_GPR: u32 = 3;
+
+/// The GPR that names the page (and button) of a menu whose pages are one composition (M10.26): the page × 256 +
+/// the button's index + 1, or the page × 256 for the page's default button ([`page_value`]).
+pub(crate) const PAGE_GPR: u32 = 4;
+
+/// The value of [`PAGE_GPR`] that asks for `page` (1 for the first) with button `button` (an index) selected, or the
+/// page's default button.
+pub(crate) fn page_value(page: u8, button: Option<usize>) -> Result<u32, BdError> {
+    let button = match button {
+        Some(index) => u32::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .filter(|value| *value <= 0xFF)
+            .ok_or_else(|| invalid("too many buttons on a page"))?,
+        None => 0,
+    };
+    Ok((u32::from(page) << 8) | button)
+}
+
+/// Every page and button a menu with these pages (their button counts) can be asked for.
+fn page_values(buttons: &[usize]) -> Result<Vec<(u8, Option<usize>)>, BdError> {
+    let mut values = Vec::new();
+    for (index, count) in buttons.iter().enumerate() {
+        let page = u8::try_from(index + 1).map_err(|_| invalid("too many pages"))?;
+        values.push((page, None));
+        values.extend((0..*count).map(|button| (page, Some(button))));
+    }
+    Ok(values)
+}
+
+/// The commands of the auto-action button on page 0 of a menu's composition: it turns to the page (and button)
+/// [`PAGE_GPR`] names. The menu's movie object has made it one of them; each is set with immediate operands (one
+/// Set_ButtonPage runs).
+pub(crate) fn page_dispatcher(buttons: &[usize]) -> Result<Vec<NavCommand>, BdError> {
+    let mut commands = Vec::new();
+    for (page, button) in page_values(buttons)? {
+        commands.push(NavCommand::if_eq(PAGE_GPR, page_value(page, button)?));
+        commands.push(match button {
+            Some(index) => NavCommand::set_button_page(
+                u16::try_from(index).map_err(|_| invalid("too many buttons"))?,
+                u16::from(page),
+            ),
+            None => NavCommand::set_page(u16::from(page)),
+        });
+    }
+    Ok(commands)
+}
+
+/// One line of a movie object being written with labels in place of line numbers ([`assemble`]).
+enum Line {
+    Command(NavCommand),
+    GoTo(usize),
+    Label(usize),
+}
+
+/// The commands of `lines`, each GoTo to its label's line.
+fn assemble(lines: Vec<Line>) -> Result<Vec<NavCommand>, BdError> {
+    let mut labels = BTreeMap::new();
+    let mut at = 0_u32;
+    for line in &lines {
+        match line {
+            Line::Label(label) => {
+                let _ = labels.insert(*label, at);
+            }
+            Line::Command(_) | Line::GoTo(_) => {
+                at = at
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("too many commands"))?;
+            }
+        }
+    }
+    lines
+        .into_iter()
+        .filter_map(|line| match line {
+            Line::Command(command) => Some(Ok(command)),
+            Line::GoTo(label) => Some(
+                labels
+                    .get(&label)
+                    .map(|line| NavCommand::goto_line(*line))
+                    .ok_or_else(|| invalid("missing label")),
+            ),
+            Line::Label(_) => None,
+        })
+        .collect()
+}
+
+/// Lines that make [`PAGE_GPR`] one of `values` (the first page when it is not), then go on at label `after`.
+fn page_check(lines: &mut Vec<Line>, values: &[u32], after: usize) {
+    for value in values {
+        lines.push(Line::Command(NavCommand::if_eq(PAGE_GPR, *value)));
+        lines.push(Line::GoTo(after));
+    }
+    lines.push(Line::Command(NavCommand::set_reg(PAGE_GPR, 1 << 8)));
+    lines.push(Line::Label(after));
+}
+
+/// Lines that put the page and button on screen into [`PAGE_GPR`] (when the menu's playlist has ended, for its next
+/// play): PSR 11 × 256 + PSR 10 + 1.
+fn page_on_screen(lines: &mut Vec<Line>) {
+    use disccraft_bdmv::mobj::PSR_OPERAND;
+    lines.extend([
+        Line::Command(NavCommand::move_reg(PAGE_GPR, PSR_OPERAND | 11)),
+        Line::Command(NavCommand::mul_reg(PAGE_GPR, 256)),
+        Line::Command(NavCommand::add_reg_reg(PAGE_GPR, PSR_OPERAND | 10)),
+        Line::Command(NavCommand::add_reg(PAGE_GPR, 1)),
+    ]);
+}
 
 /// Generated BDMV navigation tables.
 pub(crate) struct Navigation {
@@ -128,6 +251,7 @@ pub(crate) fn build_navigation_with_top(
         overrides: collect_overrides(first_override, titles, menus),
         override_objects: BTreeMap::new(),
         menu_buttons,
+        menu_pages: menus.iter().map(|menu| menu.pages.clone()).collect(),
         menu_base: counts.menu_base,
         dispatcher: counts.dispatcher,
     };
@@ -209,6 +333,8 @@ struct NavBuilder<'a> {
     override_objects: BTreeMap<usize, u16>,
     /// How many buttons each menu has.
     menu_buttons: Vec<usize>,
+    /// Each menu's place among pages built as one composition.
+    menu_pages: Vec<Option<MenuPages>>,
     menu_base: u16,
     dispatcher: Option<u16>,
 }
@@ -519,9 +645,20 @@ fn menu_commands(
     let Some(index) = builder.menu_index(id) else {
         return Ok(Vec::new());
     };
+    let count = builder.menu_buttons.get(index).copied().unwrap_or(0);
+    // A page of a menu built as one composition: its first page's movie object, with the page and button in
+    // PAGE_GPR (M10.26).
+    if let Some(Some(pages)) = builder.menu_pages.get(index) {
+        let button = button
+            .and_then(|button| usize::try_from(button).ok())
+            .filter(|button| *button < count);
+        return Ok(vec![
+            NavCommand::set_reg(PAGE_GPR, page_value(pages.page, button)?),
+            NavCommand::jump_object(u32::from(builder.menu_object(pages.first)?)),
+        ]);
+    }
     let object = builder.menu_object(index)?;
     let mut commands = Vec::new();
-    let count = builder.menu_buttons.get(index).copied().unwrap_or(0);
     if let Some(button) = button.and_then(|button| u16::try_from(button).ok())
         && usize::from(button) < count
     {
@@ -543,6 +680,16 @@ fn menu_object(
     index: usize,
     builder: &mut NavBuilder<'_>,
 ) -> Result<MovieObject, BdError> {
+    if let Some(pages) = &menu.pages {
+        if pages.first == index {
+            return pages_object(menu, index, &pages.buttons, builder);
+        }
+        // A later page: the first page's object, on this page.
+        return Ok(finish_object(vec![
+            NavCommand::set_reg(PAGE_GPR, page_value(pages.page, None)?),
+            NavCommand::jump_object(u32::from(builder.menu_object(pages.first)?)),
+        ]));
+    }
     let value = menu_value(index)?;
     let mut commands = vec![
         NavCommand::set_reg(0, u32::from(value)),
@@ -578,6 +725,89 @@ fn menu_object(
         }
     }
     Ok(finish_object(commands))
+}
+
+/// The movie object of a menu whose pages are one composition (M10.26), on its first page: as a menu's object, but
+/// [`PAGE_GPR`] is made a page and button the composition has before it plays, and a motion menu's later plays come
+/// back to the page and button on screen.
+fn pages_object(
+    menu: &MenuNav,
+    index: usize,
+    buttons: &[usize],
+    builder: &mut NavBuilder<'_>,
+) -> Result<MovieObject, BdError> {
+    let values = page_values(buttons)?
+        .into_iter()
+        .map(|(page, button)| page_value(page, button))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut lines = vec![
+        Line::Command(NavCommand::set_reg(0, u32::from(menu_value(index)?))),
+        Line::Command(NavCommand::set_reg(SELECT_GPR, 0)),
+    ];
+    // Reaching a menu ends a pending override.
+    if !builder.overrides.is_empty() {
+        lines.push(Line::Command(NavCommand::set_reg(OVERRIDE_GPR, 0)));
+    }
+    let mut end: Vec<NavCommand> = builder
+        .set_override(menu.end_override.as_ref())
+        .into_iter()
+        .collect();
+    end.extend(link_commands(&menu.end_action, builder)?);
+    let end = || end.iter().copied().map(Line::Command);
+    const CHECKED: usize = 1;
+    const AGAIN: usize = 2;
+    const RECHECKED: usize = 3;
+    const COUNT: usize = 4;
+    const END: usize = 5;
+    page_check(&mut lines, &values, CHECKED);
+    let play = NavCommand::play_pl(menu.playlist);
+    match menu.motion {
+        None => {
+            lines.push(Line::Command(play));
+            lines.extend(end());
+        }
+        Some(motion) => {
+            let again = if motion.loop_mark {
+                NavCommand::play_pl_mark(menu.playlist, 1)
+            } else {
+                play
+            };
+            match motion.plays {
+                None => {
+                    lines.push(Line::Command(play));
+                    lines.push(Line::Label(AGAIN));
+                    page_on_screen(&mut lines);
+                    page_check(&mut lines, &values, RECHECKED);
+                    lines.push(Line::Command(again));
+                    lines.push(Line::GoTo(AGAIN));
+                }
+                Some(0 | 1) => {
+                    lines.push(Line::Command(play));
+                    lines.extend(end());
+                }
+                Some(plays) => {
+                    lines.push(Line::Command(NavCommand::set_reg(
+                        LOOP_GPR,
+                        u32::from(plays.saturating_sub(1)),
+                    )));
+                    lines.push(Line::Command(play));
+                    lines.push(Line::Label(COUNT));
+                    lines.push(Line::Command(NavCommand::if_eq(LOOP_GPR, 0)));
+                    lines.push(Line::GoTo(END));
+                    lines.push(Line::Command(NavCommand::sub_reg(LOOP_GPR, 1)));
+                    page_on_screen(&mut lines);
+                    page_check(&mut lines, &values, RECHECKED);
+                    lines.push(Line::Command(again));
+                    lines.push(Line::GoTo(COUNT));
+                    lines.push(Line::Label(END));
+                    // Somewhere for the GoTo to land.
+                    lines.push(Line::Command(NavCommand::nop()));
+                    lines.extend(end());
+                }
+            }
+        }
+    }
+    Ok(finish_object(assemble(lines)?))
 }
 
 /// A motion menu's commands from line `start` of its movie object: play the menu, then play it again (from the
@@ -661,16 +891,64 @@ fn build_button_commands(
     for menu in menus {
         let mut commands = Vec::new();
         for (index, link) in menu.buttons.iter().enumerate() {
-            let mut button = menu.button_prefix.get(index).cloned().unwrap_or_default();
+            let mut button = Vec::new();
+            // A page of a composition (M10.26): PAGE_GPR names this button, so the menu comes back to it (a title's
+            // end, Return).
+            if let Some(pages) = &menu.pages {
+                button.push(NavCommand::set_reg(
+                    PAGE_GPR,
+                    page_value(pages.page, Some(index))?,
+                ));
+            }
+            button.extend(menu.button_prefix.get(index).cloned().unwrap_or_default());
             let own = menu.button_overrides.get(index).and_then(Option::as_ref);
             button.extend(builder.set_override(own));
-            button.extend(link_commands(link, builder)?);
+            match turn_page(menu, link, builder)? {
+                Some(turn) => button.extend(turn),
+                None => button.extend(link_commands(link, builder)?),
+            }
             commands.push(button);
         }
         result.push(commands);
     }
 
     Ok(result)
+}
+
+/// A link from a page of a composition to a page of the same one (M10.26): the page turns, with the button the link
+/// names (else the page's default) selected, and PAGE_GPR says so; `None` for any other link.
+fn turn_page(
+    menu: &MenuNav,
+    link: &Link,
+    builder: &NavBuilder<'_>,
+) -> Result<Option<Vec<NavCommand>>, BdError> {
+    let (Some(pages), Link::Menu { id, button }) = (&menu.pages, link) else {
+        return Ok(None);
+    };
+    let Some(target) = builder.menu_index(id.0) else {
+        return Ok(None);
+    };
+    let Some(Some(other)) = builder.menu_pages.get(target) else {
+        return Ok(None);
+    };
+    if other.first != pages.first {
+        return Ok(None);
+    }
+    let count = builder.menu_buttons.get(target).copied().unwrap_or(0);
+    let button = button
+        .and_then(|button| usize::try_from(button).ok())
+        .filter(|button| *button < count);
+    let turn = match button {
+        Some(index) => NavCommand::set_button_page(
+            u16::try_from(index).map_err(|_| invalid("too many buttons"))?,
+            u16::from(other.page),
+        ),
+        None => NavCommand::set_page(u16::from(other.page)),
+    };
+    Ok(Some(vec![
+        NavCommand::set_reg(PAGE_GPR, page_value(other.page, button)?),
+        turn,
+    ]))
 }
 
 fn finish_object(commands: Vec<NavCommand>) -> MovieObject {
@@ -710,8 +988,8 @@ fn index_titles(count: usize) -> Result<Vec<IndexTitle>, BdError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BdError, MenuMotion, MenuNav, NavCommand, TitleMap, TitleNav, build_navigation,
-        build_navigation_with_top, invalid,
+        BdError, MenuMotion, MenuNav, MenuPages, NavCommand, PAGE_GPR, TitleMap, TitleNav,
+        build_navigation, build_navigation_with_top, invalid, page_dispatcher,
     };
     use disccraft_project::{Link, MenuId, TimelineId};
     use std::collections::BTreeMap;
@@ -850,6 +1128,7 @@ mod tests {
                 motion: None,
                 button_prefix: Vec::new(),
                 select: 0,
+                pages: None,
             },
             MenuNav {
                 end_override: None,
@@ -861,6 +1140,7 @@ mod tests {
                 motion: None,
                 button_prefix: Vec::new(),
                 select: 0,
+                pages: None,
             },
         ];
         let title_remote = Link::Menu {
@@ -921,6 +1201,7 @@ mod tests {
             motion: None,
             button_prefix: Vec::new(),
             select: 0,
+            pages: None,
         }];
 
         let navigation = build_navigation(&Link::Stop, &titles, &menus, &map)?;
@@ -983,6 +1264,7 @@ mod tests {
             end_override: None,
             button_overrides: Vec::new(),
             select: 0,
+            pages: None,
         }];
         let navigation = build_navigation(&Link::Stop, &titles, &menus, &map)?;
         let object = |number: usize| {
@@ -1035,6 +1317,7 @@ mod tests {
             motion: None,
             button_prefix: vec![vec![audio_two], Vec::new()],
             select: 0,
+            pages: None,
         }];
         let subtitles_off = NavCommand::set_stream(None, Some((false, 1)));
         let navigation = build_navigation_with_top(
@@ -1086,6 +1369,7 @@ mod tests {
                 motion: None,
                 button_prefix: Vec::new(),
                 select: 0,
+                pages: None,
             },
             MenuNav {
                 end_override: None,
@@ -1097,6 +1381,7 @@ mod tests {
                 motion: None,
                 button_prefix: Vec::new(),
                 select: 0,
+                pages: None,
             },
         ];
         let navigation = build_navigation(&Link::Stop, &titles, &menus, &map)?;
@@ -1141,6 +1426,7 @@ mod tests {
             motion: None,
             button_prefix: Vec::new(),
             select: 0,
+            pages: None,
         }];
         let navigation = build_navigation(&Link::Stop, &titles, &menus, &map)?;
         let object = navigation
@@ -1175,6 +1461,7 @@ mod tests {
             motion: Some(motion),
             button_prefix: Vec::new(),
             select: 2,
+            pages: None,
         };
         let commands_of = |menus: &[MenuNav]| -> Result<Vec<[u8; 12]>, BdError> {
             let navigation = build_navigation(&Link::Stop, &titles, menus, &map)?;
@@ -1260,6 +1547,7 @@ mod tests {
                 motion: None,
                 button_prefix: Vec::new(),
                 select: 0,
+                pages: None,
             },
             MenuNav {
                 end_override: None,
@@ -1271,6 +1559,7 @@ mod tests {
                 motion: None,
                 button_prefix: Vec::new(),
                 select: 0,
+                pages: None,
             },
         ];
 
@@ -1323,6 +1612,7 @@ mod tests {
             motion: None,
             button_prefix: Vec::new(),
             select: 0,
+            pages: None,
         }];
 
         let navigation = build_navigation(&Link::Stop, &titles, &menus, &map)?;
@@ -1380,6 +1670,7 @@ mod tests {
             motion: None,
             button_prefix: Vec::new(),
             select: 0,
+            pages: None,
         }];
 
         let navigation = build_navigation(&Link::Stop, &titles, &menus, &map)?;
@@ -1436,6 +1727,7 @@ mod tests {
             motion: None,
             button_prefix: Vec::new(),
             select: 0,
+            pages: None,
         }];
 
         let navigation = build_navigation(&Link::NotSet, &titles, &menus, &map)?;
@@ -1448,6 +1740,165 @@ mod tests {
         assert_eq!(
             first.commands.first().map(|command| command.0),
             Some(NavCommand::jump_object(3).0)
+        );
+        Ok(())
+    }
+
+    /// M10.26: a menu whose two pages are one composition. Its first page's object makes PAGE_GPR a page and button
+    /// the composition has (page 1 when not), plays the menu and, a looping motion menu, puts the page and button on
+    /// screen back into PAGE_GPR before each later play; every GoTo lands in the object. The second page's object
+    /// goes to the first's on page 2. A link to the other page turns it (no jump); a link from a title to a page
+    /// names it in PAGE_GPR. Page 0's dispatcher sets each page and button with immediate operands.
+    #[test]
+    fn a_menus_pages_in_one_composition() -> Result<(), BdError> {
+        use disccraft_bdmv::mobj::PSR_OPERAND;
+        let map = TitleMap {
+            timelines: [(1_u64, 1_u16)].into_iter().collect(),
+            ..TitleMap::default()
+        };
+        let titles = vec![TitleNav {
+            playlist: 1,
+            end_action: Link::Menu {
+                id: MenuId(8),
+                button: Some(0),
+            },
+            end_override: None,
+        }];
+        let page = |id: u64, page: u8, buttons: Vec<Link>, motion: Option<MenuMotion>| MenuNav {
+            end_override: None,
+            button_overrides: Vec::new(),
+            id,
+            playlist: 100,
+            end_action: Link::NotSet,
+            buttons,
+            motion,
+            button_prefix: Vec::new(),
+            select: 0,
+            pages: Some(MenuPages {
+                first: 0,
+                page,
+                buttons: vec![2, 1],
+            }),
+        };
+        let menus = vec![
+            page(
+                7,
+                1,
+                vec![
+                    Link::Timeline {
+                        id: TimelineId(1),
+                        chapter: 0,
+                    },
+                    Link::Menu {
+                        id: MenuId(8),
+                        button: None,
+                    },
+                ],
+                Some(MenuMotion {
+                    plays: None,
+                    loop_mark: true,
+                }),
+            ),
+            page(
+                8,
+                2,
+                vec![Link::Menu {
+                    id: MenuId(7),
+                    button: Some(1),
+                }],
+                None,
+            ),
+        ];
+        let navigation = build_navigation(&Link::Stop, &titles, &menus, &map)?;
+        // Objects: first play, top menu, title 1, the two pages, the dispatcher.
+        let first = navigation
+            .objects
+            .get(3)
+            .ok_or_else(|| invalid("missing menu object"))?;
+        let commands: Vec<[u8; 12]> = first.commands.iter().map(|command| command.0).collect();
+        let count = u32::try_from(commands.len()).map_err(|_| invalid("too many"))?;
+        for command in &first.commands {
+            if command.opcode() == NavCommand::goto_line(0).opcode() {
+                assert!(command.dst() < count, "GoTo {} of {count}", command.dst());
+            }
+        }
+        let position =
+            |wanted: NavCommand| commands.iter().position(|command| *command == wanted.0);
+        // Checked against every value (page 1, its two buttons, page 2, its button), then page 1.
+        for value in [0x100, 0x101, 0x102, 0x200, 0x201] {
+            assert!(
+                position(NavCommand::if_eq(PAGE_GPR, value)).is_some(),
+                "{value:#x}"
+            );
+        }
+        assert!(position(NavCommand::set_reg(PAGE_GPR, 0x100)).is_some());
+        let play = position(NavCommand::play_pl(100)).ok_or_else(|| invalid("no play"))?;
+        let restore = position(NavCommand::move_reg(PAGE_GPR, PSR_OPERAND | 11))
+            .ok_or_else(|| invalid("no restore"))?;
+        let again =
+            position(NavCommand::play_pl_mark(100, 1)).ok_or_else(|| invalid("no later play"))?;
+        assert!(play < restore && restore < again);
+        // The second page's object: page 2, then the first page's object.
+        let second = navigation
+            .objects
+            .get(4)
+            .ok_or_else(|| invalid("missing page object"))?;
+        assert_eq!(
+            second
+                .commands
+                .iter()
+                .map(|command| command.0)
+                .collect::<Vec<_>>(),
+            vec![
+                NavCommand::set_reg(PAGE_GPR, 0x200).0,
+                NavCommand::jump_object(3).0
+            ]
+        );
+        // Buttons: each names itself first; Next turns to page 2 (its default button), Back to page 1's second
+        // button.
+        let buttons = &navigation.button_commands;
+        assert_eq!(
+            buttons.first().and_then(|page| page.get(1)).cloned(),
+            Some(vec![
+                NavCommand::set_reg(PAGE_GPR, 0x102),
+                NavCommand::set_reg(PAGE_GPR, 0x200),
+                NavCommand::set_page(2),
+            ])
+        );
+        assert_eq!(
+            buttons.get(1).and_then(|page| page.first()).cloned(),
+            Some(vec![
+                NavCommand::set_reg(PAGE_GPR, 0x201),
+                NavCommand::set_reg(PAGE_GPR, 0x102),
+                NavCommand::set_button_page(1, 1),
+            ])
+        );
+        // The title's end: page 2, its first button, through the first page's object.
+        let title = navigation
+            .objects
+            .get(2)
+            .ok_or_else(|| invalid("missing title object"))?;
+        assert!(
+            title
+                .commands
+                .contains(&NavCommand::set_reg(PAGE_GPR, 0x201))
+        );
+        assert!(title.commands.contains(&NavCommand::jump_object(3)));
+        // Page 0's dispatcher.
+        assert_eq!(
+            page_dispatcher(&[2, 1])?,
+            vec![
+                NavCommand::if_eq(PAGE_GPR, 0x100),
+                NavCommand::set_page(1),
+                NavCommand::if_eq(PAGE_GPR, 0x101),
+                NavCommand::set_button_page(0, 1),
+                NavCommand::if_eq(PAGE_GPR, 0x102),
+                NavCommand::set_button_page(1, 1),
+                NavCommand::if_eq(PAGE_GPR, 0x200),
+                NavCommand::set_page(2),
+                NavCommand::if_eq(PAGE_GPR, 0x201),
+                NavCommand::set_button_page(0, 2),
+            ]
         );
         Ok(())
     }

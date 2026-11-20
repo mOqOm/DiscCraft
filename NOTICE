@@ -15,7 +15,7 @@ filmcraft-codecs
 filmcraft-project
 filmcraft-format
 
-Pinned revision: f67d38b35cc5af6853ef5a6921ccba014512694b
+Pinned revision: ae0a71d30359719ede5bb8a66791ab263c9fb037
 
 Source files ported from FilmCraft (same license; ported at da535c18433dbe046553733b0ab08ce9bd736a51, unchanged in
 FilmCraft up to the pinned revision above):
@@ -34,23 +34,25 @@ adapted to a DiscCraft timeline's chapter points and playhead)
 
 This product includes software from PhotoCraft (https://github.com/storytold/photocraft), licensed under the MIT License or the Apache License 2.0, at your option.
 Crates used: photocraft-io, photocraft-doc, photocraft-compose, photocraft-geom, photocraft-raster.
-Pinned revision: 856f865cf98d7e4817f6f955980f47fb4ead8c32
+Pinned revision: 359051359fee33177349d93fd12ac44af9ae4e1a
 
 This product includes software from EffectCraft (https://github.com/storytold/effectcraft), licensed under the MIT License or the Apache License 2.0, at your option.
 Crates used: effectcraft-engine, effectcraft-host (and, through them, EffectCraft's project, render, media and export crates).
-Pinned revision: 665bfac0b33904b1dcda6de889f43f43a94ad3f8
+Pinned revision: f32ad3aa3b0a8e853ad41db3965fe19455a693cb
 
 This product includes software from SoundCraft (https://github.com/storytold/soundcraft), licensed under the MIT License or the Apache License 2.0, at your option.
 Crates used: soundcraft-engine, soundcraft-dsp.
-Pinned revision: a02d892f831f0a4e1220e0357c7b941030b9cd6f
+Pinned revision: f0338e662c3114a9aa753da818ad0ed1aa03338b
 
 This product includes software from craft-libs (https://github.com/storytold/craft-libs), licensed under the MIT License
 or the Apache License 2.0, at your option. FilmCraft, PhotoCraft, EffectCraft and SoundCraft pull in its crates at their own
 revisions. DiscCraft uses directly craft-audio (its AC-3 encoder, which makes the transcoded soundtracks Dolby Digital, and its
 AC-3 decoder, with which a raw AC-3 file is heard in the monitor;
-revision 56c3c833bb869a140271e2aceec2112322cacc58), craft-video (its H.264 encoder, formerly FilmCraft's
+revision c8087acbd9711315eefc2790949b7acf915da011), craft-video (its H.264 encoder, formerly FilmCraft's
 filmcraft-h264enc, which makes the HD Blu-ray video; the same revision; in tests also its MPEG-2 decoder), craft-media
 (its MPEG-2 Systems, Matroska and MP4 readers, which take out video and audio that fit a disc as they are; the same
 revision) and craft-ui (its docking, which arranges the panels and workspaces; the same revision), and in tests
-only craft-psd (PSD writer, the same revision). Its vendored Hayro crates are patched to
-revision 18ffc07519b15f5ef39e752aa0f405261fec8ebb in Cargo.toml.
+only craft-psd (PSD writer, the same revision). craft-video and craft-media are taken from the fork https://github.com/mOqOm/craft-libs (branch
+disccraft, under the same licences), which adds to that revision craft-libs pull requests #1992 and #2017 (H.264
+field pictures and MBAFF) by their authors, stores that keep Matroska and MPEG-2 transport stream indexes between runs, and interlaced (1080i) H.264 encoding. Its vendored Hayro crates are patched to
+revision bafb4522899d9f814a07dad636cdefcbf705dead in Cargo.toml.
