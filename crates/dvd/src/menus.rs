@@ -28,6 +28,8 @@ use disccraft_transcode::{Standard as TranscodeStandard, for_each_frame};
 use crate::thumbnails::{MovingThumbnails, pictures, still_thumbnails};
 use crate::{DvdError, output, vm_commands};
 
+mod hd_cache;
+
 const START_DTS: i64 = 8_100_000;
 const QUANTISER_SCALE_CODE: u8 = 4;
 const MAX_STILL_BYTES: usize = 224 * 1024;
@@ -355,7 +357,8 @@ pub struct HdMotionMenu {
 
 /// Encodes one play of a motion menu (see [`Menu::is_motion`]) as H.264 of `options`' size and rate (an HD
 /// Blu-ray disc's menus): its video background (each frame read at that size), or its still picture with the motion
-/// buttons playing, and its audio.
+/// buttons playing, and its audio. A play made before with the same options (File ▸ Render ▸ Motion Menu, or an
+/// earlier build of the same project: M6.387) is taken from `cache_dir`; one encoded here is kept there.
 ///
 /// # Errors
 ///
@@ -377,8 +380,17 @@ pub fn encode_hd_motion_menu(
     };
     let rate = (options.fps_num, options.fps_den);
     let frames = hd_frame_count(seconds, rate).map_err(|err| invalid_menu(menu, err))?;
-    let mut encoder = disccraft_transcode::hd::H264Frames::new(options)
-        .map_err(|err| unsupported_menu(menu, err))?;
+    let cache = hd_motion_cache(&context, menu, options);
+    let kept = cache.as_ref().and_then(hd_cache::HdMotionCache::read);
+    // Kept: only the first picture (the buttons' geometry and highlight) is made again.
+    let mut encoder = match kept {
+        Some(_) => None,
+        None => Some(
+            disccraft_transcode::hd::H264Frames::new(options)
+                .map_err(|err| unsupported_menu(menu, err))?,
+        ),
+    };
+    let frames = if encoder.is_some() { frames } else { 1 };
     let moving = menu
         .plays_buttons()
         .then(|| MovingThumbnails::open(project, menu));
@@ -403,9 +415,11 @@ pub fn encode_hd_motion_menu(
             },
         )
         .map_err(|err| err.to_string())?;
-        encoder
-            .push_rgb(&rendered.rgb)
-            .map_err(|err| err.to_string())?;
+        if let Some(encoder) = encoder.as_mut() {
+            encoder
+                .push_rgb(&rendered.rgb)
+                .map_err(|err| err.to_string())?;
+        }
         if first.is_none() {
             first = Some(rendered);
         }
@@ -425,9 +439,19 @@ pub fn encode_hd_motion_menu(
         }
     }
     let first = first.ok_or_else(|| invalid_menu(menu, "motion menu produced no frames"))?;
-    let (data, units) = encoder
-        .finish()
-        .map_err(|err| unsupported_menu(menu, err))?;
+    let (data, units) = match (kept, encoder) {
+        (Some(kept), _) => kept,
+        (None, Some(encoder)) => {
+            let (data, units) = encoder
+                .finish()
+                .map_err(|err| unsupported_menu(menu, err))?;
+            if let Some(cache) = &cache {
+                cache.store(options.codec, &data, &units);
+            }
+            (data, units)
+        }
+        (None, None) => return Err(invalid_menu(menu, "motion menu has no encoder")),
+    };
     let audio = menu_audio(&context, menu, seconds)?;
     Ok(HdMotionMenu {
         first,
@@ -435,6 +459,20 @@ pub fn encode_hd_motion_menu(
         units,
         audio,
     })
+}
+
+/// Where one play of `menu` for an HD Blu-ray disc encoded with `options` is kept in the cache (M6.387): named as
+/// [`motion_cache_path`]'s play, and after the options too.
+fn hd_motion_cache(
+    context: &MenuContext<'_>,
+    menu: &Menu,
+    options: &disccraft_transcode::hd::HdOptions,
+) -> Option<hd_cache::HdMotionCache> {
+    let key = motion_cache_key(context, menu, Some(options))?;
+    Some(hd_cache::HdMotionCache::new(
+        context.cache_dir,
+        &format!("motion-hd-{key:016x}"),
+    ))
 }
 
 /// The number of frames of `seconds` at `rate` (numerator, denominator).
@@ -503,6 +541,19 @@ fn motion_cache_path(
     context: &MenuContext<'_>,
     menu: &Menu,
 ) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let key = format!("motion-{:016x}", motion_cache_key(context, menu, None)?);
+    Some((
+        context.cache_dir.join(format!("{key}.m2v")),
+        context.cache_dir.join(format!("{key}.ok")),
+    ))
+}
+
+/// The name of one play of `menu`: a hash of everything it is made of, and of the HD options it is encoded with.
+fn motion_cache_key(
+    context: &MenuContext<'_>,
+    menu: &Menu,
+    hd: Option<&disccraft_transcode::hd::HdOptions>,
+) -> Option<u64> {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     disccraft_project::to_json(context.project)
@@ -510,6 +561,9 @@ fn motion_cache_path(
         .hash(&mut hasher);
     menu.id.0.hash(&mut hasher);
     (context.standard == Standard::Ntsc).hash(&mut hasher);
+    if let Some(options) = hd {
+        format!("{options:?}").hash(&mut hasher);
+    }
     for asset in context.project.assets.values() {
         let file = asset.media_file();
         if let Ok(metadata) = std::fs::metadata(&*file) {
@@ -523,11 +577,7 @@ fn motion_cache_path(
         }
     }
     MOTION_CACHE_VERSION.hash(&mut hasher);
-    let key = format!("motion-{:016x}", hasher.finish());
-    Some((
-        context.cache_dir.join(format!("{key}.m2v")),
-        context.cache_dir.join(format!("{key}.ok")),
-    ))
+    Some(hasher.finish())
 }
 
 /// Changed when the motion menus' encoding changes, so that older plays in a cache are not taken.
@@ -573,6 +623,29 @@ pub fn rendered_motion_menu(
     (video.is_file() && marker.is_file()).then_some(video)
 }
 
+/// The motion menu `menu` of an HD Blu-ray disc whose menus are encoded with `options`, rendered into `cache_dir`
+/// (File ▸ Render ▸ Motion Menu, or a build) and still the menu as it is: its pictures as a transport stream, for the
+/// project preview to play (M6.387).
+#[must_use]
+pub fn rendered_hd_motion_menu(
+    project: &Project,
+    menu: disccraft_project::MenuId,
+    cache_dir: &Path,
+    options: &disccraft_transcode::hd::HdOptions,
+) -> Option<std::path::PathBuf> {
+    let found = project.menu(menu)?;
+    if !found.is_motion() {
+        return None;
+    }
+    let context = MenuContext {
+        project,
+        standard: crate::ifo_standard(project.settings.standard),
+        cache_dir,
+    };
+    let cache = hd_motion_cache(&context, found, options)?;
+    cache.is_ready().then_some(cache.stream)
+}
+
 /// File ▸ Render ▸ Motion Menu: encodes the motion menus (`only`: one of them) into `cache_dir`, where a build
 /// with that cache then takes them. Returns how many were made or found ready.
 ///
@@ -585,6 +658,35 @@ pub fn render_motion_menus(
     only: Option<disccraft_project::MenuId>,
     progress: &mut dyn FnMut(&str, f32),
 ) -> Result<usize, DvdError> {
+    render_motion_menus_with(project, only, progress, &mut |menu| {
+        encode_motion_menu(project, menu, cache_dir).map(|_| ())
+    })
+}
+
+/// [`render_motion_menus`] for an HD Blu-ray disc whose menus are encoded with `options` (M6.387).
+///
+/// # Errors
+///
+/// As [`encode_hd_motion_menu`].
+pub fn render_hd_motion_menus(
+    project: &Project,
+    cache_dir: &Path,
+    only: Option<disccraft_project::MenuId>,
+    options: &disccraft_transcode::hd::HdOptions,
+    progress: &mut dyn FnMut(&str, f32),
+) -> Result<usize, DvdError> {
+    render_motion_menus_with(project, only, progress, &mut |menu| {
+        encode_hd_motion_menu(project, menu, cache_dir, options).map(|_| ())
+    })
+}
+
+/// Encodes the motion menus (`only`: one of them) with `encode`, saying how far it is.
+fn render_motion_menus_with(
+    project: &Project,
+    only: Option<disccraft_project::MenuId>,
+    progress: &mut dyn FnMut(&str, f32),
+    encode: &mut dyn FnMut(&Menu) -> Result<(), DvdError>,
+) -> Result<usize, DvdError> {
     let menus: Vec<&Menu> = project
         .menus
         .values()
@@ -594,7 +696,7 @@ pub fn render_motion_menus(
         crate::prepare::check_stop()?;
         // `as` is exact for the menu counts a project holds.
         progress(&menu.name, index as f32 / menus.len().max(1) as f32);
-        let _ = encode_motion_menu(project, menu, cache_dir)?;
+        encode(menu)?;
         progress(&menu.name, 1.0);
     }
     Ok(menus.len())

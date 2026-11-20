@@ -13,6 +13,7 @@ use disccraft_menu::{
 use disccraft_mpeg2venc::{Standard, StillOptions, encode_still, rgb_to_frame420};
 use disccraft_pgs::ig::{
     CompositionState, IgButton, IgObject, IgPage, InteractiveComposition, display_set_as,
+    display_set_paletted,
 };
 use disccraft_pgs::{PaletteEntry, TimedSegment, rgba_to_entry};
 use disccraft_project::{Link, Menu, MenuLoops, Project, VideoStandard, opacity_to_alpha};
@@ -52,6 +53,42 @@ pub(crate) struct MenuClip<'a> {
     /// A pop-up menu (shown over a title on the remote's Pop-up Menu key): the buttons carry their text as the
     /// normal state, since there is no menu picture under them.
     pub(crate) popup: bool,
+    /// The menu's pages built as one composition (M10.26): then `menu` is the first page with nothing over its
+    /// background (the clip's picture), and the IG has every page.
+    pub(crate) pages: Option<&'a MenuPagesClip<'a>>,
+}
+
+/// The pages of a menu built as one composition (M10.26, see `crate::pages`): each page's menu and its buttons'
+/// commands, the first page first, and the commands of the auto-action button on page 0 that turns to the page
+/// asked for.
+pub(crate) struct MenuPagesClip<'a> {
+    /// The pages.
+    pub(crate) pages: Vec<(&'a Menu, &'a [Vec<NavCommand>])>,
+    /// Page 0's button's commands.
+    pub(crate) dispatcher: Vec<NavCommand>,
+}
+
+/// The first id of the buttons on a page of a composition that show the page's picture outside its buttons (M10.26,
+/// M10.28: in pieces that do not overlap the buttons, up to the last id a button can have, 0x1FDF). They cannot be
+/// selected (no button leads to them, they have no number).
+pub const PAGE_PICTURE_BUTTON: u16 = 0x1F00;
+/// The last id a button can have.
+const LAST_BUTTON_ID: u16 = 0x1FDF;
+
+/// The menu `menu` with nothing over its background (no texts, pictures or buttons shown): the picture of the clip of
+/// a menu whose pages are one composition (M10.26).
+pub(crate) fn background_only(menu: &Menu) -> Menu {
+    let mut background = menu.clone();
+    background.texts.clear();
+    background.graphics.clear();
+    // A PSD shown by page: only the layers its pages share (M10.27).
+    if background.psd_page.is_some() {
+        background.psd_page = Some(disccraft_project::NO_PSD_PAGE);
+    }
+    for button in &mut background.buttons {
+        button.hidden = true;
+    }
+    background
 }
 
 /// Write a menu clip and return the total number of bytes written.
@@ -74,7 +111,7 @@ pub(crate) fn write_menu_clip(
     let streams = menu_streams(project);
 
     let inputs = mux_inputs(
-        project.settings.bd_video,
+        (project.settings.bd_codec, project.settings.bd_video),
         (video.data, video.pts_90k, video.dts_90k),
         ig_units,
     );
@@ -113,8 +150,8 @@ fn write_motion_menu_clip(
     cache_dir: &Path,
 ) -> Result<u64, BdError> {
     let menu = menu_clip.menu;
-    let video = project.settings.bd_video;
-    if let Some(options) = crate::hd::options(video, crate::hd::menu_rates(video)) {
+    let (choice, video) = (project.settings.bd_codec, project.settings.bd_video);
+    if let Some(options) = crate::hd::options(choice, video, crate::hd::menu_rates(choice, video)) {
         return write_hd_motion_menu_clip(project, menu_clip, (dirs, cache_dir), &options);
     }
     let motion = disccraft_dvd::encode_motion_menu(project, menu, cache_dir)
@@ -267,7 +304,7 @@ fn write_hd_motion_menu_clip(
     let mut streams = menu_streams(project);
     let mut inputs = vec![EsInput {
         pid: VIDEO_PID,
-        kind: crate::hd::kind(project.settings.bd_video),
+        kind: crate::hd::kind(project.settings.bd_codec, project.settings.bd_video),
         units,
     }];
     if let Some(audio) = &motion.audio {
@@ -363,8 +400,8 @@ struct ObjectIds {
 }
 
 fn prepare_video(project: &Project, rendered: &RenderedMenu) -> Result<VideoPrepared, BdError> {
-    let video = project.settings.bd_video;
-    if let Some(options) = crate::hd::options(video, crate::hd::menu_rates(video)) {
+    let (choice, video) = (project.settings.bd_codec, project.settings.bd_video);
+    if let Some(options) = crate::hd::options(choice, video, crate::hd::menu_rates(choice, video)) {
         return prepare_hd_video(rendered, &options);
     }
     let frame =
@@ -469,12 +506,12 @@ fn menu_streams(project: &Project) -> MenuStreams {
 
 /// A menu clip's video coding: SD MPEG-2, or the disc's HD format's (H.264, or MPEG-2 for 1080i).
 fn menu_video_coding(project: &Project) -> StreamCoding {
-    crate::hd::coding(project.settings.bd_video)
+    crate::hd::coding(project.settings.bd_codec, project.settings.bd_video)
         .unwrap_or_else(|| clip::video_coding(&project.settings, project.menus_wide()))
 }
 
 fn mux_inputs(
-    video: disccraft_project::BdVideo,
+    (choice, video): (disccraft_project::BdCodec, disccraft_project::BdVideo),
     (video_data, pts, dts): (Vec<u8>, u64, u64),
     ig_units: Vec<EsUnit>,
 ) -> Vec<EsInput> {
@@ -482,7 +519,7 @@ fn mux_inputs(
         EsInput {
             pid: VIDEO_PID,
             kind: if video.hd().is_some() {
-                crate::hd::kind(video)
+                crate::hd::kind(choice, video)
             } else {
                 StreamKind::Mpeg2Video
             },
@@ -622,6 +659,29 @@ fn build_ig_units_as(
     pts: u64,
     state: CompositionState,
 ) -> Result<Vec<EsUnit>, BdError> {
+    if let Some(pages) = menu_clip.pages {
+        return pages_ig_units(project, pages, pts, state);
+    }
+    let (page, palette, objects) = page_parts(project, rendered, menu_clip)?;
+    let composition = InteractiveComposition {
+        width: rendered.width,
+        height: rendered.height,
+        frame_rate_id: frame_rate(project.settings.standard),
+        number: 0,
+        popup: menu_clip.popup,
+        pages: vec![page],
+    };
+    let segments =
+        display_set_as(&composition, &palette, &objects, pts, state).map_err(video_error)?;
+    segments.into_iter().map(segment_unit).collect()
+}
+
+/// One menu's IG page (id 0, palette 0), its palette and its objects (ids from 0).
+fn page_parts(
+    project: &Project,
+    rendered: &RenderedMenu,
+    menu_clip: &MenuClip<'_>,
+) -> Result<(IgPage, Vec<PaletteEntry>, Vec<IgObject>), BdError> {
     let count = menu_clip.commands.len();
     let colours = IgColours::new(menu_clip.menu, &rendered.highlight);
     let mut palette = colours.palette(menu_clip.menu);
@@ -653,9 +713,466 @@ fn build_ig_units_as(
         )?;
     }
     let composition = build_composition(project, rendered, menu_clip, normal)?;
+    let page = composition
+        .pages
+        .into_iter()
+        .next()
+        .ok_or_else(|| invalid("menu has no page"))?;
+    Ok((page, palette, objects))
+}
+
+/// The IG display set of a menu whose pages are one composition (M10.26): page 0 has one auto-action button (a clear
+/// 8 x 8 object, as Encore's) that turns to the page asked for; each page of the menu follows with a palette of its
+/// own (page n names palette n - 1) and its buttons as a menu's. What the page draws over the background is in its
+/// buttons' states where they are (each state over the picture under it, as Encore's buttons carry their artwork),
+/// and elsewhere in buttons that cannot be selected, in pieces that do not overlap the buttons (M10.28: PowerDVD
+/// draws a button's state in place of what is under it, so a picture under the buttons went missing).
+fn pages_ig_units(
+    project: &Project,
+    clip: &MenuPagesClip<'_>,
+    pts: u64,
+    state: CompositionState,
+) -> Result<Vec<EsUnit>, BdError> {
+    const CLEAR_OBJECT: u16 = 0;
+    let mut objects = vec![IgObject {
+        id: CLEAR_OBJECT,
+        width: 8,
+        height: 8,
+        pixels: vec![0; 64],
+    }];
+    let mut pages = vec![IgPage {
+        id: 0,
+        default_selected: 0,
+        palette_id: 0,
+        buttons: vec![IgButton {
+            id: 0,
+            numeric_value: 0xFFFF,
+            auto_action: true,
+            x: 0,
+            y: 0,
+            upper: 0,
+            lower: 0,
+            left: 0,
+            right: 0,
+            normal_object: CLEAR_OBJECT,
+            selected_object: CLEAR_OBJECT,
+            activated_object: CLEAR_OBJECT,
+            commands: command_bytes(&clip.dispatcher)?,
+        }],
+    }];
+    let mut palettes: Vec<(u8, Vec<PaletteEntry>)> = Vec::new();
+    let mut size = None;
+    let mut next_id: u16 = 1;
+    for (index, (menu, commands)) in clip.pages.iter().enumerate() {
+        let page_number = u8::try_from(index + 1).map_err(|_| invalid("too many pages"))?;
+        let palette_id = u8::try_from(index).map_err(|_| invalid("too many pages"))?;
+        let rendered = render_with_thumbnails(project, menu)?;
+        size.get_or_insert((rendered.width, rendered.height));
+        let page_clip = MenuClip {
+            menu,
+            number: 0,
+            commands,
+            popup: false,
+            pages: None,
+        };
+        let (mut page, mut palette, mut page_objects) = page_parts(project, &rendered, &page_clip)?;
+        // What the page draws over the background: in its buttons' states, and the rest beside them.
+        let first_free = palette
+            .iter()
+            .map(|entry| u16::from(entry.id))
+            .max()
+            .map_or(1, |id| id + 1);
+        let mut pictures: Vec<(IgObject, u16, u16)> = Vec::new();
+        if let Some(picture) = page_picture(project, menu, &rendered, first_free)? {
+            palette.extend(picture.entries.iter().cloned());
+            let count = commands.len();
+            let mut rects = Vec::with_capacity(count);
+            for index in 0..count {
+                let geometry = rendered
+                    .buttons
+                    .get(index)
+                    .ok_or_else(|| invalid("missing button geometry"))?;
+                let (width, height) = (
+                    rect_width(geometry.x1, geometry.x2)?,
+                    rect_height(geometry.y1, geometry.y2)?,
+                );
+                rects.push((geometry.x1, geometry.y1, width, height));
+                let under = picture.crop(geometry.x1, geometry.y1, width, height);
+                let ids = object_ids(index)?;
+                for id in [ids.selected, ids.activated] {
+                    if let Some(object) = page_objects.iter_mut().find(|object| object.id == id) {
+                        overlay_on(&mut object.pixels, &under);
+                    }
+                }
+                let normal = normal_object_id(index, count)?;
+                if let Some(object) = page_objects.iter_mut().find(|object| object.id == normal) {
+                    overlay_on(&mut object.pixels, &under);
+                } else if under.iter().any(|id| *id != 0) {
+                    page_objects.push(IgObject {
+                        id: normal,
+                        width,
+                        height,
+                        pixels: under,
+                    });
+                    if let Some(button) = page.buttons.get_mut(index) {
+                        button.normal_object = normal;
+                    }
+                }
+            }
+            let mut local = page_objects
+                .iter()
+                .map(|object| object.id)
+                .max()
+                .map_or(0, |id| id + 1);
+            for (x, y, width, height) in picture.beside(&rects) {
+                pictures.push((
+                    IgObject {
+                        id: local,
+                        width,
+                        height,
+                        pixels: picture.crop(x, y, width, height),
+                    },
+                    x,
+                    y,
+                ));
+                local = local
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("too many objects"))?;
+            }
+        }
+        // The page's objects after the ones before it.
+        let base = next_id;
+        let moved = |id: u16| -> Result<u16, BdError> {
+            if id == 0xFFFF {
+                return Ok(id);
+            }
+            id.checked_add(base)
+                .filter(|id| *id < 0xFFFF)
+                .ok_or_else(|| invalid("too many objects"))
+        };
+        for button in &mut page.buttons {
+            button.normal_object = moved(button.normal_object)?;
+            button.selected_object = moved(button.selected_object)?;
+            button.activated_object = moved(button.activated_object)?;
+        }
+        let mut picture_buttons = Vec::with_capacity(pictures.len());
+        let mut picture_objects = Vec::with_capacity(pictures.len());
+        for (index, (mut picture, x, y)) in pictures.into_iter().enumerate() {
+            picture.id = moved(picture.id)?;
+            let id = u16::try_from(index)
+                .ok()
+                .and_then(|index| PAGE_PICTURE_BUTTON.checked_add(index))
+                .filter(|id| *id <= LAST_BUTTON_ID)
+                .ok_or_else(|| invalid("a page's picture is in too many pieces"))?;
+            picture_buttons.push(IgButton {
+                id,
+                numeric_value: 0xFFFF,
+                auto_action: false,
+                x,
+                y,
+                upper: id,
+                lower: id,
+                left: id,
+                right: id,
+                normal_object: picture.id,
+                selected_object: picture.id,
+                activated_object: picture.id,
+                commands: Vec::new(),
+            });
+            picture_objects.push(picture);
+        }
+        for mut object in page_objects {
+            object.id = moved(object.id)?;
+            next_id = next_id.max(
+                object
+                    .id
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("too many objects"))?,
+            );
+            objects.push(object);
+        }
+        for object in picture_objects {
+            next_id = next_id.max(
+                object
+                    .id
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("too many objects"))?,
+            );
+            objects.push(object);
+        }
+        // The pictures first: each in a group of its own, apart from the buttons.
+        page.buttons.splice(0..0, picture_buttons);
+        page.id = page_number;
+        page.palette_id = palette_id;
+        page.default_selected = default_selected(menu.default_button, menu.buttons.len())?;
+        palettes.push((palette_id, palette));
+        pages.push(page);
+    }
+    let (width, height) = size.ok_or_else(|| invalid("menu has no pages"))?;
+    let composition = InteractiveComposition {
+        width,
+        height,
+        frame_rate_id: frame_rate(project.settings.standard),
+        number: 0,
+        popup: false,
+        pages,
+    };
+    // Its objects must be decoded before the menu's first picture (M10.28); `crate::pages` keeps to that.
+    if disccraft_pgs::ig::display_set_lead(&composition, &objects, state) >= pts {
+        return Err(invalid("the menu's pages are too large to show in time"));
+    }
+    let palettes: Vec<(u8, &[PaletteEntry])> = palettes
+        .iter()
+        .map(|(id, entries)| (*id, entries.as_slice()))
+        .collect();
     let segments =
-        display_set_as(&composition, &palette, &objects, pts, state).map_err(video_error)?;
+        display_set_paletted(&composition, &palettes, &objects, pts, state).map_err(video_error)?;
     segments.into_iter().map(segment_unit).collect()
+}
+
+/// What a page draws over its background, as palette ids over the frame ([`page_picture`]).
+struct PagePicture {
+    /// The frame's width.
+    width: usize,
+    /// Each pixel's palette id (0 where nothing is drawn), row by row.
+    ids: Vec<u8>,
+    /// Where something is drawn: left, top, right, bottom (inclusive).
+    bounds: (usize, usize, usize, usize),
+    /// The palette entries of its colours.
+    entries: Vec<PaletteEntry>,
+}
+
+impl PagePicture {
+    /// The ids of the rectangle at (`x`, `y`) of `width` x `height`, row by row (0 outside the frame).
+    fn crop(&self, x: u16, y: u16, width: u16, height: u16) -> Vec<u8> {
+        let mut out = Vec::with_capacity(usize::from(width) * usize::from(height));
+        for row in usize::from(y)..usize::from(y) + usize::from(height) {
+            for col in usize::from(x)..usize::from(x) + usize::from(width) {
+                let id = if col < self.width {
+                    self.ids.get(row * self.width + col).copied().unwrap_or(0)
+                } else {
+                    0
+                };
+                out.push(id);
+            }
+        }
+        out
+    }
+
+    /// The picture outside the rectangles `buttons` (x, y, width, height), as rectangles that overlap neither them
+    /// nor each other, each shrunk to what it shows: the bands between the buttons' tops and bottoms, cut where the
+    /// buttons are.
+    fn beside(&self, buttons: &[(u16, u16, u16, u16)]) -> Vec<(u16, u16, u16, u16)> {
+        let (left, top, right, bottom) = self.bounds;
+        let (right, bottom) = (right + 1, bottom + 1);
+        let mut cuts = vec![top, bottom];
+        for &(_, y, _, height) in buttons {
+            let (y, end) = (usize::from(y), usize::from(y) + usize::from(height));
+            cuts.extend(
+                [y, end]
+                    .into_iter()
+                    .filter(|cut| (top..bottom).contains(cut)),
+            );
+        }
+        cuts.sort_unstable();
+        cuts.dedup();
+        let mut rects: Vec<(usize, usize, usize, usize)> = Vec::new();
+        for band in cuts.windows(2) {
+            let (y0, y1) = (band[0], band[1]);
+            let mut free = vec![(left, right)];
+            for &(x, y, width, height) in buttons {
+                let (bx0, bx1) = (usize::from(x), usize::from(x) + usize::from(width));
+                let (by0, by1) = (usize::from(y), usize::from(y) + usize::from(height));
+                if by0 >= y1 || by1 <= y0 {
+                    continue;
+                }
+                free = free
+                    .into_iter()
+                    .flat_map(|(a, b)| {
+                        [(a, b.min(bx0)), (a.max(bx1), b)]
+                            .into_iter()
+                            .filter(|(a, b)| a < b)
+                    })
+                    .collect();
+            }
+            for (x0, x1) in free {
+                // Joined to the piece above when it is the same columns.
+                match rects
+                    .iter_mut()
+                    .find(|(a, _, b, end)| *a == x0 && *b == x1 && *end == y0)
+                {
+                    Some(above) => above.3 = y1,
+                    None => rects.push((x0, y0, x1, y1)),
+                }
+            }
+        }
+        rects
+            .into_iter()
+            .filter_map(|(x0, y0, x1, y1)| self.shrink(x0, y0, x1, y1))
+            .collect()
+    }
+
+    /// The rectangle `x0..x1` by `y0..y1` shrunk to what it shows; `None` when it shows nothing.
+    fn shrink(&self, x0: usize, y0: usize, x1: usize, y1: usize) -> Option<(u16, u16, u16, u16)> {
+        let mut found: Option<(usize, usize, usize, usize)> = None;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if self.ids.get(y * self.width + x).copied().unwrap_or(0) == 0 {
+                    continue;
+                }
+                found = Some(match found {
+                    None => (x, y, x, y),
+                    Some((a, b, c, d)) => (a.min(x), b.min(y), c.max(x), d.max(y)),
+                });
+            }
+        }
+        let (a, b, c, d) = found?;
+        Some((
+            u16::try_from(a).ok()?,
+            u16::try_from(b).ok()?,
+            u16::try_from(c - a + 1).ok()?,
+            u16::try_from(d - b + 1).ok()?,
+        ))
+    }
+}
+
+/// Lays `pixels` (a button state's palette ids) over `under` (the page's picture there): the state where it draws,
+/// the picture elsewhere.
+fn overlay_on(pixels: &mut [u8], under: &[u8]) {
+    for (pixel, below) in pixels.iter_mut().zip(under) {
+        if *pixel == 0 {
+            *pixel = *below;
+        }
+    }
+}
+
+/// What `menu` draws over its background (its pictures and shapes, texts, the buttons' thumbnails and texts) as
+/// palette ids from `first` on over the frame: the menu drawn over black and over white gives each pixel's colour
+/// and opacity. `None` where it draws nothing, or no id is left.
+fn page_picture(
+    project: &Project,
+    menu: &Menu,
+    rendered: &RenderedMenu,
+    first: u16,
+) -> Result<Option<PagePicture>, BdError> {
+    // Palette ids up to 254 (M10.28: Encore leaves 255 unused).
+    let room = 255_usize.saturating_sub(usize::from(first));
+    if room == 0 {
+        return Ok(None);
+    }
+    let (width, height) = (usize::from(rendered.width), usize::from(rendered.height));
+    let size = width
+        .checked_mul(height)
+        .and_then(|area| area.checked_mul(3))
+        .ok_or_else(|| invalid("menu too large"))?;
+    let frames = disccraft_dvd::still_thumbnails(project, menu);
+    let thumbnails: Vec<_> = frames
+        .iter()
+        .map(disccraft_dvd::ThumbnailFrame::picture)
+        .collect();
+    let over = |level: u8| {
+        let ground = vec![level; size];
+        render_disc_menu(
+            project,
+            menu,
+            MenuPictures {
+                background: Some((&ground, width, height)),
+                thumbnails: &thumbnails,
+            },
+        )
+        .map(|drawn| drawn.rgb)
+        .map_err(menu_error)
+    };
+    let (black, white) = (over(0)?, over(255)?);
+    if black.len() != size || white.len() != size {
+        return Err(invalid("menu picture size"));
+    }
+    // Each pixel's colour and opacity: over black a·c, over white a·c + (1 - a)·255.
+    let mut rgba = vec![0_u8; width * height * 4];
+    let mut bounds: Option<(usize, usize, usize, usize)> = None;
+    for (pixel, (dark, light)) in black
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(white.as_chunks::<3>().0)
+        .enumerate()
+    {
+        let gap: u32 = (0..3)
+            .map(|channel| u32::from(light[channel].saturating_sub(dark[channel])))
+            .sum();
+        let alpha = 255_u32.saturating_sub(gap / 3);
+        // Faint enough to leave out (rounding where nothing is drawn).
+        if alpha <= 8 {
+            continue;
+        }
+        let colour = |channel: usize| {
+            u8::try_from((u32::from(dark[channel]) * 255 + alpha / 2) / alpha).unwrap_or(255)
+        };
+        let at = pixel * 4;
+        if let Some(out) = rgba.get_mut(at..at + 4) {
+            out.copy_from_slice(&[
+                colour(0),
+                colour(1),
+                colour(2),
+                u8::try_from(alpha).unwrap_or(255),
+            ]);
+        }
+        let (x, y) = (pixel % width, pixel / width);
+        bounds = Some(match bounds {
+            None => (x, y, x, y),
+            Some((x1, y1, x2, y2)) => (x1.min(x), y1.min(y), x2.max(x), y2.max(y)),
+        });
+    }
+    let Some((x1, y1, x2, y2)) = bounds else {
+        return Ok(None);
+    };
+    let mut counts: std::collections::HashMap<[u8; 4], u64> = std::collections::HashMap::new();
+    for y in y1..=y2 {
+        for x in x1..=x2 {
+            let at = (y * width + x) * 4;
+            if let Some(&[r, g, b, a]) = rgba
+                .get(at..at + 4)
+                .and_then(|bytes| <&[u8; 4]>::try_from(bytes).ok())
+                && a > 0
+            {
+                *counts.entry([r, g, b, a]).or_default() += 1;
+            }
+        }
+    }
+    let mut found: Vec<([u8; 4], u64)> = counts.into_iter().collect();
+    found.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let (palette, mapping) = disccraft_project::reduce_colors(&found, room);
+    let id_of = |index: usize| u8::try_from(usize::from(first).checked_add(index)?).ok();
+    let ids: std::collections::HashMap<[u8; 4], u8> = found
+        .iter()
+        .zip(&mapping)
+        .filter_map(|((colour, _), index)| Some((*colour, id_of(*index)?)))
+        .collect();
+    let entries = palette
+        .iter()
+        .enumerate()
+        .filter_map(|(index, [red, green, blue, alpha])| {
+            Some(rgba_to_entry(id_of(index)?, *red, *green, *blue, *alpha))
+        })
+        .collect();
+    let pixels = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|colour| {
+            if colour[3] == 0 {
+                0
+            } else {
+                ids.get(colour).copied().unwrap_or(0)
+            }
+        })
+        .collect();
+    Ok(Some(PagePicture {
+        width,
+        ids: pixels,
+        bounds: (x1, y1, x2, y2),
+        entries,
+    }))
 }
 
 /// The menu's picture with its video thumbnails' still pictures (Encore's `(%)` layers).
@@ -689,6 +1206,7 @@ pub(crate) fn popup_ig_units(
         number: 0,
         commands,
         popup: true,
+        pages: None,
     };
     let units = build_ig_units(project, &rendered, &menu_clip, pts)?;
     Ok((units, menu_streams(project).ig))
@@ -837,10 +1355,11 @@ impl IgColours {
             more.push(((State::Normal, 0, n), last));
         }
         // PSD buttons' layers in their own colours (M6.335) take the ids after these: leave them half.
+        // Ids up to 254 (M10.28: Encore leaves 255 unused).
         let room = if has_colour_layers(menu) {
             ROOM_FOR_COLOUR_LAYERS
         } else {
-            u8::MAX
+            u8::MAX - 1
         };
         let steps = if menu.rich_highlights {
             RICH_STEPS.min(room / last.max(1)).max(1)
@@ -1018,7 +1537,8 @@ impl ColourLayers {
                 *counts.entry(*pixel).or_default() += 1;
             }
         }
-        let room = 256_usize.saturating_sub(usize::from(first));
+        // Palette ids up to 254 (M10.28: Encore leaves 255 unused).
+        let room = 255_usize.saturating_sub(usize::from(first));
         let mut found: Vec<([u8; 4], u64)> = counts.into_iter().collect();
         found.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         let (palette, mapping) = if found.is_empty() || room == 0 {
@@ -1687,6 +2207,7 @@ mod tests {
             number: 0,
             commands: &commands,
             popup: false,
+            pages: None,
         };
         let units = super::build_ig_units(&project, &rendered, &clip, 0)?;
         let stream: Vec<u8> = units.iter().flat_map(|unit| unit.data.clone()).collect();

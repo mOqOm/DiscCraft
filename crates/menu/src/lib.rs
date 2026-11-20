@@ -232,6 +232,8 @@ fn render(
         }
         None => draw::draw_background(project, menu, width, height, &mut rgb)?,
     }
+    // A PSD shown by page draws the page's own layers over the background (M10.27).
+    draw::draw_psd_page(project, menu, width, height, &mut rgb)?;
     draw_graphics_rgb(project, menu, width, height, &mut rgb);
     draw::draw_texts(menu, width, height, &mut rgb);
     draw::draw_thumbnails(menu, width, height, &mut rgb, pictures.thumbnails);
@@ -533,6 +535,13 @@ pub fn graphic_bounds(graphic: &disccraft_project::MenuGraphic) -> Rect {
     graphic::drawn_rect(graphic)
 }
 
+/// Where the menu's page of its PSD background draws over the shared layers (M10.27), in the frame; `None` when it
+/// draws nothing (or the menu shows no page of a PSD).
+pub fn psd_page_bounds(project: &Project, menu: &Menu) -> Option<Rect> {
+    let (width, height) = frame_size(&project.settings);
+    draw::psd_page_rect(project, menu, width, height)
+}
+
 /// The frame rectangle a button's text covers where it is drawn (Encore's text layer of a button set, for
 /// selecting it with the Direct Select tool); `None` for a button without text.
 pub fn label_bounds(menu: &Menu, button: &disccraft_project::Button) -> Option<Rect> {
@@ -735,6 +744,7 @@ mod tests {
             vertical: false,
             hidden: false,
             locked: false,
+            spans: Vec::new(),
         });
         let plain = menu.clone();
         let stroke = disccraft_project::LayerEffects {
@@ -971,6 +981,7 @@ mod tests {
             vertical: false,
             hidden: false,
             locked: false,
+            spans: Vec::new(),
         });
         let lit = |project: &Project| -> Result<usize, Box<dyn Error>> {
             let menu = project.menu(menu_id).ok_or("menu")?;
@@ -988,6 +999,158 @@ mod tests {
             text.hidden = true;
         }
         assert_eq!(lit(&project)?, 0);
+        Ok(())
+    }
+
+    /// M6.389: characters with formatting of their own: a larger size makes the line (and the box) taller and the
+    /// text wider, a colour draws those characters in it and the others in the text's, and in a paragraph text the
+    /// larger characters are measured as they are set, so the text wraps into more lines.
+    #[test]
+    fn characters_are_drawn_in_formatting_of_their_own() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::{MenuBackground, MenuText, Orientation, SpanStyle, TextFormat};
+        let mut project = Project::default();
+        let menu_id = project.add_menu(None)?;
+        let mut menu = project.menu(menu_id).ok_or("menu")?.clone();
+        menu.background = MenuBackground::Color { color: [0, 0, 0] };
+        menu.text_color = [255, 255, 255];
+        let plain = MenuText {
+            effects: Default::default(),
+            box_width: None,
+            box_height: None,
+            text: "AAAA BBBB".to_owned(),
+            x: 40,
+            y: 60,
+            size: 32,
+            color: None,
+            font: None,
+            font_style: None,
+            format: TextFormat::default(),
+            shadow: None,
+            orientation: Orientation::default(),
+            hidden: false,
+            locked: false,
+            vertical: false,
+            spans: Vec::new(),
+        };
+        let base = super::text_rect(&menu, &plain);
+        let mut big = plain.clone();
+        big.style_chars(5..9, &|style: &mut SpanStyle| style.size = Some(96));
+        let grown = super::text_rect(&menu, &big);
+        assert!(grown.h > base.h * 2, "{grown:?} {base:?}");
+        assert!(grown.w > base.w, "{grown:?} {base:?}");
+
+        // "BBBB" in red: red pixels right of the middle, white ones left of it, no red on the left.
+        let mut red = plain.clone();
+        red.style_chars(5..9, &|style: &mut SpanStyle| {
+            style.color = Some([255, 0, 0])
+        });
+        menu.texts = vec![red.clone()];
+        let frame = crate::render_menu_preview(&project, &menu)?;
+        let width = usize::from(frame.width);
+        let middle = usize::from(base.x) + usize::from(base.w) / 2;
+        let (mut red_left, mut red_right, mut white_left) = (0, 0, 0);
+        for (index, pixel) in frame.rgb.chunks(3).enumerate() {
+            let x = index % width;
+            let is_red = pixel[0] > 200 && pixel[1] < 60 && pixel[2] < 60;
+            let is_white = pixel.iter().all(|value| *value > 200);
+            if is_red && x < middle {
+                red_left += 1;
+            }
+            if is_red && x >= middle {
+                red_right += 1;
+            }
+            if is_white && x < middle {
+                white_left += 1;
+            }
+        }
+        assert!(
+            red_right > 50 && white_left > 50,
+            "{red_right} {white_left}"
+        );
+        assert_eq!(red_left, 0);
+        // The layer exported for Photoshop is drawn in the same colours.
+        let layer = crate::draw::text_rgba(&menu, &red, frame.width, frame.height);
+        assert!(
+            layer
+                .chunks(4)
+                .any(|px| px[0] > 200 && px[1] < 60 && px[3] > 200)
+        );
+
+        // A paragraph text as wide as the plain text: the larger characters go to a line of their own.
+        let mut boxed = plain.clone();
+        boxed.box_width = Some(base.w + 8);
+        let one = super::text_rect(&menu, &boxed);
+        let mut boxed_big = boxed.clone();
+        boxed_big.style_chars(5..9, &|style: &mut SpanStyle| style.size = Some(64));
+        let wrapped = super::text_rect(&menu, &boxed_big);
+        assert!(wrapped.h > one.h * 2, "{wrapped:?} {one:?}");
+        assert_eq!(wrapped.w, one.w);
+        Ok(())
+    }
+
+    /// M6.390: the same in vertical text: a larger size makes the column longer, and a colour draws those characters
+    /// (lower in the column) in it and the others in the text's.
+    #[test]
+    fn vertical_characters_are_drawn_in_formatting_of_their_own() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::{MenuBackground, MenuText, Orientation, SpanStyle, TextFormat};
+        let mut project = Project::default();
+        let menu_id = project.add_menu(None)?;
+        let mut menu = project.menu(menu_id).ok_or("menu")?.clone();
+        menu.background = MenuBackground::Color { color: [0, 0, 0] };
+        menu.text_color = [255, 255, 255];
+        let plain = MenuText {
+            effects: Default::default(),
+            box_width: None,
+            box_height: None,
+            text: "あいうえおかき".to_owned(),
+            x: 200,
+            y: 40,
+            size: 32,
+            color: None,
+            font: None,
+            font_style: None,
+            format: TextFormat::default(),
+            shadow: None,
+            orientation: Orientation::default(),
+            hidden: false,
+            locked: false,
+            vertical: true,
+            spans: Vec::new(),
+        };
+        let base = super::text_rect(&menu, &plain);
+        let mut big = plain.clone();
+        big.style_chars(4..7, &|style: &mut SpanStyle| style.size = Some(64));
+        let grown = super::text_rect(&menu, &big);
+        assert!(grown.h > base.h + 50, "{grown:?} {base:?}");
+
+        let mut red = plain.clone();
+        red.style_chars(4..7, &|style: &mut SpanStyle| {
+            style.color = Some([255, 0, 0])
+        });
+        menu.texts = vec![red];
+        let frame = crate::render_menu_preview(&project, &menu)?;
+        let width = usize::from(frame.width);
+        let middle = usize::from(base.y) + usize::from(base.h) / 2;
+        let (mut red_top, mut red_bottom, mut white_top) = (0, 0, 0);
+        for (index, pixel) in frame.rgb.chunks(3).enumerate() {
+            let y = index / width;
+            let is_red = pixel[0] > 200 && pixel[1] < 60 && pixel[2] < 60;
+            let is_white = pixel.iter().all(|value| *value > 200);
+            if is_red && y < middle {
+                red_top += 1;
+            }
+            if is_red && y >= middle {
+                red_bottom += 1;
+            }
+            if is_white && y < middle {
+                white_top += 1;
+            }
+        }
+        assert!(
+            red_bottom > 50 && white_top > 50,
+            "{red_bottom} {white_top}"
+        );
+        assert_eq!(red_top, 0);
         Ok(())
     }
 
@@ -1016,6 +1179,7 @@ mod tests {
             hidden: false,
             locked: false,
             vertical: false,
+            spans: Vec::new(),
         };
         let one_line = super::text_rect(&menu, &point);
         // A third as wide: three lines.
@@ -1099,6 +1263,7 @@ mod tests {
             hidden: false,
             locked: false,
             vertical: false,
+            spans: Vec::new(),
         };
         let one_line = super::text_rect(&menu, &point);
         // Half as wide: two lines, in a box of exactly that width.
@@ -1221,6 +1386,7 @@ mod tests {
             hidden: false,
             locked: false,
             vertical: true,
+            spans: Vec::new(),
         };
         let horizontal = MenuText {
             box_width: None,
@@ -1350,6 +1516,7 @@ mod tests {
             hidden: false,
             locked: false,
             vertical: false,
+            spans: Vec::new(),
         };
         let flat = super::text_bounds(&menu, &text);
         let turned = MenuText {
@@ -1948,6 +2115,7 @@ mod tests {
             hidden: false,
             locked: false,
             vertical: false,
+            spans: Vec::new(),
         });
         // (pixels partly lit, total light) of the picture with `mode`.
         let measure =
@@ -2054,6 +2222,7 @@ mod tests {
             hidden: false,
             locked: false,
             vertical: false,
+            spans: Vec::new(),
         });
         let ink = |menu: &disccraft_project::Menu| -> Result<f64, Box<dyn Error>> {
             let rendered = super::render_menu_preview(&project, menu)?;
@@ -2094,6 +2263,7 @@ mod tests {
             hidden: false,
             locked: false,
             vertical: false,
+            spans: Vec::new(),
         });
         let with = |change: &dyn Fn(&mut disccraft_project::TextFormat)| {
             let mut changed = menu.clone();
@@ -2171,6 +2341,7 @@ mod tests {
             hidden: false,
             locked: false,
             vertical: false,
+            spans: Vec::new(),
         });
         let flat = super::text_rect(&menu, menu.texts.first().ok_or("text")?);
         let mut turned = menu.clone();
@@ -2316,6 +2487,7 @@ mod tests {
             color: Some([255, 255, 0]),
             font: None,
             font_style: None,
+            spans: Vec::new(),
         });
 
         let rect = super::text_rect(&with_text, with_text.texts.first().ok_or("text")?);

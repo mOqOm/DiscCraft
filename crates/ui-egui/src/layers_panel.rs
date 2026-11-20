@@ -401,6 +401,7 @@ mod tests {
             vertical: false,
             hidden: false,
             locked: false,
+            spans: Vec::new(),
         });
         assert_eq!(
             layer_rows(&menu, |index| index == 1),

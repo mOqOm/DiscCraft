@@ -61,6 +61,7 @@ fn a_stopped_hd_encode_returns_instead_of_hanging() {
             quality: disccraft_transcode::BEST_QUALITY,
             rendering: disccraft_transcode::Rendering::default(),
             mode: RateMode::Vbr,
+            interlaced: false,
         };
         // Stop once the first picture is encoded: the decoder is then ahead, its channel full.
         let mut asked = false;

@@ -11,5 +11,9 @@ publish.workspace = true
 disccraft-ui-egui.workspace = true
 eframe.workspace = true
 
+# The icon of the program file on Windows (assets/app-icon/disccraft.ico; build.rs).
+[target.'cfg(windows)'.build-dependencies]
+winresource.workspace = true
+
 [lints]
 workspace = true

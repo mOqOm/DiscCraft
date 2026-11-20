@@ -1,0 +1,15 @@
+DiscCraft app icon (disccraft.png and every file derived from it in this directory: disccraft-1024.png,
+disccraft.icns, disccraft.ico, hicolor/).
+
+Original artwork made for this project by the project owner with Google Gemini's image generation
+(2026-11-20): a beaver in an engraving style on a blue tile. No third-party material. Licensed like the rest
+of DiscCraft, under either of
+
+  * Apache License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0)
+  * MIT license (https://opensource.org/licenses/MIT)
+
+at your option.
+
+SPDX-License-Identifier: MIT OR Apache-2.0
+
+The derived files are regenerated with the development tools of the source repository.

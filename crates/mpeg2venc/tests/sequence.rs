@@ -270,6 +270,56 @@ fn run_hd(standard: Standard, frame_rate_code: u8) {
     }
 }
 
+/// M6.393: an HDV-sized sequence (1440 x 1080, MP@H-14): the frames given at the coded 1440 x 1088 decode without
+/// errors, and the headers say 1440 x 1080, 16:9, a 448 x 16,384-bit VBV buffer and High-1440.
+#[test]
+fn hd_1440_sequence_decodes() {
+    use disccraft_mpeg2venc::encoder::Format;
+    let (w, h) = (1440usize, 1088usize);
+    assert_eq!(Format::Hd1440.coded_size(Standard::Ntsc), (1440, 1088));
+    let mut enc = Encoder::new(EncoderConfig {
+        standard: Standard::Ntsc,
+        gop_size: 15,
+        bitrate: 18_000_000,
+        max_bitrate: 25_000_000,
+        wide: true,
+        format: Format::Hd1440,
+        pulldown: false,
+    })
+    .unwrap();
+    let frames = 4;
+    let sources: Vec<Frame420> = (0..frames).map(|t| synthetic(w, h, t * 8)).collect();
+    let mut es = Vec::new();
+    for f in &sources {
+        es.extend_from_slice(&enc.encode_frame(f).unwrap());
+    }
+    es.extend_from_slice(&enc.finish());
+    assert_eq!(&es[..4], &[0, 0, 1, 0xB3]);
+    assert_eq!(&es[4..7], &[0x5A, 0x04, 0x38]);
+    assert_eq!(es[7], 0x30 | 4);
+    let vbv = (u16::from(es[10] & 0x1F) << 5) | u16::from(es[11] >> 3);
+    assert_eq!(vbv, 448);
+    assert_eq!(&es[16..18], &[0x14, 0x62]);
+    assert_eq!(&es[22..26], &[0, 0, 1, 0xB5]);
+    let mut dec = Decoder::new();
+    let mut pics = Vec::new();
+    for (i, range) in craft_video::mpeg2::access_units(&es)
+        .into_iter()
+        .enumerate()
+    {
+        pics.extend(dec.decode(&es[range], i as i64).unwrap());
+    }
+    pics.extend(dec.flush());
+    assert_eq!(dec.errors(), 0, "decoder errors: {:?}", dec.last_error());
+    assert_eq!(pics.len(), frames);
+    for (i, (p, s)) in pics.iter().zip(&sources).enumerate() {
+        assert_eq!(p.width as usize, w);
+        let shown = w * (p.height as usize).min(1080);
+        let q = psnr(&p.y[..shown], &s.y[..shown]);
+        assert!(q > 30.0, "frame {i}: PSNR {q:.1} dB");
+    }
+}
+
 #[test]
 fn hd_1080i_59_94_sequence_decodes() {
     run_hd(Standard::Ntsc, 4);
@@ -503,8 +553,9 @@ fn interlaced_run(as_fields: bool, frames: usize) -> (f64, f64) {
 }
 
 /// M6.371: interlaced pictures (frame_pred_frame_dct 0, frame_motion_type and a dct_type a macroblock) decode
-/// without errors, as the encoder reconstructed them. (They do not code this material better than progressive
-/// frames yet: about 25 dB against 30 at 3 Mbit/s; the transcodes do not use them.)
+/// without errors, as the encoder reconstructed them. M6.394: on this material they now code better than
+/// progressive frames (about 33 dB against 30 at 3 Mbit/s; 25 before, when the motion search fell into vectors that
+/// take one field for the other).
 #[test]
 fn interlaced_pictures_decode_as_reconstructed() {
     let (fields, drift) = interlaced_run(true, 30);
@@ -512,5 +563,60 @@ fn interlaced_pictures_decode_as_reconstructed() {
         drift < 0.25,
         "decoder vs encoder reconstruction drift {drift}"
     );
-    assert!(fields > 20.0, "{fields:.2} dB");
+    let (frames, _) = interlaced_run(false, 30);
+    assert!(
+        fields > frames + 1.5,
+        "{fields:.2} dB, frames {frames:.2} dB"
+    );
+}
+
+/// M12.26: pictures marked interlaced with frame coding (`set_field_order`): each picture coding extension says
+/// the field order given (here the bottom field first), frame_pred_frame_dct 1, chroma_420_type and
+/// progressive_frame 0, and the pictures decode without errors as the encoder reconstructed them.
+#[test]
+fn pictures_marked_interlaced_keep_frame_coding() {
+    let (w, h) = (720, 480);
+    let mut enc = Encoder::new(EncoderConfig {
+        standard: Standard::Ntsc,
+        gop_size: 15,
+        bitrate: 4_000_000,
+        max_bitrate: 8_000_000,
+        wide: false,
+        format: disccraft_mpeg2venc::encoder::Format::Sd,
+        pulldown: false,
+    })
+    .unwrap();
+    enc.set_field_order(false);
+    let mut es = Vec::new();
+    for t in 0..4 {
+        es.extend_from_slice(&enc.encode_frame(&interlaced(w, h, t)).unwrap());
+    }
+    let last_recon = enc.reconstruction().unwrap().y.clone();
+    es.extend_from_slice(&enc.finish());
+    let extensions: Vec<usize> = es
+        .windows(5)
+        .enumerate()
+        .filter(|(_, bytes)| bytes[..4] == [0, 0, 1, 0xB5] && bytes[4] >> 4 == 8)
+        .map(|(at, _)| at + 4)
+        .collect();
+    assert_eq!(extensions.len(), 4);
+    for at in extensions {
+        let flags = es[at + 3];
+        assert_eq!(flags >> 7, 0, "top_field_first");
+        assert_eq!((flags >> 6) & 1, 1, "frame_pred_frame_dct");
+        assert_eq!(flags & 1, 0, "chroma_420_type");
+        assert_eq!(es[at + 4] >> 7, 0, "progressive_frame");
+    }
+    let mut dec = Decoder::new();
+    let mut pics = Vec::new();
+    for (i, range) in craft_video::mpeg2::access_units(&es)
+        .into_iter()
+        .enumerate()
+    {
+        pics.extend(dec.decode(&es[range], i as i64).unwrap());
+    }
+    pics.extend(dec.flush());
+    assert_eq!(dec.errors(), 0, "decoder errors: {:?}", dec.last_error());
+    assert_eq!(pics.len(), 4);
+    assert!(pics.last().unwrap().y == last_recon);
 }

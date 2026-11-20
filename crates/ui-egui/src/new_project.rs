@@ -447,7 +447,7 @@ pub(crate) fn transcode_summary(
             ),
             audio,
             tlf!(
-                "Bitrate: {target} Mbps on average, up to {peak} (lower if the disc is too small)",
+                "Bitrate: {target} Mbps on average, up to {peak} (more when the disc has room, less when it is short)",
                 target = target / 1000,
                 peak = peak / 1000
             ),

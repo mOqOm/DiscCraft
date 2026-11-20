@@ -37,8 +37,8 @@ install -d "$stage/usr/share/metainfo"
 sed -e "s/@VERSION@/$VERSION/" -e "s/@DATE@/$(date -u +%Y-%m-%d)/" "$here/$APP_ID.metainfo.xml.in" \
   > "$stage/usr/share/metainfo/$APP_ID.metainfo.xml"
 install -Dm644 "$here/$APP_ID.mime.xml" "$stage/usr/share/mime/packages/$APP_ID.xml"
-install -Dm644 "$root/assets/app-icon/disccraft.svg" "$stage/usr/share/icons/hicolor/scalable/apps/$APP_ID.svg"
-install -Dm644 "$root/assets/app-icon/disccraft.png" "$stage/usr/share/icons/hicolor/512x512/apps/$APP_ID.png"
+install -d "$stage/usr/share/icons"
+cp -r "$root/assets/app-icon/hicolor" "$stage/usr/share/icons/hicolor"
 for doc in README.md README.ja.md LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md; do
   install -Dm644 "$root/$doc" "$stage/usr/share/doc/disccraft/$doc"
 done
@@ -145,8 +145,8 @@ for format in $FORMATS; do
       mkdir -p "$appdir"
       cp -r "$stage/usr" "$appdir/usr"
       cp "$here/$APP_ID.desktop" "$appdir/$APP_ID.desktop"
-      cp "$root/assets/app-icon/disccraft.svg" "$appdir/$APP_ID.svg"
-      cp "$root/assets/app-icon/disccraft.png" "$appdir/.DirIcon"
+      cp "$root/assets/app-icon/hicolor/256x256/apps/$APP_ID.png" "$appdir/$APP_ID.png"
+      cp "$root/assets/app-icon/hicolor/256x256/apps/$APP_ID.png" "$appdir/.DirIcon"
       cat > "$appdir/AppRun" <<'EOF'
 #!/bin/sh
 # Starts DiscCraft from the AppImage; `disccraft-cli` as the first argument runs the command line instead.

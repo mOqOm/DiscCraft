@@ -22,8 +22,9 @@ mod preview;
 mod sup;
 mod vobsub;
 pub use demux::{
-    BdVideoFormat, Passthrough, TsH264, demux_h264_for_bd, demux_mpeg2_for_bd, demux_video_for_bd,
-    h264_fits_bd, mpeg2_fits_bd, video_fits_bd,
+    BdMismatch, BdVideoFormat, Passthrough, TsUnits, bd_mismatch, demux_h264_for_bd,
+    demux_mpeg2_for_bd, demux_video_for_bd, h264_fits_bd, mpeg2_fits_bd, narrow_mpeg2_width,
+    video_fits_bd,
 };
 pub use demux_mkv::H264Samples;
 pub use h264_cut::{CutPoints, TrimmedPassthrough, bd_cut_points};
@@ -271,9 +272,11 @@ pub fn transcode_now(
 }
 
 pub use disccraft_transcode::slideshow::Motion as SlideMotion;
-pub use menus::{render_motion_menus, rendered_motion_menu};
+pub use menus::{
+    render_hd_motion_menus, render_motion_menus, rendered_hd_motion_menu, rendered_motion_menu,
+};
 pub use prepare::slide_motion;
-pub use prepare::{revert_transcodes, undecodable_videos};
+pub use prepare::{revert_transcodes, undecodable_videos, with_clip_sounds};
 
 /// File ▸ Render ▸ Slideshow: transcodes the slideshows (`only`: one of them) into `cache_dir`, at the rate the
 /// whole project gives them, so a build with that cache takes them as they are. Returns how many.

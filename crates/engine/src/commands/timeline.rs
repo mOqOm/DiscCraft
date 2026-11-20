@@ -718,10 +718,110 @@ fn place_own_sound(
     Ok(Some(index))
 }
 
+/// Where a video clip is on its timeline: its file, its first frame on the timeline, the frames of its file's head it
+/// leaves out, and how many frames it plays.
+#[derive(Clone, Copy)]
+struct ClipPlace {
+    asset: AssetId,
+    start: i64,
+    trim_start: u32,
+    frames: i64,
+}
+
+/// The places of timeline `timeline`'s video clips (M6.379).
+fn clip_places(session: &mut Session, timeline: TimelineId) -> Result<Vec<ClipPlace>, String> {
+    let spans = clip_spans(session, timeline)?;
+    let rate = session.project.settings.frame_rate();
+    let Some(found) = session.project.timeline(timeline) else {
+        return Err(format!("timeline {} does not exist", timeline.0));
+    };
+    Ok(spans
+        .iter()
+        .enumerate()
+        .map(|(index, (asset, start, length))| ClipPlace {
+            asset: *asset,
+            start: rate.frame_at(*start),
+            trim_start: found.video_trim(index).start,
+            frames: rate.frame_at(*length),
+        })
+        .collect())
+}
+
+/// Encore links a clip's picture and its sound (M6.379): after an edit of the video clips, the audio clips linked
+/// to them (on any track, a clip of the same file that starts where the video clip started and leaves out as much
+/// of the file's head) follow. `before` are the clips' places before the edit, `mapping` what each became (`None`:
+/// removed, and its sound with it). A linked clip takes its video clip's new place, in point and length; a track
+/// left with no clip goes. Other sound stays where it is.
+fn follow_video_edit(
+    session: &mut Session,
+    timeline: TimelineId,
+    before: &[ClipPlace],
+    mapping: &[Option<usize>],
+) -> Result<(), String> {
+    let after = clip_places(session, timeline)?;
+    let Some(found) = session.project.timeline_mut(timeline) else {
+        return Ok(());
+    };
+    let mut emptied = Vec::new();
+    for (index, track) in found.audio.iter_mut().enumerate() {
+        let mut changed = false;
+        let mut clips = Vec::new();
+        for (_, clip) in track.clips() {
+            let linked = before.iter().position(|place| {
+                place.asset == clip.asset
+                    && place.start == i64::from(clip.start)
+                    && place.trim_start == clip.trim_start
+            });
+            match linked.map(|at| mapping.get(at).copied().flatten()) {
+                // Not linked: as it is.
+                None => clips.push(clip),
+                // Its video clip went.
+                Some(None) => changed = true,
+                Some(Some(now)) => {
+                    let Some(place) = after.get(now) else {
+                        clips.push(clip);
+                        continue;
+                    };
+                    let (Ok(start), Ok(frames)) =
+                        (u32::try_from(place.start), u32::try_from(place.frames))
+                    else {
+                        clips.push(clip);
+                        continue;
+                    };
+                    let moved = disccraft_project::AudioClip {
+                        asset: clip.asset,
+                        start,
+                        trim_start: place.trim_start,
+                        trim_end: Some(place.trim_start.saturating_add(frames)),
+                    };
+                    changed |= moved != clip;
+                    clips.push(moved);
+                }
+            }
+        }
+        if !changed {
+            continue;
+        }
+        clips.sort_by_key(|clip| clip.start);
+        match clips.split_first() {
+            Some((first, rest)) => {
+                track.more = rest.to_vec();
+                let _ = track.set_clip(0, *first);
+            }
+            None => emptied.push(index),
+        }
+    }
+    for index in emptied.into_iter().rev() {
+        let _ = found.audio.remove(index);
+    }
+    Ok(())
+}
+
 /// Takes a clip after the first off the timeline; its chapters go with it and the rest moves up.
 fn run_remove_video(session: &mut Session, params: &Value) -> CommandResult {
     let timeline = TimelineId(req_u64(params, "timeline")?);
     let clip = req_usize(params, "clip")?;
+    let before = clip_places(session, timeline)?;
     let spans = clip_spans(session, timeline)?;
     let (_, start, length) = spans
         .get(clip)
@@ -760,6 +860,15 @@ fn run_remove_video(session: &mut Session, params: &Value) -> CommandResult {
             .clear_timeline_video(timeline, clip, (start, length), frames)
     }
     .map_err(|error| error.to_string())?;
+    // Its linked sound goes with it; the others follow their clips (M6.379).
+    let mapping: Vec<Option<usize>> = (0..before.len())
+        .map(|index| match index.cmp(&clip) {
+            std::cmp::Ordering::Less => Some(index),
+            std::cmp::Ordering::Equal => None,
+            std::cmp::Ordering::Greater => Some(index - 1),
+        })
+        .collect();
+    follow_video_edit(session, timeline, &before, &mapping)?;
     Ok(empty_object())
 }
 
@@ -772,6 +881,7 @@ fn run_remove_video(session: &mut Session, params: &Value) -> CommandResult {
 fn run_move_video(session: &mut Session, params: &Value) -> CommandResult {
     let timeline = TimelineId(req_u64(params, "timeline")?);
     let clip = req_usize(params, "clip")?;
+    let before = clip_places(session, timeline)?;
     let time = time_param(params, &session.project.settings)?;
     let spans = clip_spans(session, timeline)?;
     let (_, start, length) = spans
@@ -804,6 +914,9 @@ fn run_move_video(session: &mut Session, params: &Value) -> CommandResult {
         .project
         .move_timeline_video(timeline, clip, (gap, next_gap), (start, length), by)
         .map_err(|error| error.to_string())?;
+    // Its linked sound moves with it (M6.379).
+    let mapping: Vec<Option<usize>> = (0..before.len()).map(Some).collect();
+    follow_video_edit(session, timeline, &before, &mapping)?;
     let at = rate.tick_of(new_start);
     Ok(object(&[
         ("start", Value::from(at.0)),
@@ -828,6 +941,7 @@ fn run_move_video(session: &mut Session, params: &Value) -> CommandResult {
 fn run_trim_video(session: &mut Session, params: &Value) -> CommandResult {
     let timeline = TimelineId(req_u64(params, "timeline")?);
     let clip = req_usize(params, "clip")?;
+    let before = clip_places(session, timeline)?;
     let out_edge = match req_str(params, "edge")?.as_str() {
         "in" => false,
         "out" => true,
@@ -975,6 +1089,9 @@ fn run_trim_video(session: &mut Session, params: &Value) -> CommandResult {
         .project
         .trim_timeline_video(timeline, clip, trim, cut)
         .map_err(|error| error.to_string())?;
+    // Its linked sound is cut as it is, and the sound of the clips after it moves up with them (M6.379).
+    let mapping: Vec<Option<usize>> = (0..before.len()).map(Some).collect();
+    follow_video_edit(session, timeline, &before, &mapping)?;
     Ok(object(&[
         ("start", Value::from(trim.start)),
         ("end", trim.end.map_or(Value::Null, Value::from)),
@@ -2538,6 +2655,102 @@ mod tests {
             ]),
         )?;
         assert_eq!(added.get("track"), Some(&Value::from(1)));
+        Ok(())
+    }
+
+    /// M6.379: a clip's sound follows its picture (Encore links them): trimming a clip cuts its sound and moves
+    /// the sound of the clips after it up, moving a clip moves its sound, and removing a clip takes its sound away.
+    #[test]
+    fn a_clips_sound_follows_its_edits() -> Result<(), Box<dyn Error>> {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/h264_aac.mp4");
+        if !fixture.is_file() {
+            println!("skipped: no target/fixtures/h264_aac.mp4");
+            return Ok(());
+        }
+        let mut session = Session::new();
+        // An HD Blu-ray: its encoded clips are trimmed to the frame.
+        session.project.settings.kind = disccraft_project::DiscKind::BluRay;
+        session.project.settings.bd_video = disccraft_project::BdVideo::Hd1080p23;
+        let video = value_u64(
+            &session.execute("asset.import", &obj(&[("path", string_value(&fixture))]))?,
+            "asset",
+        )?;
+        let timeline = value_u64(
+            &session.execute("timeline.create", &obj(&[("asset", Value::from(video))]))?,
+            "timeline",
+        )?;
+        let appended = session.execute(
+            "timeline.appendVideo",
+            &obj(&[
+                ("timeline", Value::from(timeline)),
+                ("asset", Value::from(video)),
+            ]),
+        )?;
+        assert_eq!(appended.get("audioTrack"), Some(&Value::from(0)));
+        let sound = |session: &Session| -> Vec<(u32, u32, Option<u32>)> {
+            session
+                .project
+                .timeline(disccraft_project::TimelineId(timeline))
+                .and_then(|found| found.audio.first())
+                .map(|track| {
+                    track
+                        .clips()
+                        .iter()
+                        .map(|(_, clip)| (clip.start, clip.trim_start, clip.trim_end))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        // The first clip's out point to frame 30: its sound ends there, the second's starts there.
+        session.execute(
+            "timeline.trimVideo",
+            &obj(&[
+                ("timeline", Value::from(timeline)),
+                ("clip", Value::from(0)),
+                ("edge", Value::from("out")),
+                ("time", Value::from(rate_tick(30))),
+            ]),
+        )?;
+        let laid = sound(&session);
+        assert_eq!(laid.first(), Some(&(0, 0, Some(30))), "{laid:?}");
+        assert_eq!(laid.get(1).map(|clip| clip.0), Some(30), "{laid:?}");
+        // The second clip's in point to frame 10 of its file: its sound leaves out as much.
+        session.execute(
+            "timeline.trimVideo",
+            &obj(&[
+                ("timeline", Value::from(timeline)),
+                ("clip", Value::from(1)),
+                ("edge", Value::from("in")),
+                ("time", Value::from(rate_tick(40))),
+            ]),
+        )?;
+        let laid = sound(&session);
+        assert_eq!(
+            laid.get(1).map(|clip| (clip.0, clip.1)),
+            Some((30, 10)),
+            "{laid:?}"
+        );
+        // Moved 15 frames on, with a gap before it: its sound goes along.
+        session.execute(
+            "timeline.moveVideo",
+            &obj(&[
+                ("timeline", Value::from(timeline)),
+                ("clip", Value::from(1)),
+                ("time", Value::from(rate_tick(45))),
+            ]),
+        )?;
+        let laid = sound(&session);
+        assert_eq!(laid.get(1).map(|clip| clip.0), Some(45), "{laid:?}");
+        // Removed: its sound goes, the first clip's stays.
+        session.execute(
+            "timeline.removeVideo",
+            &obj(&[
+                ("timeline", Value::from(timeline)),
+                ("clip", Value::from(1)),
+            ]),
+        )?;
+        assert_eq!(sound(&session), [(0, 0, Some(30))]);
         Ok(())
     }
 

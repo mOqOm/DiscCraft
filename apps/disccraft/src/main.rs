@@ -52,7 +52,16 @@ fn main() -> ExitCode {
             .with_inner_size([1280.0, 800.0])
             .with_maximized(true)
             // Files dragged in from Explorer are imported into the project (as in Encore).
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            // The application icon (assets/app-icon) on the window and the taskbar, and the ID the Linux desktop
+            // file names (Wayland app ID, X11 window class).
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!(
+                    "../../../assets/app-icon/hicolor/256x256/apps/io.github.mOqOm.DiscCraft.png"
+                ))
+                .unwrap_or_default(),
+            )
+            .with_app_id("io.github.mOqOm.DiscCraft"),
         ..Default::default()
     };
 

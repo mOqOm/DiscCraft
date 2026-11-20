@@ -14,6 +14,7 @@ mod clip;
 mod hd;
 mod menus;
 mod nav;
+mod pages;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -27,7 +28,10 @@ use disccraft_project::{
 use clip::BuiltClip;
 use menus::{MenuClip, MenuDirs};
 mod uo;
+
+pub use menus::PAGE_PICTURE_BUTTON;
 use nav::{MenuMotion, MenuNav, TitleMap, TitleNav};
+pub use pages::menu_page_groups;
 
 /// Errors produced while building a BDMV folder.
 #[derive(Debug, thiserror::Error)]
@@ -205,6 +209,45 @@ pub fn render_slideshows(
         let _ = hd::hd_title(&wanted, title, cache_dir, rates, progress)?;
     }
     Ok(count)
+}
+
+/// File ▸ Render ▸ Motion Menu: encodes the motion menus (`only`: one of them) into `cache_dir` as the build would
+/// (SD: as a DVD's; HD: at the disc's HD size and its menus' rate, M6.387), so the build takes them as they are and
+/// the project preview plays them. Returns how many.
+///
+/// # Errors
+///
+/// When a menu cannot be encoded.
+pub fn render_motion_menus(
+    project: &Project,
+    cache_dir: &Path,
+    only: Option<disccraft_project::MenuId>,
+    progress: &mut dyn FnMut(&str, f32),
+) -> Result<usize, BdError> {
+    let (choice, video) = (project.settings.bd_codec, project.settings.bd_video);
+    match hd::options(choice, video, hd::menu_rates(choice, video)) {
+        Some(options) => {
+            disccraft_dvd::render_hd_motion_menus(project, cache_dir, only, &options, progress)
+        }
+        None => disccraft_dvd::render_motion_menus(project, cache_dir, only, progress),
+    }
+    .map_err(|error| BdError::Prepare(error.to_string()))
+}
+
+/// The motion menu `menu` rendered into `cache_dir` (File ▸ Render ▸ Motion Menu, or a build) and still the menu as
+/// it is, for the project preview to play: an SD disc's as a DVD's (its MPEG-2 video), an HD disc's as its pictures
+/// in a transport stream (M6.387).
+#[must_use]
+pub fn rendered_motion_menu(
+    project: &Project,
+    menu: disccraft_project::MenuId,
+    cache_dir: &Path,
+) -> Option<std::path::PathBuf> {
+    let (choice, video) = (project.settings.bd_codec, project.settings.bd_video);
+    match hd::options(choice, video, hd::menu_rates(choice, video)) {
+        Some(options) => disccraft_dvd::rendered_hd_motion_menu(project, menu, cache_dir, &options),
+        None => disccraft_dvd::rendered_motion_menu(project, menu, cache_dir),
+    }
 }
 
 /// Build a BDMV folder with an explicit cache directory and progress callback.
@@ -889,8 +932,10 @@ fn add_item_duration(current: u64, item: &mpls::PlayItem) -> Result<u64, BdError
 fn build_menu_navs(project: &Project, start: u16) -> Result<Vec<MenuNav>, BdError> {
     let mut navs = Vec::new();
     let mut number = start;
+    // Menus whose pages are one composition (M10.26).
+    let places = pages::menu_pages(project);
 
-    for menu in project.menus.values() {
+    for (index, menu) in project.menus.values().enumerate() {
         if menu.buttons.is_empty() {
             return Err(invalid("menu has no buttons"));
         }
@@ -933,6 +978,7 @@ fn build_menu_navs(project: &Project, start: u16) -> Result<Vec<MenuNav>, BdErro
                 })
                 .collect(),
             select: default_select(menu),
+            pages: places.get(index).cloned().flatten(),
         });
         number = number
             .checked_add(1)
@@ -1028,27 +1074,110 @@ fn write_menus(
         playlist: &dirs.playlist,
     };
 
-    for (index, menu) in project.menus.values().enumerate() {
+    // Each menu's clip has its own number; they are made side by side (M6.381: an HD motion menu is an encode),
+    // then counted in order. A menu whose pages are one composition (M10.26) has one clip, at its first page's
+    // number: its later pages' numbers have none.
+    let menus: Vec<&Menu> = project.menus.values().collect();
+    let groups = pages::menu_page_groups(project);
+    let mut jobs = Vec::with_capacity(project.menus.len());
+    for (index, menu) in menus.iter().enumerate() {
         let Some(commands) = navigation.button_commands.get(index) else {
             return Err(invalid("missing menu commands"));
         };
-
-        let menu_clip = MenuClip {
-            menu,
-            number,
-            commands: commands.as_slice(),
-            popup: false,
+        let group = groups.iter().find(|group| group.contains(&index));
+        let job = match group {
+            Some(group) if group.first() != Some(&index) => None,
+            Some(group) => {
+                let pages = group
+                    .iter()
+                    .map(|page| {
+                        let menu = menus
+                            .get(*page)
+                            .copied()
+                            .ok_or_else(|| invalid("missing menu"))?;
+                        let commands = navigation
+                            .button_commands
+                            .get(*page)
+                            .ok_or_else(|| invalid("missing menu commands"))?;
+                        Ok((menu, commands.as_slice()))
+                    })
+                    .collect::<Result<Vec<_>, BdError>>()?;
+                let counts: Vec<usize> = pages.iter().map(|(menu, _)| menu.buttons.len()).collect();
+                Some((
+                    menus::background_only(menu),
+                    number,
+                    commands.as_slice(),
+                    Some(menus::MenuPagesClip {
+                        pages,
+                        dispatcher: nav::page_dispatcher(&counts)?,
+                    }),
+                ))
+            }
+            None => Some(((*menu).clone(), number, commands.as_slice(), None)),
         };
-        let bytes = menus::write_menu_clip(project, &menu_clip, &menu_dirs, cache_dir)?;
-        add_total(output, bytes)?;
-        add_menu_backups(dirs, output, number)?;
-
+        jobs.extend(job);
         number = number
             .checked_add(1)
             .ok_or_else(|| invalid("too many playlists"))?;
     }
+    let results = side_by_side(&jobs, |(menu, number, commands, pages)| {
+        let menu_clip = MenuClip {
+            menu,
+            number: *number,
+            commands,
+            popup: false,
+            pages: pages.as_ref(),
+        };
+        menus::write_menu_clip(project, &menu_clip, &menu_dirs, cache_dir)
+            .map(|bytes| (*number, bytes))
+    });
+    for result in results {
+        let (number, bytes) = result?;
+        add_total(output, bytes)?;
+        add_menu_backups(dirs, output, number)?;
+    }
 
     Ok(())
+}
+
+/// The most jobs [`side_by_side`] runs at once.
+const MOST_AT_ONCE: usize = 4;
+
+/// Runs `work` on every item, several at once (one for every eight cores, up to [`MOST_AT_ONCE`]: an encode uses
+/// cores of its own), and returns the results in the items' order (M6.381).
+fn side_by_side<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .div_euclid(8)
+        .clamp(1, MOST_AT_ONCE)
+        .min(items.len());
+    if workers <= 1 {
+        return items.iter().map(&work).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results = std::sync::Mutex::new(Vec::with_capacity(items.len()));
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let (next, results, work) = (&next, &results, &work);
+            let _ = scope.spawn(move || {
+                loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let Some(item) = items.get(index) else {
+                        break;
+                    };
+                    let result = work(item);
+                    if let Ok(mut results) = results.lock() {
+                        results.push((index, result));
+                    }
+                }
+            });
+        }
+    });
+    let mut results = results
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    results.sort_by_key(|(index, _)| *index);
+    results.into_iter().map(|(_, result)| result).collect()
 }
 
 fn add_menu_backups(

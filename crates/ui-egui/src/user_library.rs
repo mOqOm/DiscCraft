@@ -251,6 +251,7 @@ mod tests {
                 box_height: Some(90),
                 hidden: false,
                 locked: false,
+                spans: Vec::new(),
             }),
             set: "Titles".to_owned(),
         })?;

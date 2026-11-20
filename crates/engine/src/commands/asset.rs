@@ -1818,22 +1818,49 @@ mod tests {
         assert!(matches!(value.get("seconds"), Some(Value::Null)));
     }
 
-    /// M6.245: a video whose picture does not decode (interlaced H.264) is an error of the project check on a
-    /// disc that would have to convert it, once the file is open; on a 1080i Blu-ray, which carries it as it is,
-    /// it is none.
+    /// An MKV of MPEG-4 Part 2 video (DivX / Xvid, which craft-video does not decode) and AC-3, made with ffmpeg
+    /// into the fixtures (as the player's tests make it); `None` without ffmpeg.
+    fn mpeg4_part2_fixture() -> Option<std::path::PathBuf> {
+        let fixtures =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures");
+        let video = fixtures.join("mpeg4_part2_ac3.mkv");
+        if video.is_file() {
+            return Some(video);
+        }
+        let ffmpeg = std::env::var_os("DISCCRAFT_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
+        std::fs::create_dir_all(&fixtures).ok()?;
+        let part = fixtures.join(format!("mpeg4_part2_ac3.a{}.mkv", std::process::id()));
+        let made = std::process::Command::new(ffmpeg)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("testsrc2=size=640x480:rate=25")
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"])
+            .args([
+                "-t", "2", "-c:v", "mpeg4", "-q:v", "4", "-c:a", "ac3", "-b:a", "192k",
+            ])
+            .arg(&part)
+            .status()
+            .ok()?;
+        if !made.success() || std::fs::rename(&part, &video).is_err() {
+            let _ = std::fs::remove_file(&part);
+            return None;
+        }
+        Some(video)
+    }
+
+    /// M6.245: a video whose picture does not decode (MPEG-4 Part 2; interlaced H.264 until craft-video decoded
+    /// it, M12.25) is an error of the project check on a disc that would have to convert it, once the file is open;
+    /// a Blu-ray cannot carry it as it is either.
     #[test]
     fn a_video_that_cannot_be_converted_is_a_check_error() -> Result<(), Box<dyn std::error::Error>>
     {
-        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/fixtures/h264_1080i.mkv");
-        if !fixture.is_file() {
-            eprintln!("h264_1080i.mkv fixture not found; skipping");
+        let Some(fixture) = mpeg4_part2_fixture() else {
+            eprintln!("no ffmpeg for the MPEG-4 Part 2 fixture; skipping");
             return Ok(());
-        }
+        };
         let dir =
             std::env::temp_dir().join(format!("disccraft-undecodable-{}", std::process::id()));
         std::fs::create_dir_all(&dir)?;
-        let video = dir.join("camera.mkv");
+        let video = dir.join("divx.mkv");
         std::fs::copy(&fixture, &video)?;
         let mut session = Session::new();
         let id = session
@@ -1869,11 +1896,54 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        // A 1080i Blu-ray carries it as it is.
+        // A Blu-ray would have to convert it too.
         session.execute("disc.setKind", &json!({"kind": "bluRay"}))?;
         session.execute("disc.setBlurayVideo", &json!({"video": "1080i59.94"}))?;
-        assert!(!undecodable(&mut session)?);
+        assert!(undecodable(&mut session)?);
         let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M12.25: interlaced H.264 (a camcorder's 1080i, made by x264 as MBAFF) is no check error on a DVD any more:
+    /// craft-video decodes it (storytold/craft-libs PRs #1992 and #2017, through the mOqOm fork), so its thumbnail
+    /// is made and a DVD converts it.
+    #[test]
+    fn interlaced_h264_can_be_converted() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/fixtures/h264_1080i.mkv");
+        if !fixture.is_file() {
+            eprintln!("h264_1080i.mkv fixture not found; skipping");
+            return Ok(());
+        }
+        let mut session = Session::new();
+        let id = session
+            .execute("asset.import", &json!({"path": fixture.to_string_lossy()}))?
+            .get("asset")
+            .and_then(Value::as_u64)
+            .ok_or("no asset")?;
+        let _ = session.execute("timeline.create", &json!({"asset": id}))?;
+        let thumbnail = session.execute("asset.thumbnail", &json!({"asset": id}))?;
+        // A picture: some of its samples are not black.
+        let lit = thumbnail
+            .get("rgb")
+            .and_then(Value::as_array)
+            .map_or(0, |rgb| {
+                rgb.iter()
+                    .filter(|v| v.as_u64().is_some_and(|v| v > 40))
+                    .count()
+            });
+        assert!(lit > 1000, "{lit} lit samples");
+        let check = session.execute("project.check", &json!({}))?;
+        let problems = check
+            .get("problems")
+            .and_then(Value::as_array)
+            .ok_or("no problems")?;
+        assert!(
+            !problems
+                .iter()
+                .any(|problem| problem.get("code") == Some(&json!("undecodableVideo"))),
+            "{check}"
+        );
         Ok(())
     }
 

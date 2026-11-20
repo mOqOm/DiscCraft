@@ -221,16 +221,13 @@ impl DiscCraftApp {
             if labeled(ui, tl!("Project"), Action::TranscodeAll, idle && any) {
                 clicked.push(Action::TranscodeAll);
             }
-            // The selected motion menu (an HD Blu-ray's are made at the build), the selected slideshow.
-            let settings = &self.session.project.settings;
-            let hd = settings.kind == disccraft_project::DiscKind::BluRay
-                && settings.bd_video.hd().is_some();
+            // The selected motion menu (an HD Blu-ray's too: M6.387), the selected slideshow.
             let motion = match self.selection {
                 Selection::Menu(id) => self
                     .session
                     .project
                     .menu(id)
-                    .filter(|menu| menu.is_motion() && !hd)
+                    .filter(|menu| menu.is_motion())
                     .map(|menu| menu.id),
                 _ => None,
             };

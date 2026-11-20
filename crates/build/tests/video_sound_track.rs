@@ -128,3 +128,66 @@ fn the_videos_own_sound_as_audio_1_builds_like_the_implicit_soundtrack() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// M6.378: a title of two clips with sound and no audio tracks (as made before M6.361, or with its tracks taken
+/// away) plays the clips' own sound on the disc too, as in the preview: one AC-3 stream, as long as the two clips.
+#[test]
+fn a_title_of_two_clips_without_tracks_has_their_sound() {
+    let (Some(ffmpeg), Some(ffprobe)) = (
+        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
+        tool("DISCCRAFT_FFPROBE", "ffprobe"),
+    ) else {
+        eprintln!("ffmpeg / ffprobe not found; skipping");
+        return;
+    };
+    let video = video_with_sound(&ffmpeg);
+    let mut project = Project::default();
+    let asset = project.add_asset(&video).unwrap();
+    let timeline = project
+        .add_timeline(asset, Some("Two".to_string()))
+        .unwrap();
+    // The second clip right after the first (two seconds of 29.97 is about 60 frames).
+    let frame = 8_475_667_200_i64;
+    let _ = project
+        .append_timeline_video(timeline, asset, disccraft_project::Tick(60 * frame))
+        .unwrap();
+    project.settings.first_play = Link::Timeline {
+        id: timeline,
+        chapter: 0,
+    };
+    // The build sees a track of the two clips' sounds, the second at the join.
+    let built = disccraft_dvd::with_clip_sounds(&project);
+    let track = built
+        .timeline(timeline)
+        .and_then(|found| found.audio.first())
+        .unwrap();
+    let starts: Vec<u32> = track.clips().iter().map(|(_, clip)| clip.start).collect();
+    // The first clip's length as the timeline counts it (its seconds at 29.97).
+    let length =
+        (disccraft_transcode::probe_video(&video).unwrap().seconds * 30_000.0 / 1001.0).round();
+    assert_eq!(starts, [0, length as u32]);
+
+    let dir = std::env::temp_dir().join(format!("disccraft-two-clips-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let options = BuildOptions {
+        output: OutputKind::Folder,
+        path: dir.join("disc"),
+        cache: Some(dir.join("cache")),
+        audio_language: None,
+    };
+    build(&project, &options).unwrap();
+    let vob = dir.join("disc/VIDEO_TS/VTS_01_1.VOB");
+    assert_eq!(streams(&ffprobe, &vob), ["ac3,audio", "mpeg2video,video"]);
+    let duration = Command::new(&ffprobe)
+        .args(["-v", "error", "-select_streams", "a:0", "-show_entries"])
+        .args(["format=duration", "-of", "csv=p=0"])
+        .arg(&vob)
+        .output()
+        .unwrap();
+    let seconds: f64 = String::from_utf8_lossy(&duration.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0.0);
+    assert!((3.8..4.4).contains(&seconds), "{seconds}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

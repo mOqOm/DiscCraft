@@ -6,8 +6,7 @@
 //! also takes the fonts' vertical forms of punctuation), and runs of other characters (Latin letters, digits,
 //! half-width punctuation) are laid out as a line and turned a quarter clockwise, reading downwards.
 
-use crate::draw::formatted_layout_in;
-use disccraft_project::{TextAlign, TextFormat};
+use disccraft_project::{SpanStyle, TextAlign, TextFormat};
 use filmcraft_text::{Layout, Mask, Xform, render};
 use std::sync::Arc;
 
@@ -109,8 +108,53 @@ pub(crate) fn vertical_block_with(
     format: &TextFormat,
     room: &[(std::ops::Range<usize>, f32)],
 ) -> (Vec<Piece>, [f32; 4]) {
+    let (pieces, bounds, _) = vertical_block_spans(text, family, (size, face, format), room, &[]);
+    (pieces, bounds)
+}
+
+/// The parts of `run` (at byte `from` of its text) that `spans` (byte ranges of the text) cut it into, in order:
+/// each part's byte range in the run and the span it is in.
+fn span_parts<'a>(
+    run: &str,
+    from: usize,
+    spans: &'a [(std::ops::Range<usize>, SpanStyle)],
+) -> Vec<(std::ops::Range<usize>, Option<&'a SpanStyle>)> {
+    let end = from.saturating_add(run.len());
+    let mut cuts: Vec<usize> = vec![0, run.len()];
+    for (span, _) in spans {
+        for at in [span.start, span.end] {
+            if at > from && at < end && run.is_char_boundary(at - from) {
+                cuts.push(at - from);
+            }
+        }
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    cuts.windows(2)
+        .filter_map(|pair| {
+            let (start, stop) = (*pair.first()?, *pair.get(1)?);
+            let style = spans
+                .iter()
+                .find(|(span, _)| span.contains(&(from + start)))
+                .map(|(_, style)| style);
+            Some((start..stop, style))
+        })
+        .collect()
+}
+
+/// [`vertical_block_with`] with characters set in formatting of their own (`spans`: byte ranges of `text` and what
+/// they set, M6.389), and the colour of each piece that has its own.
+#[allow(clippy::type_complexity)]
+pub(crate) fn vertical_block_spans(
+    text: &str,
+    family: &str,
+    (size, face, format): (f32, Option<&str>, &TextFormat),
+    room: &[(std::ops::Range<usize>, f32)],
+    spans: &[(std::ops::Range<usize>, SpanStyle)],
+) -> (Vec<Piece>, [f32; 4], Vec<Option<[u8; 3]>>) {
     let column = format.line_pitch_at(size);
     let mut columns: Vec<(Vec<Piece>, f32)> = Vec::new();
+    let mut colors: Vec<Option<[u8; 3]>> = Vec::new();
     let mut line_start = 0_usize;
     for (index, line) in text.split('\n').enumerate() {
         let mut run_start = line_start;
@@ -120,44 +164,66 @@ pub(crate) fn vertical_block_with(
         let cx = -(index as f32) * column;
         let mut pieces = Vec::new();
         let mut cursor = 0.0_f32;
-        for (up, run) in runs(line) {
-            // The room of this run's characters, from its start.
-            let from = run_start;
-            run_start = run_start.saturating_add(run.len());
-            let mine: Vec<(std::ops::Range<usize>, f32)> = room
-                .iter()
-                .filter(|(range, _)| range.start >= from && range.end <= run_start)
-                .map(|(range, more)| (range.start - from..range.end - from, *more))
-                .collect();
-            let laid = if mine.is_empty() {
-                formatted_layout_in(run, family, size, face, format, up)
-            } else if up {
-                // A column's layout keeps one tracking for all its characters: the room moves the characters after
-                // it down instead.
-                let em = crate::draw::room_em(size, format);
-                spread_down(
-                    &formatted_layout_in(run, family, size, face, format, true),
-                    &mine
-                        .iter()
-                        .map(|(range, more)| (range.end, more * em / 1000.0))
-                        .collect::<Vec<_>>(),
-                )
-            } else {
-                crate::draw::formatted_layout_with(run, family, size, face, format, (false, &mine))
-            };
-            let [x0, y0, x1, y1] = laid.bounds;
-            if up {
-                // Already a column (centred on x 0): from the cursor down.
-                pieces.push((laid, translate(cx, cursor - y0)));
-                cursor += (y1 - y0).max(0.0);
-            } else {
-                // A line turned a quarter clockwise ((x, y) to (-y, x)): its middle on the column, its start at
-                // the cursor.
-                pieces.push((
-                    laid,
-                    [0.0, 1.0, -1.0, 0.0, cx + (y0 + y1) * 0.5, cursor - x0],
-                ));
-                cursor += (x1 - x0).max(0.0);
+        for (up, whole) in runs(line) {
+            let whole_from = run_start;
+            run_start = run_start.saturating_add(whole.len());
+            for (part, own) in span_parts(whole, whole_from, spans) {
+                let run = whole.get(part.clone()).unwrap_or("");
+                // The room of this run's characters, from its start.
+                let from = whole_from.saturating_add(part.start);
+                let to = whole_from.saturating_add(part.end);
+                let mine: Vec<(std::ops::Range<usize>, f32)> = room
+                    .iter()
+                    .filter(|(range, _)| range.start >= from && range.end <= to)
+                    .map(|(range, more)| (range.start - from..range.end - from, *more))
+                    .collect();
+                // A part in a span: set in its own formatting (M6.390), as its whole style (a column's characters
+                // are as far apart as its style's line height).
+                let (own_family, own_size, own_face, own_format) = match own {
+                    Some(style) => crate::draw::span_setting(family, (size, face, format), style),
+                    None => (family.to_owned(), size, face.map(str::to_owned), *format),
+                };
+                let set = |vertical: bool, room: &[(std::ops::Range<usize>, f32)]| {
+                    crate::draw::formatted_layout_with(
+                        run,
+                        &own_family,
+                        own_size,
+                        own_face.as_deref(),
+                        &own_format,
+                        (vertical, room),
+                    )
+                };
+                let laid = if mine.is_empty() {
+                    set(up, &[])
+                } else if up {
+                    // A column's layout keeps one tracking for all its characters: the room moves the characters after
+                    // it down instead.
+                    let em = crate::draw::room_em(own_size, &own_format);
+                    spread_down(
+                        &set(true, &[]),
+                        &mine
+                            .iter()
+                            .map(|(range, more)| (range.end, more * em / 1000.0))
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    set(false, &mine)
+                };
+                colors.push(own.and_then(|style| style.color));
+                let [x0, y0, x1, y1] = laid.bounds;
+                if up {
+                    // Already a column (centred on x 0): from the cursor down.
+                    pieces.push((laid, translate(cx, cursor - y0)));
+                    cursor += (y1 - y0).max(0.0);
+                } else {
+                    // A line turned a quarter clockwise ((x, y) to (-y, x)): its middle on the column, its start at
+                    // the cursor.
+                    pieces.push((
+                        laid,
+                        [0.0, 1.0, -1.0, 0.0, cx + (y0 + y1) * 0.5, cursor - x0],
+                    ));
+                    cursor += (x1 - x0).max(0.0);
+                }
             }
         }
         columns.push((pieces, cursor));
@@ -188,7 +254,7 @@ pub(crate) fn vertical_block_with(
         column * 0.5,
         tallest,
     ];
-    (pieces, bounds)
+    (pieces, bounds, colors)
 }
 
 /// A column's layout with room put in it: each `(at, room)` moves the characters from byte `at` on down by `room`

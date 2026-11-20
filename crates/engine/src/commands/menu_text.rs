@@ -39,7 +39,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "テキストを変更",
         menu: &["メニュー"],
         shortcut: None,
-        params: r##"{"menu": id, "index": n, "text"?: string, "x"?: n, "y"?: n, "size"?: 8..200, "color"?: "#RRGGBB" | null, "font"?: string | null, "fontStyle"?: string | null, "bold"?: bool, "italic"?: bool, "underline"?: bool, "strikethrough"?: bool, "caps"?: "normal" | "all" | "small", "align"?: "left" | "center" | "right" | "justify", "tracking"?: -1000..1000, "linePitch"?: 1..1000 | null (auto, 120 % of the size), "leading"?: -100..200, "kerning"?: true (メトリクス) | false | -1000..1000 (1/1000 em), "baseline"?: -100..100, "verticalScale"?: 1..1000, "horizontalScale"?: 1..1000, "script"?: "normal" | "superscript" | "subscript", "antialias"?: "none" | "crisp" | "strong" | "smooth" | "sharp", "tsume"?: 0..100, "mojikumi"?: "none" | "punctuationHalf" | "lineEndHalf" | "lineEndFull" | "punctuationFull", "kinsoku"?: "none" | "weak" | "strong", "kinsokuMethod"?: "pushInFirst" | "pushOutFirst" | "pushOutOnly", "hangingPunctuation"?: bool, "vertical"?: bool, "boxWidth"?: 16..4096 | null, "boxHeight"?: 16..4096 | null (a paragraph text's height: the lines past it are not drawn)}"##,
+        params: r##"{"menu": id, "index": n, "text"?: string, "x"?: n, "y"?: n, "size"?: 8..200, "color"?: "#RRGGBB" | null, "font"?: string | null, "fontStyle"?: string | null, "bold"?: bool, "italic"?: bool, "underline"?: bool, "strikethrough"?: bool, "caps"?: "normal" | "all" | "small", "align"?: "left" | "center" | "right" | "justify", "tracking"?: -1000..1000, "linePitch"?: 1..1000 | null (auto, 120 % of the size), "leading"?: -100..200, "kerning"?: true (メトリクス) | false | -1000..1000 (1/1000 em), "baseline"?: -100..100, "verticalScale"?: 1..1000, "horizontalScale"?: 1..1000, "script"?: "normal" | "superscript" | "subscript", "antialias"?: "none" | "crisp" | "strong" | "smooth" | "sharp", "tsume"?: 0..100, "mojikumi"?: "none" | "punctuationHalf" | "lineEndHalf" | "lineEndFull" | "punctuationFull", "kinsoku"?: "none" | "weak" | "strong", "kinsokuMethod"?: "pushInFirst" | "pushOutFirst" | "pushOutOnly", "hangingPunctuation"?: bool, "vertical"?: bool, "boxWidth"?: 16..4096 | null, "boxHeight"?: 16..4096 | null (a paragraph text's height: the lines past it are not drawn), "from"?: n, "to"?: n (M6.389: characters from..to of the text, counted in characters: size, color, font, fontStyle, bold, italic, underline, strikethrough, caps, tracking and baseline are set for them alone, null going back to the text's; the other fields for the whole text. Without them those fields are set for every character)}"##,
         enabled: always_enabled,
         run: run_set_text,
         journal: true,
@@ -190,6 +190,7 @@ fn run_add_text(session: &mut Session, params: &Value) -> CommandResult {
         hidden: false,
         locked: false,
         vertical,
+        spans: Vec::new(),
     });
     let index = u64::try_from(menu.texts.len().saturating_sub(1))
         .map_err(|_| "text index is too large".to_string())?;
@@ -235,6 +236,7 @@ fn run_place_text(session: &mut Session, params: &Value) -> CommandResult {
     }
     text.hidden = false;
     text.locked = false;
+    text.check_spans();
     let Some(menu) = session.project.menu_mut(menu_id) else {
         return Err(format!("menu {} does not exist", menu_id.0));
     };
@@ -286,14 +288,46 @@ fn run_set_text(session: &mut Session, params: &Value) -> CommandResult {
                 .transpose()?,
         ),
     };
+    let mut patch = patch;
+    let chars = CharFields {
+        size,
+        color,
+        font,
+        font_style,
+        format: patch.take_char_fields(),
+    };
+    // M6.389: characters from..to of the text get the character fields alone.
+    let range = match (opt_u64(params, "from")?, opt_u64(params, "to")?) {
+        (None, None) => None,
+        (Some(from), Some(to)) => {
+            if text.is_some() {
+                return Err(
+                    "\"text\" cannot change with a character range (\"from\", \"to\")".to_string(),
+                );
+            }
+            let from = usize::try_from(from).map_err(|_| "\"from\" is too large".to_string())?;
+            let to = usize::try_from(to).map_err(|_| "\"to\" is too large".to_string())?;
+            Some(from..to)
+        }
+        _ => return Err("\"from\" and \"to\" go together".to_string()),
+    };
     let Some(menu) = session.project.menu_mut(menu_id) else {
         return Err(format!("menu {} does not exist", menu_id.0));
     };
     let Some(target) = menu.texts.get_mut(index) else {
         return Err(format!("text {index} does not exist"));
     };
+    if let Some(range) = &range {
+        let count = target.text.chars().count();
+        if range.start >= range.end || range.end > count {
+            return Err(format!(
+                "the character range must be inside the text (0 to {count}, \"from\" before \"to\")"
+            ));
+        }
+    }
     if let Some(text) = text {
-        target.text = text;
+        // The characters' own formatting follows the edit.
+        target.retext(text);
     }
     if let Some(vertical) = vertical {
         target.vertical = vertical;
@@ -315,19 +349,138 @@ fn run_set_text(session: &mut Session, params: &Value) -> CommandResult {
     if let Some(y) = y {
         target.y = y;
     }
-    if let Some(size) = size {
-        target.size = size;
-    }
-    if let Some(color) = color {
-        target.color = color;
-    }
-    if let Some(font) = font {
-        target.font = font;
-    }
-    if let Some(font_style) = font_style {
-        target.font_style = font_style;
+    match range {
+        Some(range) => target.style_chars(range, &|style| chars.set_on(style)),
+        None => {
+            chars.apply(target);
+            // Set for the whole text, a field is every character's: the spans' own goes.
+            target.style_all_chars(&|style| chars.clear_from(style));
+        }
     }
     Ok(empty_object())
+}
+
+/// The character fields of `menu.setText` (each `None` when left out): set for the whole text, or for a range of
+/// its characters (M6.389).
+struct CharFields {
+    size: Option<u16>,
+    /// `Some(None)`: the menu's text colour (for characters: the text's).
+    color: Option<Option<[u8; 3]>>,
+    /// `Some(None)`: the default font (for characters: the text's).
+    font: Option<Option<String>>,
+    font_style: Option<Option<String>>,
+    format: FormatChars,
+}
+
+/// The character fields of [`FormatPatch`].
+#[derive(Clone, Copy, Default)]
+struct FormatChars {
+    bold: Option<bool>,
+    italic: Option<bool>,
+    underline: Option<bool>,
+    strikethrough: Option<bool>,
+    caps: Option<TextCaps>,
+    tracking: Option<i16>,
+    baseline: Option<i16>,
+}
+
+impl CharFields {
+    /// Sets them for the whole text.
+    fn apply(&self, target: &mut MenuText) {
+        if let Some(size) = self.size {
+            target.size = size;
+        }
+        if let Some(color) = self.color {
+            target.color = color;
+        }
+        if let Some(font) = &self.font {
+            target.font.clone_from(font);
+        }
+        if let Some(font_style) = &self.font_style {
+            target.font_style.clone_from(font_style);
+        }
+        FormatPatch {
+            bold: self.format.bold,
+            italic: self.format.italic,
+            underline: self.format.underline,
+            strikethrough: self.format.strikethrough,
+            caps: self.format.caps,
+            tracking: self.format.tracking,
+            baseline: self.format.baseline,
+            ..FormatPatch::default()
+        }
+        .apply(&mut target.format);
+    }
+
+    /// Sets them for some characters (null going back to the text's).
+    fn set_on(&self, style: &mut disccraft_project::SpanStyle) {
+        if let Some(size) = self.size {
+            style.size = Some(size);
+        }
+        if let Some(color) = self.color {
+            style.color = color;
+        }
+        if let Some(font) = &self.font {
+            style.font.clone_from(font);
+        }
+        if let Some(font_style) = &self.font_style {
+            style.font_style.clone_from(font_style);
+        }
+        let FormatChars {
+            bold,
+            italic,
+            underline,
+            strikethrough,
+            caps,
+            tracking,
+            baseline,
+        } = self.format;
+        style.bold = bold.or(style.bold);
+        style.italic = italic.or(style.italic);
+        style.underline = underline.or(style.underline);
+        style.strikethrough = strikethrough.or(style.strikethrough);
+        style.caps = caps.or(style.caps);
+        style.tracking = tracking.or(style.tracking);
+        style.baseline = baseline.or(style.baseline);
+    }
+
+    /// Takes the fields that are set out of some characters' own formatting.
+    fn clear_from(&self, style: &mut disccraft_project::SpanStyle) {
+        if self.size.is_some() {
+            style.size = None;
+        }
+        if self.color.is_some() {
+            style.color = None;
+        }
+        if self.font.is_some() {
+            style.font = None;
+        }
+        if self.font_style.is_some() {
+            style.font_style = None;
+        }
+        let format = self.format;
+        if format.bold.is_some() {
+            style.bold = None;
+        }
+        if format.italic.is_some() {
+            style.italic = None;
+        }
+        if format.underline.is_some() {
+            style.underline = None;
+        }
+        if format.strikethrough.is_some() {
+            style.strikethrough = None;
+        }
+        if format.caps.is_some() {
+            style.caps = None;
+        }
+        if format.tracking.is_some() {
+            style.tracking = None;
+        }
+        if format.baseline.is_some() {
+            style.baseline = None;
+        }
+    }
 }
 
 /// Encore's カーニング (M6.344): `true` the font's metric kerning; `false` none; a number (1/1000 em) the room
@@ -478,6 +631,19 @@ impl FormatPatch {
                 .transpose()?,
             hanging_punctuation: opt_flag(params, "hangingPunctuation")?,
         })
+    }
+
+    /// Takes the character fields out (M6.389: they can go to a range of characters).
+    fn take_char_fields(&mut self) -> FormatChars {
+        FormatChars {
+            bold: self.bold.take(),
+            italic: self.italic.take(),
+            underline: self.underline.take(),
+            strikethrough: self.strikethrough.take(),
+            caps: self.caps.take(),
+            tracking: self.tracking.take(),
+            baseline: self.baseline.take(),
+        }
     }
 
     fn apply(&self, format: &mut TextFormat) {
@@ -660,6 +826,81 @@ mod tests {
             .and_then(serde_json::Value::as_u64)
             .ok_or("no menu id")?;
         Ok((session, menu))
+    }
+
+    /// M6.389: characters of a text get formatting of their own; set for the whole text, a field is every
+    /// character's again; the spans follow the text as it is edited, and a wrong range is refused.
+    #[test]
+    fn characters_are_formatted_on_their_own() -> Result<(), Box<dyn Error>> {
+        let (mut session, menu) = session_with_menu()?;
+        session.execute(
+            "menu.addText",
+            &json!({"menu": menu, "text": "Hello world", "x": 40, "y": 30}),
+        )?;
+        let text = |session: &Session| {
+            session
+                .project
+                .menus
+                .values()
+                .next()
+                .and_then(|menu| menu.texts.first().cloned())
+        };
+        session.execute(
+            "menu.setText",
+            &json!({"menu": menu, "index": 0, "from": 6, "to": 11, "size": 60, "color": "#FF0000", "bold": true, "align": "center"}),
+        )?;
+        let t = text(&session).ok_or("text")?;
+        assert_eq!(t.size, disccraft_project::DEFAULT_TEXT_SIZE);
+        assert_eq!(t.color, None);
+        assert!(!t.format.bold);
+        // A paragraph field goes to the whole text.
+        assert_eq!(t.format.align, TextAlign::Center);
+        assert_eq!(t.spans.len(), 1);
+        let style = t.span_style_at(6);
+        assert_eq!(
+            (style.size, style.color, style.bold),
+            (Some(60), Some([255, 0, 0]), Some(true))
+        );
+        // Null takes a field back to the text's.
+        session.execute(
+            "menu.setText",
+            &json!({"menu": menu, "index": 0, "from": 6, "to": 8, "color": null}),
+        )?;
+        let t = text(&session).ok_or("text")?;
+        assert_eq!(t.span_style_at(6).color, None);
+        assert_eq!(t.span_style_at(9).color, Some([255, 0, 0]));
+        // Edited: the span moves with its characters.
+        session.execute(
+            "menu.setText",
+            &json!({"menu": menu, "index": 0, "text": "Oh, Hello world"}),
+        )?;
+        let t = text(&session).ok_or("text")?;
+        assert_eq!(t.span_style_at(10).size, Some(60));
+        assert_eq!(t.span_style_at(9).size, None);
+        // The size for the whole text: every character's.
+        session.execute(
+            "menu.setText",
+            &json!({"menu": menu, "index": 0, "size": 40}),
+        )?;
+        let t = text(&session).ok_or("text")?;
+        assert_eq!(t.size, 40);
+        assert_eq!(t.span_style_at(10).size, None);
+        assert_eq!(t.span_style_at(10).bold, Some(true));
+        // Undone, the characters have their formatting back.
+        session.execute("edit.undo", &json!({}))?;
+        assert_eq!(
+            text(&session).ok_or("text")?.span_style_at(10).size,
+            Some(60)
+        );
+        for bad in [
+            json!({"menu": menu, "index": 0, "from": 3, "to": 3, "bold": true}),
+            json!({"menu": menu, "index": 0, "from": 3, "to": 99, "bold": true}),
+            json!({"menu": menu, "index": 0, "from": 3, "bold": true}),
+            json!({"menu": menu, "index": 0, "from": 0, "to": 2, "text": "x"}),
+        ] {
+            assert!(session.execute("menu.setText", &bad).is_err(), "{bad}");
+        }
+        Ok(())
     }
 
     #[test]

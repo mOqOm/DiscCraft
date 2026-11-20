@@ -229,3 +229,188 @@ fn mp4_becomes_a_clean_menu_dvd() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// M12.25: interlaced H.264 (a camcorder's 1080i, made by x264 as MBAFF, in a transport stream with AC-3) becomes a
+/// DVD: craft-video decodes it now (storytold/craft-libs PRs #1992 and #2017, through the mOqOm fork), so it is
+/// converted like any other video, and the title decodes without errors with all its frames.
+#[test]
+fn interlaced_h264_becomes_a_dvd() {
+    let (Some(ffmpeg), Some(ffprobe)) = (
+        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
+        tool("DISCCRAFT_FFPROBE", "ffprobe"),
+    ) else {
+        eprintln!("ffmpeg / ffprobe not found; skipping");
+        return;
+    };
+    let video = fixtures().join("h264_1080i_short.m2ts");
+    if !video.is_file() {
+        std::fs::create_dir_all(fixtures()).unwrap();
+        let made = Command::new(&ffmpeg)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("testsrc2=size=1920x1080:rate=30000/1001")
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"])
+            .args(["-t", "2", "-c:v", "libx264", "-preset", "ultrafast"])
+            .args(["-flags", "+ildct+ilme", "-x264-params", "tff=1:bframes=2"])
+            .args(["-c:a", "ac3", "-b:a", "192k", "-f", "mpegts"])
+            .arg(&video)
+            .status();
+        if !made.is_ok_and(|status| status.success()) {
+            let _ = std::fs::remove_file(&video);
+            eprintln!("ffmpeg cannot make interlaced H.264 (no libx264?); skipping");
+            return;
+        }
+    }
+    let mut project = Project::default();
+    let v = project.add_asset(&video).unwrap();
+    let t = project.add_timeline(v, Some("Camera".to_string())).unwrap();
+    project.settings.first_play = Link::Timeline { id: t, chapter: 0 };
+    let out = fixtures().join("dvd_interlaced_h264_out");
+    let _ = std::fs::remove_dir_all(&out);
+    let cache = fixtures().join("dvd_interlaced_h264_cache");
+    let _ = std::fs::remove_dir_all(&cache);
+    let _ = build_video_ts_with(&project, &out, &cache, &mut |_, _| {}).unwrap();
+    let vob = out.join("VIDEO_TS/VTS_01_1.VOB");
+    let probe = Command::new(&ffprobe)
+        .args(["-v", "error", "-select_streams", "v:0", "-count_frames"])
+        .args([
+            "-show_entries",
+            "stream=codec_name,width,height,nb_read_frames",
+        ])
+        .args(["-of", "csv=p=0"])
+        .arg(&vob)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&probe.stdout);
+    let line = text
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches(',');
+    // Two seconds at 29.97: 60 frames (a frame either way for where the sound and the picture end).
+    let frames: u32 = line
+        .rsplit(',')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    assert!(line.starts_with("mpeg2video,720,480,"), "{text}");
+    assert!((59..=61).contains(&frames), "{text}");
+    let decode = Command::new(&ffmpeg)
+        .args(["-v", "error", "-xerror", "-i"])
+        .arg(&vob)
+        .args(["-f", "null", "-"])
+        .output()
+        .unwrap();
+    assert!(
+        decode.status.success() && decode.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&decode.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&cache);
+}
+
+/// M12.26: an interlaced source's fields stay apart on the DVD. A narrow white bar moves 48 pixels a field (59.94
+/// fields a second, interlaced by x264 as 1080i, the top field first); on the DVD each field is scaled on its own,
+/// so the even lines (top field) show one sharp bar and the odd lines (bottom field) one sharp bar 18 pixels
+/// further right (48 × 720 / 1920), with no ghost of the other field, and the pictures say the top field comes
+/// first. Scaled as whole frames, every line was a mix of the two bars.
+#[test]
+fn an_interlaced_source_keeps_its_fields_on_a_dvd() {
+    let (Some(ffmpeg), Some(ffprobe)) = (
+        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
+        tool("DISCCRAFT_FFPROBE", "ffprobe"),
+    ) else {
+        eprintln!("ffmpeg / ffprobe not found; skipping");
+        return;
+    };
+    let video = fixtures().join("h264_1080i_bar.m2ts");
+    if !video.is_file() {
+        std::fs::create_dir_all(fixtures()).unwrap();
+        let made = Command::new(&ffmpeg)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("color=black:size=1920x1080:rate=60000/1001[bg];color=white:size=16x1080:rate=60000/1001[bar];[bg][bar]overlay=x='mod(n*48,1600)+100':y=0:shortest=1,tinterlace=mode=interleave_top,format=yuv420p")
+            .args(["-t", "1", "-c:v", "libx264", "-preset", "ultrafast", "-qp", "10"])
+            .args(["-flags", "+ildct+ilme", "-x264-params", "tff=1:bframes=0"])
+            .args(["-aspect", "16:9", "-f", "mpegts"])
+            .arg(&video)
+            .status();
+        if !made.is_ok_and(|status| status.success()) {
+            let _ = std::fs::remove_file(&video);
+            eprintln!("ffmpeg cannot make interlaced H.264 (no libx264?); skipping");
+            return;
+        }
+    }
+    let mut project = Project::default();
+    project.settings.widescreen = true;
+    let v = project.add_asset(&video).unwrap();
+    let t = project.add_timeline(v, Some("Bar".to_string())).unwrap();
+    project.settings.first_play = Link::Timeline { id: t, chapter: 0 };
+    let out = fixtures().join("dvd_interlaced_bar_out");
+    let cache = fixtures().join("dvd_interlaced_bar_cache");
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&cache);
+    let _ = build_video_ts_with(&project, &out, &cache, &mut |_, _| {}).unwrap();
+    let vob = out.join("VIDEO_TS/VTS_01_1.VOB");
+    let probe = Command::new(&ffprobe)
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries"])
+        .args(["stream=field_order", "-of", "csv=p=0"])
+        .arg(&vob)
+        .output()
+        .unwrap();
+    let order = String::from_utf8_lossy(&probe.stdout);
+    assert_eq!(order.trim().trim_end_matches(','), "tt", "{order}");
+    // The luma of the tenth picture.
+    let decoded = Command::new(&ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(&vob)
+        .args([
+            "-map",
+            "0:v:0",
+            "-vf",
+            r"select=eq(n\,10)",
+            "-frames:v",
+            "1",
+        ])
+        .args(["-f", "rawvideo", "-pix_fmt", "gray", "-"])
+        .output()
+        .unwrap();
+    let luma = decoded.stdout;
+    assert_eq!(
+        luma.len(),
+        720 * 480,
+        "{}",
+        String::from_utf8_lossy(&decoded.stderr)
+    );
+    // The bright columns of a line, and where their middle is.
+    let bright =
+        |row: usize| -> Vec<usize> { (0..720).filter(|&x| luma[row * 720 + x] > 160).collect() };
+    let middle =
+        |columns: &[usize]| columns.iter().sum::<usize>() as f64 / columns.len().max(1) as f64;
+    for (top, bottom) in [(200_usize, 201_usize), (240, 241), (300, 301)] {
+        let (a, b) = (bright(top), bright(bottom));
+        assert!(
+            !a.is_empty() && !b.is_empty(),
+            "rows {top}/{bottom}: no bar"
+        );
+        // One bar each: a few columns, not two bars' worth.
+        assert!(
+            a.len() <= 10 && b.len() <= 10,
+            "rows {top}/{bottom}: {a:?} {b:?}"
+        );
+        let shift = middle(&b) - middle(&a);
+        assert!(
+            (shift - 18.0).abs() < 4.0,
+            "rows {top}/{bottom}: shift {shift}"
+        );
+        // No ghost of the other field's bar.
+        let other = middle(&b).round() as usize;
+        assert!(
+            luma[top * 720 + other] < 90,
+            "row {top}: ghost {}",
+            luma[top * 720 + other]
+        );
+    }
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&cache);
+}

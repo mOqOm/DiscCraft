@@ -248,6 +248,23 @@ impl DiscCraftApp {
                     serde_json::json!({ "video": video.id() }),
                 );
             }
+            // Encore's Codec (M12.28): 1080i as MPEG-2 (the automatic choice) or as H.264.
+            let codecs: Vec<(disccraft_project::BdCodec, &str)> = disccraft_project::BdCodec::ALL
+                .iter()
+                .map(|codec| (*codec, bd_codec_name(*codec)))
+                .collect();
+            if let Some(codec) = choice_row(
+                ui,
+                tl!("Blu-ray codec:"),
+                "sheet_bd_codec",
+                settings.bd_codec,
+                &codecs,
+            ) {
+                let _ = self.run_command(
+                    "disc.setBlurayCodec",
+                    serde_json::json!({ "codec": codec.id() }),
+                );
+            }
         }
 
         let capacities: Vec<(Capacity, &str)> =
@@ -327,7 +344,22 @@ impl DiscCraftApp {
                     ui.label(bluray.setting_label());
                 }
             });
-            text_row(ui, tl!("Blu-ray Transcode Status:"), bluray.status_label());
+            // Why it is converted rather than going on as it is (M6.376: what a tester asked), on the status's
+            // tooltip: Encore's sheet has no row for it (M6.384).
+            let reason = matches!(
+                bluray,
+                crate::project_panel::TranscodeState::Untranscoded
+                    | crate::project_panel::TranscodeState::Transcoded
+            )
+            .then(|| self.bd_mismatch(id, &asset))
+            .flatten();
+            ui.horizontal(|ui| {
+                prop_label(ui, tl!("Blu-ray Transcode Status:"));
+                let status = ui.add(egui::Label::new(bluray.status_label()).wrap());
+                if let Some(reason) = reason {
+                    let _ = status.on_hover_text(mismatch_text(reason));
+                }
+            });
             if asset.transcode_audio != disccraft_project::TranscodeAudio::DolbyDigital {
                 text_row(
                     ui,
@@ -335,28 +367,20 @@ impl DiscCraftApp {
                     crate::transcode_settings::audio_name(asset.transcode_audio),
                 );
             }
-            // Encore's rendering checkboxes, for either kind of disc (M6.327).
+            // Encore's rendering checkboxes, for either kind of disc (M6.327): shown grey here, as in Encore's sheet,
+            // and changed in Transcode Settings (M6.384).
             let mut rendering = (asset.max_render_quality, asset.frame_blend);
-            let changed = ui
+            let _ = ui
                 .horizontal(|ui| {
                     prop_label(ui, "");
-                    ui.vertical(|ui| {
-                        crate::transcode_settings::rendering_checkboxes(ui, &mut rendering)
+                    ui.add_enabled_ui(false, |ui| {
+                        ui.vertical(|ui| {
+                            crate::transcode_settings::rendering_checkboxes(ui, &mut rendering)
+                        })
                     })
-                    .inner
                 })
-                .inner;
-            if changed {
-                let _ = self.run_command(
-                    "asset.setRendering",
-                    serde_json::json!({
-                        "asset": id.0,
-                        "maxRenderQuality": rendering.0,
-                        "frameBlend": rendering.1,
-                    }),
-                );
-                self.transcode_dirty = true;
-            }
+                .response
+                .on_hover_text(tl!("Changed in Transcode Settings…"));
             if let Some(picked) = dvd_pick {
                 self.apply_dvd_pick(id, picked);
             }
@@ -3160,6 +3184,22 @@ impl DiscCraftApp {
         (chosen != current).then_some(chosen)
     }
 
+    /// Why asset `id`'s video is converted for the project's Blu-ray (HD formats), read once per asset and format.
+    fn bd_mismatch(
+        &mut self,
+        id: AssetId,
+        asset: &disccraft_project::Asset,
+    ) -> Option<disccraft_build::BdMismatch> {
+        let video = self.session.project.asset_bd_video(id);
+        let format = disccraft_build::BdVideoFormat::of_video(video)?;
+        if let Some(known) = self.bd_mismatch_cache.get(&(id.0, video)) {
+            return *known;
+        }
+        let found = disccraft_build::bd_mismatch(&asset.media_file(), format);
+        let _ = self.bd_mismatch_cache.insert((id.0, video), found);
+        found
+    }
+
     fn link_row(
         &mut self,
         ui: &mut Ui,
@@ -3525,12 +3565,64 @@ pub(crate) fn bd_video_name(video: disccraft_project::BdVideo) -> &'static str {
         disccraft_project::BdVideo::Sd => tl!("SD (MPEG-2)"),
         disccraft_project::BdVideo::Hd1080p23 => "1920x1080 23.976p (H.264)",
         disccraft_project::BdVideo::Hd1080p24 => "1920x1080 24p (H.264)",
-        disccraft_project::BdVideo::Hd1080i59 => "1920x1080 59.94i (MPEG-2)",
-        disccraft_project::BdVideo::Hd1080i50 => "1920x1080 50i (MPEG-2)",
+        // MPEG-2, or H.264 as the disc's codec asks (M12.28).
+        disccraft_project::BdVideo::Hd1080i59 => "1920x1080 59.94i (MPEG-2 / H.264)",
+        disccraft_project::BdVideo::Hd1080i50 => "1920x1080 50i (MPEG-2 / H.264)",
         disccraft_project::BdVideo::Hd720p59 => "1280x720 59.94p (H.264)",
         disccraft_project::BdVideo::Hd720p50 => "1280x720 50p (H.264)",
         disccraft_project::BdVideo::Hd720p23 => "1280x720 23.976p (H.264)",
         disccraft_project::BdVideo::Hd720p24 => "1280x720 24p (H.264)",
+    }
+}
+
+/// Blu-ray の HD の映像のコーデックの表示名（M12.28）。
+pub(crate) fn bd_codec_name(codec: disccraft_project::BdCodec) -> &'static str {
+    match codec {
+        disccraft_project::BdCodec::Auto => tl!("Automatic (MPEG-2 for 1080i)"),
+        disccraft_project::BdCodec::H264 => tl!("H.264 (1080i too)"),
+        disccraft_project::BdCodec::Mpeg2 => tl!("MPEG-2 for 1080i"),
+    }
+}
+
+/// Why `mismatch` keeps a video from going on a Blu-ray as it is, in words (M6.376).
+fn mismatch_text(mismatch: disccraft_build::BdMismatch) -> String {
+    use disccraft_build::BdMismatch;
+    match mismatch {
+        BdMismatch::Codec => tl!("Not H.264 (nor HD MPEG-2 that fits the format)").to_owned(),
+        BdMismatch::Profile(profile) => tlf!(
+            "H.264 profile {profile}: a Blu-ray takes Main or High",
+            profile = match profile {
+                66 => "Baseline".to_owned(),
+                110 => "High 10".to_owned(),
+                122 => "High 4:2:2".to_owned(),
+                244 => "High 4:4:4".to_owned(),
+                other => other.to_string(),
+            }
+        ),
+        BdMismatch::Chroma => tl!("Not 4:2:0 at 8 bits (10-bit or 4:2:2)").to_owned(),
+        BdMismatch::Level(level) => tlf!(
+            "H.264 level {level}: a Blu-ray takes up to 4.1",
+            level = format!("{}.{}", level / 10, level % 10)
+        ),
+        BdMismatch::Size(width, height) => tlf!(
+            "{width} x {height}: not the Blu-ray video's size",
+            width = width,
+            height = height
+        ),
+        BdMismatch::Scan(true) => {
+            tl!("Interlaced, and the Blu-ray video is progressive").to_owned()
+        }
+        BdMismatch::Scan(false) => {
+            tl!("Progressive, and the Blu-ray video is interlaced").to_owned()
+        }
+        BdMismatch::Rate(fps) => tlf!(
+            "{rate} fps: not the Blu-ray video's frame rate",
+            rate = format!("{fps:.3}")
+        ),
+        BdMismatch::Bitrate(mbps) => tlf!(
+            "{rate} Mbps on average: a Blu-ray takes up to 40",
+            rate = format!("{mbps:.1}")
+        ),
     }
 }
 

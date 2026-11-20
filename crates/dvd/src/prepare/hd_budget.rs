@@ -1,5 +1,5 @@
 //! The bitrate of a Blu-ray project's HD video (ROADMAP M10.15): the format's usual rate, or less when the titles
-//! would not fit the disc at it. Every title's video is encoded in HD (a timeline's clips with their trims and
+//! would not fit the disc at it, or more (up to a cap) when the disc has room to spare (M6.377). Every title's video is encoded in HD (a timeline's clips with their trims and
 //! gaps, a slideshow's slides), so the video's time is the titles' time; the sound keeps its own size. A clip
 //! whose own H.264 goes on the disc as it is (M10.16) is not encoded: it takes its file's size.
 
@@ -29,6 +29,35 @@ const MUX_OVERHEAD_PER_MILLE: f64 = 1040.0;
 /// Targets are whole multiples of this, kilobits per second, so a small change of a title's length keeps the
 /// cached encodes.
 const STEP_KBPS: u32 = 500;
+/// The highest target an HD title is raised to when the disc has room (M6.377), kilobits per second: H.264.
+const H264_RAISED_KBPS: u32 = 25_000;
+/// The highest raised target of MPEG-2 HD video, kilobits per second.
+const MPEG2_RAISED_KBPS: u32 = 32_000;
+/// The share of the disc's room a raised target plans with: the rate control lands near the target, not on it.
+const RAISE_SHARE: f64 = 0.95;
+/// The fastest a Blu-ray's video peaks, kilobits per second.
+const BD_PEAK_KBPS: u32 = 40_000;
+
+/// The highest target of `mpeg2` (else H.264) HD video when the disc has room.
+fn raised_cap(mpeg2: bool) -> u32 {
+    if mpeg2 {
+        MPEG2_RAISED_KBPS
+    } else {
+        H264_RAISED_KBPS
+    }
+}
+
+/// The peak of `mpeg2` (else H.264) HD video at `target`: the usual peak up to the usual target, twice a raised
+/// target (no more than a Blu-ray's 40 Mbit/s), and never more than `room` nor less than the target.
+fn peak_for(mpeg2: bool, target: u32, room: u32) -> u32 {
+    let (usual_target, usual_peak) = hd_default_kbps(mpeg2);
+    let peak = if target <= usual_target {
+        usual_peak
+    } else {
+        target.saturating_mul(2).min(BD_PEAK_KBPS).max(usual_peak)
+    };
+    peak.min(room).max(target)
+}
 
 /// The bitrates of a Blu-ray project's HD video and what they were worked out from.
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +68,8 @@ pub struct HdBudget {
     pub max_kbps: u32,
     /// The project's format is coded as MPEG-2 (the rates above are MPEG-2's), else H.264.
     pub mpeg2: bool,
+    /// The disc's codec setting, which chooses each title's codec from its format (M12.28).
+    pub codec: disccraft_project::BdCodec,
     /// The titles' video that is encoded, seconds (a title in a format of the other codec counted by how much more
     /// or less it takes at its codec's usual rate: M6.325).
     pub video_seconds: f64,
@@ -58,11 +89,11 @@ impl HdBudget {
     /// other codec its usual rates scaled as the budget's are (a title's own HD format, M6.325).
     #[must_use]
     pub fn rates_for(&self, video: disccraft_project::BdVideo) -> (u32, u32) {
-        let mpeg2 = video.interlaced();
+        let mpeg2 = self.codec.mpeg2(video);
         if mpeg2 == self.mpeg2 {
             return (self.target_kbps, self.max_kbps);
         }
-        let (usual, max) = hd_default_kbps(mpeg2);
+        let (usual, _) = hd_default_kbps(mpeg2);
         let (disc_usual, _) = hd_default_kbps(self.mpeg2);
         let floor = if mpeg2 {
             MPEG2_FLOOR_KBPS
@@ -71,9 +102,9 @@ impl HdBudget {
         };
         let scaled = u64::from(self.target_kbps) * u64::from(usual) / u64::from(disc_usual.max(1));
         let target = (u32::try_from(scaled).unwrap_or(usual) / STEP_KBPS * STEP_KBPS)
-            .clamp(floor, usual)
+            .clamp(floor, raised_cap(mpeg2))
             .min(self.room_kbps.max(floor));
-        (target, max.min(self.room_kbps).max(target))
+        (target, peak_for(mpeg2, target, self.room_kbps))
     }
 
     /// The bytes the titles take on the disc at the target bitrate (video and sound, multiplexed).
@@ -148,7 +179,9 @@ fn hd_budget_with(
     if project.settings.kind != DiscKind::BluRay || project.settings.bd_video.hd().is_none() {
         return Ok(None);
     }
-    let mpeg2 = project.settings.bd_video.interlaced();
+    // MPEG-2 or H.264 as the disc's codec setting gives it (M12.28: 1080i may be H.264).
+    let codec = project.settings.bd_codec;
+    let mpeg2 = codec.mpeg2(project.settings.bd_video);
     let mut video_seconds = 0.0_f64;
     let mut audio_bits = 0.0_f64;
     let mut passthrough_bits = 0.0_f64;
@@ -156,7 +189,7 @@ fn hd_budget_with(
     let mut timelines = Vec::with_capacity(project.timelines.len());
     for timeline in project.timelines.values() {
         // A title in a format of the other codec counts as it takes at that codec's usual rate (M6.325).
-        let title_mpeg2 = project.title_bd_video(timeline).interlaced();
+        let title_mpeg2 = codec.mpeg2(project.title_bd_video(timeline));
         let weight =
             f64::from(hd_default_kbps(title_mpeg2).0) / f64::from(hd_default_kbps(mpeg2).0);
         let (seconds, encoded, kept_bytes) =
@@ -183,7 +216,7 @@ fn hd_budget_with(
         return Err(DvdError::Invalid("title duration overflow".to_string()));
     }
 
-    let (usual, max_kbps) = hd_default_kbps(mpeg2);
+    let (usual, _) = hd_default_kbps(mpeg2);
     let floor = if mpeg2 {
         MPEG2_FLOOR_KBPS
     } else {
@@ -212,7 +245,12 @@ fn hd_budget_with(
             )));
         }
         if fit_kbps >= f64::from(usual) {
-            usual
+            // Room to spare (M6.377): the rate goes up to use it, planning with a share of it, as far as the
+            // codec's cap and the stream's room.
+            let share = fit_kbps * RAISE_SHARE;
+            // Inside `u32` once capped.
+            let raised = (share.min(f64::from(raised_cap(mpeg2))) as u32) / STEP_KBPS * STEP_KBPS;
+            raised.min(room_kbps / STEP_KBPS * STEP_KBPS).max(usual)
         } else {
             // Rounded down to a step, never below the floor.
             let steps = (fit_kbps as u32) / STEP_KBPS;
@@ -223,8 +261,9 @@ fn hd_budget_with(
     };
     Ok(Some(HdBudget {
         target_kbps,
-        max_kbps: max_kbps.min(room_kbps).max(target_kbps),
+        max_kbps: peak_for(mpeg2, target_kbps, room_kbps),
         mpeg2,
+        codec,
         video_seconds,
         audio_bits,
         passthrough_bits,
@@ -254,6 +293,13 @@ fn timeline_seconds(
     let mut kept_bytes = 0u64;
     let videos = timeline.videos();
     let count = videos.len();
+    // M6.388 / M6.393: a title made at HDV's 1440 keeps its 1440 clips (and encodes the others).
+    let narrow = if mpeg2 {
+        crate::BdVideoFormat::of(project)
+            .and_then(|format| crate::narrow_mpeg2_width(project, timeline, format))
+    } else {
+        None
+    };
     for (clip, video) in videos.into_iter().enumerate() {
         let path = asset_path(project, video)?;
         let path: &Path = &path;
@@ -271,7 +317,17 @@ fn timeline_seconds(
         // HD MPEG-2 kept as it is (M10.22) is its title's only clip, as H.264 is on a disc that encodes MPEG-2.
         let own_mpeg2 = crate::BdVideoFormat::of_path(project, path)
             .is_some_and(|format| crate::mpeg2_fits_bd(path, format));
-        match (kept(path).filter(|_| !(mpeg2 || own_mpeg2) || alone), fixed) {
+        // M6.385: HD MPEG-2 of the disc's size is kept beside the other clips of an MPEG-2 title.
+        let joins = mpeg2
+            && own_mpeg2
+            && crate::BdVideoFormat::of_path(project, path).is_some_and(|format| {
+                disccraft_transcode::probe_video(path)
+                    .is_ok_and(|probe| probe.width == narrow.unwrap_or(format.width))
+            });
+        match (
+            kept(path).filter(|_| !(mpeg2 || own_mpeg2) || alone || joins),
+            fixed,
+        ) {
             (None, Some(rate)) => {
                 // `as` saturates; the bytes of a clip.
                 let bytes = ((end - start) * f64::from(rate) / 8.0).round() as u64;
@@ -391,8 +447,9 @@ mod tests {
         let probe = |_path: &Path| Ok::<f64, DvdError>(3600.0);
         let size = |_path: &Path| None::<u64>;
         let alone = super::hd_budget_with(&project, &probe, &size)?.ok_or("no budget")?;
-        assert_eq!(alone.rates_for(BdVideo::Hd1080p23), (12_000, 24_000));
-        assert_eq!(alone.rates_for(BdVideo::Hd1080i59), (25_000, 35_000));
+        // An hour alone on a BD-25 has room: raised to the caps (M6.377).
+        assert_eq!(alone.rates_for(BdVideo::Hd1080p23), (25_000, 40_000));
+        assert_eq!(alone.rates_for(BdVideo::Hd1080i59), (32_000, 40_000));
         let interlaced = project.add_asset(Path::new("interlaced.mp4"))?;
         let _ = project.add_timeline(interlaced, None)?;
         if let Some(asset) = project.assets.get_mut(&interlaced) {
@@ -419,6 +476,38 @@ mod tests {
         Ok(())
     }
 
+    /// M12.28: with the disc's codec set to H.264, 1080i is budgeted at H.264's rates (and a 1080i title on a
+    /// 1080p disc counts as H.264, not at MPEG-2's rate).
+    #[test]
+    fn the_disc_codec_chooses_the_rates_of_1080i() -> Result<(), Box<dyn std::error::Error>> {
+        let mut interlaced = project(BdVideo::Hd1080i59)?;
+        interlaced.settings.bd_codec = disccraft_project::BdCodec::H264;
+        let h264 = budget(&interlaced, 3600.0)?.ok_or("no budget")?;
+        assert!(!h264.mpeg2, "{h264:?}");
+        assert_eq!((h264.target_kbps, h264.max_kbps), (25_000, 40_000));
+        assert_eq!(h264.rates_for(BdVideo::Hd1080i59), (25_000, 40_000));
+        assert!((h264.video_seconds - 3600.0).abs() < 1e-6, "{h264:?}");
+        // The same hour as MPEG-2 (the automatic choice) takes MPEG-2's rate.
+        let mpeg2 = budget(&project(BdVideo::Hd1080i59)?, 3600.0)?.ok_or("no budget")?;
+        assert!(mpeg2.mpeg2);
+        let mut mixed = project(BdVideo::Hd1080p23)?;
+        mixed.settings.bd_codec = disccraft_project::BdCodec::H264;
+        let asset = mixed.add_asset(Path::new("interlaced.mp4"))?;
+        let _ = mixed.add_timeline(asset, None)?;
+        if let Some(asset) = mixed.assets.get_mut(&asset) {
+            asset.bluray_video = Some(BdVideo::Hd1080i59);
+        }
+        let size = |_path: &Path| None::<u64>;
+        let probe = |_path: &Path| Ok::<f64, DvdError>(3600.0);
+        let budget = super::hd_budget_with(&mixed, &probe, &size)?.ok_or("no budget")?;
+        // Two hours of H.264, not one and 25/12.
+        assert!(
+            (budget.video_seconds - 2.0 * 3600.0).abs() < 1e-6,
+            "{budget:?}"
+        );
+        Ok(())
+    }
+
     #[test]
     fn only_an_hd_blu_ray_has_an_hd_budget() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(budget(&project(BdVideo::Sd)?, 60.0)?, None);
@@ -428,17 +517,29 @@ mod tests {
         Ok(())
     }
 
+    /// M6.377: titles with room to spare are raised, up to the codec's cap (the peak twice the target, at most
+    /// 40 Mbit/s), planning with 95 % of the room; between the usual rate and the cap, as far as the room goes.
     #[test]
-    fn titles_that_fit_get_the_usual_bitrate() -> Result<(), Box<dyn std::error::Error>> {
-        // An hour: 5.4 GB at 12 Mbps, 11 GB at 25 Mbps.
+    fn titles_with_room_get_a_raised_bitrate() -> Result<(), Box<dyn std::error::Error>> {
+        // An hour on a BD-25: room for about 51 Mbps.
         let h264 = budget(&project(BdVideo::Hd1080p23)?, 3600.0)?.ok_or("no budget")?;
-        assert_eq!((h264.target_kbps, h264.max_kbps), (12_000, 24_000));
+        assert_eq!((h264.target_kbps, h264.max_kbps), (25_000, 40_000));
         let mpeg2 = budget(&project(BdVideo::Hd1080i59)?, 3600.0)?.ok_or("no budget")?;
-        assert_eq!((mpeg2.target_kbps, mpeg2.max_kbps), (25_000, 35_000));
+        assert_eq!((mpeg2.target_kbps, mpeg2.max_kbps), (32_000, 40_000));
         // Video and the AC-3 soundtrack (192 kbit/s), with the transport stream's overhead.
-        let expected = (3600.0 * (25_000_000.0 + 192_000.0) * 1.04 / 8.0) as u64;
+        let expected = (3600.0 * (32_000_000.0 + 192_000.0) * 1.04 / 8.0) as u64;
         assert_eq!(mpeg2.estimated_bytes(), expected);
         assert!(mpeg2.estimated_bytes() < Capacity::Bd25.bytes());
+        // Three and a half hours of 1080i on a BD-50: room for about 29 Mbps, 95 % of it.
+        let mut bd50 = project(BdVideo::Hd1080i59)?;
+        bd50.settings.capacity = Capacity::Bd50;
+        let between = budget(&bd50, 3.5 * 3600.0)?.ok_or("no budget")?;
+        assert!(
+            (25_500..32_000).contains(&between.target_kbps),
+            "{between:?}"
+        );
+        assert_eq!(between.target_kbps % 500, 0);
+        assert!(between.estimated_bytes() <= Capacity::Bd50.bytes() / 100 * 96);
         Ok(())
     }
 
@@ -455,12 +556,12 @@ mod tests {
         assert!(fitted.max_kbps >= fitted.target_kbps);
         // Inside the 96 % of the disc the budget plans with.
         assert!(fitted.estimated_bytes() <= Capacity::Bd25.bytes() / 100 * 96);
-        // The same three hours fit a BD-50 at the usual rate.
+        // The same three hours fit a BD-50 above the usual rate (M6.377: raised to the cap).
         let mut bd50 = project_1080i;
         bd50.settings.capacity = Capacity::Bd50;
         assert_eq!(
             budget(&bd50, 3.0 * 3600.0)?.map(|budget| budget.target_kbps),
-            Some(25_000)
+            Some(32_000)
         );
         Ok(())
     }
@@ -504,9 +605,9 @@ mod tests {
         let project = project(BdVideo::Hd1080i59)?;
         let probe = |_path: &Path| Ok::<f64, DvdError>(3600.0);
         let estimate = crate::prepare::estimate_with_probe(&project, &probe)?;
-        assert_eq!(estimate.video_bitrate, 25_000_000);
+        assert_eq!(estimate.video_bitrate, 32_000_000);
         assert_eq!(estimate.capacity_bytes, Capacity::Bd25.bytes());
-        let expected = (3600.0 * (25_000_000.0 + 192_000.0) * 1.04 / 8.0) as u64;
+        let expected = (3600.0 * (32_000_000.0 + 192_000.0) * 1.04 / 8.0) as u64;
         assert_eq!(estimate.estimated_bytes, expected);
         assert_eq!(
             estimate.timelines.first().map(|(_, bytes)| *bytes),

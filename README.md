@@ -63,7 +63,7 @@ What works today:
   region codes, playlists and chapter playlists
 - Blu-ray: BDMV folders and ISO images, PG subtitles, IG menus (HDMV; always-on and popup menus, motion menus), user
   operations (UO masks). Video is SD (720×480 / 720×576) MPEG-2 or HD (1080p 23.976 / 24 and
-  720p 59.94 / 50 / 23.976 / 24 as H.264, 1080i 59.94 / 50 as MPEG-2; titles, subtitles and menus and popups are at the HD size too.
+  720p 59.94 / 50 / 23.976 / 24 as H.264, 1080i 59.94 / 50 as MPEG-2 or, by the disc's codec setting, interlaced H.264; titles, subtitles and menus and popups are at the HD size too.
   Sources at 29.97 / 25 fps become HD at their own speed as 1080i 59.94 / 50. H.264 in an `.m2ts` / `.mkv` / `.mp4` / `.mov` that fits a
   Blu-ray, interlaced 1080i included, goes on the disc as it is, without conversion. An mkv / mp4 / mov is written to the disc
   straight from the source file, so no working space the size of the video is needed). Audio goes on as it is as LPCM (up to

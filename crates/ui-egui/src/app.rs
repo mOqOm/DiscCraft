@@ -245,6 +245,12 @@ pub struct DiscCraftApp {
     pub(crate) playback: Option<crate::playback::Playback>,
     /// タイムラインのビデオクリップの位置（タイムライン、クリップとトリムのキー、クリップ）。
     pub(crate) clip_cache: Option<(TimelineId, Vec<u64>, Vec<crate::playback::ClipSpan>)>,
+    /// Why an asset's video is converted for the project's Blu-ray (M6.376), by asset and Blu-ray format: read from
+    /// the file once.
+    pub(crate) bd_mismatch_cache: std::collections::HashMap<
+        (u64, disccraft_project::BdVideo),
+        Option<disccraft_build::BdMismatch>,
+    >,
     /// ビルド結果のプレビューで再生しているタイトル。
     pub(crate) preview_playback: Option<crate::preview_playback::PreviewPlayback>,
     /// プロジェクトプレビューの窓（開いているときだけ）。
@@ -427,6 +433,7 @@ impl DiscCraftApp {
             photocraft_icon: None,
             playback: None,
             clip_cache: None,
+            bd_mismatch_cache: std::collections::HashMap::new(),
             preview_playback: None,
             project_preview: None,
             preview_paused: false,

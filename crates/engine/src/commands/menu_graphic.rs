@@ -552,6 +552,7 @@ fn run_convert_to_object(session: &mut Session, params: &Value) -> CommandResult
         hidden: false,
         locked: false,
         vertical: false,
+        spans: Vec::new(),
     });
     let text = u64::try_from(menu.texts.len().saturating_sub(1))
         .map_err(|_| "text index is too large".to_string())?;

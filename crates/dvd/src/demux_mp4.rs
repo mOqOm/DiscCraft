@@ -52,6 +52,21 @@ fn config(avc: &isobmff::AvcConfig) -> Option<Config> {
     })
 }
 
+/// The sequence parameter set of the MP4's H.264 video track (from its `moov`); `None` for another codec or file.
+pub(crate) fn sps_of(path: &Path) -> Option<crate::demux_mkv::H264Sps> {
+    let source = ReadSeekSource::new(fs::File::open(path).ok()?).ok()?;
+    let file = isobmff::open(&source).ok()?;
+    let track = file.track_of_kind(TrackKind::Video)?;
+    let info = file.tracks.get(track)?;
+    let [entry] = info.entries.as_slice() else {
+        return None;
+    };
+    let CodecConfig::Avc(avc) = &entry.codec else {
+        return None;
+    };
+    config(avc)?.sps
+}
+
 /// Opens `path` (its `moov`: no media is read) and checks its first video track against `format`.
 fn fit(path: &Path, format: BdVideoFormat) -> Option<Fit> {
     let opened = fs::File::open(path).ok()?;
