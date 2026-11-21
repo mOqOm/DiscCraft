@@ -707,6 +707,18 @@ pub(crate) fn save_hide_tools(hide: bool) -> Result<(), String> {
     save(&settings)
 }
 
+/// Reads whether HD H.264 is encoded on the system's hardware encoder (Preferences ▸ Memory, M12.40).
+pub(crate) fn load_hardware_encoder() -> bool {
+    load_settings().hardware_encoder
+}
+
+/// Saves whether HD H.264 is encoded on the hardware encoder (the other settings stay).
+pub(crate) fn save_hardware_encoder(on: bool) -> Result<(), String> {
+    let mut settings = load_settings();
+    settings.hardware_encoder = on;
+    save(&settings)
+}
+
 /// Reads how many transcodes run at a time (Preferences ▸ Memory); 0: one for every core.
 pub(crate) fn load_parallel_transcodes() -> u32 {
     load_settings().parallel_transcodes.unwrap_or(0).min(256)
@@ -1016,6 +1028,9 @@ pub(crate) struct Saved {
     /// Window ▸ Tools is off: the toolbar under the menu bar is hidden (M6.339).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) hide_tools: bool,
+    /// Preferences ▸ Memory: HD H.264 on the system's hardware encoder (M12.40).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) hardware_encoder: bool,
     /// Preferences ▸ General ▸ Playback quality (M6.341). `None`: automatic, as Encore starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) playback_quality: Option<PlaybackQuality>,

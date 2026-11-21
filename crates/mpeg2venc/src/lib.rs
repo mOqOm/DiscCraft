@@ -1,7 +1,9 @@
 //! MPEG-2 video encoder (ISO/IEC 13818-2): I pictures for menu stills, and I/P sequences for titles.
 //!
-//! MP@ML at a DVD's size (720 x 480 / 720 x 576), and MP@HL at 1920 x 1080 for a Blu-ray's interlaced HD formats
-//! (59.94i / 50i; [`encoder::Format::Hd1080`]).
+//! MP@ML at a DVD's size (720 x 480 / 720 x 576), and MP@HL / MP@H-14 for a Blu-ray's HD formats: 1920 x 1080 and
+//! 1440 x 1080 as 59.94i / 50i ([`encoder::Format::Hd1080`], [`encoder::Format::Hd1440`]) or progressive at 23.976 /
+//! 24, and 1280 x 720 progressive at 23.976 / 24 / 50 / 59.94 ([`encoder::Format::Hd720`],
+//! [`encoder::Encoder::set_progressive`], M12.35).
 #![deny(
     clippy::unwrap_used,
     clippy::expect_used,

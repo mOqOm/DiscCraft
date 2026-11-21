@@ -3611,9 +3611,18 @@ pub fn encode_hd_slideshow(
         options.max_kbps
     );
     seed = fnv1a64(format.as_bytes(), seed);
-    // 1080i coded as H.264 (M12.28) is another stream than the format's MPEG-2 (the keys of the others as they were).
+    // 1080i coded as H.264 (M12.28) is another stream than the format's MPEG-2, and so is a progressive format coded
+    // as MPEG-2 (M10.39) than its H.264 (the keys of the others as they were).
     if options.interlaced {
         seed = fnv1a64(b"h264-interlaced", seed);
+    }
+    let progressive = !matches!((options.fps_num, options.fps_den), (30_000, 1001) | (25, 1));
+    if options.codec == disccraft_transcode::hd::HdCodec::Mpeg2 && progressive {
+        seed = fnv1a64(b"mpeg2-progressive", seed);
+    }
+    // An SD Blu-ray's H.264 shown 16:9 (M10.41): its pixels are another shape.
+    if options.wide {
+        seed = fnv1a64(b"wide", seed);
     }
     seed = slideshow_seed(project, slideshow, seed)?;
     let es = cache_dir.join(format!("hd-{seed:016x}.h264"));

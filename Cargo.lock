@@ -2978,6 +2978,7 @@ dependencies = [
  "disccraft-automation",
  "disccraft-check",
  "disccraft-engine",
+ "disccraft-platform",
  "disccraft-project",
  "serde_json",
 ]
@@ -3109,6 +3110,10 @@ dependencies = [
 [[package]]
 name = "disccraft-platform"
 version = "0.1.0"
+dependencies = [
+ "disccraft-transcode",
+ "windows",
+]
 
 [[package]]
 name = "disccraft-project"

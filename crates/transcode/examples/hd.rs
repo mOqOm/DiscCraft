@@ -24,6 +24,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         rendering: disccraft_transcode::Rendering::default(),
         mode: disccraft_transcode::RateMode::Vbr,
         interlaced: false,
+        wide: false,
     };
     let started = std::time::Instant::now();
     let frames = transcode_h264(

@@ -172,6 +172,26 @@ impl<'a> Vm<'a> {
         Ok(vm)
     }
 
+    /// Sets the player's country (SPRM12: two ASCII letters, ISO 3166 alpha-2), which a parental block's choice
+    /// looks up (M13.16).
+    pub fn set_country(&mut self, country: [u8; 2]) {
+        if let Some(slot) = self.sprm.get_mut(12) {
+            *slot = u16::from_be_bytes(country);
+        }
+    }
+
+    /// Which PGC of the playing title plays (M13.16, [`DiscModel::title_variant`]): 0 for a title of one PGC;
+    /// `None` when no title plays, or none of its parental block's PGCs is for the player's level.
+    #[must_use]
+    pub fn title_variant(&self) -> Option<usize> {
+        let Location::Title { title, .. } = self.location else {
+            return None;
+        };
+        let level = self.sprm.get(13).copied().unwrap_or(15);
+        let country = self.sprm.get(12).copied().unwrap_or(0);
+        self.model.title_variant(title, level, country)
+    }
+
     /// Resume at a known location without re-running pre commands.
     ///
     /// This is what a preview does between key presses: the disc is already
@@ -1195,6 +1215,7 @@ mod tests {
         }];
 
         DiscModel {
+            parental: None,
             title_menu: None,
             first_play,
             vmgm,
@@ -1463,6 +1484,7 @@ mod tests {
             [0x30, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
         ];
         let model = DiscModel {
+            parental: None,
             title_menu: None,
             first_play: vec![[0x30, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00]],
             vmgm: vec![
@@ -1516,6 +1538,7 @@ mod tests {
         let mut first_play = guard.to_vec();
         first_play.push([0x30, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00]);
         let model = DiscModel {
+            parental: None,
             title_menu: None,
             first_play,
             vmgm: vec![],
@@ -1621,6 +1644,7 @@ mod tests {
     #[test]
     fn self_link_loops() -> Result<(), VmError> {
         let model = DiscModel {
+            parental: None,
             title_menu: None,
             first_play: vec![[0x30, 0x06, 0x00, 0x01, 0x00, 0xC0, 0x00, 0x00]],
             vmgm: vec![MenuPgcModel {
@@ -1644,6 +1668,7 @@ mod tests {
     #[test]
     fn hidden_pgc_without_jump_is_dead_end() -> Result<(), VmError> {
         let model = DiscModel {
+            parental: None,
             title_menu: None,
             first_play: vec![[0x30, 0x06, 0x00, 0x01, 0x00, 0xC0, 0x00, 0x00]],
             vmgm: vec![MenuPgcModel {
@@ -1682,6 +1707,7 @@ mod tests {
     fn restore_resumes_a_title() -> Result<(), VmError> {
         // A disc whose title returns to the menu when it ends.
         let model = DiscModel {
+            parental: None,
             title_menu: None,
             first_play: vec![[0x30, 0x06, 0x00, 0x01, 0x00, 0xC0, 0x00, 0x00]],
             vmgm: vec![MenuPgcModel {
@@ -1757,6 +1783,7 @@ mod tests {
     #[test]
     fn unknown_command_is_unsupported() -> Result<(), VmError> {
         let model = DiscModel {
+            parental: None,
             title_menu: None,
             first_play: vec![[0xFF; 8]],
             vmgm: Vec::new(),
@@ -1768,5 +1795,54 @@ mod tests {
             Err(other) => Err(other),
             Ok(_) => Err(VmError::Invalid("expected unsupported".to_string())),
         }
+    }
+
+    /// M13.16: in a parental block a player plays the first PGC whose parental ID shares a bit with its level's mask
+    /// for the title's set; the first with no level set or a country the disc does not list; none when no PGC is
+    /// for its level.
+    #[test]
+    fn a_parental_block_plays_the_pgc_for_the_players_level() -> Result<(), VmError> {
+        let mut model = test_model();
+        // Level l's mask is bit l - 1, for the VMG and title set 1. Title 1: PGC 1 for levels 4 to 8, PGC 2 for
+        // 2 and 3 (none for 1).
+        model.parental = Some(crate::model::ParentalModel {
+            countries: vec![*b"JP", *b"US"],
+            levels: std::array::from_fn(|index| vec![1 << index, 1 << index]),
+            titles: vec![(1, vec![0b1111_1000, 0b0000_0110])],
+        });
+        let japan = u16::from_be_bytes(*b"JP");
+        let cases = [
+            (8, japan, Some(0)),
+            (4, japan, Some(0)),
+            (3, japan, Some(1)),
+            (2, japan, Some(1)),
+            (1, japan, None),
+            (15, japan, Some(0)),
+            (2, u16::from_be_bytes(*b"FR"), Some(0)),
+        ];
+        for (level, country, expected) in cases {
+            assert_eq!(
+                model.title_variant(1, level, country),
+                expected,
+                "{level} {country:#x}"
+            );
+        }
+        // A title without a block: its PGC.
+        assert_eq!(model.title_variant(2, 2, japan), Some(0));
+
+        let playing = Location::Title {
+            title: 1,
+            chapter: 1,
+        };
+        let mut vm = Vm::restore(&model, playing)?;
+        assert_eq!(vm.title_variant(), Some(0));
+        vm.set_country(*b"US");
+        let mut registers = vm.registers();
+        if let Some(level) = registers.sprm.get_mut(13) {
+            *level = 3;
+        }
+        let vm = Vm::restore_with_registers(&model, playing, registers)?;
+        assert_eq!(vm.title_variant(), Some(1));
+        Ok(())
     }
 }

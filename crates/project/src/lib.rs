@@ -118,6 +118,7 @@ pub use model::{
     MAX_COLOR_SETS, MAX_SUBTITLE_CUES, MAX_TIMELINE_CLIPS, SubtitleCue, SubtitleJustify,
 };
 pub use model::{FLOWCHART_DISC, FLOWCHART_LIMIT, FlowPoint, LayerBreakPoint};
+pub use model::{MAX_PARENTAL_CHAPTERS, ParentalChapter, ParentalVariant};
 pub use quantize::reduce_colors;
 pub use replace::{DesignButton, MenuDesign};
 pub use rom::{MAX_ROM_DEPTH, MAX_ROM_ENTRIES, RomFile, rom_disc_bytes, rom_files};

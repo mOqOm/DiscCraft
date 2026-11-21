@@ -1,5 +1,5 @@
 use crate::link::Link;
-use crate::model::{DiscKind, Project};
+use crate::model::{AssetKind, DiscKind, Project};
 use serde::{Deserialize, Serialize};
 
 /// Problem severity.
@@ -363,6 +363,38 @@ impl Project {
                 problems.push(error(
                     "badParentalLevel",
                     format!("the parental level {level} of \"{name}\" is outside 0..=8"),
+                ));
+            }
+        }
+
+        // M13.17: the chapters with a parental alternative.
+        for timeline in self.timelines.values() {
+            for parental in &timeline.parental_chapters {
+                let alternative = self.assets.get(&parental.alternative);
+                let wrong = if parental.chapter >= timeline.chapters.len() {
+                    Some(format!("chapter {} does not exist", parental.chapter + 1))
+                } else if !(2..=8).contains(&parental.level) {
+                    Some(format!("level {} is outside 2..=8", parental.level))
+                } else if alternative.is_none_or(|asset| asset.kind != AssetKind::Video) {
+                    Some("its alternative is not a video".to_string())
+                } else {
+                    None
+                };
+                if let Some(wrong) = wrong {
+                    problems.push(error(
+                        "badParentalChapter",
+                        format!("a parental alternative of \"{}\": {wrong}", timeline.name),
+                    ));
+                }
+            }
+            if timeline.parental_chapters.len() > crate::MAX_PARENTAL_CHAPTERS {
+                problems.push(error(
+                    "badParentalChapter",
+                    format!(
+                        "\"{}\" has more than {} chapters with a parental alternative",
+                        timeline.name,
+                        crate::MAX_PARENTAL_CHAPTERS
+                    ),
                 ));
             }
         }

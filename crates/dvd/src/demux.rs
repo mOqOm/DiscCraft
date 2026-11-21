@@ -327,9 +327,10 @@ impl BdVideoFormat {
     /// The HD video of format `video`; `None` for SD.
     #[must_use]
     pub fn of_video(video: disccraft_project::BdVideo) -> Option<Self> {
-        let (width, height, num, den) = video.hd()?;
+        let (_, height, num, den) = video.hd()?;
         Some(Self {
-            width,
+            // The width its video is coded at (M10.40: a 1440 x 1080 format's 1440).
+            width: video.video_width()?,
             height,
             rate: (num, den),
             interlaced: video.interlaced(),
@@ -353,19 +354,26 @@ impl BdVideoFormat {
         Self::of_video(video)
     }
 
-    /// The HD video of `project`'s titles; `None` when it is not a Blu-ray in an HD format.
+    /// The video of `project`'s titles that the Blu-ray build encodes: an HD format's, or (M10.41) an SD H.264
+    /// disc's 720 x 480 / 720 x 576, interlaced; `None` when it is not a Blu-ray, or an SD one in MPEG-2.
     #[must_use]
     pub fn of(project: &disccraft_project::Project) -> Option<Self> {
         if project.settings.kind != DiscKind::BluRay {
             return None;
         }
-        let (width, height, num, den) = project.settings.bd_video.hd()?;
-        Some(Self {
-            width,
-            height,
-            rate: (num, den),
-            interlaced: project.settings.bd_video.interlaced(),
-        })
+        if project.settings.bd_sd_h264() {
+            let (height, rate) = match project.settings.standard {
+                disccraft_project::VideoStandard::Ntsc => (480, (30_000, 1001)),
+                disccraft_project::VideoStandard::Pal => (576, (25, 1)),
+            };
+            return Some(Self {
+                width: 720,
+                height,
+                rate,
+                interlaced: true,
+            });
+        }
+        Self::of_video(project.settings.bd_video)
     }
 
     /// A name for cache files.
@@ -637,8 +645,11 @@ const BD_MAX_VIDEO_BPS: u64 = 40_000_000;
 
 /// Stream `index` of `file` when it is HD MPEG-2 a Blu-ray title of `format` carries as it is: its pictures
 /// that play (the leading B pictures of an open first GOP are left out: what they refer to is not there), each
-/// with its number in the stream. `None` when it is not: another size, rate or level, field pictures, a picture
-/// without a time, or a stream that does not start with a sequence header and an I picture.
+/// with its number in the stream. `None` when it is not: another size, rate or level, a picture without a time, or
+/// a stream that does not start with a sequence header and an I picture. Frames coded as two field pictures
+/// (M10.45, as some broadcast and recorder video has them) go as they are when each unit holds a frame: the first
+/// unit holds both fields of its frame, and every unit starts with a frame picture or a first field of the same
+/// parity as the first unit's (a unit a field would alternate).
 fn mpeg2_plan(
     source: &ReadSeekSource<fs::File>,
     file: &File,
@@ -650,13 +661,16 @@ fn mpeg2_plan(
     if !first.key || !first.picture?.gop {
         return None;
     }
-    if stream
-        .units
-        .iter()
-        .any(|unit| unit.pts.is_none() || unit.picture.is_none_or(|picture| picture.structure != 3))
-    {
+    let first_field = first.picture?.structure;
+    if stream.units.iter().any(|unit| {
+        unit.pts.is_none()
+            || unit
+                .picture
+                .is_none_or(|picture| picture.structure != 3 && picture.structure != first_field)
+    }) {
         return None;
     }
+    // The ES parser takes a unit of one field picture for a frame without its second field.
     let head = file.read_unit(source, index, 0).ok()?;
     let parsed = disccraft_psmux::es::parse_video(&head, 0).ok()?;
     if !mpeg2_sequence_fits(&parsed.sequence, format) {
@@ -695,19 +709,20 @@ fn first_picture_structure(data: &[u8]) -> Option<u8> {
 }
 
 /// Whether the head of the elementary stream `path` says its video goes on a Blu-ray title of `format` as it is:
-/// a sequence that fits, starting with an I picture after a GOP header, of frame pictures.
+/// a sequence that fits, starting with an I picture after a GOP header (a frame picture or, M10.45, a frame of two
+/// field pictures).
 fn mpeg2_es_head_fits(path: &Path, format: BdVideoFormat) -> bool {
     let Some(head) = mpeg2_es_head(path) else {
         return false;
     };
-    let Ok(parsed) = disccraft_psmux::es::parse_video(&head, 0) else {
+    let Ok(parsed) = disccraft_psmux::es::parse_video_head(&head, 0) else {
         return false;
     };
     mpeg2_sequence_fits(&parsed.sequence, format)
         && parsed.pictures.first().is_some_and(|picture| {
             picture.gop_start && picture.kind == disccraft_psmux::es::PictureType::I
         })
-        && first_picture_structure(&head) == Some(3)
+        && first_picture_structure(&head).is_some_and(|structure| structure != 0)
 }
 
 /// An HD MPEG-2 video elementary stream (`.m2v`, M6.370) as it is, for an HD title of `format`: the stream is read

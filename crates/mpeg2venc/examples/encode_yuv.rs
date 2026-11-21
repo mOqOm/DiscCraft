@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! ffmpeg -i clip.vob -t 30 -s 720x480 -pix_fmt yuv420p -f rawvideo clip.yuv
-//! cargo run --release -p disccraft-mpeg2venc --example encode_yuv -- clip.yuv clip.m2v [bitrate] [max_bitrate] [interlaced]
+//! cargo run --release -p disccraft-mpeg2venc --example encode_yuv -- clip.yuv clip.m2v [bitrate] [max_bitrate] [interlaced | fields]
 //! ```
 //!
 //! The frames are 720×480 (NTSC); the bitrates are in bits per second (defaults: 6,000,000 and 9,000,000).
@@ -38,6 +38,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.get(5).is_some_and(|flag| flag == "interlaced") {
         encoder.set_interlaced(true);
     }
+    // `fields`: each frame as two field pictures, the top one first (M12.38).
+    if args.get(5).is_some_and(|flag| flag == "fields") {
+        encoder.set_field_pictures(true);
+    }
+    // DISCCRAFT_B_FRAMES=n puts n B pictures between the reference pictures (M12.32).
+    let b_frames: u8 = std::env::var("DISCCRAFT_B_FRAMES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    encoder.set_b_frames(b_frames);
+    let mut given = 0usize;
 
     let mut buffer = vec![0u8; luma + 2 * chroma];
     let mut sizes = Vec::new();
@@ -53,11 +64,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cb: cb.to_vec(),
             cr: cr.to_vec(),
         };
-        let unit = encoder.encode_frame(&frame)?;
-        sizes.push(unit.len() * 8);
+        for picture in encoder.push_frame(&frame, given.is_multiple_of(15))? {
+            sizes.push(picture.data.len() * 8);
+            writer.write_all(&picture.data)?;
+        }
+        given += 1;
         let (code_i, code_p) = encoder.quantiser_codes();
         codes = (codes.0 + u64::from(code_i), codes.1 + u64::from(code_p));
-        writer.write_all(&unit)?;
+    }
+    for picture in encoder.flush()? {
+        sizes.push(picture.data.len() * 8);
+        writer.write_all(&picture.data)?;
     }
     writer.write_all(&encoder.finish())?;
     writer.flush()?;

@@ -195,10 +195,9 @@ fn project_becomes_a_bdmv_folder_that_libbluray_plays() {
     let first = highlights.items.first().unwrap();
     let second = highlights.items.get(1).unwrap();
     assert_eq!(&first.clip, b"00001");
-    assert_eq!(first.in_time, main.marks.get(2).unwrap().time);
     assert_eq!(first.out_time, main_item.out_time);
     assert_eq!(second.in_time, main_item.in_time);
-    assert_eq!(second.out_time, main.marks.get(1).unwrap().time);
+    chapter_spans_start_at_gops(&out, &main, &highlights);
     let playlist_title = report.titles.get(1).unwrap();
     assert_eq!(playlist_title.chapters, 2);
     assert_eq!(playlist_title.playlist, 2);
@@ -236,6 +235,53 @@ fn project_becomes_a_bdmv_folder_that_libbluray_plays() {
     let stderr = String::from_utf8_lossy(&decode.stderr);
     assert!(decode.status.success(), "{stderr}");
     assert!(stderr.trim().is_empty(), "decode errors: {stderr}");
+    chapter_playlist_decodes(&ffmpeg, &input);
+}
+
+/// M10.38: each chapter playlist entry starts (and the first one ends) at the GOP its chapter mark is in: an EP map
+/// entry within the second before the mark, as Encore's chapters do (the fixture's GOPs do not fall on the marks).
+fn chapter_spans_start_at_gops(
+    out: &Path,
+    main: &disccraft_bdmv::mpls::PlayList,
+    highlights: &disccraft_bdmv::mpls::PlayList,
+) {
+    let clip = disccraft_bdmv::clpi::read_clpi(
+        &std::fs::read(out.join("BDMV/CLIPINF/00001.clpi")).unwrap(),
+    )
+    .unwrap();
+    // The EP map keeps a PTS to 512 ticks.
+    let gop_start = |time: u32| {
+        clip.ep_map
+            .iter()
+            .any(|entry| entry.pts == (u64::from(time) * 2) & !0x1FF)
+    };
+    let near_before =
+        |time: u32, mark: u32| gop_start(time) && time <= mark && mark - time < 45_000;
+    let first = highlights.items.first().unwrap();
+    let second = highlights.items.get(1).unwrap();
+    assert!(near_before(first.in_time, main.marks.get(2).unwrap().time));
+    assert!(near_before(
+        second.out_time,
+        main.marks.get(1).unwrap().time
+    ));
+}
+
+/// M10.38: the chapter playlist (chapter 3, then chapter 1 of the same clip) decodes without errors. Before its play
+/// items started at GOP starts, ffmpeg met pictures of the GOP before the mark and reported "Invalid frame
+/// dimensions 0x0". (Its `bluray:` input also lists a second copy of the video on the null PID when a play item
+/// starts within the clip, which this decodes past: the playlist's own video stream is the first.)
+fn chapter_playlist_decodes(ffmpeg: &Path, input: &str) {
+    let chapters = Command::new(ffmpeg)
+        .args(["-v", "error", "-playlist", "2", "-i", input])
+        .args(["-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&chapters.stderr);
+    assert!(chapters.status.success(), "{stderr}");
+    assert!(
+        stderr.trim().is_empty(),
+        "chapter playlist decode errors: {stderr}"
+    );
 }
 
 /// A 16-bit stereo 48 kHz WAV of `frames` silent sample frames.

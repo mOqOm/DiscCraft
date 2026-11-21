@@ -248,7 +248,8 @@ impl DiscCraftApp {
                     serde_json::json!({ "video": video.id() }),
                 );
             }
-            // Encore's Codec (M12.28): 1080i as MPEG-2 (the automatic choice) or as H.264.
+            // Encore's Codec (M12.28): 1080i as MPEG-2 (the automatic choice) or as H.264; every format as MPEG-2
+            // (M10.39).
             let codecs: Vec<(disccraft_project::BdCodec, &str)> = disccraft_project::BdCodec::ALL
                 .iter()
                 .map(|codec| (*codec, bd_codec_name(*codec)))
@@ -334,7 +335,8 @@ impl DiscCraftApp {
             ui.horizontal(|ui| {
                 prop_label(ui, tl!("Blu-ray Transcode:"));
                 if applies(bluray) {
-                    bluray_pick = self.bluray_preset_combo(
+                    // Encore's whole list (M10.42); Transcode Settings… keeps the one of the chosen format.
+                    bluray_pick = self.bluray_list_combo(
                         ui,
                         "sheet_bluray_preset",
                         &asset,
@@ -385,7 +387,7 @@ impl DiscCraftApp {
                 self.apply_dvd_pick(id, picked);
             }
             if let Some(picked) = bluray_pick {
-                self.apply_bluray_pick(id, picked);
+                self.apply_bluray_list(id, picked);
             }
             ui.separator();
         }
@@ -780,6 +782,76 @@ impl DiscCraftApp {
                 let _ = self.run_command("timeline.setPosterFrame", params);
             }
         });
+        // M13.18: another video for players below a parental level (a DVD parental block, M13.17).
+        if self.session.project.settings.kind == disccraft_project::DiscKind::Dvd {
+            ui.separator();
+            self.chapter_parental_rows(ui, id, index);
+        }
+    }
+
+    /// The chapter's parental alternative (M13.18): the video a player set below the level plays in the chapter's
+    /// place, and the level (2 to 8; 8 when a video is first chosen).
+    fn chapter_parental_rows(&mut self, ui: &mut Ui, id: TimelineId, index: usize) {
+        let current = self.session.project.timeline(id).and_then(|timeline| {
+            timeline
+                .parental_chapters
+                .iter()
+                .find(|parental| parental.chapter == index)
+                .copied()
+        });
+        let videos = self.assets_of(disccraft_project::AssetKind::Video);
+        let asset = current.map(|parental| parental.alternative);
+        let level = current.map_or(8, |parental| parental.level);
+        let shown = asset
+            .and_then(|asset| videos.iter().find(|(video, _)| *video == asset))
+            .map_or_else(|| tl!("None").to_owned(), |(_, name)| name.clone());
+        let mut chosen = (asset, level);
+        let _ = ui
+            .horizontal(|ui| {
+                prop_label(ui, tl!("Parental Alternative:"));
+                egui::ComboBox::from_id_salt(("chapter_parental_video", id.0, index))
+                    .width(FIELD_WIDTH)
+                    .selected_text(shown)
+                    .show_ui(ui, |ui| {
+                        let _ = ui.selectable_value(&mut chosen.0, None, tl!("None"));
+                        for (video, name) in &videos {
+                            let _ = ui.selectable_value(&mut chosen.0, Some(*video), name);
+                        }
+                    });
+            })
+            .response
+            .on_hover_text(tl!(
+                "The video a player set below the level plays in this chapter's place (a DVD parental block)"
+            ));
+        let _ = ui
+            .add_enabled_ui(chosen.0.is_some(), |ui| {
+                ui.horizontal(|ui| {
+                    prop_label(ui, tl!("For Levels Below:"));
+                    egui::ComboBox::from_id_salt(("chapter_parental_level", id.0, index))
+                        .selected_text(chosen.1.to_string())
+                        .show_ui(ui, |ui| {
+                            for choice in 2..=8u8 {
+                                let _ = ui.selectable_value(&mut chosen.1, choice, choice.to_string());
+                            }
+                        });
+                });
+            })
+            .response
+            .on_hover_text(tl!(
+                "Players set below this parental level play the alternative; players at it or above, and players with no level set, play the chapter"
+            ))
+            .on_disabled_hover_text(tl!("Choose an alternative video first"));
+        if chosen != (asset, level) {
+            let params = match chosen.0 {
+                Some(video) => json!({
+                    "timeline": id.0, "chapter": index, "level": chosen.1, "asset": video.0
+                }),
+                None => {
+                    json!({"timeline": id.0, "chapter": index, "level": serde_json::Value::Null})
+                }
+            };
+            let _ = self.run_command("timeline.setParentalChapter", params);
+        }
     }
 
     /// メニュービューアで選ばれている、`id` のメニューのボタンの番号。
@@ -3563,24 +3635,28 @@ pub(crate) fn prop_label(ui: &mut Ui, text: &str) {
 pub(crate) fn bd_video_name(video: disccraft_project::BdVideo) -> &'static str {
     match video {
         disccraft_project::BdVideo::Sd => tl!("SD (MPEG-2)"),
-        disccraft_project::BdVideo::Hd1080p23 => "1920x1080 23.976p (H.264)",
-        disccraft_project::BdVideo::Hd1080p24 => "1920x1080 24p (H.264)",
-        // MPEG-2, or H.264 as the disc's codec asks (M12.28).
-        disccraft_project::BdVideo::Hd1080i59 => "1920x1080 59.94i (MPEG-2 / H.264)",
-        disccraft_project::BdVideo::Hd1080i50 => "1920x1080 50i (MPEG-2 / H.264)",
-        disccraft_project::BdVideo::Hd720p59 => "1280x720 59.94p (H.264)",
-        disccraft_project::BdVideo::Hd720p50 => "1280x720 50p (H.264)",
-        disccraft_project::BdVideo::Hd720p23 => "1280x720 23.976p (H.264)",
-        disccraft_project::BdVideo::Hd720p24 => "1280x720 24p (H.264)",
+        // Each HD format is MPEG-2 or H.264 as the codec asks (M12.28, M10.39).
+        disccraft_project::BdVideo::Hd1080p23 => "1920x1080 23.976p",
+        disccraft_project::BdVideo::Hd1080p24 => "1920x1080 24p",
+        disccraft_project::BdVideo::Hd1080i59 => "1920x1080 59.94i",
+        disccraft_project::BdVideo::Hd1080i50 => "1920x1080 50i",
+        disccraft_project::BdVideo::Hd1440p23 => "1440x1080 23.976p",
+        disccraft_project::BdVideo::Hd1440p24 => "1440x1080 24p",
+        disccraft_project::BdVideo::Hd1440i59 => "1440x1080 59.94i",
+        disccraft_project::BdVideo::Hd1440i50 => "1440x1080 50i",
+        disccraft_project::BdVideo::Hd720p59 => "1280x720 59.94p",
+        disccraft_project::BdVideo::Hd720p50 => "1280x720 50p",
+        disccraft_project::BdVideo::Hd720p23 => "1280x720 23.976p",
+        disccraft_project::BdVideo::Hd720p24 => "1280x720 24p",
     }
 }
 
-/// Blu-ray の HD の映像のコーデックの表示名（M12.28）。
+/// Blu-ray の映像のコーデックの表示名（M12.28。MPEG-2 はすべての形式: M10.39、H.264 は SD も: M10.41）。
 pub(crate) fn bd_codec_name(codec: disccraft_project::BdCodec) -> &'static str {
     match codec {
-        disccraft_project::BdCodec::Auto => tl!("Automatic (MPEG-2 for 1080i)"),
-        disccraft_project::BdCodec::H264 => tl!("H.264 (1080i too)"),
-        disccraft_project::BdCodec::Mpeg2 => tl!("MPEG-2 for 1080i"),
+        disccraft_project::BdCodec::Auto => tl!("Automatic (MPEG-2 for SD and 1080i)"),
+        disccraft_project::BdCodec::H264 => tl!("H.264 (every format)"),
+        disccraft_project::BdCodec::Mpeg2 => tl!("MPEG-2 (every format)"),
     }
 }
 

@@ -2,7 +2,8 @@
 
 DVD のイメージを DDP イメージ（プレス工場へのマスターの受け渡しの形式）にする: イメージを `MAIN.DAT` として受け取り、
 ECC ブロックの倍数まで 0 で埋め、`CONTROL.DAT`（リードインの制御データ）と `DDPID`（2 つのファイルが何で、ディスクの
-どこに入るか）を足す。Encore CS6 のビルドの出力「DDP イメージ」と同じもの。今は 1 層のディスクだけ。
+どこに入るか）を足す。Encore CS6 のビルドの出力「DDP イメージ」と同じもの。2 層（DVD-9）は層ごとのフォルダー
+（`Layer 1` / `Layer 2`）に分ける（M14.4）。
 
 - 資料: ECMA-267 3rd edition（April 2001）§16.3・§25・§26.5（制御データと物理フォーマット情報）、日本レコード協会
   「CD 用マスタ DDP ファイル互換性ガイドライン」（2005-10-07。DDPID / DDPMS の項目の名前だけ）。
@@ -12,4 +13,6 @@ ECC ブロックの倍数まで 0 で埋め、`CONTROL.DAT`（リードインの
 - 確かめ方: 単体テスト（Encore が 7789 / 5168 セクターのイメージに書いた DDPID と制御データの各バイト、埋め方）と、
   disccraft-build のテスト（DVD を DDP にビルドし、MAIN.DAT のイメージが ffmpeg で最後のフレームまで再生できる）。
   手で: DiscCraft の DDP のイメージを Encore に渡すと、Encore の DDP は 3 つのファイルともバイト単位で一致した。
+  2 層: Encore が 8.32 GB のプロジェクトから書いた 2 層の DDP の DDPID 2 つと CONTROL.DAT に、同じ配置で DiscCraft が書くものが
+  バイト単位で一致する（単体テスト）。2 層の DVD を DDP にビルドし、2 つの層の MAIN.DAT をつなぐと ffmpeg で最後まで再生できる。
   詳しくは docs/formats/ddp.md。

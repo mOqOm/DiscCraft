@@ -40,7 +40,8 @@ pub use attr::{AudioAttr, AudioCoding, BcdTime, Resolution, Standard, VideoAttr,
 pub use bytes::SECTOR;
 pub use pgc::{Cell, Pgc, read_pgc, write_pgc};
 pub use vmgi::{
-    CellAddress, MenuPgc, TitleEntry, VmgMenus, Vmgi, read_vmgi, vmgi_sectors, write_vmgi,
+    CellAddress, MenuPgc, ParentalTable, TitleEntry, VmgMenus, Vmgi, read_vmgi, vmgi_sectors,
+    write_vmgi,
 };
-pub use vtsi::{TimeMap, Vtsi, read_vtsi, vts_attr_block, write_vtsi};
+pub use vtsi::{BlockPlace, PgcCategory, TimeMap, Vtsi, read_vtsi, vts_attr_block, write_vtsi};
 pub use vtsm::VtsRootMenu;

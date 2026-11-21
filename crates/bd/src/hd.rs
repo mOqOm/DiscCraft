@@ -116,7 +116,62 @@ pub(crate) fn options(
         mode: disccraft_transcode::RateMode::Vbr,
         // H.264 of a 1080i format: coded as interlaced frames (M12.28).
         interlaced: codec == HdCodec::H264 && video.interlaced(),
+        wide: false,
     })
+}
+
+/// The encoder's settings for an SD Blu-ray's H.264 (M10.41): 720 x 480 at 29.97 or 720 x 576 at 25 frames a second,
+/// coded as interlaced frames, shown 16:9 when `wide` (else 4:3), at a target and peak bitrate in kilobits per
+/// second; `None` unless the disc is SD in H.264.
+pub(crate) fn sd_options(
+    project: &Project,
+    wide: bool,
+    (target_kbps, max_kbps): (u32, u32),
+) -> Option<HdOptions> {
+    if !project.settings.bd_sd_h264() {
+        return None;
+    }
+    let (height, fps_num, fps_den) = match project.settings.standard {
+        disccraft_project::VideoStandard::Ntsc => (480, 30_000, 1001),
+        disccraft_project::VideoStandard::Pal => (576, 25, 1),
+    };
+    Some(HdOptions {
+        width: 720,
+        height,
+        fps_num,
+        fps_den,
+        target_kbps,
+        max_kbps,
+        codec: HdCodec::H264,
+        quality: disccraft_transcode::BEST_QUALITY,
+        rendering: disccraft_transcode::Rendering::default(),
+        mode: disccraft_transcode::RateMode::Vbr,
+        interlaced: true,
+        wide,
+    })
+}
+
+/// What the cache's file names say of an SD Blu-ray's H.264 besides [`format_key`] (M10.41): its lines and whether
+/// it is shown 16:9.
+pub(crate) fn sd_key(options: &HdOptions) -> String {
+    format!("-{}{}", options.height, if options.wide { "w" } else { "" })
+}
+
+/// The cache's name for the coding of `timeline`'s title in format `format` and `codec`, as [`hd_title`] names it
+/// (an HDV title made narrower aside).
+fn title_key(
+    project: &Project,
+    timeline: &disccraft_project::Timeline,
+    format: BdVideo,
+    codec: HdCodec,
+) -> String {
+    let mut key = format_key(format, codec, None);
+    if format.is_sd()
+        && let Some(options) = sd_options(project, timeline.wide(&project.settings), (0, 0))
+    {
+        key.push_str(&sd_key(&options));
+    }
+    key
 }
 
 /// Reads an HD title's access units from its cached streams one at a time, as the multiplexer writes them.
@@ -251,16 +306,45 @@ pub(crate) fn title_video(project: &Project, title: &TitleStreams) -> BdVideo {
     }
 }
 
+/// The codec choice `title` is made with: a timeline's its video's own (M10.39) or the project's, a slideshow's the
+/// project's.
+pub(crate) fn title_codec(project: &Project, title: &TitleStreams) -> BdCodec {
+    match title.source {
+        TitleSource::Timeline(id) => project
+            .timelines
+            .get(&TimelineId(id))
+            .map_or(project.settings.bd_codec, |timeline| {
+                project.title_bd_codec(timeline)
+            }),
+        TitleSource::Slideshow(_) => project.settings.bd_codec,
+    }
+}
+
 /// The rates (target and peak, kilobits per second) `title` is encoded at from the project's `budget`: those of
-/// its format's codec ([`disccraft_dvd::HdBudget::rates_for`]); nothing without a budget.
+/// its codec ([`disccraft_dvd::HdBudget::rates_for`]); nothing without a budget.
 pub(crate) fn title_rates(
     project: &Project,
     title: &TitleStreams,
     budget: Option<&disccraft_dvd::HdBudget>,
 ) -> (u32, u32) {
     budget.map_or((0, 0), |budget| {
-        budget.rates_for(title_video(project, title))
+        budget.rates_for(title_codec(project, title).mpeg2(title_video(project, title)))
     })
+}
+
+/// The part of the cache's file names that says how a title's video is coded: the format's id, then the coding
+/// when it is not the format's automatic one (1080i as H.264, M12.28; a progressive format as MPEG-2, M10.39), then
+/// HDV's narrower width (M6.388).
+pub(crate) fn format_key(video: BdVideo, codec: HdCodec, narrow: Option<u32>) -> String {
+    let mut key = video.id().to_owned();
+    let mpeg2 = codec == HdCodec::Mpeg2;
+    if mpeg2 != BdCodec::Auto.mpeg2(video) {
+        key.push_str(if mpeg2 { "-mpeg2" } else { "-h264" });
+    }
+    if let Some(narrow) = narrow {
+        key.push_str(&format!("-{narrow}"));
+    }
+    key
 }
 
 /// The HD video of `title` when the disc's titles are HD: a timeline's video or a slideshow's pictures, encoded
@@ -376,8 +460,10 @@ pub(crate) fn hd_title(
 ) -> Result<Option<HdTitle>, BdError> {
     let video = title_video(project, title);
     let video_format = video;
-    let format_id = video.id();
-    let Some(options) = options(project.settings.bd_codec, video, rates) else {
+    // An HD title, or an SD Blu-ray's H.264 one (M10.41).
+    let Some(options) = options(title_codec(project, title), video, rates)
+        .or_else(|| sd_options(project, title.wide, rates))
+    else {
         return Ok(None);
     };
     let (width, height, fps_num, fps_den) = (
@@ -387,6 +473,9 @@ pub(crate) fn hd_title(
         options.fps_den,
     );
     let size = |value: u32| u16::try_from(value).map_err(|_| invalid("HD size too large"));
+    // The width the format's video is coded at (M10.40: 1440 for the 1440 x 1080 formats; the graphics stay the
+    // frame's 1920).
+    let coded_width = video.video_width().unwrap_or(width);
     let id = match title.source {
         TitleSource::Timeline(id) => id,
         TitleSource::Slideshow(id) => {
@@ -394,8 +483,12 @@ pub(crate) fn hd_title(
                 .slideshows
                 .get(&id)
                 .ok_or_else(|| invalid("slideshow does not exist"))?;
+            let encode = HdOptions {
+                width: coded_width,
+                ..options.clone()
+            };
             let (es, index) = disccraft_dvd::encode_hd_slideshow(
-                project, slideshow, cache_dir, &options, progress,
+                project, slideshow, cache_dir, &encode, progress,
             )
             .map_err(|error| BdError::Prepare(error.to_string()))?;
             let units =
@@ -433,31 +526,30 @@ pub(crate) fn hd_title(
     };
     let videos = timeline.videos();
     let format = disccraft_dvd::BdVideoFormat {
-        width,
+        width: coded_width,
         height,
         rate: (fps_num, fps_den),
         interlaced: video_format.interlaced(),
     };
     // M6.388 / M6.393: a title whose clips that go on as they are are mostly HDV's 1440 x 1080 is made at 1440: those
     // join as they are, and its other clips and gaps are encoded at 1440 (shown 16:9). The disc's graphics stay
-    // 1920 x 1080.
-    let narrow = if options.codec == HdCodec::Mpeg2 {
+    // 1920 x 1080. (A 1440 x 1080 format's title is that wide anyway: M10.40.)
+    let narrow = if options.codec == HdCodec::Mpeg2 && coded_width == width {
         disccraft_dvd::narrow_mpeg2_width(project, timeline, format)
     } else {
         None
     };
-    let title_width = narrow.unwrap_or(width);
+    let title_width = narrow.unwrap_or(coded_width);
     let options = HdOptions {
         width: title_width,
         ..options
     };
-    let format_key = match narrow {
-        Some(narrow) => format!("{format_id}-{narrow}"),
-        // 1080i coded as H.264 (M12.28) is another stream than the format's MPEG-2: another cache file.
-        None if options.interlaced => format!("{format_id}-h264"),
-        None => format_id.to_string(),
-    };
-    let format_id = format_key.as_str();
+    // Another coding of the format is another stream: another cache file.
+    let mut key = format_key(video, options.codec, narrow);
+    if video.is_sd() {
+        key.push_str(&sd_key(&options));
+    }
+    let format_id = key.as_str();
     let (parts, title_codec) = {
         let mut parts = Vec::with_capacity(videos.len());
         let mut title_codec = options.codec;
@@ -860,9 +952,10 @@ pub(crate) fn hd_transcoded(
     let Ok(Some(budget)) = disccraft_dvd::hd_budget(project) else {
         return false;
     };
-    // In its own format (M6.325), at that format's rates.
+    // In its own format (M6.325) and codec (M10.39), at that codec's rates.
     let format = project.asset_bd_video(asset);
-    let rates = budget.rates_for(format);
+    let codec = codec(project.asset_bd_codec(asset), format);
+    let rates = budget.rates_for(codec == HdCodec::Mpeg2);
     // At the asset's own bit rate, when it has one.
     let rates = project
         .assets
@@ -890,7 +983,11 @@ pub(crate) fn hd_transcoded(
             let cached = cached_paths(
                 cache_dir,
                 source,
-                (format.id(), rates, coding),
+                (
+                    title_key(project, timeline, format, codec).as_str(),
+                    rates,
+                    coding,
+                ),
                 timeline.video_trim(clip),
             )
             .is_ok_and(|(es, index)| es.is_file() && index.is_file());
@@ -913,7 +1010,8 @@ pub(crate) fn revert_hd(
         return 0;
     };
     let format = project.asset_bd_video(asset);
-    let rates = budget.rates_for(format);
+    let codec = codec(project.asset_bd_codec(asset), format);
+    let rates = budget.rates_for(codec == HdCodec::Mpeg2);
     // At the asset's own bit rate, when it has one.
     let rates = project
         .assets
@@ -940,7 +1038,11 @@ pub(crate) fn revert_hd(
             let Ok((es, index)) = cached_paths(
                 cache_dir,
                 source,
-                (format.id(), rates, coding),
+                (
+                    title_key(project, timeline, format, codec).as_str(),
+                    rates,
+                    coding,
+                ),
                 timeline.video_trim(clip),
             ) else {
                 continue;
@@ -1134,8 +1236,9 @@ mod tests {
     }
 
     /// M12.28: with the disc's codec set to H.264, 1080i is H.264 coded as interlaced frames (the clip says H.264,
-    /// 1080i); MPEG-2 and the automatic choice keep MPEG-2 for 1080i; the progressive formats are H.264 whatever
-    /// the choice.
+    /// 1080i); MPEG-2 and the automatic choice keep MPEG-2 for 1080i. M10.39: the progressive formats are H.264
+    /// unless MPEG-2 is chosen, then MPEG-2 (the clip says MPEG-2, 1080p or 720p, at the format's rate), each kept in
+    /// a cache file of its own.
     #[test]
     fn the_disc_codec_chooses_1080i_h264_or_mpeg2() {
         let h264 = options(BdCodec::H264, BdVideo::Hd1080i59, (20_000, 30_000)).unwrap();
@@ -1162,13 +1265,47 @@ mod tests {
             assert_eq!(mpeg2.codec, HdCodec::Mpeg2);
             assert!(!mpeg2.interlaced);
         }
-        for choice in BdCodec::ALL {
+        for (choice, codec) in [
+            (BdCodec::Auto, HdCodec::H264),
+            (BdCodec::H264, HdCodec::H264),
+            (BdCodec::Mpeg2, HdCodec::Mpeg2),
+        ] {
             let progressive = options(choice, BdVideo::Hd1080p23, (20_000, 30_000)).unwrap();
-            assert_eq!(
-                (progressive.codec, progressive.interlaced),
-                (HdCodec::H264, false)
-            );
+            assert_eq!((progressive.codec, progressive.interlaced), (codec, false));
         }
+        assert_eq!(
+            coding(BdCodec::Mpeg2, BdVideo::Hd720p59),
+            Some(StreamCoding::Mpeg2Video {
+                video_format: 5,
+                frame_rate: 7,
+                aspect: 3
+            })
+        );
+        assert_eq!(
+            coding(BdCodec::Mpeg2, BdVideo::Hd1080p24),
+            Some(StreamCoding::Mpeg2Video {
+                video_format: 6,
+                frame_rate: 2,
+                aspect: 3
+            })
+        );
+        // The automatic coding keeps the format's name; another is another file.
+        assert_eq!(
+            super::format_key(BdVideo::Hd1080p23, HdCodec::H264, None),
+            "1080p23.976"
+        );
+        assert_eq!(
+            super::format_key(BdVideo::Hd1080p23, HdCodec::Mpeg2, None),
+            "1080p23.976-mpeg2"
+        );
+        assert_eq!(
+            super::format_key(BdVideo::Hd1080i59, HdCodec::H264, None),
+            "1080i59.94-h264"
+        );
+        assert_eq!(
+            super::format_key(BdVideo::Hd1080i59, HdCodec::Mpeg2, Some(1440)),
+            "1080i59.94-1440"
+        );
     }
 
     /// Clips are joined without being copied: each unit is read from its own clip's file, and the second clip's

@@ -104,6 +104,48 @@ pub(crate) fn layer_break(
     Ok(Some(found))
 }
 
+/// Moves the title sets from `from_vts` on `sectors` later in `VIDEO_TS.IFO` and `VIDEO_TS.BUP`: their start sectors
+/// in the title search pointer table (VMGI_MAT 0x0C4 gives its sector; each 12-byte entry has its title set at 6
+/// and the set's start at 8). For a gap left before that title set in the image.
+pub(crate) fn shift_title_sets(video_ts: &Path, from_vts: u8, sectors: u32) -> Result<(), String> {
+    for name in ["VIDEO_TS.IFO", "VIDEO_TS.BUP"] {
+        let path = video_ts.join(name);
+        let mut data = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let bad = || format!("{}: no title search pointer table", path.display());
+        let u32_at = |data: &[u8], at: usize| -> Option<u32> {
+            Some(u32::from_be_bytes(
+                data.get(at..at.checked_add(4)?)?.try_into().ok()?,
+            ))
+        };
+        let table = u32_at(&data, 0x0C4)
+            .and_then(|sector| usize::try_from(sector).ok()?.checked_mul(2048))
+            .ok_or_else(bad)?;
+        let count = data
+            .get(table..table.saturating_add(2))
+            .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+            .ok_or_else(bad)?;
+        for index in 0..usize::from(count) {
+            let entry = index
+                .checked_mul(12)
+                .and_then(|offset| table.checked_add(8)?.checked_add(offset))
+                .ok_or_else(bad)?;
+            let vts = data.get(entry.saturating_add(6)).copied().ok_or_else(bad)?;
+            if vts < from_vts {
+                continue;
+            }
+            let at = entry.saturating_add(8);
+            let start = u32_at(&data, at)
+                .and_then(|start| start.checked_add(sectors))
+                .ok_or_else(bad)?;
+            data.get_mut(at..at.saturating_add(4))
+                .ok_or_else(bad)?
+                .copy_from_slice(&start.to_be_bytes());
+        }
+        std::fs::write(&path, &data).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// The manual break's title set, cell and the time asked for (90 kHz, at its frame), when the project sets one
 /// for a dual-layer DVD.
 fn manual_target(project: &Project, dvd: &DvdBuildReport) -> Result<Option<(u8, u8, u64)>, String> {

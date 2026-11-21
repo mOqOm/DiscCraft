@@ -83,7 +83,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "トランスコード設定（Blu-ray）",
         menu: &["アセット"],
         shortcut: None,
-        params: r#"{"asset": id, "kbps": number | null (null: 自動), "maxKbps"?: number (最大。省略で kbps), "preset"?: string (品質プリセットの名前), "video"?: "1080p23.976" | "1080p24" | "1080i59.94" | "1080i50" | "720p59.94" | "720p50" | "720p23.976" | "720p24" | null (HD の Blu-ray でこのビデオのタイトルを作る形式。null: プロジェクト設定を使用。省略で今のまま), "quality"?: 1〜5 (MPEG-2 の品質。Long Form の MPEG-2 のプリセットは 3。省略で 5), "mode"?: "vbr" | "vbr2Pass" | "cbr" (レートの保ち方。Encore の Blu-ray のプリセットは VBR 1 パス。省略で vbr)}"#,
+        params: r#"{"asset": id, "kbps": number | null (null: 自動), "maxKbps"?: number (最大。省略で kbps), "preset"?: string (品質プリセットの名前), "video"?: "1080p23.976" | "1080p24" | "1080i59.94" | "1080i50" | "1440p23.976" | "1440p24" | "1440i59.94" | "1440i50" | "720p59.94" | "720p50" | "720p23.976" | "720p24" | null (HD の Blu-ray でこのビデオのタイトルを作る形式。null: プロジェクト設定を使用（コーデックも）。省略で今のまま), "codec"?: "h264" | "mpeg2" | null (HD の Blu-ray でこのビデオのタイトルを作るコーデック。null: プロジェクトの。省略で今のまま), "quality"?: 1〜5 (MPEG-2 の品質。Long Form の MPEG-2 のプリセットは 3。省略で 5), "mode"?: "vbr" | "vbr2Pass" | "cbr" (レートの保ち方。Encore の Blu-ray のプリセットは VBR 1 パス。省略で vbr)}"#,
         enabled: always_enabled,
         run: run_set_bluray_transcode,
         journal: true,
@@ -93,7 +93,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "Blu-ray の形式にそのまま入るか",
         menu: &["アセット"],
         shortcut: None,
-        params: r#"{"asset": id, "video": "sd" | "1080p23.976" | "1080p24" | "1080i59.94" | "1080i50" | "720p59.94" | "720p50" | "720p23.976" | "720p24"} → {"fits": bool (このビデオがその形式のタイトルにトランスコードせずに入るか)}"#,
+        params: r#"{"asset": id, "video": "sd" | "1080p23.976" | "1080p24" | "1080i59.94" | "1080i50" | "1440p23.976" | "1440p24" | "1440i59.94" | "1440i50" | "720p59.94" | "720p50" | "720p23.976" | "720p24"} → {"fits": bool (このビデオがその形式のタイトルにトランスコードせずに入るか)}"#,
         enabled: always_enabled,
         run: run_fits_bluray,
         journal: false,
@@ -847,6 +847,17 @@ fn run_set_bluray_transcode(session: &mut Session, params: &Value) -> CommandRes
         )),
         Some(_) => return Err("parameter \"video\" must be an HD format or null".to_string()),
     };
+    // Encore's Codec (M10.39): H.264 or MPEG-2 of its own, or the project's with null.
+    let codec = match params.get("codec") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(name)) => Some(Some(
+            disccraft_project::BdCodec::from_id(name)
+                .filter(|codec| !codec.is_auto())
+                .ok_or_else(|| format!("parameter \"codec\": no codec {name}"))?,
+        )),
+        Some(_) => return Err("parameter \"codec\" must be h264, mpeg2 or null".to_string()),
+    };
     let asset = session
         .project
         .assets
@@ -864,6 +875,13 @@ fn run_set_bluray_transcode(session: &mut Session, params: &Value) -> CommandRes
     });
     if let Some(video) = video {
         asset.bluray_video = video;
+        // Use Project Settings: the project's codec too.
+        if video.is_none() && codec.is_none() {
+            asset.bluray_codec = None;
+        }
+    }
+    if let Some(codec) = codec {
+        asset.bluray_codec = codec;
     }
     Ok(empty_object())
 }
@@ -1477,6 +1495,61 @@ mod tests {
 
     /// M6.300: Transcode Settings keeps how the rate is kept beside it (VBR 1 pass, VBR 2 pass, CBR): set with the
     /// rate or alone, kept when left out, undone; another name is refused.
+    /// M10.39: a codec of its own (kept when left out), the project's with null or with the project's format;
+    /// automatic and unknown ones refused. (Part of [`a_transcode_setting_has_its_encoding`], for asset 5.)
+    fn codec_of_its_own(session: &mut Session) -> Result<(), Box<dyn std::error::Error>> {
+        let format = |session: &Session| {
+            session
+                .project
+                .assets
+                .get(&AssetId(5))
+                .and_then(|asset| asset.bluray_video)
+        };
+        let codec = |session: &Session| {
+            session
+                .project
+                .assets
+                .get(&AssetId(5))
+                .and_then(|asset| asset.bluray_codec)
+        };
+        let _ = session.execute(
+            "asset.setBlurayTranscode",
+            &json!({"asset": 5, "kbps": null, "video": "720p59.94", "codec": "mpeg2"}),
+        )?;
+        assert_eq!(codec(session), Some(disccraft_project::BdCodec::Mpeg2));
+        let _ = session.execute(
+            "asset.setBlurayTranscode",
+            &json!({"asset": 5, "kbps": 20000}),
+        )?;
+        assert_eq!(codec(session), Some(disccraft_project::BdCodec::Mpeg2));
+        for bad in [json!("auto"), json!("vc1"), json!(2)] {
+            let params = json!({"asset": 5, "kbps": null, "codec": bad});
+            assert!(
+                session
+                    .execute("asset.setBlurayTranscode", &params)
+                    .is_err(),
+                "{params}"
+            );
+        }
+        let _ = session.execute(
+            "asset.setBlurayTranscode",
+            &json!({"asset": 5, "kbps": null, "codec": null}),
+        )?;
+        assert_eq!(codec(session), None);
+        assert_eq!(format(session), Some(disccraft_project::BdVideo::Hd720p59));
+        let _ = session.execute(
+            "asset.setBlurayTranscode",
+            &json!({"asset": 5, "kbps": null, "codec": "h264"}),
+        )?;
+        let _ = session.execute(
+            "asset.setBlurayTranscode",
+            &json!({"asset": 5, "kbps": null, "video": null}),
+        )?;
+        assert_eq!(format(session), None);
+        assert_eq!(codec(session), None);
+        Ok(())
+    }
+
     #[test]
     fn a_transcode_setting_has_its_encoding() -> Result<(), Box<dyn std::error::Error>> {
         use disccraft_project::TranscodeMode;
@@ -1501,6 +1574,7 @@ mod tests {
             bluray_transcode: None,
             transcode_film: false,
             bluray_video: None,
+            bluray_codec: None,
             transcode_quality: disccraft_project::BEST_QUALITY,
             max_render_quality: false,
             frame_blend: false,
@@ -1659,11 +1733,7 @@ mod tests {
                 "{params}"
             );
         }
-        let _ = session.execute(
-            "asset.setBlurayTranscode",
-            &json!({"asset": 5, "kbps": null, "video": null}),
-        )?;
-        assert_eq!(format(&session), None);
+        codec_of_its_own(&mut session)?;
         let _ = session.execute("asset.setTranscode", &json!({"asset": 5, "kbps": 8000}))?;
         // M6.306: the sound's format beside them.
         let _ = session.execute(
@@ -1762,6 +1832,7 @@ mod tests {
             bluray_transcode: None,
             transcode_film: false,
             bluray_video: None,
+            bluray_codec: None,
             transcode_quality: disccraft_project::BEST_QUALITY,
             max_render_quality: false,
             frame_blend: false,
@@ -1802,6 +1873,7 @@ mod tests {
             bluray_transcode: None,
             transcode_film: false,
             bluray_video: None,
+            bluray_codec: None,
             transcode_quality: disccraft_project::BEST_QUALITY,
             max_render_quality: false,
             frame_blend: false,

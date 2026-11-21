@@ -26,6 +26,8 @@ pub(crate) struct BuiltClip {
     pub(crate) bytes: u64,
     /// Clip duration in 90 kHz units.
     pub(crate) duration_90k: u64,
+    /// Where decoding can start: the video's random access points (GOP starts), in 45 kHz units, in order.
+    pub(crate) entry_points: Vec<u32>,
 }
 
 /// A title clip with its elementary streams ready to multiplex (nothing written yet). A pop-up menu's IG stream
@@ -67,7 +69,31 @@ impl PreparedClip {
             marks: self.marks.clone(),
             bytes: 0,
             duration_90k: duration_90k(self.presentation_start, self.presentation_end)?,
+            entry_points: self.entry_points(),
         })
+    }
+
+    /// The video's random access points in 45 kHz units, in order.
+    fn entry_points(&self) -> Vec<u32> {
+        let video = self.inputs.iter().find(|input| {
+            matches!(
+                input.kind,
+                disccraft_m2tsmux::StreamKind::Mpeg2Video
+                    | disccraft_m2tsmux::StreamKind::H264Video
+            )
+        });
+        let mut points: Vec<u32> = video
+            .map(|input| {
+                input
+                    .units
+                    .iter()
+                    .filter(|unit| unit.random_access)
+                    .filter_map(|unit| u32::try_from(unit.pts / 2).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        points.sort_unstable();
+        points
     }
 
     /// Adds an interactive graphics stream (a pop-up menu).
@@ -108,8 +134,18 @@ pub(crate) fn prepare_clip(
     let video_stream = Stream {
         pid: VIDEO_PID,
         coding: match hd {
-            Some(hd) => crate::hd::coding_of(hd.video, hd.codec)
-                .ok_or_else(|| invalid("an HD title on an SD disc"))?,
+            Some(hd) => match crate::hd::coding_of(hd.video, hd.codec) {
+                Some(coding) => coding,
+                // An SD disc's H.264 (M10.41): 480i or 576i, 4:3 or 16:9 as the title is.
+                None if hd.codec == disccraft_transcode::hd::HdCodec::H264 => {
+                    StreamCoding::H264Video {
+                        video_format: video_format(settings.standard),
+                        frame_rate: frame_rate(settings.standard),
+                        aspect: if title.wide { 3 } else { 2 },
+                    }
+                }
+                None => return Err(invalid("an HD title on an SD disc")),
+            },
             None => video_coding(settings, title.wide),
         },
     };

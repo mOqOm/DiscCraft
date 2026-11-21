@@ -826,6 +826,7 @@ mod tests {
             label_offset: [0, 0],
             thumbnail_offset: [0, 0],
             body: None,
+            psd_layer: None,
             hidden: false,
             locked: false,
             name: "Button 1".to_string(),

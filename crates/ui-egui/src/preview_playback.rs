@@ -1438,6 +1438,7 @@ mod tests {
         Timeline {
             parental_level: None,
             parental_alternative: disccraft_project::Link::NotSet,
+            parental_chapters: Vec::new(),
             id: TimelineId(id),
             name: format!("T{id}"),
             video: AssetId(video),
@@ -1478,6 +1479,7 @@ mod tests {
             bluray_transcode: None,
             transcode_film: false,
             bluray_video: None,
+            bluray_codec: None,
             transcode_quality: disccraft_project::BEST_QUALITY,
             max_render_quality: false,
             frame_blend: false,

@@ -12,6 +12,7 @@ disccraft-automation.workspace = true
 disccraft-check.workspace = true
 disccraft-project.workspace = true
 disccraft-engine.workspace = true
+disccraft-platform.workspace = true
 serde_json.workspace = true
 clap.workspace = true
 

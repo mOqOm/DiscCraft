@@ -847,6 +847,7 @@ mod tests {
     /// ファーストプレイ → メニュー 1（ボタン 2 つ）→ タイトル 1（2 チャプター）→ メニューへ戻る。
     fn sample_disc() -> DiscModel {
         DiscModel {
+            parental: None,
             title_menu: None,
             first_play: vec![[0x30, 0x06, 0x00, 0x01, 0x00, 0xC0, 0x00, 0x00]],
             vmgm: vec![MenuPgcModel {
