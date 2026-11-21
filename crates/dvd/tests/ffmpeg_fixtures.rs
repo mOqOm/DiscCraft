@@ -641,6 +641,145 @@ fn builds_a_timeline_of_two_clips() -> Result<(), Box<dyn Error>> {
     result
 }
 
+/// M13.17: a chapter with a parental alternative makes its title a parental block. The timeline of two clips (two
+/// chapters) whose second chapter is for level 5, with bars in its place below: one PGC for levels 5 to 8 (the
+/// two chapters), one for 1 to 4 (the first chapter and the bars, muxed after the title's last picture); the title's
+/// mask and the disc's parental table say so, a player at level 4 plays the second PGC, the VOB decodes whole.
+#[test]
+fn a_chapter_with_a_parental_alternative_makes_a_parental_block() -> Result<(), Box<dyn Error>> {
+    let ffmpeg = ffmpeg_path();
+    if !tool_available(&ffmpeg) {
+        println!("skipped: ffmpeg not found");
+        return Ok(());
+    }
+    let _guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
+    let fixtures = fixtures_dir();
+    fs::create_dir_all(&fixtures)?;
+    let m2v = fixtures.join("ntsc.m2v");
+    if !m2v.is_file() {
+        create_m2v(&ffmpeg, &m2v)?;
+    }
+    // 120 frames of bars, coded as the fixture is.
+    let bars = fixtures.join("ntsc_bars.m2v");
+    if !bars.is_file() {
+        run_success(
+            &ffmpeg,
+            &[
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "smptebars=size=720x480:rate=30000/1001",
+                "-t",
+                "4",
+                "-vf",
+                "setfield=tff",
+                "-c:v",
+                "mpeg2video",
+                "-pix_fmt",
+                "yuv420p",
+                "-b:v",
+                "6000k",
+                "-maxrate",
+                "8000k",
+                "-bufsize",
+                "1835k",
+                "-g",
+                "15",
+                "-bf",
+                "2",
+                "-flags",
+                "+cgop+ilme+ildct",
+                "-sc_threshold",
+                "1000000000",
+                "-aspect",
+                "4:3",
+                "-f",
+                "mpeg2video",
+            ],
+            &bars,
+        )?;
+    }
+
+    let mut project = Project::default();
+    project.settings.kind = DiscKind::Dvd;
+    project.settings.standard = VideoStandard::Ntsc;
+    let video = project.add_asset(&m2v)?;
+    let alternative = project.add_asset(&bars)?;
+    let timeline = project.add_timeline(video, Some("Parental".to_string()))?;
+    let join = Tick(599 * 8_475_667_200);
+    assert_eq!(project.append_timeline_video(timeline, video, join)?, 1);
+    project
+        .timeline_mut(timeline)
+        .ok_or("missing timeline")?
+        .parental_chapters = vec![disccraft_project::ParentalChapter {
+        chapter: 1,
+        level: 5,
+        alternative,
+    }];
+
+    let dir = temp_dir("parental_block");
+    let _ = fs::remove_dir_all(&dir);
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        let report = build_video_ts(&project, &dir)?;
+        let title = report.titles.first().ok_or("missing report title")?;
+        assert_eq!(title.chapters, 2);
+        assert!((i64::from(title.duration_90k) - 1198 * 3003).abs() < 45_000);
+
+        let video_ts = dir.join("VIDEO_TS");
+        let vtsi = read_vtsi(&fs::read(video_ts.join("VTS_01_0.IFO"))?)?;
+        assert_eq!(vtsi.pgcs.len(), 2);
+        let ids: Vec<u16> = vtsi
+            .categories
+            .iter()
+            .map(|category| category.parental_id)
+            .collect();
+        assert_eq!(ids, [0x00F0, 0x000F]);
+        let (full, cut) = (&vtsi.pgcs[0], &vtsi.pgcs[1]);
+        assert_eq!(full.program_entry_cells, [1, 2]);
+        assert_eq!(cut.program_entry_cells, [1, 2]);
+        let cell_ids = |pgc: &disccraft_ifo::Pgc| {
+            pgc.cells
+                .iter()
+                .map(|cell| cell.cell_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(cell_ids(full), [1, 2]);
+        assert_eq!(cell_ids(cut), [1, 3]);
+        // The bars follow the title's last picture in the VOB.
+        assert!(cut.cells[1].first_sector > full.cells[1].last_sector);
+
+        let vmgi = read_vmgi(&fs::read(video_ts.join("VIDEO_TS.IFO"))?)?;
+        assert_eq!(vmgi.titles[0].parental_mask, 0x00FF);
+        let table = vmgi.parental.as_ref().ok_or("no parental table")?;
+        assert_eq!(table.countries.len(), 249);
+
+        let model = disccraft_vm::load_video_ts(&video_ts)?;
+        let japan = u16::from_be_bytes(*b"JP");
+        assert_eq!(model.title_variant(1, 8, japan), Some(0));
+        assert_eq!(model.title_variant(1, 5, japan), Some(0));
+        assert_eq!(model.title_variant(1, 4, japan), Some(1));
+        assert_eq!(model.title_variant(1, 15, japan), Some(0));
+
+        let vob = video_ts.join("VTS_01_1.VOB");
+        let decoded = Command::new(&ffmpeg)
+            .args(["-v", "error", "-xerror", "-i"])
+            .arg(&vob)
+            .args(["-f", "null", "-"])
+            .output()?;
+        assert!(
+            decoded.status.success() && decoded.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&decoded.stderr)
+        );
+        Ok(())
+    })();
+    let _ = fs::remove_dir_all(&dir);
+    result
+}
+
 /// A clip that needs a transcode (an MP4) butted on to an MPEG-2 clip: it is transcoded on its own and joined, so
 /// the title plays both.
 #[test]

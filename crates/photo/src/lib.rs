@@ -87,6 +87,9 @@ pub struct PsdButton {
     pub thumbnail: Option<[u32; 4]>,
     /// The button's subpicture (its `(=1)` / `(=2)` / `(=3)` layers) over the button's area.
     pub subpicture: Option<PsdSubpicture>,
+    /// The PSD layer id (`lyid`) of its `(+)` group, when the PSD has one (Photoshop and PhotoCraft keep it while
+    /// the group is edited, moved or renamed, and give a copy a new one; M10.49).
+    pub layer_id: Option<u32>,
 }
 
 /// A PSD button's subpicture (Encore's `(=1)` / `(=2)` / `(=3)` layers): which colour of the colour set each pixel
@@ -132,9 +135,28 @@ pub struct PsdMenu {
 pub struct PsdPages {
     /// The layers outside the pages that are not buttons, highlight layers hidden: the picture under every page.
     pub shared: Image8,
-    /// Each page's own layers over transparency, highlight layers hidden: page 0 the top level's `(+)` groups,
-    /// then each shown `(#)` group (a hidden one is no page), the lowest first.
+    /// Each page's own buttons over transparency, highlight layers hidden: page 0 the top level's `(+)` groups, then
+    /// the button sets in each shown `(#)` group (a hidden one is no page), the lowest first. What else a `(#)` group
+    /// draws is left out, as on Encore's Blu-ray discs.
     pub pages: Vec<Image8>,
+}
+
+/// One layer of a PSD's layer tree, as Encore's Layers panel lists it (M10.47).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PsdTreeNode {
+    /// The layer's name as the PSD has it.
+    pub name: String,
+    /// Whether it is shown (the eye).
+    pub visible: bool,
+    /// Whether it is a group.
+    pub group: bool,
+    /// A `(#)` group that is a page: its page number (1 for the lowest), as [`load_psd_menu`] numbers its pages.
+    pub page: Option<usize>,
+    /// A button set (`(+)` and Encore's chapter index sets): its page (0 for the top level's buttons) and its number
+    /// in the page (0 for the lowest), as [`load_psd_menu`] reads the buttons.
+    pub button: Option<(usize, usize)>,
+    /// The group's layers, the top one first.
+    pub children: Vec<PsdTreeNode>,
 }
 
 const MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -225,6 +247,89 @@ pub fn load_psd_menu(path: &Path) -> Result<PsdMenu, PhotoError> {
     })
 }
 
+/// The layer tree of the PSD at `path`, the top layer first (M10.47, Encore's Layers panel): each layer's name and
+/// eye, the pages and the button sets numbered as [`load_psd_menu`] numbers them.
+///
+/// # Errors
+///
+/// As [`load_psd_menu`].
+pub fn psd_layer_tree(path: &Path) -> Result<Vec<PsdTreeNode>, PhotoError> {
+    let (doc, _) = load_document(path)?;
+    let paged = doc.layers.iter().any(is_page_group);
+    let mut pages = 0usize;
+    let mut top_buttons = 0usize;
+    // Bottom to top, as the document keeps its layers and as the pages and buttons are numbered.
+    let mut nodes: Vec<PsdTreeNode> = doc
+        .layers
+        .iter()
+        .map(|layer| {
+            if paged && is_page_group(layer) {
+                pages = pages.saturating_add(1);
+                let mut buttons = 0usize;
+                tree_node(layer, Some((pages, &mut buttons)), (Some(pages), true))
+            } else {
+                tree_node(layer, Some((0, &mut top_buttons)), (None, true))
+            }
+        })
+        .collect();
+    nodes.reverse();
+    Ok(nodes)
+}
+
+/// `layer` as a tree node; `buttons`: the page its button sets are numbered in and the count so far (`None` inside a
+/// set, or in a `(#)` group that is no page, whose groups are no buttons); `page`: the page it is; `top`: at the
+/// document's top level (where a `(#)` group is a page or nothing, as [`collect_button_layers`] reads it).
+fn tree_node(
+    layer: &Layer,
+    mut buttons: Option<(usize, &mut usize)>,
+    (page, top): (Option<usize>, bool),
+) -> PsdTreeNode {
+    let LayerContent::Group(group) = &layer.content else {
+        return PsdTreeNode {
+            name: layer.name.clone(),
+            visible: layer.visible,
+            group: false,
+            page,
+            button: None,
+            children: Vec::new(),
+        };
+    };
+    let mut button = None;
+    let inner = if is_button_name(&layer.name) {
+        if let Some((page, count)) = buttons.as_mut() {
+            button = Some((*page, **count));
+            **count = count.saturating_add(1);
+        }
+        None
+    } else if is_page_name(&layer.name) && page.is_none() && (top || !layer.visible) {
+        // A `(#)` group that is no page: a hidden one, or one at the top level of a menu without pages shown.
+        None
+    } else {
+        buttons
+    };
+    let mut inner = inner;
+    let mut children: Vec<PsdTreeNode> = group
+        .children
+        .iter()
+        .map(|child| {
+            tree_node(
+                child,
+                inner.as_mut().map(|(page, count)| (*page, &mut **count)),
+                (None, false),
+            )
+        })
+        .collect();
+    children.reverse();
+    PsdTreeNode {
+        name: layer.name.clone(),
+        visible: layer.visible,
+        group: true,
+        page,
+        button,
+        children,
+    }
+}
+
 /// How many pages the menu PSD at `path` has: 1, and one more for each shown `(#)` group at its top level (M10.27).
 ///
 /// # Errors
@@ -253,8 +358,12 @@ pub fn load_menu_pages(path: &Path) -> Result<PsdPages, PhotoError> {
             if !keep(index, layer) {
                 layer.visible = false;
             } else if is_page_group(layer) {
-                // A page shows its group (Encore hides the other pages' groups as it shows one).
+                // A page shows its group's buttons (Encore hides the other pages' groups as it shows one), and only
+                // them: Encore's Blu-ray pages leave out what else the group draws (docs/encore-behavior.md 9.5g).
                 layer.visible = true;
+                if let LayerContent::Group(group) = &mut layer.content {
+                    hide_all_but_buttons(&mut group.children);
+                }
             }
         }
         hide_highlights_in_layers(&mut doc.layers);
@@ -422,6 +531,20 @@ fn collect_highlight_from_layer(layer: &Layer, out: &mut Vec<Layer>) {
     }
 }
 
+/// Hides every layer that is not in a button's set; a group that is no button stays, showing only the button sets
+/// inside it.
+fn hide_all_but_buttons(layers: &mut [Layer]) {
+    for layer in layers {
+        if is_button_name(&layer.name) {
+            continue;
+        }
+        match &mut layer.content {
+            LayerContent::Group(group) => hide_all_but_buttons(&mut group.children),
+            _ => layer.visible = false,
+        }
+    }
+}
+
 fn hide_highlights_in_layers(layers: &mut [Layer]) {
     for layer in layers {
         hide_highlight_layer(layer);
@@ -552,6 +675,7 @@ fn build_button(layer: Layer, canvas: Rect) -> Option<PsdButton> {
 
     Some(PsdButton {
         kind: button_kind(&layer.name),
+        layer_id: layer.psd_id,
         name,
         x: u32::try_from(rect.x0).ok()?,
         y: u32::try_from(rect.y0).ok()?,

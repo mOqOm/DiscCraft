@@ -502,6 +502,30 @@ impl DiscCraftApp {
                 Err(error) => self.status = error,
             }
         }
+        // M12.40: HD H.264 on the system's hardware encoder.
+        ui.add_space(6.0);
+        let mut hardware = crate::workspace::load_hardware_encoder();
+        let encoders = disccraft_platform::hardware_h264_encoders();
+        let toggled = ui
+            .add_enabled(
+                !encoders.is_empty(),
+                egui::Checkbox::new(&mut hardware, tl!("Use the hardware encoder for HD H.264")),
+            )
+            .on_disabled_hover_text(tl!("This computer has no hardware H.264 encoder"))
+            .changed();
+        ui.small(match encoders.first() {
+            Some(name) => tlf!(
+                "{name}: the Blu-ray's 1080p and 720p H.264 in one pass (VBR or CBR), several times as fast. 1080i, standard definition and two-pass encodes stay on the processor, as does a video the encoder fails on.",
+                name = name
+            ),
+            None => tl!("No hardware H.264 encoder was found.").to_string(),
+        });
+        if toggled {
+            match crate::workspace::save_hardware_encoder(hardware) {
+                Ok(()) => disccraft_platform::use_for_transcodes(hardware),
+                Err(error) => self.status = error,
+            }
+        }
     }
 
     /// "Preview" (Encore: TV Mode / Player Region Code / Audio Language; the parental level is DiscCraft's): the

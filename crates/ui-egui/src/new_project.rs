@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::i18n::{tl, tlf};
-use disccraft_project::{BdVideo, Capacity, DiscKind, VideoStandard};
+use disccraft_project::{BdCodec, BdVideo, Capacity, DiscKind, VideoStandard};
 use egui::text::{CCursor, CCursorRange};
 use egui::{Align, Button, Layout, Ui};
 
@@ -40,6 +40,9 @@ pub(crate) struct NewProjectForm {
     pub(crate) capacity: Capacity,
     /// A Blu-ray's video format (M6.357: HD unless the user picks SD).
     pub(crate) bd_video: BdVideo,
+    /// A Blu-ray's codec: the open project's in Project Settings; `None` for a new project, whose is
+    /// [`default_bd_codec`].
+    pub(crate) bd_codec: Option<BdCodec>,
     /// The tab in front.
     pub(crate) tab: NewProjectTab,
     /// Focus the name field and select its text on the next frame.
@@ -59,6 +62,7 @@ impl Default for NewProjectForm {
             wide: false,
             capacity: Capacity::Dvd5,
             bd_video: default_bd_video(VideoStandard::Ntsc),
+            bd_codec: None,
             tab: NewProjectTab::Basic,
             focus_name: true,
             settings: false,
@@ -74,6 +78,17 @@ pub(crate) fn default_bd_video(standard: VideoStandard) -> BdVideo {
     match standard {
         VideoStandard::Ntsc => BdVideo::Hd1080p23,
         VideoStandard::Pal => BdVideo::Hd1080i50,
+    }
+}
+
+/// The Blu-ray codec a new project starts with: Encore's New Project dialog starts a PAL Blu-ray in H.264, 1920 x
+/// 1080 at 25 with the odd field first (seen 2026-11-21, M10.43), so the PAL default format is H.264 (coded as
+/// interlaced frames); anything else is automatic (an NTSC disc's 1080p 23.976 is H.264 automatically).
+pub(crate) fn default_bd_codec(standard: VideoStandard, video: BdVideo) -> BdCodec {
+    if standard == VideoStandard::Pal && video == default_bd_video(standard) {
+        BdCodec::H264
+    } else {
+        BdCodec::Auto
     }
 }
 
@@ -119,6 +134,7 @@ impl NewProjectForm {
             wide: settings.widescreen,
             capacity: settings.capacity,
             bd_video: settings.bd_video,
+            bd_codec: Some(settings.bd_codec),
             tab: NewProjectTab::Basic,
             focus_name: false,
             settings: true,
@@ -328,7 +344,11 @@ fn draw_settings_group(ui: &mut Ui, form: &mut NewProjectForm) {
 
                 ui.label(tl!("Transcode settings:"));
                 ui.vertical(|ui| {
-                    for line in transcode_summary(form.kind, form.standard, form.bd_video) {
+                    for line in transcode_summary(
+                        form.kind,
+                        form.standard,
+                        (form.bd_video, form.bd_codec()),
+                    ) {
                         ui.small(line);
                     }
                 });
@@ -352,6 +372,12 @@ fn draw_standard_combo(ui: &mut Ui, form: &mut NewProjectForm) {
 impl NewProjectForm {
     /// After the TV standard changed from `before`: a Blu-ray video format still at the old standard's default
     /// becomes the new one's (one the user picked stays).
+    /// The Blu-ray codec: the open project's, or a new one's ([`default_bd_codec`]).
+    pub(crate) fn bd_codec(&self) -> BdCodec {
+        self.bd_codec
+            .unwrap_or_else(|| default_bd_codec(self.standard, self.bd_video))
+    }
+
     pub(crate) fn follow_standard(&mut self, before: VideoStandard) {
         if self.standard != before && self.bd_video == default_bd_video(before) {
             self.bd_video = default_bd_video(self.standard);
@@ -423,12 +449,14 @@ fn draw_buttons(ui: &mut Ui, form: &NewProjectForm) -> Option<FormAction> {
 pub(crate) fn transcode_summary(
     kind: DiscKind,
     standard: VideoStandard,
-    bd_video: BdVideo,
+    (bd_video, codec): (BdVideo, BdCodec),
 ) -> Vec<String> {
     let audio = tl!("Audio: Dolby Digital (AC-3) 192 kbps stereo (AC-3 and WAV sources are kept)")
         .to_owned();
-    if let (DiscKind::BluRay, Some((width, height, num, den))) = (kind, bd_video.hd()) {
-        let (codec, (target, peak)) = if bd_video.interlaced() {
+    if let (DiscKind::BluRay, Some((_, height, num, den)), Some(width)) =
+        (kind, bd_video.hd(), bd_video.video_width())
+    {
+        let (codec, (target, peak)) = if codec.mpeg2(bd_video) {
             ("MPEG-2", disccraft_build::hd_default_kbps(true))
         } else {
             ("H.264", disccraft_build::hd_default_kbps(false))
@@ -621,11 +649,38 @@ mod tests {
     #[test]
     fn summary_matches_the_standard() {
         crate::i18n::set_current(crate::i18n::Language::En);
-        let ntsc = transcode_summary(DiscKind::Dvd, VideoStandard::Ntsc, BdVideo::Sd);
-        let pal = transcode_summary(DiscKind::BluRay, VideoStandard::Pal, BdVideo::Sd);
-        let hd = transcode_summary(DiscKind::BluRay, VideoStandard::Ntsc, BdVideo::Hd1080p23);
-        let interlaced =
-            transcode_summary(DiscKind::BluRay, VideoStandard::Pal, BdVideo::Hd1080i50);
+        let ntsc = transcode_summary(
+            DiscKind::Dvd,
+            VideoStandard::Ntsc,
+            (
+                BdVideo::Sd,
+                super::default_bd_codec(VideoStandard::Ntsc, BdVideo::Sd),
+            ),
+        );
+        let pal = transcode_summary(
+            DiscKind::BluRay,
+            VideoStandard::Pal,
+            (
+                BdVideo::Sd,
+                super::default_bd_codec(VideoStandard::Pal, BdVideo::Sd),
+            ),
+        );
+        let hd = transcode_summary(
+            DiscKind::BluRay,
+            VideoStandard::Ntsc,
+            (
+                BdVideo::Hd1080p23,
+                super::default_bd_codec(VideoStandard::Ntsc, BdVideo::Hd1080p23),
+            ),
+        );
+        let interlaced = transcode_summary(
+            DiscKind::BluRay,
+            VideoStandard::Pal,
+            (
+                BdVideo::Hd1080i50,
+                super::default_bd_codec(VideoStandard::Pal, BdVideo::Hd1080i50),
+            ),
+        );
         crate::i18n::set_current(crate::i18n::Language::Ja);
 
         assert!(ntsc.first().is_some_and(|line| line.contains("720 x 480")));
@@ -645,7 +700,7 @@ mod tests {
         assert!(
             interlaced
                 .first()
-                .is_some_and(|line| line.contains("MPEG-2, 1920 x 1080, 25 fps")),
+                .is_some_and(|line| line.contains("H.264, 1920 x 1080, 25 fps")),
             "{interlaced:?}"
         );
     }
@@ -660,6 +715,16 @@ mod tests {
         form.follow_standard(VideoStandard::Ntsc);
         assert_eq!(form.bd_video, BdVideo::Hd1080i50);
         assert_eq!(default_bd_video(VideoStandard::Pal), BdVideo::Hd1080i50);
+        // M10.43: as Encore's, a PAL disc's 1080i 25 is H.264; the rest automatic.
+        assert_eq!(form.bd_codec(), disccraft_project::BdCodec::H264);
+        assert_eq!(
+            super::default_bd_codec(VideoStandard::Ntsc, BdVideo::Hd1080p23),
+            disccraft_project::BdCodec::Auto
+        );
+        assert_eq!(
+            super::default_bd_codec(VideoStandard::Pal, BdVideo::Sd),
+            disccraft_project::BdCodec::Auto
+        );
         // A format the user picked stays.
         form.bd_video = BdVideo::Hd720p50;
         form.standard = VideoStandard::Ntsc;

@@ -126,7 +126,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "Blu-ray の映像を設定",
         menu: &["ディスク"],
         shortcut: None,
-        params: r#"{"video": "sd"|"1080p23.976"|"1080p24"|"1080i59.94"|"1080i50"|"720p59.94"|"720p50"|"720p23.976"|"720p24"}"#,
+        params: r#"{"video": "sd"|"1080p23.976"|"1080p24"|"1080i59.94"|"1080i50"|"1440p23.976"|"1440p24"|"1440i59.94"|"1440i50"|"720p59.94"|"720p50"|"720p23.976"|"720p24"}"#,
         enabled: always_enabled,
         run: run_set_bluray_video,
         journal: true,
@@ -568,7 +568,8 @@ mod tests {
         Ok(())
     }
 
-    /// M10.14: the interlaced HD formats by their names; their rate is their frames'.
+    /// M10.14: the interlaced HD formats by their names; their rate is their frames'. M10.40: the 1440 x 1080 ones
+    /// too, in the 1920 x 1080 frame and coded 1440 wide.
     #[test]
     fn the_blu_ray_video_can_be_1080i() -> Result<(), Box<dyn Error>> {
         let mut session = Session::new();
@@ -588,8 +589,21 @@ mod tests {
                 serde_json::to_value(video)?,
                 serde_json::Value::String(video.id().to_string())
             );
-            assert_eq!(video.interlaced(), video.id().starts_with("1080i"));
+            assert_eq!(
+                video.interlaced(),
+                video.id().starts_with("1080i") || video.id().starts_with("1440i")
+            );
+            let wide = video.hd().map(|(width, ..)| width);
+            if video.id().starts_with("1440") {
+                assert_eq!((wide, video.video_width()), (Some(1920), Some(1440)));
+            } else {
+                assert_eq!(video.video_width(), wide);
+            }
         }
+        session.execute("disc.setBlurayVideo", &json!({"video": "1440i59.94"}))?;
+        let video = session.project.settings.bd_video;
+        assert_eq!(video, disccraft_project::BdVideo::Hd1440i59);
+        assert_eq!(video.hd(), Some((1920, 1080, 30_000, 1001)));
         // The progressive 1080 formats outside the Blu-ray standard are no longer offered; a project file that
         // has one opens as the standard's format of the same frame rate.
         for (old, now) in [
@@ -629,11 +643,13 @@ mod tests {
                 .execute("disc.setBlurayCodec", &json!({"codec": "vc1"}))
                 .is_err()
         );
-        // 1080i is MPEG-2 unless the disc asks for H.264; the progressive formats are H.264 whatever it asks.
+        // 1080i is MPEG-2 unless the disc asks for H.264; the progressive formats are H.264 unless it asks for
+        // MPEG-2 (M10.39).
         assert!(!BdCodec::H264.mpeg2(BdVideo::Hd1080i50));
         assert!(BdCodec::Auto.mpeg2(BdVideo::Hd1080i50));
         assert!(BdCodec::Mpeg2.mpeg2(BdVideo::Hd1080i59));
-        assert!(!BdCodec::Mpeg2.mpeg2(BdVideo::Hd720p59));
+        assert!(BdCodec::Mpeg2.mpeg2(BdVideo::Hd720p59));
+        assert!(!BdCodec::Auto.mpeg2(BdVideo::Hd720p59));
         for codec in BdCodec::ALL {
             assert_eq!(
                 serde_json::to_value(codec)?,

@@ -173,6 +173,10 @@ pub struct Button {
     /// Locked (Encore's lock in the Layers panel): cannot be picked or moved in the menu viewer.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub locked: bool,
+    /// The PSD layer id (`lyid`) of the `(+)` group the button was made from (M10.49): when the PSD is edited
+    /// outside and taken in again, the group with this id is this button, whatever its name now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub psd_layer: Option<u32>,
 }
 
 /// A button's content box relative to its rectangle's top-left corner (see [`Button::body`]).
@@ -1868,6 +1872,7 @@ impl Project {
             label_offset: [0, 0],
             thumbnail_offset: [0, 0],
             body: None,
+            psd_layer: None,
             hidden: false,
             locked: false,
         });

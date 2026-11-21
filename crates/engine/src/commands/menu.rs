@@ -1870,9 +1870,11 @@ fn run_fill_chapter_index_pages(session: &mut Session, params: &Value) -> Comman
 }
 
 /// Make a menu follow a PSD edited outside (Encore's "Edit Menu in Photoshop"): the PSD becomes the background, the
-/// `(+)` groups become the buttons (in order: the menu's buttons keep their links and get the new rectangles, new
-/// groups add buttons, buttons without a group are removed), and the button texts and the text objects are cleared,
-/// as they are in the picture now.
+/// `(+)` groups become the buttons, and the button texts and the text objects are cleared, as they are in the
+/// picture now. M10.46: the groups are matched to the menu's buttons (M10.49: by PSD layer id, then by name, then a
+/// group renamed in place, [`match_psd_buttons`]) and the buttons take the PSD's order: a matched button keeps its
+/// link and settings (and the links to it and the default button follow it), a new group adds a button, a button
+/// without a group is removed. A menu shown by page (the PSD's `(#)` groups) takes in every page of it, each from its own group.
 fn run_apply_psd(session: &mut Session, params: &Value) -> CommandResult {
     let menu_id = MenuId(req_u64(params, "menu")?);
     let path = req_str(params, "path")?;
@@ -1880,50 +1882,190 @@ fn run_apply_psd(session: &mut Session, params: &Value) -> CommandResult {
         return Err(format!("menu {} does not exist", menu_id.0));
     };
     let (pages, asset) = psd_buttons(session, &path)?;
-    // A page of a PSD shown by page takes its own page's buttons (M10.27).
-    let index = page.map_or(0, usize::from);
-    let index = if index < pages.len() { index } else { 0 };
-    let rects = pages.into_iter().nth(index).unwrap_or_default();
-
-    let Some(menu) = session.project.menu_mut(menu_id) else {
-        return Err(format!("menu {} does not exist", menu_id.0));
-    };
-    menu.background = MenuBackground::Image { asset };
-    let groups = psd_groups(&rects);
-    menu.subpicture_colors = groups.first;
-    menu.second_subpicture_colors = groups.second;
-    menu.texts.clear();
-    for (index, found) in rects.iter().enumerate() {
-        let group = groups.groups.get(index).copied().unwrap_or(1);
-        match menu.buttons.get_mut(index) {
-            Some(button) => {
-                button.rect = found.rect;
-                button.thumbnail = found.thumbnail;
-                button.subpicture.clone_from(&found.subpicture);
-                button.highlight_group = group;
-                button.label.clear();
-                if !found.name.is_empty() {
-                    button.name.clone_from(&found.name);
-                }
-                // A chapter index button's prefix gives its kind; an ordinary `(+)` keeps the one set by hand.
-                if found.kind != disccraft_project::ButtonKind::Normal {
-                    button.kind = found.kind;
-                }
+    // The menus to update, each with its page of the PSD: every page of a menu shown by page (a page added in
+    // DiscCraft, which the PSD has no group for, takes only the new background); else this menu, from page 0.
+    let mut targets: Vec<(MenuId, Option<usize>)> = Vec::new();
+    match page {
+        Some(_) => {
+            for id in session.project.menu_pages(menu_id) {
+                let index = session
+                    .project
+                    .menu(id)
+                    .and_then(|menu| menu.psd_page)
+                    .map(usize::from)
+                    .filter(|index| *index < pages.len());
+                targets.push((id, index));
             }
-            None => menu.buttons.push(psd_button(found, group)),
         }
+        None => targets.push((menu_id, Some(0))),
     }
-    let extra: Vec<usize> = (rects.len()..menu.buttons.len()).collect();
-    if !extra.is_empty() {
-        session
-            .project
-            .remove_buttons(menu_id, &extra)
-            .map_err(|error| error.to_string())?;
+    let mut count = 0;
+    for (id, index) in targets {
+        let found: &[PsdMenuButton] = index
+            .and_then(|index| pages.get(index))
+            .map_or(&[], Vec::as_slice);
+        if id == menu_id {
+            count = found.len();
+        }
+        if index.is_some() {
+            apply_psd_page(session, id, found, asset)?;
+        } else if let Some(menu) = session.project.menu_mut(id) {
+            menu.background = MenuBackground::Image { asset };
+        }
     }
     Ok(object(&[
         ("asset", Value::from(asset.0)),
-        ("buttons", Value::from(rects.len())),
+        ("buttons", Value::from(count)),
     ]))
+}
+
+/// Make menu `id` follow its page of an edited PSD, `found` (bottom to top): the buttons matched to the groups
+/// ([`match_psd_buttons`]), in the PSD's order (M10.46, [`run_apply_psd`]).
+fn apply_psd_page(
+    session: &mut Session,
+    id: MenuId,
+    found: &[PsdMenuButton],
+    asset: AssetId,
+) -> Result<(), String> {
+    let old: Vec<(String, Option<u32>, Rect)> = session
+        .project
+        .menu(id)
+        .map(|menu| {
+            menu.buttons
+                .iter()
+                .map(|button| (button.name.clone(), button.psd_layer, button.rect))
+                .collect()
+        })
+        .ok_or_else(|| format!("menu {} does not exist", id.0))?;
+    let names: Vec<&str> = old.iter().map(|(name, _, _)| name.as_str()).collect();
+    let matched = match_psd_buttons(&old, found);
+    let mut used = vec![false; names.len()];
+    for index in matched.iter().flatten() {
+        if let Some(slot) = used.get_mut(*index) {
+            *slot = true;
+        }
+    }
+
+    let groups = psd_groups(found);
+    let Some(menu) = session.project.menu_mut(id) else {
+        return Err(format!("menu {} does not exist", id.0));
+    };
+    menu.background = MenuBackground::Image { asset };
+    menu.subpicture_colors = groups.first;
+    menu.second_subpicture_colors = groups.second;
+    menu.texts.clear();
+    // The new order: each group's button (a new one added for a group without), then the buttons without a group.
+    let mut order = Vec::with_capacity(found.len().max(names.len()));
+    for (index, button) in found.iter().enumerate() {
+        match matched.get(index).copied().flatten() {
+            Some(existing) => order.push(existing),
+            None => {
+                let group = groups.groups.get(index).copied().unwrap_or(1);
+                menu.buttons.push(psd_button(button, group));
+                order.push(menu.buttons.len().saturating_sub(1));
+            }
+        }
+    }
+    let kept = order.len();
+    order.extend((0..names.len()).filter(|index| !used.get(*index).copied().unwrap_or(true)));
+    session
+        .project
+        .reorder_buttons(id, &order)
+        .map_err(|error| error.to_string())?;
+    let Some(menu) = session.project.menu_mut(id) else {
+        return Err(format!("menu {} does not exist", id.0));
+    };
+    for (index, (button, found)) in menu.buttons.iter_mut().zip(found).enumerate() {
+        button.rect = found.rect;
+        button.thumbnail = found.thumbnail;
+        button.subpicture.clone_from(&found.subpicture);
+        button.highlight_group = groups.groups.get(index).copied().unwrap_or(1);
+        button.label.clear();
+        button.psd_layer = found.layer_id;
+        if !found.name.is_empty() {
+            button.name.clone_from(&found.name);
+        }
+        // A chapter index button's prefix gives its kind; an ordinary `(+)` keeps the one set by hand.
+        if found.kind != disccraft_project::ButtonKind::Normal {
+            button.kind = found.kind;
+        }
+    }
+    let extra: Vec<usize> = (kept..menu.buttons.len()).collect();
+    if !extra.is_empty() {
+        session
+            .project
+            .remove_buttons(id, &extra)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// The menu's button each group of an edited PSD (`found`, bottom to top) is, from the buttons `old` (name, PSD
+/// layer id, place), each taken once (M10.49): the one of its name made from the same PSD layer, then the first of
+/// its name (an editor that numbers the layers anew on saving still finds them), then the one made from the same
+/// layer (a group renamed in Photoshop, which keeps the id); then, where the group or the button has no layer id (a
+/// PSD written without them, a button from before M10.49), the first whose place overlaps the group's (a group
+/// renamed where it was). Two layer ids that differ are two layers, so a group copied in Photoshop (a new id) never
+/// takes the place of one deleted, as it did when the rest were paired in order. `None`: a new button.
+fn match_psd_buttons(
+    old: &[(String, Option<u32>, Rect)],
+    found: &[PsdMenuButton],
+) -> Vec<Option<usize>> {
+    let mut used = vec![false; old.len()];
+    let mut matched: Vec<Option<usize>> = vec![None; found.len()];
+    let take =
+        |matched: &mut Vec<Option<usize>>,
+         used: &mut Vec<bool>,
+         pick: &dyn Fn(&PsdMenuButton, &(String, Option<u32>, Rect)) -> bool| {
+            for (slot, button) in matched.iter_mut().zip(found) {
+                if slot.is_some() {
+                    continue;
+                }
+                let hit = old.iter().enumerate().position(|(index, candidate)| {
+                    !used.get(index).copied().unwrap_or(true) && pick(button, candidate)
+                });
+                if let Some(index) = hit {
+                    if let Some(taken) = used.get_mut(index) {
+                        *taken = true;
+                    }
+                    *slot = Some(index);
+                }
+            }
+        };
+    let same_layer = |button: &PsdMenuButton, layer: &Option<u32>| {
+        button.layer_id.is_some() && button.layer_id == *layer
+    };
+    let same_name =
+        |button: &PsdMenuButton, name: &str| !button.name.is_empty() && name == button.name;
+    take(&mut matched, &mut used, &|button, (name, layer, _)| {
+        same_name(button, name) && same_layer(button, layer)
+    });
+    take(&mut matched, &mut used, &|button, (name, _, _)| {
+        same_name(button, name)
+    });
+    take(&mut matched, &mut used, &|button, (_, layer, _)| {
+        same_layer(button, layer)
+    });
+    take(&mut matched, &mut used, &|button, (_, layer, rect)| {
+        (button.layer_id.is_none() || layer.is_none()) && overlap(button.rect, *rect)
+    });
+    matched
+}
+
+/// Whether two rectangles share some area.
+fn overlap(a: Rect, b: Rect) -> bool {
+    let (a_right, a_bottom) = (
+        u32::from(a.x) + u32::from(a.w),
+        u32::from(a.y) + u32::from(a.h),
+    );
+    let (b_right, b_bottom) = (
+        u32::from(b.x) + u32::from(b.w),
+        u32::from(b.y) + u32::from(b.h),
+    );
+    u32::from(a.x) < b_right
+        && u32::from(b.x) < a_right
+        && u32::from(a.y) < b_bottom
+        && u32::from(b.y) < a_bottom
 }
 
 /// A button made from a PSD's `(+)` group: its name, its place, video thumbnail and subpicture, its highlight group
@@ -1957,6 +2099,7 @@ fn psd_button(found: &PsdMenuButton, highlight_group: u8) -> disccraft_project::
         label_offset: [0, 0],
         thumbnail_offset: [0, 0],
         body: None,
+        psd_layer: found.layer_id,
     }
 }
 
@@ -2061,6 +2204,8 @@ struct PsdMenuButton {
     subpicture_colors: [Option<[u8; 3]>; 3],
     /// Its kind by the group name's prefix (`(+#)` / `(+>)` / `(+<)`).
     kind: disccraft_project::ButtonKind,
+    /// Its `(+)` group's PSD layer id (M10.49).
+    layer_id: Option<u32>,
 }
 
 /// Encore's automatic colour set of a PSD menu (M6.336): the colours of highlight groups 1 and 2, and each button's
@@ -2165,6 +2310,7 @@ fn psd_buttons(
                 .subpicture
                 .as_ref()
                 .map_or([None; 3], |sub| sub.colors),
+            layer_id: button.layer_id,
         }
     };
     let pages: Vec<Vec<PsdMenuButton>> = std::iter::once(&psd.buttons)
@@ -3242,6 +3388,7 @@ mod tests {
         };
         let button = |name: &str, x: u32, y: u32| PsdLayer::Group {
             name: format!("(+) {name}"),
+            id: None,
             children: vec![raster(
                 "text",
                 fill(x, y, x + 200, y + 40, [255, 255, 255, 255]),
@@ -3258,6 +3405,7 @@ mod tests {
                 button("Next", 400, 300),
                 PsdLayer::Group {
                     name: "(#) Episodes".to_owned(),
+                    id: None,
                     children: vec![
                         raster("art", fill(500, 40, 600, 100, [255, 0, 0, 255])),
                         button("Episode 1", 100, 380),
@@ -3310,7 +3458,8 @@ mod tests {
                 .background
         );
 
-        // Drawn: the shared background everywhere, each page's own layers only on it.
+        // Drawn: the shared background everywhere, each page's own buttons only on it (not the page's other art,
+        // as on Encore's Blu-ray pages).
         let at = |project: &disccraft_project::Project,
                   menu: MenuId,
                   x: usize,
@@ -3339,8 +3488,8 @@ mod tests {
             "Play not on the second page"
         );
         assert!(
-            at(&session.project, second, 550, 70)?[0] > 200,
-            "the page's art"
+            at(&session.project, second, 550, 70)?[0] < 50,
+            "no art of the page's own but its buttons"
         );
         assert!(
             at(&session.project, first, 550, 70)?[0] < 50,
@@ -3361,10 +3510,12 @@ mod tests {
                 raster("背景", fill(0, 0, w, h, [0, 60, 0, 255])),
                 PsdLayer::Group {
                     name: "(#) Main Page".to_owned(),
+                    id: None,
                     children: vec![button("Play", 100, 300), button("Episodes", 400, 300)],
                 },
                 PsdLayer::Group {
                     name: "(#) Episodes Page".to_owned(),
+                    id: None,
                     children: vec![button("Episode 1", 100, 380), button("Back", 400, 380)],
                 },
             ],
@@ -3431,6 +3582,7 @@ mod tests {
             }
             PsdLayer::Group {
                 name: name.to_owned(),
+                id: None,
                 children: vec![PsdLayer::Raster {
                     name: "art".to_owned(),
                     rgba,
@@ -3487,6 +3639,264 @@ mod tests {
         Ok(())
     }
 
+    /// M10.46: a PSD edited outside is taken in by name. The first page's groups come back reordered (Scenes now
+    /// below Play), Play moved, a new Extras group added; the second page's Back moved. Applied from the second
+    /// page, both pages follow: the buttons take the PSD's order, Play keeps its link, the default button stays
+    /// Scenes, Extras is a new button, and Back has its new place.
+    #[test]
+    fn an_edited_psd_is_taken_in_by_name_on_every_page() -> Result<(), Box<dyn Error>> {
+        use disccraft_photo::PsdLayer;
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-apply-by-name-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let (w, h) = (720u32, 480u32);
+        let block = |x0: u32, y0: u32| {
+            let mut rgba = vec![0u8; (w * h * 4) as usize];
+            for y in y0..y0 + 40 {
+                for x in x0..x0 + 120 {
+                    let i = ((y * w + x) * 4) as usize;
+                    rgba[i..i + 4].copy_from_slice(&[220, 220, 220, 255]);
+                }
+            }
+            rgba
+        };
+        let button = |name: &str, x: u32, y: u32| PsdLayer::Group {
+            name: format!("(+) {name}"),
+            id: None,
+            children: vec![PsdLayer::Raster {
+                name: name.to_owned(),
+                rgba: block(x, y),
+                visible: true,
+            }],
+        };
+        let page = |children: Vec<PsdLayer>| PsdLayer::Group {
+            name: "(#) Page 1".to_owned(),
+            id: None,
+            children,
+        };
+        let background = || PsdLayer::Raster {
+            name: "Background".to_owned(),
+            rgba: [20, 20, 60, 255].repeat((w * h) as usize),
+            visible: true,
+        };
+        let path = dir.join("Paged.psd");
+        disccraft_photo::write_layered_psd(
+            &path,
+            w,
+            h,
+            &[
+                background(),
+                page(vec![button("Back", 40, 400)]),
+                button("Play", 40, 40),
+                button("Scenes", 40, 100),
+            ],
+        )?;
+        let path_text = path.to_string_lossy().into_owned();
+        let mut session = Session::new();
+        let imported = session.execute("menu.import", &serde_json::json!({ "path": path_text }))?;
+        let first = MenuId(
+            imported
+                .get("menu")
+                .and_then(Value::as_u64)
+                .ok_or("no menu")?,
+        );
+        let second = MenuId(
+            imported
+                .get("pages")
+                .and_then(|pages| pages.get(0))
+                .and_then(Value::as_u64)
+                .ok_or("no page")?,
+        );
+        if let Some(menu) = session.project.menu_mut(first) {
+            if let Some(play) = menu.buttons.first_mut() {
+                play.link = Link::Menu {
+                    id: second,
+                    button: None,
+                };
+            }
+            menu.default_button = 1;
+        }
+
+        disccraft_photo::write_layered_psd(
+            &path,
+            w,
+            h,
+            &[
+                background(),
+                page(vec![button("Back", 300, 400)]),
+                button("Scenes", 40, 100),
+                button("Play", 200, 40),
+                button("Extras", 40, 200),
+            ],
+        )?;
+        session.execute(
+            "menu.applyPsd",
+            &serde_json::json!({ "menu": second.0, "path": path_text }),
+        )?;
+        let menu = session.project.menu(first).ok_or("no first page")?;
+        let names: Vec<&str> = menu
+            .buttons
+            .iter()
+            .map(|button| button.name.as_str())
+            .collect();
+        assert_eq!(names, ["Scenes", "Play", "Extras"]);
+        let play = menu.buttons.get(1).ok_or("no Play")?;
+        assert_eq!(
+            play.link,
+            Link::Menu {
+                id: second,
+                button: None
+            }
+        );
+        assert_eq!((play.rect.x, play.rect.y), (200, 40));
+        assert_eq!(menu.default_button, 0);
+        assert_eq!(
+            menu.buttons.get(2).map(|button| button.link.clone()),
+            Some(Link::NotSet)
+        );
+        let back = session
+            .project
+            .menu(second)
+            .and_then(|menu| menu.buttons.first())
+            .ok_or("no Back")?;
+        assert_eq!(
+            (back.name.as_str(), back.rect.x, back.rect.y),
+            ("Back", 300, 400)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M10.49 (found with the GitHub issue #13 reporter's menu edited in Photoshop CS6): a set copied below the
+    /// lowest one, a set deleted and a set renamed. The copy is a new button without a link (before, it took the
+    /// deleted set's link, the two paired in order), the renamed set keeps its button and link, and the links to a
+    /// button by number and the default button follow their buttons. Buttons from before M10.49 (no layer ids) are
+    /// paired with a renamed set where it overlaps them, so the copy, elsewhere, is still new.
+    #[test]
+    fn an_edited_psds_sets_are_known_by_their_layer_ids() -> Result<(), Box<dyn Error>> {
+        use disccraft_photo::PsdLayer;
+        let dir = std::env::temp_dir().join(format!("disccraft-apply-lyid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let (w, h) = (720u32, 480u32);
+        let set = |name: &str, id: u32, x0: u32, y0: u32| {
+            let mut rgba = vec![0u8; (w * h * 4) as usize];
+            for y in y0..y0 + 40 {
+                for x in x0..x0 + 120 {
+                    let i = ((y * w + x) * 4) as usize;
+                    rgba[i..i + 4].copy_from_slice(&[220, 220, 220, 255]);
+                }
+            }
+            PsdLayer::Group {
+                name: format!("(+) {name}"),
+                id: Some(id),
+                children: vec![PsdLayer::Raster {
+                    name: name.to_owned(),
+                    rgba,
+                    visible: true,
+                }],
+            }
+        };
+        let background = || PsdLayer::Raster {
+            name: "Background".to_owned(),
+            rgba: [20, 20, 60, 255].repeat((w * h) as usize),
+            visible: true,
+        };
+        let path = dir.join("Edited.psd");
+        let path_text = path.to_string_lossy().into_owned();
+        let edited = |forget_ids: bool| -> Result<Vec<(String, Link)>, Box<dyn Error>> {
+            disccraft_photo::write_layered_psd(
+                &path,
+                w,
+                h,
+                &[
+                    background(),
+                    set("Doctor", 10, 40, 40),
+                    set("Play", 11, 40, 100),
+                    set("Subtitles", 12, 40, 160),
+                    set("Audio", 13, 40, 220),
+                ],
+            )?;
+            let mut session = Session::new();
+            let imported =
+                session.execute("menu.import", &serde_json::json!({ "path": path_text }))?;
+            let menu = MenuId(value_u64(&imported, "menu")?);
+            if let Some(found) = session.project.menu_mut(menu) {
+                let links = [
+                    Link::NotSet,
+                    Link::Stop,
+                    Link::LastMenu,
+                    Link::Menu {
+                        id: menu,
+                        button: Some(1),
+                    },
+                ];
+                for (button, link) in found.buttons.iter_mut().zip(links) {
+                    assert!(button.psd_layer.is_some());
+                    if forget_ids {
+                        button.psd_layer = None;
+                    }
+                    button.link = link;
+                }
+                found.default_button = 1;
+            }
+            // In Photoshop: Doctor copied below itself (a new id) and moved right, Subtitles deleted, Audio renamed.
+            disccraft_photo::write_layered_psd(
+                &path,
+                w,
+                h,
+                &[
+                    background(),
+                    set("Doctor copy", 20, 400, 40),
+                    set("Doctor", 10, 40, 40),
+                    set("Play", 11, 40, 100),
+                    set("Audio Setup", 13, 40, 220),
+                ],
+            )?;
+            session.execute(
+                "menu.applyPsd",
+                &serde_json::json!({ "menu": menu.0, "path": path_text }),
+            )?;
+            let found = session.project.menu(menu).ok_or("no menu")?;
+            assert_eq!(found.default_button, 2, "the default button is still Play");
+            assert!(
+                found
+                    .buttons
+                    .iter()
+                    .all(|button| button.psd_layer.is_some())
+            );
+            Ok(found
+                .buttons
+                .iter()
+                .map(|button| (button.name.clone(), button.link.clone()))
+                .collect())
+        };
+        for forget_ids in [false, true] {
+            let buttons = edited(forget_ids)?;
+            let menu = match buttons.last().map(|(_, link)| link) {
+                Some(Link::Menu { id, .. }) => *id,
+                other => return Err(format!("Audio Setup's link: {other:?}").into()),
+            };
+            assert_eq!(
+                buttons,
+                [
+                    ("Doctor copy".to_owned(), Link::NotSet),
+                    ("Doctor".to_owned(), Link::NotSet),
+                    ("Play".to_owned(), Link::Stop),
+                    (
+                        "Audio Setup".to_owned(),
+                        Link::Menu {
+                            id: menu,
+                            button: Some(2)
+                        }
+                    ),
+                ],
+                "layer ids forgotten: {forget_ids}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
     #[test]
     fn a_psd_is_imported_as_a_menu_a_pop_up_menu_or_a_page() -> Result<(), Box<dyn Error>> {
         let dir =
@@ -3505,6 +3915,7 @@ mod tests {
         };
         let group = |name: &str, y: u32| disccraft_photo::PsdLayer::Group {
             name: format!("(+){name}"),
+            id: None,
             children: vec![disccraft_photo::PsdLayer::Raster {
                 name: "text".to_owned(),
                 rgba: fill(100, y, 300, y + 40),
@@ -3777,6 +4188,7 @@ mod tests {
                 },
                 disccraft_photo::PsdLayer::Group {
                     name: "(+)Scene".to_owned(),
+                    id: None,
                     children: vec![
                         disccraft_photo::PsdLayer::Raster {
                             name: "frame".to_owned(),
@@ -3961,6 +4373,7 @@ mod tests {
                 },
                 disccraft_photo::PsdLayer::Group {
                     name: "(+) Play".to_owned(),
+                    id: None,
                     children: vec![disccraft_photo::PsdLayer::Raster {
                         name: "Play".to_owned(),
                         rgba: label,
@@ -4068,6 +4481,7 @@ mod tests {
                 },
                 disccraft_photo::PsdLayer::Group {
                     name: "(+) Play".to_owned(),
+                    id: None,
                     children: vec![disccraft_photo::PsdLayer::Raster {
                         name: "bar".to_owned(),
                         rgba: art,
@@ -4219,6 +4633,7 @@ mod tests {
                 },
                 disccraft_photo::PsdLayer::Group {
                     name: "(+) Play".to_owned(),
+                    id: None,
                     children: vec![
                         disccraft_photo::PsdLayer::Raster {
                             name: "(=1)".to_owned(),
@@ -4316,6 +4731,7 @@ mod tests {
             }
             disccraft_photo::PsdLayer::Group {
                 name: format!("(+) B{index}"),
+                id: None,
                 children: vec![disccraft_photo::PsdLayer::Raster {
                     name: "(=1)".to_owned(),
                     rgba,

@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use disccraft_ifo::{
-    AudioAttr, AudioCoding, BcdTime, Cell, Pgc, SECTOR, Standard, TimeMap, VideoAttr, VtsRootMenu,
-    Vtsi, vts_attr_block, write_vtsi,
+    AudioAttr, AudioCoding, BcdTime, BlockPlace, Cell, Pgc, PgcCategory, SECTOR, Standard, TimeMap,
+    VideoAttr, VtsRootMenu, Vtsi, vts_attr_block, write_vtsi,
 };
 use disccraft_nav::{ChapterPlaylistNav, TitleNav};
 use disccraft_project::PlaybackOrder;
@@ -30,6 +30,8 @@ pub(crate) struct BuiltVts {
     pub(crate) total_bytes: u64,
     /// The chapter playlists built into this title set, in the order they were given.
     pub(crate) extras: Vec<BuiltExtraTitle>,
+    /// M13.17: the parental IDs of the title's parental block's PGCs together (0 without one).
+    pub(crate) parental_mask: u16,
 }
 
 /// One chapter playlist built as another title of a title set.
@@ -50,7 +52,10 @@ pub(crate) fn build_title_set(
     vts: u8,
     standard: Standard,
     nav: &TitleNav,
-    extras: &[&ChapterPlaylistNav],
+    (extras, parental): (
+        &[&ChapterPlaylistNav],
+        Option<&crate::parental::ParentalPlan>,
+    ),
 ) -> Result<BuiltVts, DvdError> {
     let mut sink = VobFileSink::new(video_ts, vts);
     let input = mux_input(loaded);
@@ -89,14 +94,74 @@ pub(crate) fn build_title_set(
     )?;
     // The colours the title's subtitles draw with (drawn text's, and passed-through subpictures' own).
     pgc.palette = loaded.palette;
-    let (tmap_unit, tmap) = build_tmap(&layout)?;
     let vobu_starts = layout.vobus.iter().map(|vobu| vobu.start_sector).collect();
 
-    let mut pgcs = vec![pgc];
-    let mut tmaps = vec![TimeMap {
-        unit: tmap_unit,
-        entries: tmap,
-    }];
+    let master = pgc;
+    let mut pgcs = Vec::new();
+    let mut tmaps = Vec::new();
+    let mut categories = Vec::new();
+    let mut parental_mask = 0u16;
+    let mut title_duration = duration;
+    let mut chapters = loaded.program_cells.len();
+    match parental {
+        None => {
+            let (tmap_unit, tmap) = build_tmap(&layout)?;
+            pgcs.push(master.clone());
+            tmaps.push(TimeMap {
+                unit: tmap_unit,
+                entries: tmap,
+            });
+        }
+        // M13.17: a parental block, one PGC a version: the title's chapters, an alternative's cells in place of a
+        // chapter the version plays it for.
+        Some(plan) => {
+            let all: Vec<u16> = (1..=loaded.program_cells.len())
+                .map(|program| u16::try_from(program).map_err(|_| invalid("too many programs")))
+                .collect::<Result<_, _>>()?;
+            let chapter_cells =
+                program_cell_lists(&loaded.program_cells, layout.cells.len(), &all)?;
+            let count = plan.variants.len();
+            for (index, variant) in plan.variants.iter().enumerate() {
+                let lists = (0..plan.chapters)
+                    .map(|chapter| {
+                        let alternative = plan
+                            .replaced_chapters
+                            .iter()
+                            .zip(&variant.replaced)
+                            .position(|(replaced, plays)| *replaced == chapter && *plays);
+                        chapter_cells
+                            .get(alternative.map_or(chapter, |k| plan.chapters.saturating_add(k)))
+                            .cloned()
+                            .ok_or_else(|| invalid("a parental chapter is out of range"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let (cells, programs, variant_duration) = playlist_cells(&layout, &master, &lists)?;
+                let (unit, entries) = build_playlist_tmap(&layout, &lists)?;
+                if index == 0 {
+                    title_duration = variant_duration;
+                }
+                pgcs.push(Pgc {
+                    playback_time: BcdTime::from_90k(u64::from(variant_duration), standard),
+                    program_entry_cells: programs,
+                    cells,
+                    ..master.clone()
+                });
+                tmaps.push(TimeMap { unit, entries });
+                let id = variant.parental_id();
+                parental_mask |= id;
+                categories.push(PgcCategory {
+                    title: 1,
+                    block: Some(match index {
+                        0 => BlockPlace::First,
+                        last if last + 1 == count => BlockPlace::Last,
+                        _ => BlockPlace::Middle,
+                    }),
+                    parental_id: id,
+                });
+            }
+            chapters = plan.chapters;
+        }
+    }
     let mut built_extras = Vec::with_capacity(extras.len());
     for (index, extra) in extras.iter().enumerate() {
         let expected_ttn = u8::try_from(index.saturating_add(2))
@@ -104,9 +169,8 @@ pub(crate) fn build_title_set(
         if extra.vts_ttn != expected_ttn {
             return Err(invalid("chapter playlist title numbers are out of order"));
         }
-        let master = pgcs.first().ok_or_else(|| invalid("missing master PGC"))?;
         let cells = program_cell_lists(&loaded.program_cells, layout.cells.len(), &extra.programs)?;
-        let (pgc, duration) = build_playlist_pgc(&layout, master, extra, &cells, standard)?;
+        let (pgc, duration) = build_playlist_pgc(&layout, &master, extra, &cells, standard)?;
         let (unit, entries) = build_playlist_tmap(&layout, &cells)?;
         built_extras.push(BuiltExtraTitle {
             chapters: extra.programs.len(),
@@ -116,6 +180,9 @@ pub(crate) fn build_title_set(
         });
         pgcs.push(pgc);
         tmaps.push(TimeMap { unit, entries });
+        if !categories.is_empty() {
+            categories.push(PgcCategory::single(expected_ttn));
+        }
     }
 
     let vtsi = Vtsi {
@@ -134,6 +201,7 @@ pub(crate) fn build_title_set(
         },
         audio: audio_attrs,
         pgcs,
+        categories,
         title_vobs_sectors: layout.total_sectors,
         tmaps,
         vobu_starts,
@@ -162,8 +230,8 @@ pub(crate) fn build_title_set(
         .and_then(|x| x.checked_add(bup_bytes))
         .ok_or_else(|| invalid("title byte count overflow"))?;
 
-    // The chapters are the programs (a layer break's own cell is not one).
-    let chapters = loaded.program_cells.len();
+    // The chapters are the programs (a layer break's own cell is not one; a parental block's alternatives are not
+    // the title's).
     let chapters_u16 =
         u16::try_from(chapters).map_err(|_| DvdError::Invalid("too many cells".to_string()))?;
 
@@ -171,11 +239,12 @@ pub(crate) fn build_title_set(
         chapters,
         chapters_u16,
         vobs_sectors: layout.total_sectors,
-        duration_90k: duration,
+        duration_90k: title_duration,
         title_set_sectors,
         vts_attr_block: attr_block,
         total_bytes,
         extras: built_extras,
+        parental_mask,
     })
 }
 
@@ -221,8 +290,30 @@ fn build_playlist_pgc(
         return Err(invalid("chapter playlist has too many entries"));
     }
 
-    let mut cells = Vec::with_capacity(nav.programs.len());
-    let mut programs = Vec::with_capacity(nav.programs.len());
+    let (cells, programs, duration) = playlist_cells(layout, master, program_cells)?;
+    let pgc = Pgc {
+        prohibited_ops: nav.prohibited_ops,
+        playback_time: BcdTime::from_90k(u64::from(duration), standard),
+        program_entry_cells: programs,
+        cells,
+        pre: vm_commands(&nav.pre),
+        post: vm_commands(&nav.post),
+        playback_mode: playback_mode(nav.order, nav.programs.len()),
+        ..master.clone()
+    };
+    Ok((pgc, duration))
+}
+
+/// The cells of `program_cells` (each program's master cells, 0-based) as one chain: the cells, the programs'
+/// entry cells (1-based) and the running time (90 kHz). A cell that does not follow the one before in the VOB
+/// starts with an STC discontinuity.
+fn playlist_cells(
+    layout: &VobsLayout,
+    master: &Pgc,
+    program_cells: &[Vec<usize>],
+) -> Result<(Vec<Cell>, Vec<u8>, u32), DvdError> {
+    let mut cells = Vec::with_capacity(program_cells.len());
+    let mut programs = Vec::with_capacity(program_cells.len());
     let mut duration = 0u32;
     let mut previous: Option<u8> = None;
     for indices in program_cells {
@@ -261,18 +352,7 @@ fn build_playlist_pgc(
     if cells.len() > 255 {
         return Err(invalid("chapter playlist has too many cells"));
     }
-
-    let pgc = Pgc {
-        prohibited_ops: nav.prohibited_ops,
-        playback_time: BcdTime::from_90k(u64::from(duration), standard),
-        program_entry_cells: programs,
-        cells,
-        pre: vm_commands(&nav.pre),
-        post: vm_commands(&nav.post),
-        playback_mode: playback_mode(nav.order, nav.programs.len()),
-        ..master.clone()
-    };
-    Ok((pgc, duration))
+    Ok((cells, programs, duration))
 }
 
 /// The PGC's PG playback mode byte for an order over `count` programs: random and shuffle hold the number of

@@ -16,8 +16,12 @@ pub struct Vtsi {
     /// Title audio attributes.
     pub audio: Vec<AudioAttr>,
     /// The title PGCs: PGC `n` is the entry PGC of VTS title `n` (VTS_TTN). The first is the master timeline; the
-    /// others are chapter playlists that list the same cells in another order.
+    /// others are chapter playlists that list the same cells in another order. With `categories`, a title can have
+    /// several, a parental block.
     pub pgcs: Vec<Pgc>,
+    /// M13.16: each PGC's category (its VTS title, its place in a parental block and its parental ID field), in
+    /// PGC order; empty: PGC `n` is the only PGC of VTS title `n`, in no block.
+    pub categories: Vec<PgcCategory>,
     /// Sector count of the title VOBS.
     pub title_vobs_sectors: u32,
     /// One VTS_TMAP per PGC, in PGC order.
@@ -39,10 +43,125 @@ pub struct TimeMap {
     pub entries: Vec<u32>,
 }
 
+/// Where a PGC is in a parental block (block mode, M13.16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockPlace {
+    /// The block's first PGC (block mode 01b).
+    First,
+    /// Between the first and the last (10b).
+    Middle,
+    /// The block's last PGC (11b).
+    Last,
+}
+
+/// A title PGC's category in the VTS_PGCITI (M13.16): from the top bit, 1 (an entry PGC), the VTS title number (7
+/// bits), the block mode (2 bits: 00b in no block, 01b first, 10b middle, 11b last), the block type (2 bits: 01b a
+/// parental block), 4 reserved bits, and the parental ID field (16 bits). Public sources: MPUCoder's ifo_vts page
+/// (the entry bit, the title number and the mask in the last two bytes), JP2001312880A (the block mode, the block
+/// type and the parental ID field's bits).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PgcCategory {
+    /// The VTS title (VTS_TTN) the PGC plays.
+    pub title: u8,
+    /// Its place in a parental block; `None` in no block.
+    pub block: Option<BlockPlace>,
+    /// The parental IDs it is played for: a player plays the first PGC of the block whose field shares a bit with
+    /// the mask its parental level has in the VMG_PTL_MAIT (US7451453B1). 0 outside a block.
+    pub parental_id: u16,
+}
+
+impl PgcCategory {
+    /// The category of a title's only PGC.
+    #[must_use]
+    pub fn single(title: u8) -> Self {
+        Self {
+            title,
+            block: None,
+            parental_id: 0,
+        }
+    }
+
+    fn word(self) -> u32 {
+        let mode = match self.block {
+            None => 0,
+            Some(BlockPlace::First) => 1,
+            Some(BlockPlace::Middle) => 2,
+            Some(BlockPlace::Last) => 3,
+        };
+        0x8000_0000
+            | (u32::from(self.title & 0x7F) << 24)
+            | (mode << 22)
+            | (u32::from(self.block.is_some()) << 20)
+            | u32::from(self.parental_id)
+    }
+
+    fn from_word(word: u32) -> Result<Self, IfoError> {
+        if word & 0x8000_0000 == 0 || word & 0x000F_0000 != 0 {
+            return Err(IfoError("bad PGC category".to_string()));
+        }
+        let title = u8::try_from((word >> 24) & 0x7F).unwrap_or(0);
+        let block = match ((word >> 22) & 3, (word >> 20) & 3) {
+            (0, 0) => None,
+            (1, 1) => Some(BlockPlace::First),
+            (2, 1) => Some(BlockPlace::Middle),
+            (3, 1) => Some(BlockPlace::Last),
+            _ => return Err(IfoError("bad PGC block".to_string())),
+        };
+        let parental_id = u16::try_from(word & 0xFFFF).unwrap_or(0);
+        if block.is_none() && parental_id != 0 {
+            return Err(IfoError(
+                "a parental ID outside a parental block".to_string(),
+            ));
+        }
+        Ok(Self {
+            title,
+            block,
+            parental_id,
+        })
+    }
+}
+
 impl Vtsi {
-    /// The entry PGC of VTS title `ttn` (one-based).
+    /// The category of PGC `index` (zero-based).
+    #[must_use]
+    pub fn category(&self, index: usize) -> PgcCategory {
+        self.categories.get(index).copied().unwrap_or_else(|| {
+            PgcCategory::single(u8::try_from(index.saturating_add(1)).unwrap_or(u8::MAX))
+        })
+    }
+
+    /// The PGCs of VTS title `ttn` (one-based), each with its index: its only one, or its parental block's.
+    pub fn title_pgcs(&self, ttn: u8) -> impl Iterator<Item = (usize, &Pgc, PgcCategory)> {
+        self.pgcs
+            .iter()
+            .enumerate()
+            .map(|(index, pgc)| (index, pgc, self.category(index)))
+            .filter(move |(_, _, category)| category.title == ttn)
+    }
+
+    /// The entry PGC of VTS title `ttn` (one-based): the first of a parental block.
     pub fn title_pgc(&self, ttn: u8) -> Option<&Pgc> {
-        self.pgcs.get(usize::from(ttn).checked_sub(1)?)
+        self.title_pgcs(ttn).next().map(|(_, pgc, _)| pgc)
+    }
+
+    /// Each VTS title's first PGC number (PGCN) and chapter count, in title order (what the VTS_PTT_SRPT lists).
+    fn ptt_titles(&self) -> Result<Vec<(u16, usize)>, IfoError> {
+        check_categories(self)?;
+        let titles = (0..self.pgcs.len())
+            .map(|index| self.category(index).title)
+            .max()
+            .unwrap_or(0);
+        (1..=titles)
+            .map(|title| {
+                let (index, pgc, _) = self
+                    .title_pgcs(title)
+                    .next()
+                    .ok_or_else(|| IfoError("a VTS title without a PGC".to_string()))?;
+                let pgcn = u16::try_from(index.saturating_add(1))
+                    .map_err(|_| IfoError("too many PGCs".to_string()))?;
+                Ok((pgcn, pgc.program_entry_cells.len()))
+            })
+            .collect()
     }
 
     /// Every distinct cell of the title VOBS (the VTS_C_ADT list), sorted by VOB id and cell id.
@@ -60,6 +179,58 @@ fn address_cells(pgcs: &[Pgc]) -> Vec<Cell> {
     cells.sort_by_key(|c| (c.vob_id, c.cell_id));
     cells.dedup_by_key(|c| (c.vob_id, c.cell_id));
     cells
+}
+
+/// Whether `v`'s categories make sense: one per PGC (or none); the titles numbered from 1 in PGC order, each one PGC
+/// in no block or a parental block (first, middle ones, last) whose PGCs have the same chapters and each a parental
+/// ID.
+fn check_categories(v: &Vtsi) -> Result<(), IfoError> {
+    if v.categories.is_empty() {
+        return Ok(());
+    }
+    if v.categories.len() != v.pgcs.len() {
+        return Err(IfoError("one category per PGC is required".to_string()));
+    }
+    let mut expected_title = 1u8;
+    let mut open_block: Option<(u8, usize)> = None;
+    for (index, category) in v.categories.iter().enumerate() {
+        let chapters = v
+            .pgcs
+            .get(index)
+            .map_or(0, |pgc| pgc.program_entry_cells.len());
+        match (open_block, category.block) {
+            (None, None | Some(BlockPlace::First)) => {
+                if category.title != expected_title {
+                    return Err(IfoError("VTS titles out of order".to_string()));
+                }
+                expected_title = expected_title.saturating_add(1);
+                if category.block.is_some() {
+                    open_block = Some((category.title, chapters));
+                }
+            }
+            (Some((title, block_chapters)), Some(BlockPlace::Middle | BlockPlace::Last)) => {
+                if category.title != title || chapters != block_chapters {
+                    return Err(IfoError("a parental block's PGCs differ".to_string()));
+                }
+                if category.block == Some(BlockPlace::Last) {
+                    open_block = None;
+                }
+            }
+            _ => return Err(IfoError("a parental block out of order".to_string())),
+        }
+        if category.block.is_some() != (category.parental_id != 0) {
+            return Err(IfoError(
+                "a parental ID is for the PGCs of a parental block, each of which has one"
+                    .to_string(),
+            ));
+        }
+    }
+    if open_block.is_some() {
+        return Err(IfoError(
+            "a parental block without its last PGC".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Write a VTSI file according to the M2 layout.
@@ -213,12 +384,11 @@ pub fn read_vtsi(data: &[u8]) -> Result<Vtsi, IfoError> {
     let cadt_ptr = r.u32(0x0E0)?;
     let vobu_ptr = r.u32(0x0E4)?;
 
-    let pgcs = read_pgciti(&r, pgciti_ptr, ifo_sectors)?;
+    let (pgcs, categories) = read_pgciti(&r, pgciti_ptr, ifo_sectors)?;
     let root_menu = match r.u32(0x0D0)? {
         0 => None,
         ptr => Some(read_vtsm_pgci_ut(&r, table_start(&r, ptr, ifo_sectors)?)?),
     };
-    let mut programs = Vec::with_capacity(pgcs.len());
     for pgc in &pgcs {
         if pgc.cells.is_empty() {
             return Err(IfoError("no cells".to_string()));
@@ -226,10 +396,28 @@ pub fn read_vtsi(data: &[u8]) -> Result<Vtsi, IfoError> {
         if pgc.program_entry_cells.len() > 99 {
             return Err(IfoError("too many programs".to_string()));
         }
-        programs.push(pgc.program_entry_cells.len());
     }
-
-    read_ptt_srpt(&r, ptt_ptr, ifo_sectors, &programs)?;
+    let probe = Vtsi {
+        video,
+        audio,
+        pgcs,
+        categories,
+        title_vobs_sectors,
+        tmaps: Vec::new(),
+        vobu_starts: Vec::new(),
+        subpictures,
+        root_menu,
+    };
+    read_ptt_srpt(&r, ptt_ptr, ifo_sectors, &probe.ptt_titles()?)?;
+    let Vtsi {
+        video,
+        audio,
+        pgcs,
+        categories,
+        subpictures,
+        root_menu,
+        ..
+    } = probe;
     let tmaps = read_tmapti(&r, tmapti_ptr, ifo_sectors)?;
     if tmaps.len() != pgcs.len() {
         return Err(IfoError(
@@ -243,6 +431,7 @@ pub fn read_vtsi(data: &[u8]) -> Result<Vtsi, IfoError> {
         video,
         audio,
         pgcs,
+        categories,
         title_vobs_sectors,
         tmaps,
         vobu_starts,
@@ -302,12 +491,14 @@ fn validate_vtsi(v: &Vtsi) -> Result<(), IfoError> {
 
 fn write_ptt_srpt(w: &mut Writer, v: &Vtsi) -> Result<(), IfoError> {
     let base = w.len();
-    let titles = v.pgcs.len();
+    // Each title's chapters are the programs of its first PGC (a parental block's PGCs have the same ones).
+    let ptt_titles = v.ptt_titles()?;
+    let titles = ptt_titles.len();
     let titles_u16 = u16::try_from(titles).map_err(|_| IfoError("too many titles".to_string()))?;
     let mut total_programs = 0usize;
-    for pgc in &v.pgcs {
+    for (_, chapters) in &ptt_titles {
         total_programs = total_programs
-            .checked_add(pgc.program_entry_cells.len())
+            .checked_add(*chapters)
             .ok_or_else(|| IfoError("PTT overflow".to_string()))?;
     }
     let lists_start = titles
@@ -325,15 +516,9 @@ fn write_ptt_srpt(w: &mut Writer, v: &Vtsi) -> Result<(), IfoError> {
     w.put_u32(off(base, 4)?, u32_from_usize(end)?);
 
     let mut list_pos = lists_start;
-    for (index, pgc) in v.pgcs.iter().enumerate() {
-        let pgcn = u16::try_from(
-            index
-                .checked_add(1)
-                .ok_or_else(|| IfoError("PTT overflow".to_string()))?,
-        )
-        .map_err(|_| IfoError("too many titles".to_string()))?;
-        let chapters = u16::try_from(pgc.program_entry_cells.len())
-            .map_err(|_| IfoError("too many chapters".to_string()))?;
+    for (index, &(pgcn, chapters)) in ptt_titles.iter().enumerate() {
+        let chapters =
+            u16::try_from(chapters).map_err(|_| IfoError("too many chapters".to_string()))?;
         w.put_u32(
             off(
                 base,
@@ -384,14 +569,8 @@ fn write_pgciti(w: &mut Writer, v: &Vtsi) -> Result<(), IfoError> {
     w.put_u16(off(base, 2)?, 0);
     w.put_u32(off(base, 4)?, u32_from_usize(end)?);
     for (index, (data, pgc_offset)) in datas.iter().zip(&offsets).enumerate() {
-        // Every PGC is the entry PGC of VTS title index + 1.
-        let ttn = u32::try_from(
-            index
-                .checked_add(1)
-                .ok_or_else(|| IfoError("PGCITI overflow".to_string()))?,
-        )
-        .map_err(|_| IfoError("too many PGCs".to_string()))?;
-        let category = (0x80 | ttn) << 24;
+        // Every PGC is an entry PGC: of VTS title index + 1, or as its category says.
+        let category = v.category(index).word();
         let entry = off(
             base,
             off(
@@ -653,7 +832,11 @@ fn table_end(r: &Reader<'_>, base: usize, end_address: u32) -> Result<usize, Ifo
     Ok(end)
 }
 
-fn read_pgciti(r: &Reader<'_>, ptr: u32, ifo_sectors: usize) -> Result<Vec<Pgc>, IfoError> {
+fn read_pgciti(
+    r: &Reader<'_>,
+    ptr: u32,
+    ifo_sectors: usize,
+) -> Result<(Vec<Pgc>, Vec<PgcCategory>), IfoError> {
     let base = table_start(r, ptr, ifo_sectors)?;
     let count = usize::from(r.u16(base)?);
     if count == 0 || count > MAX_VTS_TITLES {
@@ -671,6 +854,7 @@ fn read_pgciti(r: &Reader<'_>, ptr: u32, ifo_sectors: usize) -> Result<Vec<Pgc>,
         .ok_or_else(|| IfoError("PGCITI overflow".to_string()))?;
 
     let mut starts = Vec::with_capacity(count);
+    let mut categories = Vec::with_capacity(count);
     for index in 0..count {
         let entry = off(
             base,
@@ -681,15 +865,7 @@ fn read_pgciti(r: &Reader<'_>, ptr: u32, ifo_sectors: usize) -> Result<Vec<Pgc>,
                     .ok_or_else(|| IfoError("PGCITI overflow".to_string()))?,
             )?,
         )?;
-        let ttn = u32::try_from(
-            index
-                .checked_add(1)
-                .ok_or_else(|| IfoError("PGCITI overflow".to_string()))?,
-        )
-        .map_err(|_| IfoError("too many PGCs".to_string()))?;
-        if r.u32(entry)? != (0x80 | ttn) << 24 {
-            return Err(IfoError("bad PGC category".to_string()));
-        }
+        categories.push(PgcCategory::from_word(r.u32(entry)?)?);
         let offset = usize::try_from(r.u32(off(entry, 4)?)?)
             .map_err(|_| IfoError("PGC offset too large".to_string()))?;
         if offset < header {
@@ -716,14 +892,21 @@ fn read_pgciti(r: &Reader<'_>, ptr: u32, ifo_sectors: usize) -> Result<Vec<Pgc>,
             .ok_or_else(|| IfoError("PGC length overflow".to_string()))?;
         pgcs.push(pgc::read_pgc(r.slice(start, pgc_len)?)?);
     }
-    Ok(pgcs)
+    // The categories of titles of one PGC each, in order, are what no categories say.
+    let plain = categories.iter().enumerate().all(|(index, category)| {
+        *category == PgcCategory::single(u8::try_from(index.saturating_add(1)).unwrap_or(0))
+    });
+    if plain {
+        categories.clear();
+    }
+    Ok((pgcs, categories))
 }
 
 fn read_ptt_srpt(
     r: &Reader<'_>,
     ptr: u32,
     ifo_sectors: usize,
-    programs: &[usize],
+    programs: &[(u16, usize)],
 ) -> Result<(), IfoError> {
     let base = table_start(r, ptr, ifo_sectors)?;
     let titles = usize::from(r.u16(base)?);
@@ -742,7 +925,7 @@ fn read_ptt_srpt(
         .and_then(|x| x.checked_add(8))
         .ok_or_else(|| IfoError("PTT overflow".to_string()))?;
     let mut total_programs = 0usize;
-    for &count in programs {
+    for &(_, count) in programs {
         total_programs = total_programs
             .checked_add(count)
             .ok_or_else(|| IfoError("PTT overflow".to_string()))?;
@@ -758,7 +941,7 @@ fn read_ptt_srpt(
 
     let end_pos = table_end(r, base, end)?;
     let mut list_pos = lists_start;
-    for (index, &count) in programs.iter().enumerate() {
+    for (index, &(pgcn, count)) in programs.iter().enumerate() {
         let offset = usize::try_from(
             r.u32(off(
                 base,
@@ -774,12 +957,6 @@ fn read_ptt_srpt(
         if offset != list_pos {
             return Err(IfoError("bad PTT offset".to_string()));
         }
-        let pgcn = u16::try_from(
-            index
-                .checked_add(1)
-                .ok_or_else(|| IfoError("PTT overflow".to_string()))?,
-        )
-        .map_err(|_| IfoError("too many titles".to_string()))?;
         for k in 0..count {
             let pos = off(base, list_pos)?;
             if off(pos, 4)? > end_pos {
@@ -1040,7 +1217,9 @@ fn off(base: usize, delta: usize) -> Result<usize, IfoError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TimeMap, VTSI_MAT_END, Vtsi, read_vtsi, vts_attr_block, write_vtsi};
+    use super::{
+        BlockPlace, PgcCategory, TimeMap, VTSI_MAT_END, Vtsi, read_vtsi, vts_attr_block, write_vtsi,
+    };
     use crate::IfoError;
     use crate::attr::{AudioAttr, AudioCoding, BcdTime, Standard, VideoAttr, VmCommand};
     use crate::bytes::{Reader, SECTOR};
@@ -1061,6 +1240,7 @@ mod tests {
                 bits: 16,
                 sample_rate: 48_000,
             }],
+            categories: Vec::new(),
             pgcs: vec![Pgc {
                 prohibited_ops: 0,
                 playback_time: BcdTime([0, 0, 0, 0]),
@@ -1139,6 +1319,105 @@ mod tests {
 
     /// A second title PGC (a chapter playlist) lists the same cells in another order: both titles come back,
     /// the PTT and TMAP tables have one list each, and the cell address table still lists each cell once.
+    /// M13.16: VTS title 1 is a parental block of two PGCs, title 2 the third PGC: the categories say so (entry,
+    /// title, block mode and type, parental ID) and the chapters of title 2 are PGC 3's.
+    #[test]
+    fn a_parental_block_round_trips() -> Result<(), IfoError> {
+        let mut v = sample_vtsi();
+        let pgc = v
+            .pgcs
+            .first()
+            .cloned()
+            .ok_or_else(|| IfoError("no pgc".to_string()))?;
+        let tmap = v
+            .tmaps
+            .first()
+            .cloned()
+            .ok_or_else(|| IfoError("no tmap".to_string()))?;
+        v.pgcs = vec![pgc.clone(), pgc.clone(), pgc];
+        v.tmaps = vec![tmap.clone(), tmap.clone(), tmap];
+        v.categories = vec![
+            PgcCategory {
+                title: 1,
+                block: Some(BlockPlace::First),
+                parental_id: 0x00F0,
+            },
+            PgcCategory {
+                title: 1,
+                block: Some(BlockPlace::Last),
+                parental_id: 0x000F,
+            },
+            PgcCategory::single(2),
+        ];
+        let data = write_vtsi(&v)?;
+        let back = read_vtsi(&data)?;
+        assert_eq!(back, v);
+        assert_eq!(back.title_pgcs(1).count(), 2);
+        assert_eq!(
+            back.title_pgcs(2)
+                .map(|(index, _, _)| index)
+                .collect::<Vec<_>>(),
+            [2]
+        );
+
+        let r = Reader::new(&data);
+        let sector = |pointer: usize| -> Result<usize, IfoError> {
+            usize::try_from(r.u32(pointer)?)
+                .ok()
+                .and_then(|value| value.checked_mul(SECTOR))
+                .ok_or_else(|| IfoError("test overflow".to_string()))
+        };
+        let pgciti = sector(0x0CC)?;
+        assert_eq!(r.u32(super::off(pgciti, 8)?)?, 0x8150_00F0);
+        assert_eq!(r.u32(super::off(pgciti, 16)?)?, 0x81D0_000F);
+        assert_eq!(r.u32(super::off(pgciti, 24)?)?, 0x8200_0000);
+        let ptt = sector(0x0C8)?;
+        assert_eq!(r.u16(ptt)?, 2);
+        // Title 1's chapters are PGC 1's; title 2's list (after the two offsets and title 1's two entries) PGC 3's.
+        assert_eq!(r.u16(super::off(ptt, 16)?)?, 1);
+        assert_eq!(r.u16(super::off(ptt, 24)?)?, 3);
+
+        // Blocks that do not hold together are refused.
+        let refused = [
+            vec![
+                PgcCategory::single(1),
+                PgcCategory::single(2),
+                PgcCategory::single(2),
+            ],
+            vec![
+                PgcCategory {
+                    parental_id: 1,
+                    ..PgcCategory::single(1)
+                },
+                PgcCategory::single(2),
+                PgcCategory::single(3),
+            ],
+            vec![
+                PgcCategory {
+                    title: 1,
+                    block: Some(BlockPlace::First),
+                    parental_id: 1,
+                },
+                PgcCategory::single(2),
+                PgcCategory::single(3),
+            ],
+            vec![
+                PgcCategory {
+                    title: 1,
+                    block: Some(BlockPlace::Middle),
+                    parental_id: 1,
+                },
+                PgcCategory::single(2),
+                PgcCategory::single(3),
+            ],
+        ];
+        for categories in refused {
+            v.categories = categories;
+            assert!(write_vtsi(&v).is_err(), "{:?}", v.categories);
+        }
+        Ok(())
+    }
+
     #[test]
     fn two_titles_share_the_cells() -> Result<(), IfoError> {
         let mut v = sample_vtsi();

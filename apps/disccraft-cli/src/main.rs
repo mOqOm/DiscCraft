@@ -75,6 +75,11 @@ enum Sub {
 }
 
 fn main() -> ExitCode {
+    // M12.40: DISCCRAFT_HARDWARE_ENCODER=1 encodes HD H.264 on the system's hardware encoder (as the application's
+    // Preferences ▸ Memory does), falling back to the CPU.
+    if std::env::var_os("DISCCRAFT_HARDWARE_ENCODER").is_some_and(|value| value == "1") {
+        disccraft_platform::use_for_transcodes(true);
+    }
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {

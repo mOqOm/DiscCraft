@@ -82,6 +82,8 @@ struct FileMeta {
     data_lbn: u32,
     data_sectors: u32,
     iso_extent: u32,
+    /// Unused sectors left before the file's data (a gap that moves it and the files after it).
+    gap_before: u32,
 }
 
 struct VideoItem {
@@ -199,8 +201,32 @@ pub fn write_dvd_iso_with_rom(
     out: &Path,
     unix_time: i64,
 ) -> Result<IsoReport, UdfError> {
+    write_dvd_iso_with_gaps(video_ts, &[], rom, label, out, unix_time)
+}
+
+/// [`write_dvd_iso_with_rom`] with `gaps` unused sectors left before the named video files (a title set moved to put a
+/// dual-layer disc's layer break at the start of an ECC block; its start in `VIDEO_TS.IFO` must say so).
+///
+/// # Errors
+///
+/// As [`write_dvd_iso_with_rom`].
+pub fn write_dvd_iso_with_gaps(
+    video_ts: &[ImageFile],
+    gaps: &[(String, u32)],
+    rom: &[TreeFile],
+    label: &str,
+    out: &Path,
+    unix_time: i64,
+) -> Result<IsoReport, UdfError> {
     let out_path = out.to_string_lossy().into_owned();
     let mut metas = prepare_files(video_ts)?;
+    for meta in &mut metas {
+        meta.gap_before = gaps
+            .iter()
+            .filter(|(name, _)| *name == meta.name)
+            .map(|(_, sectors)| *sectors)
+            .sum();
+    }
     let mut rom = RomTree::build(rom, &DVD_ROOT_NAMES)?;
     let date = iso9660::ecma_date(unix_time);
 
@@ -278,6 +304,7 @@ fn prepare_files(video_ts: &[ImageFile]) -> Result<Vec<FileMeta>, UdfError> {
             data_lbn: 0,
             data_sectors: 0,
             iso_extent: 0,
+            gap_before: 0,
         });
     }
 
@@ -437,6 +464,8 @@ fn allocate_plan(
     for meta in metas.iter_mut() {
         let sectors = sectors_for_size(meta.size)?;
         let sectors = u32_from_u64(sectors, "file data sectors")?;
+        data_lbn = checked_add_u32(data_lbn, meta.gap_before, "file data LBN")?;
+        data_sectors = checked_add_u32(data_sectors, meta.gap_before, "file data sectors")?;
         if is_backup(&meta.name) {
             data_lbn = checked_add_u32(data_lbn, BUP_GAP_SECTORS, "file data LBN")?;
             data_sectors = checked_add_u32(data_sectors, BUP_GAP_SECTORS, "file data sectors")?;

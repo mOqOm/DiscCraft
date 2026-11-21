@@ -131,6 +131,75 @@ fn a_dvd_ddp_image_is_its_image_with_the_control_data_and_the_id() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// M14.4: a dual-layer DVD (DVD9, its layer break set at frame 45 as in `layer_break.rs`) as a DDP image: the image
+/// split at the layer break between the folders `Layer 1` (layer 0's part, CONTROL.DAT, DDPID) and `Layer 2` (layer
+/// 1's part padded to a whole ECC block, its DDPID), as Encore CS6 writes a dual-layer DDP image; the two parts
+/// joined are the image, which plays in ffmpeg from the first frame to the last.
+#[test]
+fn a_dual_layer_ddp_image_has_a_folder_for_each_layer() {
+    let Some(ffmpeg) = ffmpeg() else {
+        eprintln!("ffmpeg not found; skipping");
+        return;
+    };
+    let video = source(&ffmpeg);
+    let mut dual = project(&video);
+    let timeline = *dual.timelines.keys().next().unwrap();
+    dual.add_chapter(timeline, disccraft_project::Tick(37 * 8_475_667_200), None)
+        .unwrap();
+    dual.settings.capacity = disccraft_project::Capacity::Dvd9;
+    dual.settings.layer_break = Some(disccraft_project::LayerBreakPoint {
+        timeline,
+        time: disccraft_project::Tick(45 * 8_475_667_200 + 8_475_667_200 / 4),
+    });
+    let dir = std::env::temp_dir().join(format!("disccraft-ddp-dual-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let report = build(&dual, &options(&dir)).unwrap();
+    let found = report.layer_break.clone().expect("a layer break");
+    let ddp = dir.join("Movie");
+    assert!(!ddp.join("MAIN.DAT").exists());
+    let (first, second) = (ddp.join("Layer 1"), ddp.join("Layer 2"));
+    let layer0 = std::fs::read(first.join("MAIN.DAT")).unwrap();
+    let layer1 = std::fs::read(second.join("MAIN.DAT")).unwrap();
+    assert_eq!(layer0.len() as u64, u64::from(found.sector) * 2048);
+    assert_eq!(layer1.len() % (16 * 2048), 0, "whole ECC blocks");
+    assert_eq!(report.total_bytes, (layer0.len() + layer1.len()) as u64);
+    let layout = Layout {
+        sectors: found.total_sectors,
+        layer_break: Some(found.sector),
+    };
+    assert_eq!(
+        std::fs::read(first.join("CONTROL.DAT")).unwrap(),
+        control_data(&layout).unwrap()
+    );
+    assert_eq!(
+        std::fs::read(first.join("DDPID")).unwrap(),
+        ddp_id(&layout).unwrap()
+    );
+    assert_eq!(
+        Some(std::fs::read(second.join("DDPID")).unwrap()),
+        disccraft_ddp::second_layer_id(&layout).unwrap()
+    );
+    // The two parts joined (without layer 1's padding) are the image, which plays every frame.
+    let rest = (found.total_sectors - found.sector) as usize * 2048;
+    assert!(layer1[rest..].iter().all(|byte| *byte == 0));
+    let iso = dir.join("joined.iso");
+    let mut joined = layer0;
+    joined.extend_from_slice(&layer1[..rest]);
+    std::fs::write(&iso, &joined).unwrap();
+    let out = Command::new(&ffmpeg)
+        .args(["-v", "error", "-f", "dvdvideo", "-title", "1", "-i"])
+        .arg(&iso)
+        .args(["-map", "0:v", "-f", "framemd5", "-"])
+        .output()
+        .unwrap();
+    let frames = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .count();
+    assert_eq!(frames, 59, "ffmpeg plays every frame of the title");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_blu_ray_gets_no_ddp_image() {
     let dir = std::env::temp_dir().join(format!("disccraft-ddp-bd-{}", std::process::id()));

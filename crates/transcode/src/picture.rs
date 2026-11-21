@@ -71,8 +71,9 @@ pub(crate) fn encode_video(
         let mut encoder =
             Encoder::new(config.clone()).map_err(|e| TranscodeError::Encode(e.to_string()))?;
         encoder.set_quality(options.quality);
+        encoder.set_b_frames(B_FRAMES);
         if let Some(top_first) = fields {
-            encoder.set_field_order(top_first);
+            encoder.set_interlaced(top_first);
         }
         let mut stats = Vec::new();
         encode_pass(
@@ -80,8 +81,8 @@ pub(crate) fn encode_video(
             options,
             frames,
             &mut encoder,
-            &mut |encoder, _| {
-                stats.extend(encoder.last_picture());
+            &mut |picture| {
+                stats.push(picture.stats);
                 Ok(())
             },
             &mut |fraction| progress(fraction * 0.5),
@@ -95,8 +96,11 @@ pub(crate) fn encode_video(
     let mut writer = BufWriter::new(file);
     let mut encoder = Encoder::new(config).map_err(|e| TranscodeError::Encode(e.to_string()))?;
     encoder.set_quality(options.quality);
+    encoder.set_b_frames(B_FRAMES);
+    // An interlaced source's pictures with the field tools (M12.36): each macroblock transformed and predicted as a
+    // frame or as two fields, the tools kept on the pictures where enough macroblocks take them.
     if let Some(top_first) = fields {
-        encoder.set_field_order(top_first);
+        encoder.set_interlaced(top_first);
     }
     if let Some(first) = &first {
         encoder.plan_second_pass(first);
@@ -107,9 +111,9 @@ pub(crate) fn encode_video(
         options,
         frames,
         &mut encoder,
-        &mut |_, access_unit| {
+        &mut |picture| {
             writer
-                .write_all(access_unit)
+                .write_all(&picture.data)
                 .map_err(|error| io_error(output_path, error))
         },
         &mut |fraction| progress(from + fraction * span),
@@ -150,15 +154,20 @@ fn interlaced_output(source: &Source, options: &crate::TranscodeOptions) -> Opti
     (same && rate.den != 0).then_some(top_first)
 }
 
+/// B pictures between the reference pictures of a DVD title's video (M12.33): Encore's GOPs of M = 3 (I B B P …),
+/// film under 3:2 pulldown too (M12.34).
+pub(crate) const B_FRAMES: u8 = 2;
+
 /// One pass over the output frames: each is decoded, scaled and converted on a thread of its own, a few ahead of
-/// `encoder` (which runs here, its slices on threads of their own), and each access unit goes to `sink`.
+/// `encoder` (which runs here, its slices on threads of their own), and each coded picture goes to `sink` in
+/// decoding order.
 /// `fields`: an interlaced source whose fields stay apart ([`interlaced_output`]).
 fn encode_pass(
     (source, fields): (&Source, Option<bool>),
     options: &crate::TranscodeOptions,
     frames: u64,
     encoder: &mut Encoder,
-    sink: &mut dyn FnMut(&Encoder, &[u8]) -> Result<(), TranscodeError>,
+    sink: &mut dyn FnMut(&disccraft_mpeg2venc::encoder::CodedPicture) -> Result<(), TranscodeError>,
     progress: &mut dyn FnMut(f32),
 ) -> Result<(), TranscodeError> {
     let standard = options.standard;
@@ -229,12 +238,21 @@ fn encode_pass(
             let frame420 = receiver
                 .recv()
                 .map_err(|_| TranscodeError::Encode("the decoder stopped early".to_string()))??;
-            let access_unit = encoder
-                .encode_frame_gop(&frame420, gops.starts(index))
+            let pictures = encoder
+                .push_frame(&frame420, gops.starts(index))
                 .map_err(|error| TranscodeError::Encode(error.to_string()))?;
-            sink(encoder, &access_unit)?;
+            for picture in &pictures {
+                sink(picture)?;
+            }
             report_progress(progress, index, frames);
             crate::check_stop()?;
+        }
+        // The frames still waiting for a reference picture after them.
+        for picture in &encoder
+            .flush()
+            .map_err(|error| TranscodeError::Encode(error.to_string()))?
+        {
+            sink(picture)?;
         }
         Ok(())
     })

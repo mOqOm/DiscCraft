@@ -24,6 +24,9 @@ pub enum PsdLayer {
     Group {
         /// Group name.
         name: String,
+        /// Its PSD layer id (`lyid`), which Photoshop keeps while the group is edited or renamed and gives a copy
+        /// anew (M10.49: a button set's, so the menu knows the set again); `None` lets the writer choose.
+        id: Option<u32>,
         /// The layers in the group, bottom to top.
         children: Vec<PsdLayer>,
     },
@@ -106,12 +109,14 @@ fn build_layer(
             }
             Ok(out)
         }
-        PsdLayer::Group { name, children } => {
+        PsdLayer::Group { name, id, children } => {
             let children = children
                 .iter()
                 .map(|child| build_layer(child, format, canvas, expected))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(Layer::group(name.clone(), children))
+            let mut group = Layer::group(name.clone(), children);
+            group.psd_id = *id;
+            Ok(group)
         }
     }
 }
@@ -219,6 +224,7 @@ mod tests {
             },
             PsdLayer::Group {
                 name: "(+) Scene".to_owned(),
+                id: None,
                 children: vec![
                     PsdLayer::Raster {
                         name: "frame".to_owned(),
@@ -280,6 +286,7 @@ mod tests {
             },
             PsdLayer::Group {
                 name: "(+) Play".to_owned(),
+                id: None,
                 children: vec![
                     PsdLayer::Raster {
                         name: "Play".to_owned(),
@@ -363,6 +370,7 @@ mod tests {
             },
             PsdLayer::Group {
                 name: "(+) Play".to_owned(),
+                id: None,
                 children: vec![
                     // Bottom to top: colour 1 over x 1..7, colour 3 over x 4..6 (any colour of its own), colour 2
                     // over x 5..7, and a faint colour 2 over x 1..2 that does not count.
@@ -404,6 +412,44 @@ mod tests {
             sub.colors,
             [Some([255, 0, 0]), Some([9, 9, 9]), Some([0, 0, 0])]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M10.49: a button set's PSD layer id is written and read back, so a menu knows the set again after the PSD is
+    /// edited (Photoshop keeps the id while the set is moved or renamed).
+    #[test]
+    fn a_button_sets_layer_id_is_kept() -> Result<(), Box<dyn Error>> {
+        let dir = std::env::temp_dir().join(format!("disccraft-psd-lyid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("menu.psd");
+        let (w, h) = (8_usize, 4_usize);
+        let mut block = vec![0u8; w * h * 4];
+        for px in block.chunks_mut(4).take(8) {
+            px.copy_from_slice(&[255, 255, 255, 255]);
+        }
+        let set = |name: &str, id: Option<u32>| PsdLayer::Group {
+            name: name.to_owned(),
+            id,
+            children: vec![PsdLayer::Raster {
+                name: "art".to_owned(),
+                rgba: block.clone(),
+                visible: true,
+            }],
+        };
+        write_layered_psd(
+            &path,
+            8,
+            4,
+            &[set("(+) Play", Some(41)), set("(+) Scenes", Some(7))],
+        )?;
+        let menu = load_psd_menu(&path)?;
+        let ids: Vec<(&str, Option<u32>)> = menu
+            .buttons
+            .iter()
+            .map(|button| (button.name.as_str(), button.layer_id))
+            .collect();
+        assert_eq!(ids, [("Play", Some(41)), ("Scenes", Some(7))]);
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

@@ -6,11 +6,12 @@
 //! A DVD quality preset is Encore's name for a rate and a way of keeping it ("NTSC DV High quality 7Mb VBR 2 Pass":
 //! 7 Mbit/s, two passes, Dolby Digital): Encore's built-in ones (an NTSC project's 23.976 ones first: film,
 //! progressive pictures shown by 3:2 pulldown), then the user's own (Edit Quality Presets…), then Automatic.
-//! A Blu-ray's are High Quality / Long Form / Maximum Quality of the project's Blu-ray format, whose codec,
-//! dimensions and frame rate are the project's (Transcode Defaults…): the same for every asset here.
+//! A Blu-ray's are High Quality / Long Form / Maximum Quality of the asset's Blu-ray format: its codec, dimensions
+//! and frame rate, its own on an HD Blu-ray (M6.325; the codec since M10.39, every format in both), else the
+//! project's (Transcode Defaults…).
 
 use disccraft_project::{
-    Asset, AssetId, AssetKind, BEST_QUALITY, BdVideo, BlurayTranscode, MAX_TRANSCODE_KBPS,
+    Asset, AssetId, AssetKind, BEST_QUALITY, BdCodec, BdVideo, BlurayTranscode, MAX_TRANSCODE_KBPS,
     MIN_QUALITY, MIN_TRANSCODE_KBPS, TranscodeAudio, TranscodeMode, VideoStandard,
 };
 use serde_json::json;
@@ -48,6 +49,17 @@ const LOW_QUALITY: u8 = 2;
 
 /// The quality of Encore's MPEG-2 "Long Form" Blu-ray presets.
 const LONG_FORM_QUALITY: u8 = 3;
+
+/// What was picked in the whole Blu-ray list ([`bluray_list`]).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ListChoice {
+    /// An entry of the list.
+    Pick(ListPick),
+    /// Automatic at its end: the project's format and codec at the automatic rate.
+    ProjectSettings,
+    /// Don't Transcode: no rate of its own (a video that goes on the disc as it is).
+    AsIs,
+}
 
 /// What was picked in a quality preset combo.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -173,11 +185,11 @@ pub(crate) struct BlurayFormat {
     pub(crate) automatic: String,
 }
 
-/// The project's Blu-ray format as Encore's Transcode Settings show it.
-pub(crate) fn bluray_format(video: BdVideo, standard: VideoStandard) -> BlurayFormat {
-    let (codec, width, height, rate, interlaced) = match video {
+/// A Blu-ray format coded as MPEG-2 (`mpeg2`) or H.264, as Encore's Transcode Settings show it.
+pub(crate) fn bluray_format(video: BdVideo, mpeg2: bool, standard: VideoStandard) -> BlurayFormat {
+    let codec = if mpeg2 { "MPEG-2" } else { "H.264" };
+    let (width, height, rate, interlaced) = match video {
         BdVideo::Sd => (
-            "MPEG-2",
             720,
             if standard == VideoStandard::Ntsc {
                 480
@@ -191,28 +203,39 @@ pub(crate) fn bluray_format(video: BdVideo, standard: VideoStandard) -> BlurayFo
             },
             true,
         ),
-        BdVideo::Hd1080p23 => ("H.264", 1920, 1080, "23.976", false),
-        BdVideo::Hd1080p24 => ("H.264", 1920, 1080, "24", false),
-        BdVideo::Hd1080i59 => ("MPEG-2", 1920, 1080, "29.97", true),
-        BdVideo::Hd1080i50 => ("MPEG-2", 1920, 1080, "25", true),
-        BdVideo::Hd720p59 => ("H.264", 1280, 720, "59.94", false),
-        BdVideo::Hd720p50 => ("H.264", 1280, 720, "50", false),
-        BdVideo::Hd720p23 => ("H.264", 1280, 720, "23.976", false),
-        BdVideo::Hd720p24 => ("H.264", 1280, 720, "24", false),
+        BdVideo::Hd1080p23 => (1920, 1080, "23.976", false),
+        BdVideo::Hd1080p24 => (1920, 1080, "24", false),
+        BdVideo::Hd1080i59 => (1920, 1080, "29.97", true),
+        BdVideo::Hd1080i50 => (1920, 1080, "25", true),
+        BdVideo::Hd720p59 => (1280, 720, "59.94", false),
+        BdVideo::Hd720p50 => (1280, 720, "50", false),
+        BdVideo::Hd720p23 => (1280, 720, "23.976", false),
+        BdVideo::Hd720p24 => (1280, 720, "24", false),
+        BdVideo::Hd1440p23 => (1440, 1080, "23.976", false),
+        BdVideo::Hd1440p24 => (1440, 1080, "24", false),
+        BdVideo::Hd1440i59 => (1440, 1080, "29.97", true),
+        BdVideo::Hd1440i50 => (1440, 1080, "25", true),
     };
     let tv = if standard == VideoStandard::Ntsc {
         "NTSC"
     } else {
         "PAL"
     };
+    // Encore names the 1440 x 1080 presets with spaces round the "x" ("1440 x 1080i 29.97 High Quality H.264"), but
+    // not their Automatic ("1440x1080i H.264").
+    let size = if width == 1440 {
+        format!("{width} x {height}")
+    } else {
+        format!("{width}x{height}")
+    };
     let (stem, automatic) = match video {
-        BdVideo::Sd => (format!("{tv} SD"), "SD MPEG-2".to_owned()),
+        BdVideo::Sd => (format!("{tv} SD"), format!("SD {codec}")),
         _ if interlaced => (
-            format!("{width}x{height}i {rate}"),
+            format!("{size}i {rate}"),
             format!("{width}x{height}i {codec}"),
         ),
         _ => (
-            format!("{width}x{height}p {rate}"),
+            format!("{size}p {rate}"),
             format!("{width}x{height} {rate}p {codec}"),
         ),
     };
@@ -238,6 +261,45 @@ fn shown_bd_video(settings: &disccraft_project::DiscSettings, shown: &Asset) -> 
         .unwrap_or(settings.bd_video)
 }
 
+/// Whether an asset `shown` is coded as MPEG-2 on a Blu-ray with `settings` (else H.264): its own codec on an HD
+/// Blu-ray (M10.39), else the project's, for its format ([`shown_bd_video`]).
+fn shown_bd_mpeg2(settings: &disccraft_project::DiscSettings, shown: &Asset) -> bool {
+    let codec = if settings.bd_video.hd().is_none() {
+        settings.bd_codec
+    } else {
+        shown.bluray_codec.unwrap_or(settings.bd_codec)
+    };
+    codec.mpeg2(shown_bd_video(settings, shown))
+}
+
+/// Every HD format in both codecs, as Transcode Settings name them: the codecs in Encore's order (MPEG-2, H.264),
+/// each format's sizes and rates from the smallest.
+fn hd_formats(standard: VideoStandard) -> Vec<((BdVideo, bool), BlurayFormat)> {
+    let mut formats: Vec<((BdVideo, bool), BlurayFormat)> = [true, false]
+        .into_iter()
+        .flat_map(|mpeg2| {
+            BdVideo::ALL
+                .into_iter()
+                .filter(|video| video.hd().is_some())
+                .map(move |video| ((video, mpeg2), bluray_format(video, mpeg2, standard)))
+        })
+        .collect();
+    // A stable sort: the codecs stay in their order.
+    formats.sort_by(|((a, a_mpeg2), _), ((b, b_mpeg2), _)| {
+        let key = |video: BdVideo| {
+            let (_, height, num, den) = video.hd().unwrap_or((0, 0, 0, 1));
+            // The video's own size (1440 x 1080 between 720p and 1920 x 1080).
+            let width = video.video_width().unwrap_or(0);
+            (
+                u64::from(width) * u64::from(height),
+                u64::from(num) * 1_000_000 / u64::from(den.max(1)),
+            )
+        };
+        b_mpeg2.cmp(a_mpeg2).then(key(*a).cmp(&key(*b)))
+    });
+    formats
+}
+
 /// The names, without repeats and in Encore's order, of the parts `part` of the HD formats `keep` keeps (as
 /// Transcode Settings show them).
 fn hd_parts(
@@ -246,11 +308,7 @@ fn hd_parts(
     part: impl Fn(&BlurayFormat) -> String,
 ) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
-    for video in BdVideo::ALL
-        .into_iter()
-        .filter(|video| video.hd().is_some())
-    {
-        let found = bluray_format(video, standard);
+    for (_, found) in hd_formats(standard) {
         let name = part(&found);
         if keep(&found) && !names.contains(&name) {
             names.push(name);
@@ -259,14 +317,10 @@ fn hd_parts(
     names
 }
 
-/// The HD format with the codec, dimensions and rate `wanted` (as Transcode Settings name them), or the nearest
-/// one DiscCraft makes: that codec and those dimensions at another rate, else that codec.
-fn hd_video_of(wanted: &[String; 3], standard: VideoStandard) -> Option<BdVideo> {
-    let formats: Vec<(BdVideo, BlurayFormat)> = BdVideo::ALL
-        .into_iter()
-        .filter(|video| video.hd().is_some())
-        .map(|video| (video, bluray_format(video, standard)))
-        .collect();
+/// The HD format and codec (MPEG-2: `true`) with the codec, dimensions and rate `wanted` (as Transcode Settings name
+/// them), or the nearest one DiscCraft makes: that codec and those dimensions at another rate, else that codec.
+fn hd_video_of(wanted: &[String; 3], standard: VideoStandard) -> Option<(BdVideo, bool)> {
+    let formats = hd_formats(standard);
     let [codec, dimensions, rate] = wanted;
     let find = |test: &dyn Fn(&BlurayFormat) -> bool| {
         formats
@@ -314,7 +368,10 @@ pub(crate) fn bluray_presets(format: &BlurayFormat) -> Vec<BlurayPreset> {
     };
     let sd = format.stem.ends_with(" SD");
     let named = |quality: &str| {
-        if sd {
+        if sd && format.codec == "H.264" {
+            // Encore's names for a standard-definition Blu-ray in H.264 (M10.41).
+            format!("{} H.264 {quality} H.264", format.stem)
+        } else if sd {
             // Encore's own names for a standard-definition Blu-ray.
             match quality {
                 "Long Form" => format!("{} MPEG-2 Long Form MPEG-2", format.stem),
@@ -377,6 +434,156 @@ pub(crate) fn bluray_setting_name(asset: &Asset, format: Option<&BlurayFormat>) 
         (None, Some(format)) => tlf!("Automatic: {format}", format = format.automatic),
         (None, None) => tl!("Automatic").to_owned(),
     }
+}
+
+/// What an entry of the whole Blu-ray list picks (M10.42).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ListPick {
+    /// A Blu-ray preset of a format in a codec (MPEG-2: `true`).
+    Preset {
+        video: BdVideo,
+        mpeg2: bool,
+        preset: BlurayPreset,
+    },
+    /// A DVD quality preset: its rate as an SD Blu-ray's (MPEG-2, as a DVD's).
+    Dvd(DvdPreset),
+    /// A format in a codec at the automatic rate.
+    Automatic { video: BdVideo, mpeg2: bool },
+}
+
+/// One entry of the whole Blu-ray list: its name, what it picks, and why it cannot be picked for this project.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ListEntry {
+    pub(crate) name: String,
+    pub(crate) pick: ListPick,
+    pub(crate) unavailable: Option<&'static str>,
+}
+
+/// Whether a format's frame rate is one of the TV standard's list: Encore's NTSC project lists 23.976, 24, 29.97 and
+/// 59.94, its PAL project 25 and 50 only (seen 2026-11-21, M10.43).
+fn rate_of_standard(video: BdVideo, standard: VideoStandard) -> bool {
+    match video.hd() {
+        None => true,
+        Some((_, _, 24_000, 1001) | (_, _, 24, 1)) => standard == VideoStandard::Ntsc,
+        Some((_, _, 30_000, 1001) | (_, _, 60_000, 1001)) => standard == VideoStandard::Ntsc,
+        Some(_) => standard == VideoStandard::Pal,
+    }
+}
+
+/// Encore's whole Blu-ray list of an asset (its Properties: M10.42, as the user's screenshots of 2026-11-21 show it):
+/// first every preset by name (each format of the TV standard in both codecs, the DVD presets, the user's Blu-ray
+/// presets for the asset's format `shown`), then Automatic in each format and codec (SD, the interlaced formats from
+/// the widest, then the progressive ones by rate and from the widest; MPEG-2 before H.264). The ones the project
+/// cannot make are given with the reason: an HD format on an SD Blu-ray or SD on an HD one (the disc's video is the
+/// project's), SD in the other codec than the disc's, a DVD preset but on an SD Blu-ray in MPEG-2, and film (3:2
+/// pulldown is a DVD's).
+pub(crate) fn bluray_list(
+    settings: &disccraft_project::DiscSettings,
+    shown: (BdVideo, bool),
+    user: &[crate::workspace::QualityPreset],
+) -> (Vec<ListEntry>, Vec<ListEntry>) {
+    let standard = settings.standard;
+    let hd_disc = settings.bd_video.hd().is_some();
+    let sd_mpeg2 = settings.bd_codec.mpeg2(BdVideo::Sd);
+    let why = |video: BdVideo, mpeg2: bool| -> Option<&'static str> {
+        match (hd_disc, video.is_sd()) {
+            (true, true) => Some(tl!(
+                "SD titles are made on an SD Blu-ray (the project's Blu-ray video, Transcode Defaults…)"
+            )),
+            (false, false) => Some(tl!(
+                "HD titles are made on an HD Blu-ray (the project's Blu-ray video, Transcode Defaults…)"
+            )),
+            (false, true) if mpeg2 != sd_mpeg2 => Some(tl!(
+                "An SD Blu-ray's titles all take the project's codec (Transcode Defaults…)"
+            )),
+            _ => None,
+        }
+    };
+    let formats: Vec<(BdVideo, bool)> = [true, false]
+        .into_iter()
+        .flat_map(|mpeg2| {
+            BdVideo::ALL
+                .into_iter()
+                .filter(move |video| rate_of_standard(*video, standard))
+                .map(move |video| (video, mpeg2))
+        })
+        .collect();
+    let mut presets: Vec<ListEntry> = formats
+        .iter()
+        .flat_map(|&(video, mpeg2)| {
+            bluray_presets(&bluray_format(video, mpeg2, standard))
+                .into_iter()
+                .map(move |preset| ListEntry {
+                    name: preset.name.clone(),
+                    pick: ListPick::Preset {
+                        video,
+                        mpeg2,
+                        preset,
+                    },
+                    unavailable: why(video, mpeg2),
+                })
+        })
+        .collect();
+    for preset in dvd_presets(standard, &[]) {
+        let unavailable = if hd_disc || !sd_mpeg2 {
+            Some(tl!(
+                "A DVD preset is an SD Blu-ray's in MPEG-2 (Transcode Defaults…)"
+            ))
+        } else if preset.film {
+            Some(tl!("Film shown by 3:2 pulldown is a DVD's"))
+        } else {
+            None
+        };
+        presets.push(ListEntry {
+            name: preset.name.clone(),
+            pick: ListPick::Dvd(preset),
+            unavailable,
+        });
+    }
+    let (video, mpeg2) = shown;
+    let format = bluray_format(video, mpeg2, standard);
+    for preset in bluray_presets_with(&format, user).into_iter().skip(3) {
+        presets.push(ListEntry {
+            name: preset.name.clone(),
+            pick: ListPick::Preset {
+                video,
+                mpeg2,
+                preset,
+            },
+            unavailable: why(video, mpeg2),
+        });
+    }
+    presets.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // Automatic: SD, then interlaced from the widest, then progressive by rate and from the widest.
+    let mut kinds: Vec<BdVideo> = BdVideo::ALL
+        .into_iter()
+        .filter(|video| rate_of_standard(*video, standard))
+        .collect();
+    kinds.sort_by_key(|video| {
+        let (_, _, num, den) = video.hd().unwrap_or((0, 0, 0, 1));
+        let rate = u64::from(num) * 1000 / u64::from(den.max(1));
+        let width = video.video_width().unwrap_or(0);
+        (
+            !video.is_sd(),
+            !video.interlaced(),
+            if video.interlaced() { 0 } else { rate },
+            std::cmp::Reverse(width),
+        )
+    });
+    let automatic = kinds
+        .into_iter()
+        .flat_map(|video| [(video, true), (video, false)])
+        .map(|(video, mpeg2)| ListEntry {
+            name: tlf!(
+                "Automatic: {format}",
+                format = bluray_format(video, mpeg2, standard).automatic
+            ),
+            pick: ListPick::Automatic { video, mpeg2 },
+            unavailable: why(video, mpeg2),
+        })
+        .collect();
+    (presets, automatic)
 }
 
 /// A quality preset combo (Encore's): the presets, a separator, Automatic, `extra` (a Blu-ray's "Use Project
@@ -542,6 +749,8 @@ pub(crate) struct TranscodeDraft {
     bluray: Option<BlurayTranscode>,
     /// The asset's own HD format for a Blu-ray (`None`: the project's).
     bluray_video: Option<BdVideo>,
+    /// The asset's own codec for a Blu-ray (`None`: the project's).
+    bluray_codec: Option<BdCodec>,
     /// Whether the video goes on a title in a format chosen here as it is (`asset.fitsBluray`), asked once.
     fits_as: Option<(BdVideo, bool)>,
     /// Encore's "Use Maximum Render Quality" and "Use Frame Blending".
@@ -561,6 +770,7 @@ impl TranscodeDraft {
         shown.transcode_quality = dvd.quality;
         shown.bluray_transcode.clone_from(&self.bluray);
         shown.bluray_video = self.bluray_video;
+        shown.bluray_codec = self.bluray_codec;
         shown
     }
 }
@@ -629,6 +839,7 @@ impl DiscCraftApp {
             },
             bluray: found.bluray_transcode.clone(),
             bluray_video: found.bluray_video,
+            bluray_codec: found.bluray_codec,
             fits_as: None,
             rendering: (found.max_render_quality, found.frame_blend),
         });
@@ -706,8 +917,12 @@ impl DiscCraftApp {
         passes: bool,
     ) -> Option<Picked<BlurayPreset>> {
         let settings = &self.session.project.settings;
-        // The presets of the asset's own format (M6.325), else the project's.
-        let format = bluray_format(shown_bd_video(settings, shown), settings.standard);
+        // The presets of the asset's own format (M6.325) and codec (M10.39), else the project's.
+        let format = bluray_format(
+            shown_bd_video(settings, shown),
+            shown_bd_mpeg2(settings, shown),
+            settings.standard,
+        );
         let presets: Vec<(String, BlurayPreset)> =
             bluray_presets_with(&format, &self.quality_presets)
                 .into_iter()
@@ -722,6 +937,135 @@ impl DiscCraftApp {
             (passes, true),
             Some(tl!("Use Project Settings")),
         )
+    }
+
+    /// The Properties panel's Blu-ray combo (M10.42): Encore's whole list ([`bluray_list`]), a separator and
+    /// Automatic (the project's settings), and "Don't Transcode" for a video that `passes` onto the disc as it is.
+    /// What was picked, if anything.
+    pub(crate) fn bluray_list_combo(
+        &self,
+        ui: &mut egui::Ui,
+        salt: &str,
+        shown: &Asset,
+        passes: bool,
+    ) -> Option<ListChoice> {
+        let settings = &self.session.project.settings;
+        let video = shown_bd_video(settings, shown);
+        let mpeg2 = shown_bd_mpeg2(settings, shown);
+        let (presets, automatic) = bluray_list(settings, (video, mpeg2), &self.quality_presets);
+        let format = bluray_format(video, mpeg2, settings.standard);
+        // What is ticked: its preset, else its own format's Automatic, else Automatic.
+        let own = shown.bluray_video.is_some() || shown.bluray_codec.is_some();
+        let current = match &shown.bluray_transcode {
+            Some(_) => Some(bluray_setting_name(shown, Some(&format))),
+            None if own && settings.bd_video.hd().is_some() => {
+                Some(tlf!("Automatic: {format}", format = format.automatic))
+            }
+            None => None,
+        };
+        let as_is = passes && shown.bluray_transcode.is_none();
+        let text = if as_is {
+            tl!("Don't Transcode").to_owned()
+        } else {
+            current
+                .clone()
+                .unwrap_or_else(|| tl!("Automatic").to_owned())
+        };
+        let mut picked = None;
+        let _ = egui::ComboBox::from_id_salt(salt)
+            .width(260.0)
+            .height(480.0)
+            .selected_text(text)
+            .show_ui(ui, |ui| {
+                ui.set_min_width(340.0);
+                for entry in presets.iter().chain(&automatic) {
+                    let ticked = !as_is && current.as_deref() == Some(entry.name.as_str());
+                    let mut response = ui.add_enabled(
+                        entry.unavailable.is_none(),
+                        egui::Button::selectable(ticked, &entry.name),
+                    );
+                    if let Some(why) = entry.unavailable {
+                        response = response.on_disabled_hover_text(why);
+                    }
+                    if response.clicked() {
+                        picked = Some(ListChoice::Pick(entry.pick.clone()));
+                    }
+                }
+                ui.separator();
+                let project = !as_is && current.is_none();
+                if ui
+                    .add(egui::Button::selectable(project, tl!("Automatic")))
+                    .on_hover_text(tl!(
+                        "The project's Blu-ray format and codec, at the rate that fits the disc"
+                    ))
+                    .clicked()
+                {
+                    picked = Some(ListChoice::ProjectSettings);
+                }
+                if passes
+                    && ui
+                        .add(egui::Button::selectable(as_is, tl!("Don't Transcode")))
+                        .on_hover_text(tl!(
+                            "This video goes on the disc as it is: it is not transcoded"
+                        ))
+                        .clicked()
+                {
+                    picked = Some(ListChoice::AsIs);
+                }
+            });
+        picked
+    }
+
+    /// Sets an asset's Blu-ray setting from the whole list (one undo step): a preset or an Automatic of an HD
+    /// format sets the asset's own format and codec with it; SD's are the project's.
+    pub(crate) fn apply_bluray_list(&mut self, asset: AssetId, choice: ListChoice) {
+        let own = |video: BdVideo, mpeg2: bool| {
+            if video.is_sd() {
+                (serde_json::Value::Null, serde_json::Value::Null)
+            } else {
+                (
+                    json!(video.id()),
+                    json!(if mpeg2 { BdCodec::Mpeg2 } else { BdCodec::H264 }.id()),
+                )
+            }
+        };
+        let params = match choice {
+            ListChoice::Pick(ListPick::Preset {
+                video,
+                mpeg2,
+                preset,
+            }) => {
+                let (video, codec) = own(video, mpeg2);
+                json!({
+                    "asset": asset.0,
+                    "kbps": preset.kbps,
+                    "maxKbps": preset.max_kbps,
+                    "preset": preset.name,
+                    "quality": preset.quality,
+                    "mode": preset.mode.as_str(),
+                    "video": video,
+                    "codec": codec,
+                })
+            }
+            // A DVD preset's peak: its rate when constant, else Encore's 9 Mbit/s.
+            ListChoice::Pick(ListPick::Dvd(preset)) => json!({
+                "asset": asset.0,
+                "kbps": preset.kbps,
+                "maxKbps": if preset.mode == TranscodeMode::Cbr { preset.kbps } else { preset.kbps.max(9_000) },
+                "preset": preset.name,
+                "quality": preset.quality,
+                "mode": preset.mode.as_str(),
+                "video": null,
+            }),
+            ListChoice::Pick(ListPick::Automatic { video, mpeg2 }) => {
+                let (video, codec) = own(video, mpeg2);
+                json!({ "asset": asset.0, "kbps": null, "video": video, "codec": codec })
+            }
+            ListChoice::ProjectSettings => json!({ "asset": asset.0, "kbps": null, "video": null }),
+            ListChoice::AsIs => json!({ "asset": asset.0, "kbps": null }),
+        };
+        let _ = self.run_command("asset.setBlurayTranscode", params);
+        self.transcode_dirty = true;
     }
 
     /// Sets an asset's DVD setting from a pick (one undo step).
@@ -748,25 +1092,6 @@ impl DiscCraftApp {
         self.transcode_dirty = true;
     }
 
-    /// Sets an asset's Blu-ray setting from a pick (one undo step).
-    pub(crate) fn apply_bluray_pick(&mut self, asset: AssetId, picked: Picked<BlurayPreset>) {
-        let params = match picked {
-            Picked::Preset(preset) => json!({
-                "asset": asset.0,
-                "kbps": preset.kbps,
-                "maxKbps": preset.max_kbps,
-                "preset": preset.name,
-                "quality": preset.quality,
-                "mode": preset.mode.as_str(),
-            }),
-            Picked::Automatic => json!({ "asset": asset.0, "kbps": null }),
-            // The project's format, at the automatic rate.
-            Picked::ProjectSettings => json!({ "asset": asset.0, "kbps": null, "video": null }),
-        };
-        let _ = self.run_command("asset.setBlurayTranscode", params);
-        self.transcode_dirty = true;
-    }
-
     /// Draws the dialog while it is open (Encore's layout).
     pub(crate) fn transcode_settings_window(&mut self, ctx: &egui::Context) {
         let Some(mut draft) = self.transcode_settings_dialog.clone() else {
@@ -781,11 +1106,12 @@ impl DiscCraftApp {
         // The asset's own HD format on an HD Blu-ray (M6.325), else the project's.
         let project_hd = settings.bd_video.hd().is_some();
         let video = shown_bd_video(&settings, &draft.as_asset(&asset));
+        let mpeg2 = shown_bd_mpeg2(&settings, &draft.as_asset(&asset));
         // Another format chosen here: "Don't Transcode" only if the video goes on its titles as it is.
         if video != shown_bd_video(&settings, &asset) {
             bluray_passes = self.fits_bluray_as(draft.asset, video, &mut draft.fits_as);
         }
-        let format = bluray_format(video, settings.standard);
+        let format = bluray_format(video, mpeg2, settings.standard);
         let mut done = None;
         let mut edit_presets = false;
         let mut defaults = false;
@@ -830,7 +1156,7 @@ impl DiscCraftApp {
                                     tl!("No Fields (Progressive Scan)")
                                 };
                                 let standard = settings.standard;
-                                let mut chosen: Option<BdVideo> = None;
+                                let mut chosen: Option<(BdVideo, bool)> = None;
                                 egui::Grid::new("transcode_bluray_grid")
                                     .num_columns(2)
                                     .spacing([8.0, 6.0])
@@ -910,15 +1236,20 @@ impl DiscCraftApp {
                                                 Picked::Automatic => None,
                                                 Picked::ProjectSettings => {
                                                     draft.bluray_video = None;
+                                                    draft.bluray_codec = None;
                                                     None
                                                 }
                                             };
                                         }
                                         ui.end_row();
                                     });
-                                // Another format: its own presets (a preset of the one before is let go).
-                                if let Some(next) = chosen.filter(|next| *next != video) {
+                                // Another format or codec: its own presets (a preset of the one before is let go).
+                                if let Some((next, next_mpeg2)) =
+                                    chosen.filter(|next| *next != (video, mpeg2))
+                                {
                                     draft.bluray_video = Some(next);
+                                    draft.bluray_codec =
+                                        Some(if next_mpeg2 { BdCodec::Mpeg2 } else { BdCodec::H264 });
                                     draft.bluray = None;
                                 }
                             },
@@ -987,6 +1318,7 @@ impl DiscCraftApp {
                     }),
                 );
                 let video = draft.bluray_video.map(BdVideo::id);
+                let codec = draft.bluray_codec.map(BdCodec::id);
                 let bluray = match draft.bluray {
                     Some(setting) => json!({
                         "asset": draft.asset.0,
@@ -996,8 +1328,14 @@ impl DiscCraftApp {
                         "quality": setting.quality,
                         "mode": setting.mode.as_str(),
                         "video": video,
+                        "codec": codec,
                     }),
-                    None => json!({ "asset": draft.asset.0, "kbps": null, "video": video }),
+                    None => json!({
+                        "asset": draft.asset.0,
+                        "kbps": null,
+                        "video": video,
+                        "codec": codec,
+                    }),
                 };
                 let _ = self.run_command("asset.setBlurayTranscode", bluray);
                 let (max_quality, frame_blend) = draft.rendering;
@@ -1202,7 +1540,8 @@ mod tests {
     use super::{bluray_format, bluray_presets, dvd_presets, kbps_of, mbps_text};
 
     /// M6.325: an asset's own Blu-ray format from the dialog's codec, dimensions and rate, or the nearest one
-    /// DiscCraft makes.
+    /// DiscCraft makes. M10.39: every format in both codecs (MPEG-2 first, as Encore lists them), the sizes and rates
+    /// from the smallest.
     #[test]
     fn a_format_is_chosen_by_its_parts() {
         use disccraft_project::{BdVideo, VideoStandard};
@@ -1210,21 +1549,28 @@ mod tests {
             |parts: [&str; 3]| super::hd_video_of(&parts.map(str::to_owned), VideoStandard::Ntsc);
         assert_eq!(
             pick(["H.264", "1280 x 720", "59.94"]),
-            Some(BdVideo::Hd720p59)
+            Some((BdVideo::Hd720p59, false))
         );
         assert_eq!(
             pick(["MPEG-2", "1920 x 1080", "29.97"]),
-            Some(BdVideo::Hd1080i59)
+            Some((BdVideo::Hd1080i59, true))
         );
-        // H.264 at 1920 x 1080 has no 29.97: its first rate.
         assert_eq!(
             pick(["H.264", "1920 x 1080", "29.97"]),
-            Some(BdVideo::Hd1080p23)
+            Some((BdVideo::Hd1080i59, false))
         );
-        // MPEG-2 has no 720p: its own size.
         assert_eq!(
             pick(["MPEG-2", "1280 x 720", "59.94"]),
-            Some(BdVideo::Hd1080i59)
+            Some((BdVideo::Hd720p59, true))
+        );
+        assert_eq!(
+            pick(["MPEG-2", "1920 x 1080", "23.976"]),
+            Some((BdVideo::Hd1080p23, true))
+        );
+        // No such rate at that size: its first.
+        assert_eq!(
+            pick(["H.264", "1280 x 720", "29.97"]),
+            Some((BdVideo::Hd720p23, false))
         );
         assert_eq!(pick(["VC-1", "1280 x 720", "59.94"]), None);
         let codecs = super::hd_parts(
@@ -1232,13 +1578,40 @@ mod tests {
             |_| true,
             |found| found.codec.to_owned(),
         );
-        assert_eq!(codecs, ["H.264", "MPEG-2"]);
+        assert_eq!(codecs, ["MPEG-2", "H.264"]);
         let sizes = super::hd_parts(
             VideoStandard::Ntsc,
             |found| found.codec == "H.264",
             |found| found.dimensions.clone(),
         );
-        assert_eq!(sizes, ["1920 x 1080", "1280 x 720"]);
+        assert_eq!(sizes, ["1280 x 720", "1440 x 1080", "1920 x 1080"]);
+        // M10.40: 1440 x 1080, named as Encore names it (spaces round the "x" in the presets, none in Automatic).
+        assert_eq!(
+            pick(["H.264", "1440 x 1080", "29.97"]),
+            Some((BdVideo::Hd1440i59, false))
+        );
+        let hdv = super::bluray_format(BdVideo::Hd1440i59, false, VideoStandard::Ntsc);
+        assert_eq!(hdv.automatic, "1440x1080i H.264");
+        assert_eq!(
+            super::bluray_presets(&hdv)
+                .first()
+                .map(|preset| preset.name.as_str()),
+            Some("1440 x 1080i 29.97 High Quality H.264")
+        );
+        let film = super::bluray_format(BdVideo::Hd1440p23, true, VideoStandard::Ntsc);
+        assert_eq!(film.automatic, "1440x1080 23.976p MPEG-2");
+        assert_eq!(
+            super::bluray_presets(&film)
+                .get(1)
+                .map(|preset| (preset.name.as_str(), preset.kbps)),
+            Some(("1440 x 1080p 23.976 Long Form MPEG-2", 8_000))
+        );
+        let rates = super::hd_parts(
+            VideoStandard::Ntsc,
+            |found| found.codec == "MPEG-2" && found.dimensions == "1920 x 1080",
+            |found| found.rate.to_owned(),
+        );
+        assert_eq!(rates, ["23.976", "24", "25", "29.97"]);
     }
 
     /// M6.307: Encore's quality presets: a DVD's (the 23.976 film ones first since M6.314, an NTSC project's only;
@@ -1317,7 +1690,7 @@ mod tests {
                 .all(|preset| preset.name.starts_with("PAL ") && !preset.film)
         );
 
-        let interlaced = bluray_format(BdVideo::Hd1080i59, VideoStandard::Ntsc);
+        let interlaced = bluray_format(BdVideo::Hd1080i59, true, VideoStandard::Ntsc);
         assert_eq!(
             (
                 interlaced.codec,
@@ -1357,7 +1730,7 @@ mod tests {
             .map(|preset| preset.quality)
             .collect();
         assert_eq!(qualities, [5, 3, 5]);
-        let film = bluray_format(BdVideo::Hd1080p23, VideoStandard::Ntsc);
+        let film = bluray_format(BdVideo::Hd1080p23, false, VideoStandard::Ntsc);
         assert_eq!(film.automatic, "1920x1080 23.976p H.264");
         // Encore's are one-pass VBR; the user's Blu-ray preset follows them, with its own way.
         let offered = super::bluray_presets_with(&film, &user);
@@ -1404,7 +1777,60 @@ mod tests {
                 ),
             ]
         );
-        let sd = bluray_format(BdVideo::Sd, VideoStandard::Ntsc);
+        // M10.39: the progressive formats in MPEG-2 too, named and rated as Encore's.
+        let mpeg2_film = bluray_format(BdVideo::Hd1080p23, true, VideoStandard::Ntsc);
+        assert_eq!(mpeg2_film.automatic, "1920x1080 23.976p MPEG-2");
+        let rated: Vec<(String, u32, u32, u8)> = bluray_presets(&mpeg2_film)
+            .into_iter()
+            .map(|preset| (preset.name, preset.kbps, preset.max_kbps, preset.quality))
+            .collect();
+        assert_eq!(
+            rated,
+            [
+                (
+                    "1920x1080p 23.976 High Quality MPEG-2".to_owned(),
+                    25_000,
+                    30_000,
+                    5
+                ),
+                (
+                    "1920x1080p 23.976 Long Form MPEG-2".to_owned(),
+                    8_000,
+                    11_000,
+                    3
+                ),
+                (
+                    "1920x1080p 23.976 Maximum Quality MPEG-2".to_owned(),
+                    35_000,
+                    40_000,
+                    5
+                ),
+            ]
+        );
+        let fast = bluray_format(BdVideo::Hd720p59, true, VideoStandard::Ntsc);
+        assert_eq!(fast.automatic, "1280x720 59.94p MPEG-2");
+        assert_eq!(
+            bluray_presets(&fast)
+                .first()
+                .map(|preset| preset.name.as_str()),
+            Some("1280x720p 59.94 High Quality MPEG-2")
+        );
+        // M10.41: an SD Blu-ray in H.264, named as Encore names it.
+        let sd_h264 = bluray_format(BdVideo::Sd, false, VideoStandard::Ntsc);
+        assert_eq!(sd_h264.automatic, "SD H.264");
+        let names: Vec<String> = bluray_presets(&sd_h264)
+            .into_iter()
+            .map(|preset| preset.name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "NTSC SD H.264 High Quality H.264",
+                "NTSC SD H.264 Long Form H.264",
+                "NTSC SD H.264 Maximum Quality H.264",
+            ]
+        );
+        let sd = bluray_format(BdVideo::Sd, true, VideoStandard::Ntsc);
         let names: Vec<String> = bluray_presets(&sd)
             .into_iter()
             .map(|preset| preset.name)
@@ -1415,6 +1841,191 @@ mod tests {
                 "NTSC SD MPEG-2 High Quality",
                 "NTSC SD MPEG-2 Long Form MPEG-2",
                 "NTSC SD MPEG-2 Maximum Quality",
+            ]
+        );
+    }
+
+    /// M10.42: Encore's whole Blu-ray list (the user's screenshots of an NTSC project, 2026-11-21): 69 presets by
+    /// name (every format of the standard in both codecs, the DVD ones, SD in both codecs), then 20 Automatics (SD,
+    /// the interlaced formats from the widest, the progressive ones by rate and from the widest, MPEG-2 first); what
+    /// the project cannot make is greyed with the reason.
+    #[test]
+    fn the_whole_blu_ray_list_is_encores() {
+        use super::{ListPick, bluray_list};
+        use disccraft_project::{BdCodec, BdVideo, DiscKind, DiscSettings};
+        let hd = DiscSettings {
+            kind: DiscKind::BluRay,
+            bd_video: BdVideo::Hd1080p23,
+            ..DiscSettings::default()
+        };
+        let (presets, automatic) = bluray_list(&hd, (BdVideo::Hd1080p23, false), &[]);
+        assert_eq!((presets.len(), automatic.len()), (69, 20));
+        let names: Vec<&str> = presets.iter().map(|entry| entry.name.as_str()).collect();
+        // The order of the screenshots, from their first lines, their turns and their last lines.
+        let seen = [
+            "1280x720p 23.976 High Quality H.264",
+            "1280x720p 23.976 High Quality MPEG-2",
+            "1280x720p 23.976 Long Form H.264",
+            "1280x720p 59.94 Maximum Quality MPEG-2",
+            "1440 x 1080i 29.97 High Quality H.264",
+            "1440 x 1080p 23.976 Maximum Quality MPEG-2",
+            "1440 x 1080p 24 High Quality H.264",
+            "1920x1080i 29.97 High Quality H.264",
+            "1920x1080p 24 Maximum Quality MPEG-2",
+            "NTSC DV 23.976 High quality 4Mb VBR 2 Pass",
+            "NTSC DV Low quality 4Mb CBR 1 Pass",
+            "NTSC Progressive High quality 7Mb VBR 2 Pass",
+            "NTSC SD H.264 High Quality H.264",
+            "NTSC SD H.264 Maximum Quality H.264",
+            "NTSC SD MPEG-2 High Quality",
+            "NTSC SD MPEG-2 Long Form MPEG-2",
+            "NTSC SD MPEG-2 Maximum Quality",
+        ];
+        let places: Vec<usize> = seen
+            .iter()
+            .map(|name| names.iter().position(|found| found == name).unwrap())
+            .collect();
+        assert!(
+            places
+                .windows(2)
+                .all(|pair| matches!(pair, [before, after] if before < after)),
+            "{names:?}"
+        );
+        assert_eq!(places.first(), Some(&0));
+        assert_eq!(places.last(), Some(&68));
+        let order: Vec<(BdVideo, bool)> = automatic
+            .iter()
+            .map(|entry| match entry.pick {
+                ListPick::Automatic { video, mpeg2 } => (video, mpeg2),
+                _ => panic!("{entry:?}"),
+            })
+            .collect();
+        assert_eq!(
+            order
+                .iter()
+                .step_by(2)
+                .map(|(video, _)| *video)
+                .collect::<Vec<_>>(),
+            [
+                BdVideo::Sd,
+                BdVideo::Hd1080i59,
+                BdVideo::Hd1440i59,
+                BdVideo::Hd1080p23,
+                BdVideo::Hd1440p23,
+                BdVideo::Hd720p23,
+                BdVideo::Hd1080p24,
+                BdVideo::Hd1440p24,
+                BdVideo::Hd720p24,
+                BdVideo::Hd720p59,
+            ]
+        );
+        assert!(
+            order
+                .chunks(2)
+                .all(|pair| matches!(pair, [(_, true), (_, false)]))
+        );
+        // An HD disc: every HD format, no SD (nor the DVD presets).
+        let open = |entries: &[super::ListEntry], name: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .map(|entry| entry.unavailable.is_none())
+        };
+        assert_eq!(
+            open(&presets, "1280x720p 59.94 High Quality MPEG-2"),
+            Some(true)
+        );
+        assert_eq!(
+            open(&presets, "NTSC SD H.264 High Quality H.264"),
+            Some(false)
+        );
+        assert_eq!(
+            open(&presets, "NTSC DV High quality 7Mb VBR 2 Pass"),
+            Some(false)
+        );
+        // An SD disc in MPEG-2: SD MPEG-2 and the DVD presets but film; not HD, nor SD H.264.
+        let sd = DiscSettings {
+            kind: DiscKind::BluRay,
+            ..DiscSettings::default()
+        };
+        let (presets, automatic) = bluray_list(&sd, (BdVideo::Sd, true), &[]);
+        assert_eq!(open(&presets, "NTSC SD MPEG-2 High Quality"), Some(true));
+        assert_eq!(
+            open(&presets, "NTSC SD H.264 High Quality H.264"),
+            Some(false)
+        );
+        assert_eq!(
+            open(&presets, "NTSC DV High quality 7Mb VBR 2 Pass"),
+            Some(true)
+        );
+        assert_eq!(
+            open(&presets, "NTSC DV 23.976 High quality 7Mb VBR 2 Pass"),
+            Some(false)
+        );
+        assert_eq!(
+            open(&presets, "1920x1080i 29.97 High Quality MPEG-2"),
+            Some(false)
+        );
+        assert!(matches!(
+            automatic.as_slice(),
+            [first, second, ..] if first.unavailable.is_none() && second.unavailable.is_some()
+        ));
+        // An SD disc in H.264: SD H.264 only.
+        let sd_h264 = DiscSettings {
+            bd_codec: BdCodec::H264,
+            ..sd
+        };
+        let (presets, _) = bluray_list(&sd_h264, (BdVideo::Sd, false), &[]);
+        assert_eq!(open(&presets, "NTSC SD H.264 Long Form H.264"), Some(true));
+        assert_eq!(open(&presets, "NTSC SD MPEG-2 High Quality"), Some(false));
+        assert_eq!(
+            open(&presets, "NTSC DV High quality 7Mb VBR 2 Pass"),
+            Some(false)
+        );
+    }
+
+    /// M10.43: a PAL project's whole list (Encore's DCPALLIST, 2026-11-21): 25 and 50 only (no 23.976 nor 24), 29
+    /// presets and 8 Automatics: SD, 1920x1080i, 1440x1080i, 1280x720 50p.
+    #[test]
+    fn a_pal_projects_whole_list_is_encores() {
+        use super::{ListPick, bluray_list};
+        use disccraft_project::{BdVideo, DiscKind, DiscSettings};
+        let hd = DiscSettings {
+            kind: DiscKind::BluRay,
+            ..DiscSettings::default()
+        };
+        let pal = DiscSettings {
+            standard: disccraft_project::VideoStandard::Pal,
+            bd_video: BdVideo::Hd1080i50,
+            ..hd
+        };
+        let (presets, automatic) = bluray_list(&pal, (BdVideo::Hd1080i50, false), &[]);
+        assert_eq!((presets.len(), automatic.len()), (29, 8));
+        let names: Vec<&str> = presets.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names.first(), Some(&"1280x720p 50 High Quality H.264"));
+        assert_eq!(names.get(6), Some(&"1440 x 1080i 25 High Quality H.264"));
+        assert_eq!(names.get(18), Some(&"PAL DV High quality 4Mb VBR 2 Pass"));
+        assert_eq!(names.last(), Some(&"PAL SD MPEG-2 Maximum Quality"));
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.contains("29.97") || name.contains("23.976"))
+        );
+        let order: Vec<BdVideo> = automatic
+            .iter()
+            .step_by(2)
+            .map(|entry| match entry.pick {
+                ListPick::Automatic { video, .. } => video,
+                _ => panic!("{entry:?}"),
+            })
+            .collect();
+        assert_eq!(
+            order,
+            [
+                BdVideo::Sd,
+                BdVideo::Hd1080i50,
+                BdVideo::Hd1440i50,
+                BdVideo::Hd720p50
             ]
         );
     }

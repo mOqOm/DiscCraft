@@ -13,7 +13,7 @@
     clippy::unreachable
 )]
 
-use disccraft_udf::image::{DVD_ROOT_NAMES, ImageFile, dvd_file_order, write_dvd_iso_with_rom};
+use disccraft_udf::image::{DVD_ROOT_NAMES, ImageFile, dvd_file_order, write_dvd_iso_with_gaps};
 use disccraft_udf::tree::{TreeFile, write_udf250_iso_with_dirs};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -46,7 +46,8 @@ pub fn transcode_status(
 ) -> std::collections::BTreeMap<disccraft_project::AssetId, TranscodeStatus> {
     disccraft_dvd::sync_media_choices(project);
     let mut all = disccraft_dvd::transcode_status(project, cache_dir);
-    let hd = project.settings.kind == DiscKind::BluRay && project.settings.bd_video.hd().is_some();
+    // HD, or SD H.264 (M10.41): the Blu-ray build's own encodes.
+    let hd = project.settings.bd_encodes_titles();
     if let (true, Some(cache)) = (hd, cache_dir) {
         for (asset, status) in &mut all {
             let video = project
@@ -633,28 +634,71 @@ fn build_dvd_iso(
     let mut report = report_from_dvd(&dvd, started);
     progress(STEP_IMAGE, 0.0);
     stop_before_step()?;
-    let sectors = write_dvd_image(&folder, rom, &disc_label(project, stem), iso)?;
+    let (sectors, layer_break) = write_dvd_image_with_break(
+        (project, &dvd),
+        (&folder, rom, &disc_label(project, stem)),
+        iso,
+        &iso.with_extension("layerbreak.txt"),
+    )?;
     progress(STEP_IMAGE, 1.0);
     report.output = iso.to_path_buf();
     report.total_bytes = u64::from(sectors) * 2048;
-    report.layer_break = layer::layer_break(
-        project,
-        &dvd,
-        iso,
-        &iso.with_extension("layerbreak.txt"),
-        sectors,
-    )?;
+    report.layer_break = layer_break;
     report.seconds = started.elapsed().as_secs_f64();
     Ok(report)
 }
 
-/// Writes the DVD image of the built `folder` (its VIDEO_TS) and the ROM content to `image`, labelled `label`;
-/// returns its size in sectors. An image that fails is removed: what was written of it is no image.
+/// The sectors of an ECC block: layer 0 of a dual-layer DVD (opposite track path) ends at the end of one (ECMA-267
+/// §25), so its layer break is at the start of one.
+const ECC_BLOCK_SECTORS: u32 = 16;
+
+/// Writes the DVD image (as [`write_dvd_image`]) and, for a dual-layer one, chooses its layer break (as
+/// [`layer::layer_break`], writing `note`) at the start of an ECC block: when the break's cell starts elsewhere, the
+/// title set holding it is moved that many sectors later (a gap left before it in the image, its start moved in
+/// `VIDEO_TS.IFO` / `.BUP`) and the image is written again. Returns the image's sectors and its layer break.
+fn write_dvd_image_with_break(
+    (project, dvd): (&Project, &disccraft_dvd::DvdBuildReport),
+    (folder, rom, label): (&Path, &[TreeFile], &str),
+    image: &Path,
+    note: &Path,
+) -> Result<(u32, Option<layer::LayerBreak>), String> {
+    let mut gaps: Vec<(String, u32)> = Vec::new();
+    // A move can make the automatic choice another cell; a few tries settle it.
+    for _ in 0..4 {
+        let sectors = write_dvd_image(folder, rom, label, image, &gaps)?;
+        let Some(found) = layer::layer_break(project, dvd, image, note, sectors)? else {
+            return Ok((sectors, None));
+        };
+        let off = found.sector % ECC_BLOCK_SECTORS;
+        if off == 0 {
+            return Ok((sectors, Some(found)));
+        }
+        let vts = found
+            .place
+            .as_ref()
+            .map(|place| place.vts)
+            .ok_or_else(|| "the layer break is at no title cell's start".to_string())?;
+        let gap = ECC_BLOCK_SECTORS - off;
+        layer::shift_title_sets(&folder.join("VIDEO_TS"), vts, gap)?;
+        let name = format!("VTS_{vts:02}_0.IFO");
+        match gaps.iter_mut().find(|(file, _)| *file == name) {
+            Some((_, sectors)) => *sectors = sectors.saturating_add(gap),
+            None => gaps.push((name, gap)),
+        }
+    }
+    let _ = std::fs::remove_file(image);
+    Err("the layer break could not be put at the start of an ECC block".to_string())
+}
+
+/// Writes the DVD image of the built `folder` (its VIDEO_TS) and the ROM content to `image`, labelled `label`, with
+/// `gaps` unused sectors before the named video files; returns its size in sectors. An image that fails is removed:
+/// what was written of it is no image.
 fn write_dvd_image(
     folder: &Path,
     rom: &[TreeFile],
     label: &str,
     image: &Path,
+    gaps: &[(String, u32)],
 ) -> Result<u32, String> {
     let video_ts = folder.join("VIDEO_TS");
     let names: Vec<String> = std::fs::read_dir(&video_ts)
@@ -673,7 +717,7 @@ fn write_dvd_image(
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
     catch_unwind(AssertUnwindSafe(|| {
-        write_dvd_iso_with_rom(&files, rom, label, image, now)
+        write_dvd_iso_with_gaps(&files, gaps, rom, label, image, now)
     }))
     .map_err(|_| "internal error while writing the ISO image".to_string())
     .and_then(|written| written.map_err(|e| format!("ISO: {e}")))
@@ -685,7 +729,8 @@ fn write_dvd_image(
 
 /// Builds the VIDEO_TS folder beside `dir` (`<name>.files`), then writes the DDP image into `dir`: the disc image as
 /// MAIN.DAT, then CONTROL.DAT and DDPID (Encore's DDP Image). A dual-layer disc's layer break is chosen as for an
-/// image and written beside the folder (`<name>.layerbreak.txt`).
+/// image and written beside the folder (`<name>.layerbreak.txt`); its image is split between the layers' folders
+/// (M14.4, [`disccraft_ddp::LAYER_FOLDERS`]).
 fn build_dvd_ddp(
     project: &Project,
     (dir, rom): (&Path, &[TreeFile]),
@@ -708,13 +753,21 @@ fn build_dvd_ddp(
         for file in files {
             let _ = std::fs::remove_file(dir.join(file));
         }
+        // A dual-layer image's folders (M14.4).
+        for folder in disccraft_ddp::LAYER_FOLDERS {
+            let _ = std::fs::remove_dir_all(dir.join(folder));
+        }
     };
     remove_all();
     let main = dir.join(disccraft_ddp::MAIN_FILE);
-    let sectors = write_dvd_image(&work_folder(dir), rom, &disc_label(project, name), &main)?;
     let note = dir.with_file_name(format!("{name}.layerbreak.txt"));
-    let layer_break =
-        layer::layer_break(project, &dvd, &main, &note, sectors).inspect_err(|_| remove_all())?;
+    let (sectors, layer_break) = write_dvd_image_with_break(
+        (project, &dvd),
+        (&work_folder(dir), rom, &disc_label(project, name)),
+        &main,
+        &note,
+    )
+    .inspect_err(|_| remove_all())?;
     let layout = disccraft_ddp::Layout {
         sectors,
         layer_break: layer_break.as_ref().map(|found| found.sector),

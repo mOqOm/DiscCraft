@@ -146,6 +146,10 @@ fn a_manual_layer_break_lands_on_its_frame() {
         found.sector >= found.total_sectors.div_ceil(2),
         "layer 0 ≥ layer 1"
     );
+    // M14.3: the break is at the start of an ECC block (layer 0 a whole number of 16-sector blocks, ECMA-267 §25).
+    // When the cell starts elsewhere its title set moves later by a gap in the image, and VIDEO_TS.IFO says so.
+    assert_eq!(found.sector % 16, 0, "break at {}", found.sector);
+    title_sets_where_the_vmg_says(&dir.join("disc.iso"));
     assert_eq!(
         u64::from(found.total_sectors) * 2048,
         std::fs::metadata(dir.join("disc.iso")).unwrap().len()
@@ -163,6 +167,33 @@ fn a_manual_layer_break_lands_on_its_frame() {
     }
     oracle(&ffmpeg, &dir.join("disc.iso"));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every title's title set starts in the image where `VIDEO_TS.IFO` (its title search pointers) says: its
+/// `VTS_xx_0.IFO` that many sectors after `VIDEO_TS.IFO`.
+fn title_sets_where_the_vmg_says(iso: &Path) {
+    let listing = disccraft_udf::read::list_udf(iso).unwrap();
+    let sector = |name: &str| {
+        listing
+            .iter()
+            .find(|file| file.path == format!("VIDEO_TS/{name}"))
+            .unwrap_or_else(|| panic!("{name} in the image"))
+    };
+    let vmg = sector("VIDEO_TS.IFO");
+    let image = std::fs::read(iso).unwrap();
+    let start = usize::try_from(vmg.sector).unwrap() * 2048;
+    let bytes = &image[start..start + usize::try_from(vmg.size).unwrap()];
+    let vmgi = disccraft_ifo::read_vmgi(bytes).unwrap();
+    assert!(!vmgi.titles.is_empty());
+    for title in &vmgi.titles {
+        let vts = sector(&format!("VTS_{:02}_0.IFO", title.vts));
+        assert_eq!(
+            title.vts_start_sector,
+            vts.sector - vmg.sector,
+            "title set {}",
+            title.vts
+        );
+    }
 }
 
 /// ffmpeg's DVD navigation plays the whole title from the image (all 59 frames, through the break's cell) without

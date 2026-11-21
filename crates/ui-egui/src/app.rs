@@ -152,6 +152,17 @@ pub struct DiscCraftApp {
     /// レイヤーパネルで、初めの開き方から開け閉めしたページのフォルダー（`(#) ページ n`）。初めは、ビューアに
     /// 出ているページのフォルダーだけが開いている。
     pub(crate) toggled_pages: std::collections::HashSet<MenuId>,
+    /// M10.47: PSD から作ったメニューのレイヤーパネルに出す PSD のレイヤーの木（ファイルのパスごと、更新の時刻つき）。
+    pub(crate) psd_trees: std::collections::HashMap<
+        String,
+        (
+            Option<std::time::SystemTime>,
+            std::sync::Arc<Vec<disccraft_menu::PsdTreeNode>>,
+        ),
+    >,
+    /// M10.47: PSD のレイヤーの木で、人が開け閉めしたグループ（ファイルのパスと、上からの番号の道）と、開いているか。
+    /// 表示するページが変わってもそのまま（M10.48）。
+    pub(crate) psd_groups_open: std::collections::HashMap<(String, Vec<usize>), bool>,
     /// ドラッグ中のボタンのルート（ルートを手で決めるとき）。
     pub(crate) route_drag: Option<crate::route_drag::RouteDrag>,
     /// 開いている「ユーザー操作」ダイアログ。
@@ -376,6 +387,7 @@ impl DiscCraftApp {
         disccraft_build::set_parallel_transcodes(
             usize::try_from(crate::workspace::load_parallel_transcodes()).unwrap_or(0),
         );
+        disccraft_platform::use_for_transcodes(crate::workspace::load_hardware_encoder());
         ctx.request_repaint();
 
         crate::help::log(&format!(
@@ -456,6 +468,8 @@ impl DiscCraftApp {
             active_panel: None,
             collapsed_layers: std::collections::HashSet::new(),
             toggled_pages: std::collections::HashSet::new(),
+            psd_trees: std::collections::HashMap::new(),
+            psd_groups_open: std::collections::HashMap::new(),
             route_drag: None,
             user_ops_dialog: None,
             playlist_name_dialog: None,
@@ -704,6 +718,11 @@ impl DiscCraftApp {
                 "disc.setBlurayVideo",
                 json!({ "video": form.bd_video.id() }),
             );
+            // As Encore's New Project dialog (M10.43: a PAL disc's 1080i 25 in H.264).
+            let codec = form.bd_codec();
+            if !codec.is_auto() {
+                let _ = self.run_command("disc.setBlurayCodec", json!({ "codec": codec.id() }));
+            }
         }
         if form.wide {
             let _ = self.run_command("disc.setAspect", json!({ "aspect": "16:9" }));

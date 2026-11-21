@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use disccraft_project::{DiscKind, Project, Timeline, TimelineId, VideoStandard};
+use disccraft_project::{Project, Timeline, TimelineId, VideoStandard};
 
 use super::{
     AC3_STEREO_BITRATE, BD_STREAMS_BITRATE, DvdError, asset_path, audio_bitrate_for_title,
@@ -85,11 +85,11 @@ pub struct HdBudget {
 }
 
 impl HdBudget {
-    /// The target and peak bitrates (kilobits per second) of a title in format `video`: the budget's, or for the
-    /// other codec its usual rates scaled as the budget's are (a title's own HD format, M6.325).
+    /// The target and peak bitrates (kilobits per second) of a title coded as MPEG-2 (`mpeg2`) or H.264: the
+    /// budget's, or for the other codec its usual rates scaled as the budget's are (a title's own HD format,
+    /// M6.325, or codec, M10.39: [`disccraft_project::Project::asset_bd_mpeg2`]).
     #[must_use]
-    pub fn rates_for(&self, video: disccraft_project::BdVideo) -> (u32, u32) {
-        let mpeg2 = self.codec.mpeg2(video);
+    pub fn rates_for(&self, mpeg2: bool) -> (u32, u32) {
         if mpeg2 == self.mpeg2 {
             return (self.target_kbps, self.max_kbps);
         }
@@ -176,7 +176,8 @@ fn hd_budget_with(
     probe: &dyn Fn(&Path) -> Result<f64, DvdError>,
     kept: &dyn Fn(&Path) -> Option<u64>,
 ) -> Result<Option<HdBudget>, DvdError> {
-    if project.settings.kind != DiscKind::BluRay || project.settings.bd_video.hd().is_none() {
+    // HD, or SD coded as H.264 (M10.41: budgeted as H.264).
+    if !project.settings.bd_encodes_titles() {
         return Ok(None);
     }
     // MPEG-2 or H.264 as the disc's codec setting gives it (M12.28: 1080i may be H.264).
@@ -188,8 +189,9 @@ fn hd_budget_with(
     let mut most_sound = 0_u32;
     let mut timelines = Vec::with_capacity(project.timelines.len());
     for timeline in project.timelines.values() {
-        // A title in a format of the other codec counts as it takes at that codec's usual rate (M6.325).
-        let title_mpeg2 = codec.mpeg2(project.title_bd_video(timeline));
+        // A title of the other codec (its format, M6.325, or its own codec, M10.39) counts as it takes at that
+        // codec's usual rate.
+        let title_mpeg2 = project.asset_bd_mpeg2(timeline.video);
         let weight =
             f64::from(hd_default_kbps(title_mpeg2).0) / f64::from(hd_default_kbps(mpeg2).0);
         let (seconds, encoded, kept_bytes) =
@@ -448,8 +450,8 @@ mod tests {
         let size = |_path: &Path| None::<u64>;
         let alone = super::hd_budget_with(&project, &probe, &size)?.ok_or("no budget")?;
         // An hour alone on a BD-25 has room: raised to the caps (M6.377).
-        assert_eq!(alone.rates_for(BdVideo::Hd1080p23), (25_000, 40_000));
-        assert_eq!(alone.rates_for(BdVideo::Hd1080i59), (32_000, 40_000));
+        assert_eq!(alone.rates_for(false), (25_000, 40_000));
+        assert_eq!(alone.rates_for(true), (32_000, 40_000));
         let interlaced = project.add_asset(Path::new("interlaced.mp4"))?;
         let _ = project.add_timeline(interlaced, None)?;
         if let Some(asset) = project.assets.get_mut(&interlaced) {
@@ -467,8 +469,8 @@ mod tests {
         tight.settings.capacity = Capacity::Bd25;
         let long = |_path: &Path| Ok::<f64, DvdError>(3.0 * 3600.0);
         let fitted = super::hd_budget_with(&tight, &long, &size)?.ok_or("no budget")?;
-        let (h264, _) = fitted.rates_for(BdVideo::Hd1080p23);
-        let (mpeg2, peak) = fitted.rates_for(BdVideo::Hd1080i59);
+        let (h264, _) = fitted.rates_for(false);
+        let (mpeg2, peak) = fitted.rates_for(true);
         assert!(h264 < 12_000 && mpeg2 < 25_000, "{fitted:?}");
         assert!(mpeg2 >= h264 * 2 - super::STEP_KBPS, "{h264} {mpeg2}");
         assert_eq!(mpeg2 % super::STEP_KBPS, 0);
@@ -485,7 +487,7 @@ mod tests {
         let h264 = budget(&interlaced, 3600.0)?.ok_or("no budget")?;
         assert!(!h264.mpeg2, "{h264:?}");
         assert_eq!((h264.target_kbps, h264.max_kbps), (25_000, 40_000));
-        assert_eq!(h264.rates_for(BdVideo::Hd1080i59), (25_000, 40_000));
+        assert_eq!(h264.rates_for(false), (25_000, 40_000));
         assert!((h264.video_seconds - 3600.0).abs() < 1e-6, "{h264:?}");
         // The same hour as MPEG-2 (the automatic choice) takes MPEG-2's rate.
         let mpeg2 = budget(&project(BdVideo::Hd1080i59)?, 3600.0)?.ok_or("no budget")?;
@@ -503,6 +505,34 @@ mod tests {
         // Two hours of H.264, not one and 25/12.
         assert!(
             (budget.video_seconds - 2.0 * 3600.0).abs() < 1e-6,
+            "{budget:?}"
+        );
+        Ok(())
+    }
+
+    /// M10.39: MPEG-2 for the progressive formats too: the disc's codec set to MPEG-2 budgets 1080p at MPEG-2's
+    /// rates, and a title whose video has a codec of its own counts at that codec's rate.
+    #[test]
+    fn mpeg2_is_budgeted_for_any_format() -> Result<(), Box<dyn std::error::Error>> {
+        let mut progressive = project(BdVideo::Hd1080p23)?;
+        progressive.settings.bd_codec = disccraft_project::BdCodec::Mpeg2;
+        let mpeg2 = budget(&progressive, 3600.0)?.ok_or("no budget")?;
+        assert!(mpeg2.mpeg2, "{mpeg2:?}");
+        assert_eq!(mpeg2.rates_for(true), (mpeg2.target_kbps, mpeg2.max_kbps));
+        let mut mixed = project(BdVideo::Hd720p59)?;
+        let asset = mixed.add_asset(Path::new("own.mp4"))?;
+        let _ = mixed.add_timeline(asset, None)?;
+        if let Some(asset) = mixed.assets.get_mut(&asset) {
+            asset.bluray_codec = Some(disccraft_project::BdCodec::Mpeg2);
+        }
+        assert!(mixed.asset_bd_mpeg2(asset));
+        let size = |_path: &Path| None::<u64>;
+        let probe = |_path: &Path| Ok::<f64, DvdError>(3600.0);
+        let budget = super::hd_budget_with(&mixed, &probe, &size)?.ok_or("no budget")?;
+        assert!(!budget.mpeg2);
+        // One hour of H.264 and one of MPEG-2 (25/12 of an hour of H.264).
+        assert!(
+            (budget.video_seconds - 3600.0 * (1.0 + 25.0 / 12.0)).abs() < 1e-6,
             "{budget:?}"
         );
         Ok(())

@@ -88,6 +88,50 @@ pub struct DiscModel {
     pub vmgm: Vec<MenuPgcModel>,
     /// Titles, indexed by `title - 1`.
     pub titles: Vec<TitleModel>,
+    /// M13.16: the parental blocks and the masks that choose in them; `None` on a disc without one.
+    pub parental: Option<ParentalModel>,
+}
+
+/// A disc's parental management (M13.16): the VMG_PTL_MAIT's masks and each title's parental block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentalModel {
+    /// The countries the masks are for (ISO 3166 alpha-2, as SPRM12 holds a player's).
+    pub countries: Vec<[u8; 2]>,
+    /// `levels[l - 1]`: parental level `l`'s mask for the VMG, then title set 1, 2, ….
+    pub levels: [Vec<u16>; 8],
+    /// Each title's (indexed by `title - 1`) title set and the parental IDs of its parental block's PGCs, in block
+    /// order (empty: a title of one PGC).
+    pub titles: Vec<(u8, Vec<u16>)>,
+}
+
+impl DiscModel {
+    /// Which of title `title`'s PGCs (0 = the first) a player plays at parental level `level` (SPRM13: 1 to 8, 15
+    /// none set) in country `country` (SPRM12: two ASCII letters): its only one; in a parental block the first whose
+    /// parental ID shares a bit with the mask the disc gives that level and the title's set (US7451453B1; a player
+    /// that cannot look a mask up, with no level or a country the disc does not list, the first). `None` when none
+    /// does: the player stops.
+    #[must_use]
+    pub fn title_variant(&self, title: u8, level: u16, country: u16) -> Option<usize> {
+        let Some(parental) = &self.parental else {
+            return Some(0);
+        };
+        let Some((vts, ids)) = parental.titles.get(usize::from(title).checked_sub(1)?) else {
+            return Some(0);
+        };
+        if ids.is_empty() {
+            return Some(0);
+        }
+        let code = country.to_be_bytes();
+        let mask = usize::from(level)
+            .checked_sub(1)
+            .and_then(|index| parental.levels.get(index))
+            .filter(|_| parental.countries.contains(&code))
+            .and_then(|masks| masks.get(usize::from(*vts)).copied());
+        match mask {
+            None => Some(0),
+            Some(mask) => ids.iter().position(|id| id & mask != 0),
+        }
+    }
 }
 
 /// Load a VIDEO_TS folder into a [`DiscModel`].
@@ -96,6 +140,18 @@ pub fn load_video_ts(dir: &Path) -> Result<DiscModel, VmError> {
     let first_play = commands_from(&vmgi.first_play.pre);
     let vmgm = load_vmgm(dir, &vmgi)?;
     let titles = load_titles(dir, &vmgi)?;
+    let parental = match &vmgi.parental {
+        Some(table) => Some(ParentalModel {
+            countries: table.countries.clone(),
+            levels: table.levels.clone(),
+            titles: vmgi
+                .titles
+                .iter()
+                .map(|entry| Ok((entry.vts, title_parental_ids(dir, entry)?)))
+                .collect::<Result<Vec<_>, VmError>>()?,
+        }),
+        None => None,
+    };
 
     let title_menu = vmgi.menus.as_ref().and_then(|menus| {
         let index = menus.pgcs.iter().position(|menu| menu.title_menu)?;
@@ -107,6 +163,7 @@ pub fn load_video_ts(dir: &Path) -> Result<DiscModel, VmError> {
         first_play,
         vmgm,
         titles,
+        parental,
     })
 }
 
@@ -247,6 +304,17 @@ fn load_title(dir: &Path, entry: &TitleEntry) -> Result<TitleModel, VmError> {
             .unwrap_or_default(),
         prohibited_ops: pgc.prohibited_ops,
     })
+}
+
+/// The parental IDs of title `entry`'s parental block's PGCs, in block order; empty when it has one PGC.
+fn title_parental_ids(dir: &Path, entry: &TitleEntry) -> Result<Vec<u16>, VmError> {
+    let data = read_file(&dir.join(format!("VTS_{:02}_0.IFO", entry.vts)))?;
+    let vtsi: Vtsi = read_vtsi(&data).map_err(|e| VmError::Ifo(e.0))?;
+    Ok(vtsi
+        .title_pgcs(entry.vts_ttn)
+        .filter(|(_, _, category)| category.block.is_some())
+        .map(|(_, _, category)| category.parental_id)
+        .collect())
 }
 
 fn commands_from(cmds: &[VmCommand]) -> Vec<Cmd> {
