@@ -128,7 +128,7 @@ pub fn revert_transcodes(
     cache_dir: &Path,
     asset: disccraft_project::AssetId,
 ) -> Result<usize, BdError> {
-    let hd = if project.settings.bd_video.hd().is_some() {
+    let hd = if project.settings.bd_encodes_titles() {
         hd::revert_hd(project, cache_dir, asset)
     } else {
         0
@@ -153,7 +153,8 @@ pub fn transcode_now(
     if project.settings.kind != DiscKind::BluRay {
         return Err(invalid("project is not a Blu-ray project"));
     }
-    if project.settings.bd_video.hd().is_none() {
+    // An SD disc's MPEG-2 is a DVD's; HD and SD H.264 (M10.41) are made here.
+    if !project.settings.bd_encodes_titles() {
         return disccraft_dvd::transcode_now(project, cache_dir, only, progress)
             .map_err(|error| BdError::Prepare(error.to_string()));
     }
@@ -189,7 +190,7 @@ pub fn render_slideshows(
     only: Option<u64>,
     progress: &mut dyn FnMut(&str, f32),
 ) -> Result<usize, BdError> {
-    if project.settings.bd_video.hd().is_none() {
+    if !project.settings.bd_encodes_titles() {
         return disccraft_dvd::render_slideshows(project, cache_dir, only, progress)
             .map_err(|error| BdError::Prepare(error.to_string()));
     }
@@ -267,8 +268,9 @@ pub fn build_bdmv_with(
     }
 
     let dirs = prepare_directories(out_dir)?;
-    // In HD the timelines' video is encoded to H.264 below; their SD MPEG-2 would be made only to be thrown away.
-    let titles = if project.settings.bd_video.hd().is_some() {
+    // In HD (and in SD as H.264, M10.41) the timelines' video is encoded below; their SD MPEG-2 would be made only to
+    // be thrown away.
+    let titles = if project.settings.bd_encodes_titles() {
         load_title_streams_for_hd(project, cache_dir, progress)
     } else {
         load_title_streams(project, cache_dir, progress)
@@ -898,19 +900,35 @@ fn write_chapter_playlists(
 /// The PlayItems of a chapter playlist's entries over its master clip: one per entry, from the chapter's mark
 /// to the next mark (or the clip's end).
 fn chapter_span_items(built: &BuiltClip, chapters: &[u32]) -> Result<Vec<mpls::PlayItem>, BdError> {
+    // A chapter's span starts at the GOP its mark is in, as Encore's chapters do: a play item that starts within a
+    // GOP makes the player (and libbluray) start reading pictures that refer back before it.
+    let gop_start = |time: u32| -> u32 {
+        built
+            .entry_points
+            .iter()
+            .copied()
+            .filter(|point| *point <= time && *point >= built.play_item.in_time)
+            .max()
+            .unwrap_or(time)
+    };
     let mut items = Vec::with_capacity(chapters.len());
     for chapter in chapters {
         let chapter = usize::try_from(*chapter).map_err(|_| invalid("chapter index too large"))?;
-        let in_time = built
+        let mark = built
             .marks
             .get(chapter)
             .copied()
             .ok_or_else(|| invalid("chapter playlist entry is out of range"))?;
-        let out_time = built
-            .marks
-            .get(chapter.saturating_add(1))
-            .copied()
-            .unwrap_or(built.play_item.out_time);
+        let next = built.marks.get(chapter.saturating_add(1)).copied();
+        let (mut in_time, mut out_time) = (
+            gop_start(mark),
+            next.map_or(built.play_item.out_time, gop_start),
+        );
+        // Two marks in one GOP: keep the marks as they are rather than an empty span.
+        if out_time <= in_time {
+            in_time = mark;
+            out_time = next.unwrap_or(built.play_item.out_time);
+        }
         if out_time <= in_time {
             return Err(invalid("chapter playlist entry is empty"));
         }

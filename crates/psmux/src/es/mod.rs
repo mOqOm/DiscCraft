@@ -40,6 +40,7 @@ pub use ac3::{Ac3Frame, Ac3Stream, parse_ac3};
 pub use dts::{DtsStream, parse_dts};
 pub use mpa::{MpaStream, parse_mpa};
 pub use mpeg2v::{
-    Picture, PictureType, SequenceInfo, VideoStream, parse_video, parse_video_reader,
+    Picture, PictureType, SequenceInfo, VideoStream, parse_video, parse_video_head,
+    parse_video_reader,
 };
 pub use wav::{BD_LPCM_MAX_BITRATE, LpcmStream, parse_wav, parse_wav_for_bd};

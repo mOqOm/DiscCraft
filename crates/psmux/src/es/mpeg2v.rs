@@ -92,6 +92,25 @@ pub fn parse_video(data: &[u8], start_dts: i64) -> Result<VideoStream, EsError> 
     parser.finish(data.len(), start_dts)
 }
 
+/// [`parse_video`] of the head of a stream (`data`, cut anywhere): a frame of two field pictures cut after its first
+/// field is left out, and one cut inside its second field kept (M10.45), as the whole stream would have them whole.
+///
+/// # Errors
+///
+/// As [`parse_video`].
+pub fn parse_video_head(data: &[u8], start_dts: i64) -> Result<VideoStream, EsError> {
+    let mut parser = VideoParser::new();
+    parser.feed(data, 0, true)?;
+    parser.second_field = None;
+    if parser.open_field.take().is_some()
+        && let Some(cut) = parser.pictures.pop()
+    {
+        parser.current_picture = None;
+        return parser.finish(cut.offset, start_dts);
+    }
+    parser.finish(data.len(), start_dts)
+}
+
 /// [`parse_video`] of a stream read from `reader` a chunk at a time, so it is never in memory whole (the pictures'
 /// offsets are into the stream as read).
 ///
@@ -332,11 +351,17 @@ fn parse_sequence_extension(
     Ok(())
 }
 
-fn parse_picture_coding_extension(
-    data: &[u8],
-    offset: usize,
-    pic: &mut Picture,
-) -> Result<(), EsError> {
+/// What a picture coding extension says of how its picture is shown.
+#[derive(Debug, Clone, Copy)]
+struct CodingExtension {
+    /// picture_structure: 1 the top field, 2 the bottom field, 3 a frame.
+    structure: u8,
+    top_field_first: bool,
+    repeat_first_field: bool,
+    progressive_frame: bool,
+}
+
+fn parse_picture_coding_extension(data: &[u8], offset: usize) -> Result<CodingExtension, EsError> {
     let mut br = reader_at(data, offset)?;
     let _id = br
         .read_bits(4)
@@ -350,8 +375,8 @@ fn parse_picture_coding_extension(
     let picture_structure = br
         .read_bits(2)
         .ok_or_else(|| es_err("truncated picture coding extension"))?;
-    if picture_structure != 3 {
-        return Err(es_err("field pictures are not supported"));
+    if picture_structure == 0 {
+        return Err(es_err("invalid picture_structure"));
     }
     let top_field_first = br
         .read_bits(1)
@@ -387,10 +412,12 @@ fn parse_picture_coding_extension(
         .read_bits(1)
         .ok_or_else(|| es_err("truncated picture coding extension"))?;
 
-    pic.top_field_first = top_field_first;
-    pic.repeat_first_field = repeat_first_field;
-    pic.progressive_frame = progressive_frame;
-    Ok(())
+    Ok(CodingExtension {
+        structure: u8::try_from(picture_structure).unwrap_or(3),
+        top_field_first,
+        repeat_first_field,
+        progressive_frame,
+    })
 }
 
 fn parse_gop_header(data: &[u8], offset: usize) -> Result<bool, EsError> {
@@ -494,6 +521,18 @@ struct VideoParser {
     pending_gop: Option<bool>,
     current_picture: Option<usize>,
     first_picture: bool,
+    /// The first field of a frame coded as two field pictures, waiting for its second (13818-2 6.1.1.4).
+    open_field: Option<OpenField>,
+    /// The second field's picture header has been read; its coding extension comes next.
+    second_field: Option<OpenField>,
+}
+
+/// A frame's first field picture: its picture_structure, temporal_reference and type.
+#[derive(Debug, Clone, Copy)]
+struct OpenField {
+    structure: u8,
+    temporal_reference: u16,
+    kind: PictureType,
 }
 
 impl VideoParser {
@@ -508,6 +547,8 @@ impl VideoParser {
             pending_gop: None,
             current_picture: None,
             first_picture: true,
+            open_field: None,
+            second_field: None,
         }
     }
 
@@ -601,6 +642,22 @@ impl VideoParser {
         }
 
         let (temporal_reference, kind) = parse_picture_header(data, sc)?;
+        if self.second_field.is_some() {
+            return Err(es_err("a field picture without its coding extension"));
+        }
+        // M10.45: the second field picture of a frame belongs to its first's access unit (the same
+        // temporal_reference, nothing between them; after an I or P field an I or P one, after a B field a B one).
+        if let Some(open) = self.open_field.take() {
+            let pairs = open.temporal_reference == temporal_reference
+                && self.pending_start.is_none()
+                && (open.kind == PictureType::B) == (kind == PictureType::B);
+            if !pairs {
+                return Err(es_err("a field picture without its second field"));
+            }
+            self.second_field = Some(open);
+            self.current_picture = None;
+            return Ok(());
+        }
         let offset = match self.pending_start {
             Some(o) => o,
             None => at,
@@ -651,14 +708,35 @@ impl VideoParser {
                 }
             }
             8 => {
-                if let Some(idx) = self.current_picture {
-                    if let Some(pic) = self.pictures.get_mut(idx) {
-                        parse_picture_coding_extension(data, sc, pic)?;
-                    } else {
-                        return Err(es_err("missing picture"));
+                let extension = parse_picture_coding_extension(data, sc)?;
+                if let Some(open) = self.second_field.take() {
+                    // The other field of the frame.
+                    if extension.structure == 3 || extension.structure == open.structure {
+                        return Err(es_err("a field picture without its second field"));
                     }
+                    return Ok(());
+                }
+                let idx = self
+                    .current_picture
+                    .ok_or_else(|| es_err("picture coding extension without picture"))?;
+                let pic = self
+                    .pictures
+                    .get_mut(idx)
+                    .ok_or_else(|| es_err("missing picture"))?;
+                if extension.structure == 3 {
+                    pic.top_field_first = extension.top_field_first;
+                    pic.repeat_first_field = extension.repeat_first_field;
+                    pic.progressive_frame = extension.progressive_frame;
                 } else {
-                    return Err(es_err("picture coding extension without picture"));
+                    // A frame as two field pictures: shown in the order they come, the first one's field first.
+                    pic.top_field_first = extension.structure == 1;
+                    pic.repeat_first_field = false;
+                    pic.progressive_frame = false;
+                    self.open_field = Some(OpenField {
+                        structure: extension.structure,
+                        temporal_reference: pic.temporal_reference,
+                        kind: pic.kind,
+                    });
                 }
             }
             _ => {}
@@ -677,6 +755,9 @@ impl VideoParser {
             .ok_or_else(|| es_err("missing sequence header"))?;
         if self.pictures.is_empty() {
             return Err(es_err("no pictures"));
+        }
+        if self.open_field.is_some() || self.second_field.is_some() {
+            return Err(es_err("a field picture without its second field"));
         }
 
         self.set_lengths(total)?;
@@ -807,7 +888,7 @@ impl VideoParser {
 
 #[cfg(test)]
 mod tests {
-    use super::{PictureType, frame_duration, parse_video};
+    use super::{PictureType, frame_duration, parse_video, parse_video_head};
 
     struct BitWriter {
         bytes: Vec<u8>,
@@ -1060,7 +1141,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_field_picture() {
+    fn rejects_a_field_picture_without_its_second() {
         let mut data = Vec::new();
         write_sequence_header(&mut data);
         write_sequence_extension(&mut data, 0);
@@ -1068,6 +1149,102 @@ mod tests {
         write_picture_header(&mut data, 0, 1);
         write_picture_coding_extension(&mut data, 1, 1, 0);
         assert!(parse_video(&data, 0).is_err());
+    }
+
+    /// Frames of two field pictures (top, then bottom): I + P, P + P, B + B. Returns the stream and where each
+    /// frame starts.
+    fn build_field_video() -> (Vec<u8>, Vec<usize>) {
+        let mut data = Vec::new();
+        write_sequence_header(&mut data);
+        write_sequence_extension(&mut data, 0);
+        write_gop(&mut data, 1);
+        let mut starts = vec![0];
+        for (index, (tr, first, second)) in [(0, 1, 2), (3, 2, 2), (1, 3, 3), (2, 3, 3)]
+            .into_iter()
+            .enumerate()
+        {
+            if index > 0 {
+                starts.push(data.len());
+            }
+            for (coding, structure) in [(first, 1), (second, 2)] {
+                write_picture_header(&mut data, tr, coding);
+                // A field picture's top_field_first is 0 (13818-2 6.3.10).
+                write_picture_coding_extension(&mut data, structure, 0, 0);
+                write_slice(&mut data);
+            }
+        }
+        (data, starts)
+    }
+
+    /// M10.45: a frame of two field pictures is one access unit, of the first field's type, shown for a frame,
+    /// its top field first.
+    #[test]
+    fn field_pictures_pair_into_frames() {
+        let (data, starts) = build_field_video();
+        let parsed = parse_video(&data, 0).unwrap();
+        let kinds: Vec<PictureType> = parsed.pictures.iter().map(|picture| picture.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                PictureType::I,
+                PictureType::P,
+                PictureType::B,
+                PictureType::B
+            ]
+        );
+        let offsets: Vec<usize> = parsed
+            .pictures
+            .iter()
+            .map(|picture| picture.offset)
+            .collect();
+        assert_eq!(offsets, starts);
+        assert_eq!(parsed.pictures[0].len, starts[1]);
+        for picture in &parsed.pictures {
+            assert!(
+                picture.top_field_first
+                    && !picture.progressive_frame
+                    && !picture.repeat_first_field
+            );
+            assert_eq!(picture.duration, 900_900);
+        }
+    }
+
+    #[test]
+    fn rejects_a_second_field_that_does_not_pair() {
+        for (second_type, second_structure) in [(3, 2), (2, 1), (2, 3)] {
+            let mut data = Vec::new();
+            write_sequence_header(&mut data);
+            write_sequence_extension(&mut data, 0);
+            write_gop(&mut data, 1);
+            write_picture_header(&mut data, 0, 1);
+            write_picture_coding_extension(&mut data, 1, 0, 0);
+            write_slice(&mut data);
+            write_picture_header(&mut data, 0, second_type);
+            write_picture_coding_extension(&mut data, second_structure, 0, 0);
+            write_slice(&mut data);
+            assert!(
+                parse_video(&data, 0).is_err(),
+                "{second_type} {second_structure}"
+            );
+        }
+    }
+
+    /// The head of a stream cut after a frame's first field: that frame is left out.
+    #[test]
+    fn a_head_cut_inside_a_frame_of_fields_leaves_it_out() {
+        let (data, starts) = build_field_video();
+        // Cut where the second frame's second field starts.
+        let second_field = (starts[1] + 4..data.len())
+            .find(|&at| data.get(at..at + 4) == Some(&[0, 0, 1, 0][..]))
+            .unwrap_or(data.len());
+        let cut = data.get(..second_field).unwrap_or(&data);
+        assert!(parse_video(cut, 0).is_err());
+        let head = parse_video_head(cut, 0).unwrap();
+        assert_eq!(head.pictures.len(), 1);
+        assert_eq!(head.pictures[0].len, starts[1]);
+        for i in 0..=data.len() {
+            let _ = parse_video_head(data.get(..i).unwrap_or(&data), 0);
+        }
     }
 
     #[test]

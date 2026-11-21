@@ -1,4 +1,4 @@
-//! MPEG-2 P-picture variable-length codes and bitstream helpers.
+//! MPEG-2 P- and B-picture variable-length codes and bitstream helpers.
 #![allow(dead_code)]
 
 use crate::bitwriter::BitWriter;
@@ -15,6 +15,26 @@ pub(crate) enum PType {
     NoMcCoded,
     /// Motion compensated, not coded.
     McNotCoded,
+    /// Intra macroblock.
+    Intra,
+}
+
+/// How a B-picture macroblock is predicted (13818-2 table B.4; the quantiser is never changed per macroblock).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BPrediction {
+    /// From the past reference picture.
+    Forward,
+    /// From the future reference picture.
+    Backward,
+    /// The average of both.
+    Interpolated,
+}
+
+/// B-picture macroblock type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BType {
+    /// Motion compensated; `coded` when it has a coded block pattern.
+    Mc(BPrediction, bool),
     /// Intra macroblock.
     Intra,
 }
@@ -186,6 +206,19 @@ pub(crate) fn p_macroblock_type(kind: PType) -> VlcCode {
     }
 }
 
+/// Return the B-picture macroblock type code (13818-2 table B.4).
+pub(crate) fn b_macroblock_type(kind: BType) -> VlcCode {
+    match kind {
+        BType::Mc(BPrediction::Interpolated, false) => (0b10, 2),
+        BType::Mc(BPrediction::Interpolated, true) => (0b11, 2),
+        BType::Mc(BPrediction::Backward, false) => (0b010, 3),
+        BType::Mc(BPrediction::Backward, true) => (0b011, 3),
+        BType::Mc(BPrediction::Forward, false) => (0b0010, 4),
+        BType::Mc(BPrediction::Forward, true) => (0b0011, 4),
+        BType::Intra => (0b00011, 5),
+    }
+}
+
 /// Return the coded block pattern code for `cbp` in 0..=63.
 pub(crate) fn coded_block_pattern(cbp: u8) -> Option<VlcCode> {
     lookup(&CODED_BLOCK_PATTERN, cbp)
@@ -238,6 +271,12 @@ pub(crate) fn write_macroblock_address_increment_after(writer: &mut BitWriter, s
 /// Write a P-picture macroblock type code.
 pub(crate) fn write_p_macroblock_type(writer: &mut BitWriter, kind: PType) {
     let code = p_macroblock_type(kind);
+    writer.write_bits(code.0, code.1);
+}
+
+/// Write a B-picture macroblock type code.
+pub(crate) fn write_b_macroblock_type(writer: &mut BitWriter, kind: BType) {
+    let code = b_macroblock_type(kind);
     writer.write_bits(code.0, code.1);
 }
 

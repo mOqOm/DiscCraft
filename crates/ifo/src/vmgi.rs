@@ -5,6 +5,8 @@ use crate::pgc::{Pgc, read_pgc, write_pgc};
 
 const FP_PGC_OFFSET: usize = 0x400;
 const TITLE_TYPE: u8 = 0x3C;
+/// The title type of a title of more than one PGC (a parental block, M13.16): bit 6 "not one sequential PGC".
+const TITLE_TYPE_PGCS: u8 = 0x7C;
 const VTS_ATR_SIZE: usize = 0x308;
 const VTS_ATTR_BLOCK: usize = 0x300;
 const MAX_TITLES: usize = 99;
@@ -25,6 +27,21 @@ pub struct TitleEntry {
     pub vts_ttn: u8,
     /// Start sector of the VTS, counted from the first sector of VIDEO_TS.IFO.
     pub vts_start_sector: u32,
+    /// M13.16: the parental IDs of the title's PGCs together (TT_SRPT +4, the "parental management mask"); 0 for a
+    /// title without a parental block.
+    pub parental_mask: u16,
+}
+
+/// The VMG_PTL_MAIT (M13.16, MPUCoder's ifo_vmg page): for each of `countries` (ISO 3166 alpha-2 codes, which a
+/// player compares with its own, SPRM12) and each parental level, a 16-bit mask for the VMG and each title set
+/// (US7451453B1: "the PTL_MAI table maps the current parental level into a 16-bit mask"). Every country here has the
+/// same masks, written once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentalTable {
+    /// The countries, as ASCII.
+    pub countries: Vec<[u8; 2]>,
+    /// `levels[l - 1]`: the masks of parental level `l` (1 to 8), the VMG's then title set 1's, 2's, ….
+    pub levels: [Vec<u16>; 8],
 }
 
 /// One menu PGC in the VMGM PGC information unit.
@@ -85,6 +102,8 @@ pub struct Vmgi {
     pub vts_attrs: Vec<Vec<u8>>,
     /// Optional VMGM menu tables.
     pub menus: Option<VmgMenus>,
+    /// M13.16: the parental management masks, when a title has a parental block.
+    pub parental: Option<ParentalTable>,
 }
 
 /// Return the number of sectors that `write_vmgi` will produce.
@@ -107,6 +126,16 @@ pub fn write_vmgi(v: &Vmgi) -> Result<Vec<u8>, IfoError> {
     write_tt_srpt(&mut w, &v.titles)?;
     w.pad_to_sector();
 
+    let ptl_ptr = match &v.parental {
+        Some(table) => {
+            let ptr = w.len() / SECTOR;
+            write_ptl_mait(&mut w, table, v.vts_count)?;
+            w.pad_to_sector();
+            ptr
+        }
+        None => 0,
+    };
+
     let vts_ptr = w.len() / SECTOR;
     write_vts_atrt(&mut w, &v.vts_attrs)?;
     w.pad_to_sector();
@@ -127,7 +156,13 @@ pub fn write_vmgi(v: &Vmgi) -> Result<Vec<u8>, IfoError> {
     }
 
     let ifo_sectors = w.len() / SECTOR;
-    finish_vmgi(&mut w, v, ifo_sectors, tt_ptr, vts_ptr, menu_ptrs)?;
+    finish_vmgi(
+        &mut w,
+        v,
+        ifo_sectors,
+        (tt_ptr, ptl_ptr, vts_ptr),
+        menu_ptrs,
+    )?;
     Ok(w.into_bytes())
 }
 
@@ -151,9 +186,29 @@ pub fn read_vmgi(data: &[u8]) -> Result<Vmgi, IfoError> {
     if tt_ptr != 1 {
         return Err(IfoError("bad VMGI table layout".to_string()));
     }
-    let expected_vts_ptr = 1usize
+    let after_titles = 1usize
         .checked_add(ceil_sectors(tt_len))
         .ok_or_else(|| IfoError("VMGI layout overflow".to_string()))?;
+    // M13.16: the parental management table, when there is one, right after the titles.
+    let parental = match pointers.ptl {
+        0 => None,
+        ptr => Some(read_ptl_mait(&r, ptr, ifo_sectors, header.vts_count)?),
+    };
+    let expected_vts_ptr = match &parental {
+        None => after_titles,
+        Some(table) => {
+            if usize::try_from(pointers.ptl).ok() != Some(after_titles) {
+                return Err(IfoError("bad VMGI table layout".to_string()));
+            }
+            let masks = usize::from(header.vts_count).saturating_add(1);
+            let len = checked_mul_add(table.countries.len(), 8, 8)?
+                .checked_add(checked_mul_add(masks, 16, 0)?)
+                .ok_or_else(|| IfoError("VMGI layout overflow".to_string()))?;
+            after_titles
+                .checked_add(ceil_sectors(len))
+                .ok_or_else(|| IfoError("VMGI layout overflow".to_string()))?
+        }
+    };
     if vts_ptr != expected_vts_ptr {
         return Err(IfoError("bad VMGI table layout".to_string()));
     }
@@ -177,6 +232,7 @@ pub fn read_vmgi(data: &[u8]) -> Result<Vmgi, IfoError> {
         first_play,
         vts_attrs,
         menus,
+        parental,
     };
 
     if ifo_sectors != vmgi_sectors(&v)? {
@@ -203,6 +259,7 @@ struct VmgiHeader {
 
 struct VmgiPointers {
     tt: u32,
+    ptl: u32,
     vts: u32,
     pgci: u32,
     c_adt: u32,
@@ -224,6 +281,12 @@ fn validate_vmgi(v: &Vmgi) -> Result<(), IfoError> {
     for block in &v.vts_attrs {
         if block.len() != VTS_ATTR_BLOCK {
             return Err(IfoError("bad VTS attribute block size".to_string()));
+        }
+    }
+    if let Some(table) = &v.parental {
+        let masks = usize::from(v.vts_count).saturating_add(1);
+        if table.countries.is_empty() || table.levels.iter().any(|level| level.len() != masks) {
+            return Err(IfoError("bad parental management table".to_string()));
         }
     }
     for t in &v.titles {
@@ -293,8 +356,7 @@ fn finish_vmgi(
     w: &mut Writer,
     v: &Vmgi,
     ifo_sectors: usize,
-    tt_ptr: usize,
-    vts_ptr: usize,
+    (tt_ptr, ptl_ptr, vts_ptr): (usize, usize, usize),
     menu_ptrs: MenuPointers,
 ) -> Result<(), IfoError> {
     let last_vtsi = ifo_sectors
@@ -317,6 +379,7 @@ fn finish_vmgi(
     w.put_u32(0x00C, u32_from_usize(last_set)?);
     w.put_u32(0x01C, u32_from_usize(last_vtsi)?);
     w.put_u32(0x0C4, u32_from_usize(tt_ptr)?);
+    w.put_u32(0x0CC, u32_from_usize(ptl_ptr)?);
     w.put_u32(0x0D0, u32_from_usize(vts_ptr)?);
 
     if v.menus.is_some() {
@@ -359,14 +422,53 @@ fn write_tt_srpt(w: &mut Writer, titles: &[TitleEntry]) -> Result<(), IfoError> 
 
     let mut pos = off(base, 8)?;
     for t in titles {
-        w.put_u8(pos, TITLE_TYPE);
+        w.put_u8(
+            pos,
+            if t.parental_mask == 0 {
+                TITLE_TYPE
+            } else {
+                TITLE_TYPE_PGCS
+            },
+        );
         w.put_u8(off(pos, 1)?, 1);
         w.put_u16(off(pos, 2)?, t.chapters);
-        w.put_u16(off(pos, 4)?, 0);
+        w.put_u16(off(pos, 4)?, t.parental_mask);
         w.put_u8(off(pos, 6)?, t.vts);
         w.put_u8(off(pos, 7)?, t.vts_ttn);
         w.put_u32(off(pos, 8)?, t.vts_start_sector);
         pos = off(pos, 12)?;
+    }
+    Ok(())
+}
+
+/// The VMG_PTL_MAIT: the number of countries and of title sets and the end address, then for each country its code,
+/// 2 reserved bytes, the offset of its table and 2 reserved bytes (8 bytes), then the one table every country points
+/// at: the masks of level 8, 7, … 1, each the VMG's and every title set's.
+fn write_ptl_mait(w: &mut Writer, table: &ParentalTable, vts_count: u8) -> Result<(), IfoError> {
+    let base = w.len();
+    let masks = usize::from(vts_count).saturating_add(1);
+    let countries = table.countries.len();
+    let table_offset = checked_mul_add(countries, 8, 8)?;
+    let end = table_end_address(table_offset, checked_mul_add(masks, 16, 0)?)?;
+    let table_offset_u16 =
+        u16::try_from(table_offset).map_err(|_| IfoError("too many countries".to_string()))?;
+    w.put_u16(
+        base,
+        u16::try_from(countries).map_err(|_| IfoError("too many countries".to_string()))?,
+    );
+    w.put_u16(off(base, 2)?, u16::from(vts_count));
+    w.put_u32(off(base, 4)?, u32_from_usize(end)?);
+    for (index, country) in table.countries.iter().enumerate() {
+        let pos = off(base, checked_mul_add(index, 8, 8)?)?;
+        w.put_slice(pos, country);
+        w.put_u16(off(pos, 4)?, table_offset_u16);
+    }
+    let mut pos = off(base, table_offset)?;
+    for level in table.levels.iter().rev() {
+        for index in 0..masks {
+            w.put_u16(pos, level.get(index).copied().unwrap_or(0));
+            pos = off(pos, 2)?;
+        }
     }
     Ok(())
 }
@@ -636,7 +738,8 @@ fn read_vmgi_pointers(
     let c_adt = r.u32(0x0D8)?;
     let vobu = r.u32(0x0DC)?;
 
-    if r.u32(0x0CC)? != 0 || r.u32(0x0D4)? != 0 {
+    let ptl = r.u32(0x0CC)?;
+    if r.u32(0x0D4)? != 0 {
         return Err(IfoError("unexpected VMGM table pointer".to_string()));
     }
 
@@ -689,6 +792,7 @@ fn read_vmgi_pointers(
 
     Ok(VmgiPointers {
         tt,
+        ptl,
         vts,
         pgci,
         c_adt,
@@ -1031,6 +1135,53 @@ fn read_zero_bytes(r: &Reader<'_>, offset: usize, len: usize) -> Result<(), IfoE
     Ok(())
 }
 
+/// The VMG_PTL_MAIT as [`write_ptl_mait`] writes it: every country pointing at one table.
+fn read_ptl_mait(
+    r: &Reader<'_>,
+    ptr: u32,
+    ifo_sectors: usize,
+    vts_count: u8,
+) -> Result<ParentalTable, IfoError> {
+    let base = table_start(r, ptr, ifo_sectors, 1)?;
+    let countries = usize::from(r.u16(base)?);
+    if countries == 0 || r.u16(off(base, 2)?)? != u16::from(vts_count) {
+        return Err(IfoError("bad VMG_PTL_MAIT header".to_string()));
+    }
+    let masks = usize::from(vts_count).saturating_add(1);
+    let table_offset = checked_mul_add(countries, 8, 8)?;
+    let end = table_end_address(table_offset, checked_mul_add(masks, 16, 0)?)?;
+    if r.u32(off(base, 4)?)? != u32_from_usize(end)? || off(base, end)? >= r.len() {
+        return Err(IfoError("bad VMG_PTL_MAIT end address".to_string()));
+    }
+    let mut codes = Vec::with_capacity(countries);
+    for index in 0..countries {
+        let pos = off(base, checked_mul_add(index, 8, 8)?)?;
+        let code = r.slice(pos, 2)?;
+        codes.push([
+            code.first().copied().unwrap_or(0),
+            code.get(1).copied().unwrap_or(0),
+        ]);
+        if usize::from(r.u16(off(pos, 4)?)?) != table_offset
+            || r.u16(off(pos, 2)?)? != 0
+            || r.u16(off(pos, 6)?)? != 0
+        {
+            return Err(IfoError("bad VMG_PTL_MAIT country entry".to_string()));
+        }
+    }
+    let mut levels: [Vec<u16>; 8] = Default::default();
+    let mut pos = off(base, table_offset)?;
+    for level in levels.iter_mut().rev() {
+        for _ in 0..masks {
+            level.push(r.u16(pos)?);
+            pos = off(pos, 2)?;
+        }
+    }
+    Ok(ParentalTable {
+        countries: codes,
+        levels,
+    })
+}
+
 fn read_tt_srpt(
     r: &Reader<'_>,
     ptr: u32,
@@ -1062,15 +1213,19 @@ fn read_tt_srpt(
     let mut titles = Vec::with_capacity(n);
     let mut pos = off(base, 8)?;
     for _ in 0..n {
-        if r.u8(pos)? != TITLE_TYPE {
-            return Err(IfoError("bad title type".to_string()));
-        }
+        let title_type = r.u8(pos)?;
         if r.u8(off(pos, 1)?)? != 1 {
             return Err(IfoError("bad angle count".to_string()));
         }
         let chapters = r.u16(off(pos, 2)?)?;
-        if r.u16(off(pos, 4)?)? != 0 {
-            return Err(IfoError("bad parental mask".to_string()));
+        let parental_mask = r.u16(off(pos, 4)?)?;
+        let expected_type = if parental_mask == 0 {
+            TITLE_TYPE
+        } else {
+            TITLE_TYPE_PGCS
+        };
+        if title_type != expected_type {
+            return Err(IfoError("bad title type".to_string()));
         }
         let vts = r.u8(off(pos, 6)?)?;
         let vts_ttn = r.u8(off(pos, 7)?)?;
@@ -1085,6 +1240,7 @@ fn read_tt_srpt(
             vts,
             vts_ttn,
             vts_start_sector,
+            parental_mask,
         });
         pos = off(pos, 12)?;
     }
@@ -1268,12 +1424,14 @@ mod tests {
                     vts: 1,
                     vts_ttn: 1,
                     vts_start_sector: 100,
+                    parental_mask: 0,
                 },
                 TitleEntry {
                     chapters: 2,
                     vts: 2,
                     vts_ttn: 1,
                     vts_start_sector: 200,
+                    parental_mask: 0,
                 },
             ],
             vts_count: 2,
@@ -1292,6 +1450,7 @@ mod tests {
             },
             vts_attrs: vec![block_a, block_b],
             menus: None,
+            parental: None,
         }
     }
 
@@ -1384,6 +1543,54 @@ mod tests {
         let mut v = sample_vmgi();
         v.menus = Some(sample_menus());
         v
+    }
+
+    /// M13.16: the parental management table: every country pointing at one table of the masks of level 8 down to
+    /// 1, the VMG's and each title set's; a title with a parental block has its mask and its title type says it has
+    /// more than one PGC.
+    #[test]
+    fn the_parental_table_round_trips() -> Result<(), IfoError> {
+        let mut v = sample_vmgi();
+        if let Some(title) = v.titles.first_mut() {
+            title.parental_mask = 0x00FF;
+        }
+        let levels: [Vec<u16>; 8] = std::array::from_fn(|index| {
+            let bit = 1u16 << index;
+            vec![bit, bit, bit]
+        });
+        v.parental = Some(super::ParentalTable {
+            countries: vec![*b"JP", *b"US"],
+            levels,
+        });
+        let data = write_vmgi(&v)?;
+        assert_eq!(read_vmgi(&data)?, v);
+
+        let r = Reader::new(&data);
+        let table = usize::try_from(r.u32(0x0CC)?)
+            .ok()
+            .and_then(|sector| sector.checked_mul(SECTOR))
+            .ok_or_else(|| IfoError("test overflow".to_string()))?;
+        assert!(table > 0);
+        // 2 countries, 2 title sets, the end: 8 + 2 * 8 + 8 levels * 3 masks * 2 bytes - 1.
+        assert_eq!(r.u16(table)?, 2);
+        assert_eq!(r.u16(super::off(table, 2)?)?, 2);
+        assert_eq!(r.u32(super::off(table, 4)?)?, 8 + 16 + 48 - 1);
+        assert_eq!(r.slice(super::off(table, 8)?, 2)?, b"JP");
+        assert_eq!(r.u16(super::off(table, 12)?)?, 24);
+        assert_eq!(r.slice(super::off(table, 16)?, 2)?, b"US");
+        assert_eq!(r.u16(super::off(table, 20)?)?, 24);
+        // Level 8's masks first, level 1's last.
+        assert_eq!(r.u16(super::off(table, 24)?)?, 0x0080);
+        assert_eq!(r.u16(super::off(table, 24 + 42)?)?, 0x0001);
+        // The title with a block: its title type and mask.
+        let titles = usize::try_from(r.u32(0x0C4)?)
+            .ok()
+            .and_then(|sector| sector.checked_mul(SECTOR))
+            .ok_or_else(|| IfoError("test overflow".to_string()))?;
+        assert_eq!(r.u8(super::off(titles, 8)?)?, 0x7C);
+        assert_eq!(r.u16(super::off(titles, 12)?)?, 0x00FF);
+        assert_eq!(r.u8(super::off(titles, 20)?)?, 0x3C);
+        Ok(())
     }
 
     #[test]

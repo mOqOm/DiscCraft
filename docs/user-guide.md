@@ -54,9 +54,15 @@ What it does not do (for now):
 - Editing video itself (edit in FilmCraft, make the disc in DiscCraft)
 - 4K (Ultra HD Blu-ray)
 
-Blu-ray video is SD (720×480 / 720×576) MPEG-2 or HD. HD is H.264 for 1080p (23.976 / 24) and 720p, and
-MPEG-2 for 1080i (59.94 / 50), or H.264 with **H.264 (1080i too)** as the disc's **Blu-ray codec** (coded as interlaced
-frames, the top field first, at H.264's bitrates). Sources shot at 29.97 or 25 fps become HD at their own speed with 1080i 59.94 / 50
+Blu-ray video is SD (720×480 / 720×576) or HD. HD is H.264 for 1080p (23.976 / 24) and 720p, and
+MPEG-2 for 1080i (59.94 / 50), or H.264 with **H.264 (every format)** as the disc's **Blu-ray codec** (coded as interlaced
+frames, the top field first, at H.264's bitrates). SD is MPEG-2, as on a DVD, or with **H.264 (every format)** H.264
+of 720×480 / 720×576 coded as interlaced frames, its pixels shaped for the title's 4:3 or 16:9 (budgeted as HD
+H.264 is; the menus stay MPEG-2). With **MPEG-2 (every format)** 1080p and 720p are MPEG-2 too, as
+progressive pictures at the format's frame rate (MPEG-2's bitrates). A video can also have a codec of its own
+(**Transcode Settings…**, see 4.1). Each 1080 format is also offered 1440×1080 wide (1440x1080 59.94i / 50i / 23.976p
+/ 24p: HDV's and AVCHD's size, its pixels 4:3 wide so it is shown 16:9); its video is made 1440 wide, and the menus and
+subtitles stay 1920×1080 as the Blu-ray specification draws them. Sources shot at 29.97 or 25 fps become HD at their own speed with 1080i 59.94 / 50
 (the Blu-ray specification has no 1920×1080 at 29.97p / 25p, so each frame goes on the disc as the two fields of 1080i).
 HD video averages 12 Mbps as H.264 and 25 Mbps as 1080i MPEG-2. When the titles are too long to fit the disc at that rate,
 it is lowered automatically until they fit (down to 3 Mbps for H.264 and 8 Mbps for MPEG-2; past that the disc cannot be built).
@@ -90,7 +96,8 @@ The **New Project** dialog has two tabs, **Basic** and **Advanced**.
 
 - With an empty location, you are asked for one when you save
 - The default television standard can be changed in [Preferences](#15-preferences)
-- A new Blu-ray project is HD: 1920 x 1080 at 23.976 fps with NTSC, 1080i at 25 fps with PAL. Files that fit the
+- A new Blu-ray project is HD: 1920 x 1080 at 23.976 fps with NTSC, 1080i at 25 fps in H.264 with PAL (both as in
+  Encore's New Project dialog). Files that fit the
   format go on the disc as they are; the others are converted, by default at 12 Mbps on average with H.264 and
   25 Mbps with MPEG-2 (1080i); when the disc has room the rate goes up to use it (as far as 25 Mbps for H.264 and
   32 Mbps for MPEG-2), and when it is short it comes down. With **SD (MPEG-2)** as the Blu-ray video format, HD sources are converted down to SD
@@ -98,8 +105,8 @@ The **New Project** dialog has two tabs, **Basic** and **Advanced**.
 
 What you can change later: authoring mode, Blu-ray video format, aspect ratio and size in **File ▸ Project Settings…**; the disc's name
 and size under **Disc Info** in the **Build** panel; all the disc's settings in the **Disc** panel
-(the Blu-ray video size, SD (MPEG-2) / HD (H.264), is there too, and the Blu-ray codec: **Automatic (MPEG-2 for 1080i)**,
-**H.264 (1080i too)** or **MPEG-2 for 1080i**).
+(the Blu-ray video size, SD (MPEG-2) / HD (H.264), is there too, and the Blu-ray codec: **Automatic (MPEG-2 for SD and
+1080i)**, **H.264 (every format)** or **MPEG-2 (every format)**).
 
 ### 2.3 Saving
 
@@ -247,8 +254,11 @@ Blu-ray still carries it as it is, without conversion ("H.264 that goes on an HD
 An interlaced video at the DVD's own frame rate (1080i 59.94 or 480i for NTSC, 1080i 50 or 576i for PAL; MPEG-2 or
 H.264) keeps its two fields apart on a DVD: each field is scaled on its own and the pictures are marked interlaced, in
 the source's field order, so motion stays as smooth as in the source instead of two moments blending in every line
-(with "Use Maximum Render Quality" too, which then scales such video with the usual scaler). Film (23.976) and video of
-another frame rate are scaled as whole frames as before.
+(with "Use Maximum Render Quality" too, which then scales such video with the usual scaler). Where the picture moves,
+the two fields are also predicted each on its own, so it looks better at the same bit rate. Converted to Blu-ray's
+interlaced formats (1080i 59.94 / 50 and SD), such video with the top field first keeps its two fields apart the same
+way (predicted as fields too with MPEG-2). Film (23.976) and video of another frame rate are scaled as whole frames as
+before.
 A video whose picture cannot be decoded (for example MPEG-4 Part 2, DivX / Xvid) imports, but on a disc that has to
 convert it, Check Project reports the error "The picture cannot be decoded, so the video cannot be converted for this
 disc." (so you know before a build starts).
@@ -277,7 +287,8 @@ the same part. When the key pictures have leading B pictures (open GOPs), the cl
 **HD MPEG-2 that goes on an HD Blu-ray as it is**: the MPEG-2 video of a transport stream (`.m2ts` / `.mts` / `.m2t` /
 `.ts`) or a program stream (`.mpg` / `.vob`) (an HDV camcorder's 1440×1080i, a broadcast recording's 1920×1080i or 1440×1080i, 1280×720p) goes on the disc
 without re-encoding too, when its size, frame rate and scan are those of the disc's Blu-ray Video, it is Main profile
-at High or High-1440 level, no faster than 40 Mbps, and coded as frame pictures. It is trimmed at its GOPs (the
+at High or High-1440 level, and no faster than 40 Mbps (coded as frame pictures, or as two field pictures a frame as
+some broadcast recordings are). It is trimmed at its GOPs (the
 timeline's trim snaps to them), and on a 1080i disc a 1920 x 1080 one goes on as it is beside the title's other clips
 too. 1440 x 1080 ones, from HDV, go on as they are when they are more of the title's clips that go on as they are
 than 1920 x 1080 ones: the title is then made at 1440 x 1080 (shown 16:9), its other clips and gaps encoded at that
@@ -369,9 +380,10 @@ A DTS file (`.dts`) goes into a DVD's or a Blu-ray's audio track as it is, witho
   **Quality Preset** for a DVD, and **Blu-ray Transcode** has the **Codec**, **Dimensions**, **Frame Rate** and **Field**
   and the **Quality Preset** for a Blu-ray. On an HD Blu-ray the codec, dimensions and frame rate choose the format
   this video's titles are made in, which can differ from the project's (a 720p59.94 video on a 1080p23.976 disc,
-  say): each choice offers what goes with the others (the dimensions of that codec, the frame rates of those
-  dimensions), the field follows from them, and the presets in the list are that format's. **Use Project Settings**
-  in the preset list puts the video back to the project's format at the automatic rate. A video that goes on the
+  say): every format can be MPEG-2 or H.264 (MPEG-2 first, as in Encore), each choice offers what goes with the
+  others (the dimensions, then the frame rates of those dimensions, from the smallest), the field follows from them,
+  and the presets in the list are that format's in that codec. **Use Project Settings** in the preset list puts the
+  video back to the project's format and codec at the automatic rate. A video that goes on the
   disc in the chosen format as it is shows **Don't Transcode**. An SD Blu-ray's titles are all the project's format,
   so the rows are greyed there (**Transcode Defaults…** on the right opens the project settings where it is
   chosen). On the right are **OK**,
@@ -383,7 +395,12 @@ A DTS file (`.dts`) goes into a DVD's or a Blu-ray's audio track as it is, witho
   between two of the video's frames mixes them by how near it is to each, instead of showing the one before it
   again. Both are off at first, and changing one makes a new conversion. The same two preset lists are combos in
   the Properties panel when a video asset is selected, with the two checkboxes under them shown grey as in Encore
-  (they are changed here, in Transcode Settings), and the Transcode Settings columns show the preset's name
+  (they are changed here, in Transcode Settings), and the Transcode Settings columns show the preset's name. The
+  Properties panel's **Blu-ray Transcode** combo is Encore's whole list, as in Encore: every Blu-ray preset of the TV
+  standard's formats in both codecs, the DVD presets and SD's, by name, then **Automatic: <format>** for each format
+  and codec, and **Automatic** (the project's format and codec) at the end; picking one sets the video's format,
+  codec and rate together. What the project cannot make is grey, with the reason on it (SD titles on an HD Blu-ray
+  or HD ones on an SD Blu-ray, an SD Blu-ray in the other codec, a DVD preset but on an SD Blu-ray in MPEG-2, film)
 - A DVD's quality presets are Encore's for the TV standard: on an NTSC project first the film ones, **NTSC DV 23.976
   High quality 4Mb VBR 2 Pass**, **7Mb VBR 2 Pass**, **8Mb CBR 1 Pass** and **NTSC DV 23.976 Low quality 4Mb CBR 1
   Pass**, then **NTSC DV High quality 4Mb VBR 2 Pass**, **7Mb VBR 2 Pass**, **8Mb CBR 1 Pass**, **NTSC DV Low quality
@@ -393,7 +410,9 @@ A DTS file (`.dts`) goes into a DVD's or a Blu-ray's audio track as it is, witho
   pulldown (soft pulldown: the player repeats fields as the pictures say, so the disc plays at 29.97 and holds a fifth
   fewer pictures, each with more bits). "High" / "Low" quality is how hard the encoder looks for movement (Encore's
   quality, 5 and 2): a "Low quality" preset searches a smaller range, to whole pixels only, so it converts faster
-  and the picture is a little worse at the same bit rate. A preset sets the video bit rate (used for that video whatever the others get; the others share what it
+  and the picture is a little worse at the same bit rate. Converted MPEG-2 video (a DVD's, and an HD Blu-ray's at
+  1080i) is coded in GOPs of I B B P… as Encore's (two B pictures between the reference pictures; film too, each
+  picture repeating a field by its place in the 3:2 pulldown). A preset sets the video bit rate (used for that video whatever the others get; the others share what it
   leaves of the disc, and the size estimate counts it), how it is kept and the sound:
   **VBR, 1 Pass** (the rate averages the bit rate, up to the maximum), **VBR, 2 Pass** (the whole video is gone
   through once to measure it, writing nothing, then converted giving hard scenes more of the bits and easy ones
@@ -603,7 +622,7 @@ order they are to play (so extras can be watched in any order).
 | **File ▸ New ▸ Menu** (Ctrl+M) | An empty menu, with the same guides as Encore |
 | **File ▸ Import ▸ Menu…** (Shift+Ctrl+I) | Makes a menu from a PSD / `.pcraft`. Groups whose names start with `(+)` become buttons |
 | **New Menu** on a **Library** preset | Made from one of DiscCraft's own templates |
-| **Menu ▸ Add New Page** | The next page of the open menu (same background and settings). A page is an empty menu of its own: put its buttons on it. The pages are listed under their menu in the Menus panel (**Page 1**, **Page 2**…), the viewer's tab says which page is open, and the arrows under the viewer go from page to page. The Layers panel shows them as Encore does, as `(#) Page n` groups above the first page's layers (the last page on top): a click on one shows that page, and its arrow opens it to the page's own layers. A link reaches a page through its menu's name ▸ **Page n** in the link lists. On a Blu-ray the pages are one menu, as Encore builds them: going from page to page only changes the buttons and what the page draws, while the background video and the menu's sound play on without starting again. That needs pages that share the first page's background, sound, duration and loops (as **Add New Page** makes them), up to 254 pages, however much they draw; otherwise each page is built as a menu of its own and turning a page starts it from the beginning. A pop-up menu's pages pop up together over the title ([Blu-ray](#1410-blu-ray)). On a DVD each page is always a menu of its own |
+| **Menu ▸ Add New Page** | The next page of the open menu (same background and settings). A page is an empty menu of its own: put its buttons on it. The pages are listed under their menu in the Menus panel (**Page 1**, **Page 2**…), the viewer's tab says which page is open, and the arrows under the viewer go from page to page. The Layers panel shows them as Encore does, as `(#) Page n` groups above the first page's layers (the last page on top): a click on one shows that page, and its arrow opens it to the page's own layers. A menu made from a PSD lists the PSD's own layers, as Encore does (their names, the groups inside groups, the eye of a hidden layer, the mark of a `(+)` button set; at first only the shown page's `(#)` group is open, and a group opened or closed stays so from page to page): a click on a button set, or on a layer inside one, selects its button, and the set's eye hides the button. Texts, images and buttons added in DiscCraft are listed above the PSD's layers. A link reaches a page through its menu's name ▸ **Page n** in the link lists. On a Blu-ray the pages are one menu, as Encore builds them: going from page to page only changes the buttons and what the page draws, while the background video and the menu's sound play on without starting again. That needs pages that share the first page's background, sound, duration and loops (as **Add New Page** makes them), up to 254 pages, however much they draw; otherwise each page is built as a menu of its own and turning a page starts it from the beginning. A pop-up menu's pages pop up together over the title ([Blu-ray](#1410-blu-ray)). On a DVD each page is always a menu of its own |
 
 The first menu made becomes **First Play** and the **Title Button** automatically.
 
@@ -619,7 +638,9 @@ highlight. (A button made in DiscCraft without a subpicture or text highlight ge
 
 A group at the top of the layers whose name starts with `(#)` is a page of the menu, as in Encore: the menu gets a
 page for each such group (the lowest first; the name after `(#)` does not matter), with the buttons in the group.
-A hidden page group is no page, as in Encore.
+A hidden page group is no page, as in Encore. A page shows only the buttons in its group: the group's other layers
+(pictures and text that are not in a button's set) are left out, as Encore leaves them out of its Blu-ray menus. Put
+such art in a button's set, or outside the page groups to have it on every page.
 The `(+)` groups outside the page groups are the first page's buttons, and the layers outside them that are not
 buttons are shown on every page. If no buttons are outside the page groups, the lowest page group is the first page
 (Encore keeps an empty first page there). On a Blu-ray these pages turn without starting the background again.
@@ -800,9 +821,13 @@ is the whole job, including the loop, the audio and what to hide afterwards.
 ### 8.6 Reworking in a PSD
 
 - **Edit ▸ Edit Menu in PhotoCraft** (Shift+Ctrl+M): turns the menu into a layered PSD and opens it in PhotoCraft
-  (or the default application). It is read again automatically when you save. The PSD is kept in
-  `<project>.menus/`. Afterwards button links are as before, new groups add buttons and the buttons of groups that
-  are gone are removed
+  (or the default application); a menu made from a PSD, with no text added, opens that PSD as it is. It is read
+  again automatically when you save. The PSD is kept in `<project>.menus/`. When it is read again, each `(+)`
+  group finds its button by name (a renamed group by its layer id, which Photoshop keeps; in a PSD without layer
+  ids, a renamed group that overlaps its button; a copied group is a new button) and the buttons take the PSD's
+  stacking order: a button found keeps its link and settings (the default button and the links to it follow it),
+  new groups add buttons and the buttons of groups that are gone are removed. A menu made from a PSD with `(#)`
+  pages reads every page again
 - **Menu ▸ Save Menu as File…**: writes the menu as a PSD
 - **Menu ▸ Replace Menu…**: replaces the open menu with a PSD's design, keeping the links by button number
 - **Menu ▸ Save Menu as Template…** (Ctrl+Alt+M): saves it in the Library's **User** set
@@ -984,7 +1009,7 @@ DTS tracks are silent.
 | Destination | When empty, the place shown in faint text (`<project name>_DVD` / `_BD` beside the project; `<project name>.iso` for an image; `<project name>_DDP` for a DDP image). For a folder or a DDP image, naming an existing folder makes a `<disc name>` folder inside it (a place that already has `VIDEO_TS` / `BDMV`, or a DDP image's `DDPID`, is built again in place). An image cannot be given a folder |
 | Disc Info | The usage bar (**Refresh Usage** calculates it), the disc's name (also the ISO's volume label), the size (**Custom**, last in the list, takes a size of your own in GB beside it — 1 GB = 1,000,000,000 bytes — from 0.001 GB up to a single-layer DVD's 4.7 GB, or a BDXL's 128 GB on a Blu-ray; a larger DVD is DVD9. The usage bar and the project check then measure against it), **DVD-ROM content** / **BD-ROM content** (**Browse…** chooses a folder; its files and folders go in the disc's root, beside `VIDEO_TS` / `BDMV`: a manual or photos to read on a computer. A folder build copies them, an image holds them. They take that much of the capacity from the video, and the line under the bar shows their size. **Clear** takes them off. A file must be under 4 GB, folders at most 7 deep) |
 | Layer Break | DVD-9 only. Automatic / manual. Manual is set by timeline and position (timecode / frame / seconds, **Playhead**) |
-| Region Codes | DVD only. All regions / custom (ticks for 1 to 8). **Parental level**: none, or 1 to 8 (8 is the most restricted). A player whose parental level is set lower asks for its password before the disc plays (at the start, and when a title is started from the remote) and stops when it is not given; a player with no level set plays as usual. A timeline, slideshow or chapter playlist can ask a level of its own (**Parental level** in its properties: the disc's, none, or 1 to 8), and a timeline can name what plays in its place when the level is not raised (**If Not Allowed**: another title or a menu, as a parental block; not set, the player stops). Country-specific ratings are not written, and this has not been tried on a hardware player |
+| Region Codes | DVD only. All regions / custom (ticks for 1 to 8). **Parental level**: none, or 1 to 8 (8 is the most restricted). A player whose parental level is set lower asks for its password before the disc plays (at the start, and when a title is started from the remote) and stops when it is not given; a player with no level set plays as usual. A timeline, slideshow or chapter playlist can ask a level of its own (**Parental level** in its properties: the disc's, none, or 1 to 8), and a timeline can name what plays in its place when the level is not raised (**If Not Allowed**: another title or a menu; not set, the player stops). A timeline's chapter can have another video for players below a level (the DVD standard's parental block: **Parental Alternative** and **For Levels Below** (2 to 8) in the chapter's properties; the command is `timeline.setParentalChapter`): the title then becomes a version for each range of levels, which the player chooses by its own level (it asks no password; the other video goes on the disc with its own sound; the preview shows the full version). The same levels are written for every country, and this has not been tried on a hardware player |
 | Project Check | The check results (the same rows as the check window) |
 | Result | Errors, the number of titles / chapters / the size, **Simulate** (runs the VM after building to a folder) |
 
@@ -993,12 +1018,15 @@ During a build a bar shows the progress and the time taken (also in the status b
 - Converted media stays in `disccraft-cache` at the output (the next build skips the conversion). `--cache` on the
   command line keeps it elsewhere to share it
 - An ISO is UDF + ISO 9660. On Windows a double click in Explorer mounts it
-- A DVD-9 image with a layer break leaves a note in `<name>.layerbreak.txt` at the same place
+- A DVD-9 image with a layer break leaves a note in `<name>.layerbreak.txt` at the same place. The image puts the
+  break at the start of a 16-sector block, as a dual-layer disc needs: when the break's cell starts elsewhere, its
+  title set is moved a few sectors later in the image (the VIDEO_TS folder build is not moved)
 - A **DDP Image** (DVD only, as in Encore) is what a replication plant takes in place of a master disc: a folder
   holding `MAIN.DAT` (the disc image), `CONTROL.DAT` (the disc's control data: its size and layout) and `DDPID`
   (which says what the two files are and where they go on the disc). These are the same files Encore CS6 writes
-  for the same image. The `VIDEO_TS` folder is built beside it (`<name>.files`). A dual-layer (DVD-9) disc cannot
-  be written as a DDP image yet
+  for the same image. The `VIDEO_TS` folder is built beside it (`<name>.files`). A dual-layer (DVD-9) disc's DDP
+  image has a folder for each layer, as Encore writes it: `Layer 1` (layer 0's part of the image, `CONTROL.DAT`,
+  `DDPID`) and `Layer 2` (the rest of the image and its own `DDPID`)
 - Nothing is burned to a disc. Use other software to burn
 - How much of the disc is left, and what to do when it is not enough:
   [reading the disc's size as you work](#149-reading-the-discs-size-as-you-work)
@@ -1097,9 +1125,10 @@ oddly, when a row should not wrap, or when a route should lead somewhere nobody 
 The automatic routing follows Adobe Encore CS6's rules. Buttons whose left (top) edges or centres line up
 within 9 px form a column (row): up and down (left and right) walk along it and wrap at the ends. A button
 just out of line (overlapping the row but 10 to 18 px off) breaks the whole row, and so do buttons that partly
-overlap each other. A bar that contains other buttons (a strip behind a row of items) is in no row and steps
+overlap each other and a button 10 to 18 px from one of the row's (a bar just below it). A bar that contains other buttons (a strip behind a row of items) is in no row and steps
 into the buttons inside it. Without a row or column, an arrow goes to the nearest button that way (up and down
-only within about 68° of straight on), or else to one beside it. When "Next" and "Previous" buttons are left
+only within about 68° of straight on, or less than 400 px to the side), or else to one beside it: one level with it
+first, the nearest by the gap between them, the clockwise one on a tie (up goes right, down left). When "Next" and "Previous" buttons are left
 out, the leftmost button goes up and left to "Previous" and the rightmost down and right to "Next".
 
 1. Click the menu's background — not a button or text — so the Properties panel shows the menu's sheet,
@@ -1312,7 +1341,7 @@ So that you are not looking for it:
 
 | Encore has | DiscCraft |
 |---|---|
-| Burning to a disc; a dual-layer DVD's DDP image | Not there. DiscCraft writes a folder, an ISO, or a single-layer DVD's DDP image |
+| Burning to a disc | Not there. DiscCraft writes a folder, an ISO, or a DVD's DDP image |
 | Copy protection (CSS, AACS) | Not there. Only the region code flags |
 | BD-J menus | Not there. Blu-ray is HDMV |
 | Highlight colour sets shared between projects as a file | Not there for menus (subtitle colour sets have `.dccolors`). Save the menu as a template instead |
@@ -1330,7 +1359,7 @@ So that you are not looking for it:
 | Preview | The player the Project Preview and the Monitor stand for. **TV mode**: 16:9 Widescreen, 4:3 Letterbox (a 16:9 title is shown with bars above and below, on a 4:3 screen), or 4:3 Pan & Scan (the middle of a 16:9 title fills the 4:3 screen, its sides cut). **Player region code**: All regions, or one of 1 to 8 — a DVD limited to other regions does not open in the preview (the status bar says why). **Audio language**: when the disc chooses no audio track itself, a title's first track in this language is heard. **Subtitle language**: when no subtitles are shown, a title's first subtitle track in this language is shown. A built Blu-ray opened in the preview picks its first audio and subtitle streams in these languages too, as a player does, while the disc has chosen none. **Player parental level**: None, or 1 to 8 — a disc whose parental level (Build panel) is higher does not play, as on a locked player (the preview has no password to give). The defaults (widescreen, all regions, no language, no level) play every disc as it is. **Preview playback quality**: the same choice for the Project Preview's titles (High by default). Kept in `workspace.json` |
 | Media | Where DiscCraft keeps its **Library Content** (your own library items) and its **Media Cache Database** (the lengths, sizes and thumbnails remembered of media files, and the indexes of MKV files and of transport streams (`.m2ts` / `.ts` / `.mpg` / `.vob`), so a large file opens at once in a later session instead of being read through again), each with **Browse…** (put it in another folder), **Default** (back beside the settings) and **Show in Explorer**. A library folder that already holds a library is opened as it is; an empty one gets the items you have now. A new cache folder is used from then on, and the old one is left as it is. **Clean** empties the media cache: the files are read again when next needed (a build's transcodes are in the build's destination and are not touched). Nothing is ever written into or beside your media files |
 | Menus | Button routing (movement up, down, left and right, how and by which rule to wrap, leaving out "Next" and "Previous" buttons), the default for syncing button names. **Kept in the project** (the routing is the same whichever computer builds it) |
-| Memory | **Installed RAM**, and **Transcodes at a time**: Automatic (one for every processor core), or a number. A build and Transcode Now convert several titles at once and each takes memory of its own, so choose fewer to leave more for other applications. Kept in `workspace.json` |
+| Memory | **Installed RAM**, and **Transcodes at a time**: Automatic (one for every processor core), or a number. A build and Transcode Now convert several titles at once and each takes memory of its own, so choose fewer to leave more for other applications. **Use the hardware encoder for HD H.264** (Windows; it can be chosen only when a graphics card's encoder is found; off by default): a Blu-ray's 1080p and 720p H.264 converted in one pass (VBR or CBR) is encoded on the hardware instead of the processor. 1080i, standard definition and two-pass encodes, and a video the encoder cannot open or fails on, are converted on the processor. From the CLI, the environment variable `DISCCRAFT_HARDWARE_ENCODER=1`. Kept in `workspace.json` |
 | Appearance | Display language (日本語 / English). **Window ▸ Language** switches it too. Until you choose one, every start follows the operating system's display language (Japanese on a Japanese system; English on an English system and on one in any other language) |
 
 ## 16. Keyboard shortcuts

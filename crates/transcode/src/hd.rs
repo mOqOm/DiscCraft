@@ -1,9 +1,9 @@
 //! HD transcode for Blu-ray.
 //!
 //! Decodes a supported media file, scales it to an HD frame, and encodes an elementary stream plus an access-unit
-//! index: Annex B H.264, or for the interlaced 1920 x 1080 formats (59.94i / 50i) MPEG-2 MP@HL
-//! ([`HdCodec::Mpeg2`]: the H.264 encoder codes progressive frames only). The functions and files named `h264`
-//! make either, as the options say.
+//! index: Annex B H.264, or MPEG-2 MP@HL ([`HdCodec::Mpeg2`]: the interlaced 1920 x 1080 formats, 59.94i / 50i,
+//! and since M10.39 the progressive ones, 1080p and 720p). The functions and files named `h264` make either, as the
+//! options say.
 
 use std::convert::TryFrom;
 use std::fs::{self, File};
@@ -48,6 +48,9 @@ pub struct HdOptions {
     /// H.264 of an interlaced format (1080i, M12.28): the frames are coded as interlaced frames, the top field
     /// first (craft-video's `EncoderConfig::interlaced`). MPEG-2 HD is always signalled interlaced.
     pub interlaced: bool,
+    /// A standard-definition frame (720 x 480 or 720 x 576: an SD Blu-ray's H.264, M10.41) shown 16:9, else 4:3: the
+    /// shape of its pixels ([`output_pixel_aspect`]). An HD frame's is fixed by its size.
+    pub wide: bool,
 }
 
 /// The video coding of an HD stream.
@@ -56,8 +59,10 @@ pub enum HdCodec {
     /// H.264 High Profile, progressive frames.
     #[default]
     H264,
-    /// MPEG-2 MP@HL, 1920 x 1080 at 29.97 or 25 frames a second, signalled as interlaced (59.94i / 50i): each
-    /// frame is coded as one frame picture whose two fields are from the same moment.
+    /// MPEG-2 MP@HL: 1920 x 1080 at 29.97 or 25 frames a second, signalled as interlaced (59.94i / 50i), each frame
+    /// coded as one frame picture whose two fields are from the same moment, or (M12.37) from an interlaced source
+    /// at that rate, of the source's two moments with the field tools; or (M10.39) a progressive sequence of
+    /// 1080 lines at 23.976 or 24, or of 720 lines at 23.976, 24, 50 or 59.94 frames a second.
     Mpeg2,
 }
 
@@ -80,10 +85,180 @@ impl From<Packet> for Coded {
     }
 }
 
+/// M12.40: a hardware H.264 encoder from outside this crate (the system's: the applications register it with
+/// [`set_hardware_h264`], the `platform` crate making it). It takes NV12 pictures (the luma, then the chroma samples
+/// interleaved) and gives Annex B access units in decoding order, without B pictures.
+pub trait HardwareH264 {
+    /// Encodes the picture `nv12` shown at `pts` (100 ns units): the access units it has ready.
+    ///
+    /// # Errors
+    ///
+    /// When the encoder fails.
+    fn encode(&mut self, nv12: &[u8], pts: i64) -> Result<Vec<HardwarePacket>, String>;
+
+    /// The access units still held back, at the end.
+    ///
+    /// # Errors
+    ///
+    /// When the encoder fails.
+    fn finish(&mut self) -> Result<Vec<HardwarePacket>, String>;
+}
+
+/// One access unit from a [`HardwareH264`] encoder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HardwarePacket {
+    /// The access unit, start code prefixed (with its access unit delimiter).
+    pub data: Vec<u8>,
+    /// Its presentation time, 100 ns units, as given.
+    pub pts: i64,
+    /// Whether it starts a GOP.
+    pub key: bool,
+}
+
+/// What an HD stream asks of a [`HardwareH264`] encoder: Blu-ray's High profile at level 4.1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HardwareH264Config {
+    /// Picture width.
+    pub width: u32,
+    /// Picture height.
+    pub height: u32,
+    /// Frame rate numerator.
+    pub fps_num: u32,
+    /// Frame rate denominator.
+    pub fps_den: u32,
+    /// Average bit rate, bit/s.
+    pub bitrate: u32,
+    /// Peak bit rate, bit/s.
+    pub max_bitrate: u32,
+    /// Constant bit rate (the average is the peak).
+    pub cbr: bool,
+    /// Frames from one key frame to the next.
+    pub gop: u32,
+    /// Slices a picture.
+    pub slices: u32,
+    /// The shape of a pixel (the VUI's sample aspect ratio).
+    pub sar: (u32, u32),
+}
+
+/// Makes a [`HardwareH264`] encoder for an HD stream, or says why it cannot.
+pub type HardwareH264Factory = fn(&HardwareH264Config) -> Result<Box<dyn HardwareH264>, String>;
+
+static HARDWARE_H264: std::sync::RwLock<Option<HardwareH264Factory>> = std::sync::RwLock::new(None);
+
+/// Uses `factory`'s hardware encoder for the HD H.264 the transcodes make (M12.40), or none (`None`, the default):
+/// progressive formats in one pass (VBR or CBR); an interlaced format and a two-pass encode stay on the CPU, and so
+/// does a video whose hardware encode cannot start or fails (it is encoded again on the CPU).
+pub fn set_hardware_h264(factory: Option<HardwareH264Factory>) {
+    if let Ok(mut slot) = HARDWARE_H264.write() {
+        *slot = factory;
+    }
+}
+
+fn hardware_h264() -> Option<HardwareH264Factory> {
+    HARDWARE_H264.read().ok().and_then(|slot| *slot)
+}
+
+/// The hardware encoder's settings for `options`: the CPU's GOP, slices and pixel shape; 90 % of the target as the
+/// average (a hardware encoder overshot it by about a tenth on detailed pictures, M12.39).
+fn hardware_config(options: &HdOptions) -> HardwareH264Config {
+    let cbr = options.mode == crate::RateMode::Cbr;
+    let target = options.target_kbps.saturating_mul(1000);
+    HardwareH264Config {
+        width: options.width,
+        height: options.height,
+        fps_num: options.fps_num,
+        fps_den: options.fps_den,
+        bitrate: if cbr { target } else { target / 10 * 9 },
+        max_bitrate: if cbr {
+            target
+        } else {
+            options.max_kbps.saturating_mul(1000)
+        },
+        cbr,
+        gop: keyint(options),
+        slices: 4,
+        sar: output_pixel_aspect(options.width, options.height, options.wide),
+    }
+}
+
+/// A hardware encoder at work and where it is: one frame in 100 ns units, and the pictures given out so far.
+struct HardwareState {
+    encoder: Box<dyn HardwareH264>,
+    frame: i64,
+    given: i64,
+    last_pts: Option<i64>,
+}
+
+impl HardwareState {
+    /// `packets` as coded units in frames, decoded in the order they come (no B pictures: each as shown).
+    fn coded(&mut self, packets: Vec<HardwarePacket>) -> Result<Vec<Coded>, TranscodeError> {
+        packets
+            .into_iter()
+            .map(|packet| {
+                let pts = packet
+                    .pts
+                    .checked_add(self.frame / 2)
+                    .and_then(|time| time.checked_div(self.frame))
+                    .ok_or_else(|| TranscodeError::Encode("a hardware picture time".to_string()))?;
+                if self.last_pts.is_some_and(|last| pts <= last) {
+                    return Err(TranscodeError::Encode(
+                        "the hardware encoder reordered the pictures".to_string(),
+                    ));
+                }
+                self.last_pts = Some(pts);
+                self.given = self.given.saturating_add(1);
+                Ok(Coded {
+                    data: packet.data,
+                    pts,
+                    dts: pts,
+                    keyframe: packet.key,
+                })
+            })
+            .collect()
+    }
+}
+
+/// `planes` as one NV12 picture `width` x `height`.
+fn nv12_of(planes: &YuvPlanes, (width, height): (usize, usize)) -> Result<Vec<u8>, TranscodeError> {
+    let wrong =
+        || TranscodeError::Encode("a picture the wrong size for the hardware encoder".to_string());
+    let mut nv12 = Vec::with_capacity(
+        width
+            .checked_mul(height)
+            .ok_or_else(wrong)?
+            .saturating_mul(3)
+            / 2,
+    );
+    for row in 0..height {
+        let start = row.checked_mul(planes.y_stride).ok_or_else(wrong)?;
+        nv12.extend_from_slice(
+            planes
+                .y
+                .get(start..start.checked_add(width).ok_or_else(wrong)?)
+                .ok_or_else(wrong)?,
+        );
+    }
+    let half = width / 2;
+    for row in 0..height / 2 {
+        let start = row.checked_mul(planes.uv_stride).ok_or_else(wrong)?;
+        let end = start.checked_add(half).ok_or_else(wrong)?;
+        let (u, v) = (
+            planes.u.get(start..end).ok_or_else(wrong)?,
+            planes.v.get(start..end).ok_or_else(wrong)?,
+        );
+        for (cb, cr) in u.iter().zip(v) {
+            nv12.push(*cb);
+            nv12.push(*cr);
+        }
+    }
+    Ok(nv12)
+}
+
 /// The encoder of an HD stream: H.264, or MPEG-2 for the interlaced formats (with what each picture took, for a
-/// first pass of two).
+/// first pass of two), or (M12.40) a hardware H.264 encoder.
 enum HdEncoder {
     H264(Box<Encoder>),
+    Hardware(HardwareState),
     Mpeg2(
         Box<disccraft_mpeg2venc::encoder::Encoder>,
         Vec<disccraft_mpeg2venc::encoder::PictureStats>,
@@ -106,37 +281,57 @@ enum HdStats {
     Mpeg2(Vec<disccraft_mpeg2venc::encoder::PictureStats>),
 }
 
-/// The MPEG-2 encoder's settings for `options`: 1920 x 1080, or (M6.393) HDV's 1440 x 1080, at 29.97 (NTSC) or 25
-/// (PAL) frames a second.
+/// The MPEG-2 encoder's settings for `options`, and the rate of a progressive sequence: 1920 x 1080, or (M6.393)
+/// HDV's 1440 x 1080, as 59.94i / 50i (29.97 or 25 frames a second) or (M10.39) progressive at 23.976 or 24, and
+/// 1280 x 720 progressive at 23.976, 24, 50 or 59.94.
 fn mpeg2_config(
     options: &HdOptions,
-) -> Result<disccraft_mpeg2venc::encoder::EncoderConfig, TranscodeError> {
-    let standard = match (options.height, options.fps_num, options.fps_den) {
-        (1080, 30_000, 1001) => disccraft_mpeg2venc::Standard::Ntsc,
-        (1080, 25, 1) => disccraft_mpeg2venc::Standard::Pal,
-        _ => None.ok_or_else(|| {
-            TranscodeError::Unsupported(
-                "MPEG-2 HD is 1080 lines at 29.97 or 25 frames a second".to_string(),
-            )
-        })?,
+) -> Result<
+    (
+        disccraft_mpeg2venc::encoder::EncoderConfig,
+        Option<disccraft_mpeg2venc::encoder::FrameRate>,
+    ),
+    TranscodeError,
+> {
+    use disccraft_mpeg2venc::encoder::{Format, FrameRate};
+    let unsupported = || {
+        TranscodeError::Unsupported(
+            "MPEG-2 HD is 1080 lines as 59.94i, 50i, 23.976p or 24p, or 720 lines as 23.976p, 24p, 50p or 59.94p"
+                .to_string(),
+        )
     };
-    let format = match options.width {
-        1920 => disccraft_mpeg2venc::encoder::Format::Hd1080,
-        1440 => disccraft_mpeg2venc::encoder::Format::Hd1440,
-        _ => {
-            return Err(TranscodeError::Unsupported(
-                "MPEG-2 HD is 1920 or 1440 pixels wide".to_string(),
-            ));
+    let rate = FrameRate::of(options.fps_num, options.fps_den).ok_or_else(unsupported)?;
+    let (format, progressive) = match (options.width, options.height, rate) {
+        (1920 | 1440, 1080, FrameRate::Fps29_97 | FrameRate::Fps25) => (Format::Hd1080, None),
+        (1920 | 1440, 1080, FrameRate::Fps23_976 | FrameRate::Fps24) => {
+            (Format::Hd1080, Some(rate))
         }
+        (
+            1280,
+            720,
+            FrameRate::Fps23_976 | FrameRate::Fps24 | FrameRate::Fps50 | FrameRate::Fps59_94,
+        ) => (Format::Hd720, Some(rate)),
+        _ => return Err(unsupported()),
     };
-    Ok(disccraft_mpeg2venc::encoder::EncoderConfig {
+    let format = if options.width == 1440 {
+        Format::Hd1440
+    } else {
+        format
+    };
+    let standard = if matches!(rate, FrameRate::Fps25 | FrameRate::Fps50) {
+        disccraft_mpeg2venc::Standard::Pal
+    } else {
+        disccraft_mpeg2venc::Standard::Ntsc
+    };
+    // Half a second, as on a DVD (a whole number of I B B P groups for a progressive rate).
+    let gop_size = match progressive {
+        Some(rate) => u16::try_from(rate.nominal() / 2 / 3 * 3).unwrap_or(12),
+        None if standard == disccraft_mpeg2venc::Standard::Ntsc => 15,
+        None => 12,
+    };
+    let config = disccraft_mpeg2venc::encoder::EncoderConfig {
         standard,
-        // Half a second, as on a DVD.
-        gop_size: if standard == disccraft_mpeg2venc::Standard::Ntsc {
-            15
-        } else {
-            12
-        },
+        gop_size,
         bitrate: options.target_kbps.saturating_mul(1000),
         // CBR: the target is also the peak.
         max_bitrate: if options.mode == crate::RateMode::Cbr {
@@ -147,7 +342,23 @@ fn mpeg2_config(
         wide: true,
         format,
         pulldown: false,
-    })
+    };
+    Ok((config, progressive))
+}
+
+/// The MPEG-2 encoder for `options` ([`mpeg2_config`]): a progressive sequence at a progressive format's rate.
+fn mpeg2_encoder(
+    options: &HdOptions,
+) -> Result<disccraft_mpeg2venc::encoder::Encoder, TranscodeError> {
+    let (config, progressive) = mpeg2_config(options)?;
+    let mut encoder = disccraft_mpeg2venc::encoder::Encoder::new(config)
+        .map_err(|error| TranscodeError::Encode(error.to_string()))?;
+    if let Some(rate) = progressive {
+        encoder
+            .set_progressive(rate)
+            .map_err(|error| TranscodeError::Encode(error.to_string()))?;
+    }
+    Ok(encoder)
 }
 
 /// `planes` (1920 x 1080) as the MPEG-2 encoder's frame of the coded size (1920 x 1088): the last line repeated
@@ -189,11 +400,32 @@ fn mpeg2_frame(
 
 impl HdEncoder {
     fn new(options: &HdOptions) -> Result<Self, TranscodeError> {
-        Self::with_pass(options, HdPass::Single)
+        Self::with_pass(options, HdPass::Single, false)
     }
 
-    /// An encoder for `pass` of a two-pass encode.
-    fn with_pass(options: &HdOptions, pass: HdPass) -> Result<Self, TranscodeError> {
+    /// The registered hardware encoder for a video's progressive H.264 in one pass (M12.40); `None` when there is
+    /// none, the stream is not one it makes, or it cannot start.
+    fn hardware(options: &HdOptions, pass: &HdPass) -> Option<Self> {
+        let factory = hardware_h264()?;
+        if options.codec != HdCodec::H264 || options.interlaced || !matches!(pass, HdPass::Single) {
+            return None;
+        }
+        let encoder = factory(&hardware_config(options)).ok()?;
+        let frame = i64::from(options.fps_den)
+            .checked_mul(10_000_000)?
+            .checked_div(i64::from(options.fps_num))?;
+        Some(Self::Hardware(HardwareState {
+            encoder,
+            frame: frame.max(1),
+            given: 0,
+            last_pts: None,
+        }))
+    }
+
+    /// An encoder for `pass` of a two-pass encode; `fields`: of pictures whose two fields were taken at different
+    /// moments ([`keeps_fields`]), which MPEG-2 codes with its field tools (M12.36). H.264 codes the interlaced
+    /// formats' frames as interlaced frames either way.
+    fn with_pass(options: &HdOptions, pass: HdPass, fields: bool) -> Result<Self, TranscodeError> {
         match options.codec {
             HdCodec::H264 => {
                 let mut config = encoder_config(options);
@@ -206,15 +438,18 @@ impl HdEncoder {
                     .map(|encoder| Self::H264(Box::new(encoder)))
                     .map_err(|error| TranscodeError::Encode(error.to_string()))
             }
-            HdCodec::Mpeg2 => disccraft_mpeg2venc::encoder::Encoder::new(mpeg2_config(options)?)
-                .map(|mut encoder| {
-                    encoder.set_quality(options.quality);
-                    if let HdPass::Second(HdStats::Mpeg2(first)) = &pass {
-                        encoder.plan_second_pass(first);
-                    }
-                    Self::Mpeg2(Box::new(encoder), Vec::new())
-                })
-                .map_err(|error| TranscodeError::Encode(error.to_string())),
+            HdCodec::Mpeg2 => {
+                let mut encoder = mpeg2_encoder(options)?;
+                encoder.set_quality(options.quality);
+                encoder.set_b_frames(crate::picture::B_FRAMES);
+                if fields {
+                    encoder.set_interlaced(true);
+                }
+                if let HdPass::Second(HdStats::Mpeg2(first)) = &pass {
+                    encoder.plan_second_pass(first);
+                }
+                Ok(Self::Mpeg2(Box::new(encoder), Vec::new()))
+            }
         }
     }
 
@@ -222,6 +457,7 @@ impl HdEncoder {
     fn stats(&self) -> Option<HdStats> {
         match self {
             Self::H264(encoder) => encoder.pass_stats().map(HdStats::H264),
+            Self::Hardware(_) => None,
             Self::Mpeg2(_, pictures) => Some(HdStats::Mpeg2(pictures.clone())),
         }
     }
@@ -240,32 +476,77 @@ impl HdEncoder {
                 .into_iter()
                 .map(Coded::from)
                 .collect()),
+            Self::Hardware(state) => {
+                let size = (
+                    usize::try_from(options.width).unwrap_or(0),
+                    usize::try_from(options.height).unwrap_or(0),
+                );
+                let nv12 = nv12_of(planes, size)?;
+                let pts = index.saturating_mul(state.frame);
+                let packets = state
+                    .encoder
+                    .encode(&nv12, pts)
+                    .map_err(TranscodeError::Encode)?;
+                state.coded(packets)
+            }
             Self::Mpeg2(encoder, pictures) => {
-                let config = mpeg2_config(options)?;
+                let (config, _) = mpeg2_config(options)?;
                 let frame = mpeg2_frame(planes, config.format.coded_size(config.standard))?;
-                let data = encoder
-                    .encode_frame(&frame)
+                // A GOP every `gop_size` frames, as `encode_frame` starts them.
+                let start = index.rem_euclid(i64::from(config.gop_size.max(1))) == 0;
+                let coded = encoder
+                    .push_frame(&frame, start)
                     .map_err(|error| TranscodeError::Encode(error.to_string()))?;
-                pictures.extend(encoder.last_picture());
-                // I and P pictures only: shown in the order coded. A GOP starts with its sequence header.
-                let keyframe = data.starts_with(&[0, 0, 1, 0xB3]);
-                Ok(vec![Coded {
-                    data,
-                    pts: index,
-                    dts: index,
-                    keyframe,
-                }])
+                Ok(mpeg2_coded(coded, pictures))
             }
         }
     }
 
     /// The pictures still held back.
-    fn flush(&mut self) -> Vec<Coded> {
+    fn flush(&mut self) -> Result<Vec<Coded>, TranscodeError> {
         match self {
-            Self::H264(encoder) => encoder.flush().into_iter().map(Coded::from).collect(),
-            Self::Mpeg2(..) => Vec::new(),
+            Self::H264(encoder) => Ok(encoder.flush().into_iter().map(Coded::from).collect()),
+            Self::Hardware(state) => {
+                let packets = state.encoder.finish().map_err(TranscodeError::Encode)?;
+                state.coded(packets)
+            }
+            Self::Mpeg2(encoder, pictures) => {
+                let coded = encoder
+                    .flush()
+                    .map_err(|error| TranscodeError::Encode(error.to_string()))?;
+                Ok(mpeg2_coded(coded, pictures))
+            }
         }
     }
+}
+
+/// MPEG-2 pictures in decoding order as coded units (frame numbers): shown at their place in display order, decoded
+/// one frame before their place in decoding order (with B pictures a reference picture is decoded a frame before
+/// the B pictures shown ahead of it; I and P pictures alone are decoded as shown). Their statistics go to `stats`
+/// for a first pass of two.
+fn mpeg2_coded(
+    coded: Vec<disccraft_mpeg2venc::encoder::CodedPicture>,
+    stats: &mut Vec<disccraft_mpeg2venc::encoder::PictureStats>,
+) -> Vec<Coded> {
+    coded
+        .into_iter()
+        .map(|picture| {
+            let decoding = i64::try_from(stats.len()).unwrap_or(i64::MAX);
+            stats.push(picture.stats);
+            let pts = i64::try_from(picture.display).unwrap_or(i64::MAX);
+            let dts = if crate::picture::B_FRAMES > 0 {
+                decoding - 1
+            } else {
+                pts
+            };
+            Coded {
+                data: picture.data,
+                pts,
+                dts,
+                keyframe: picture.gop_start,
+            }
+        })
+        .collect()
 }
 
 /// One access unit of the elementary stream.
@@ -435,17 +716,47 @@ pub fn transcode_h264_range(
     let source = Source::open(input)?;
     let (range_start, range_length) = source_range(source.info().duration, range);
     let frames = frame_count(range_length, options)?;
+    let fields = keeps_fields(&source, options);
+
+    // M12.40: the registered hardware encoder first, for the streams it makes; a failure (but a stop) encodes the
+    // video again on the CPU.
+    if options.mode != crate::RateMode::Vbr2Pass
+        && let Some(mut encoder) = HdEncoder::hardware(options, &HdPass::Single)
+    {
+        let made = (|| -> Result<(), TranscodeError> {
+            let file = File::create(es_out).map_err(|error| io_error(es_out, error))?;
+            let mut writer = BufWriter::new(file);
+            let mut packets = PacketWriter::new(&mut writer, es_out);
+            encode_range(
+                (&source, range_start, frames),
+                (options, fields),
+                &mut encoder,
+                &mut packets,
+                progress,
+            )?;
+            packets.flush()?;
+            write_h264_index(index_out, packets.units())
+        })();
+        match made {
+            Ok(()) => {
+                progress(1.0);
+                return Ok(frames);
+            }
+            Err(error) if crate::stop_requested() => return Err(error),
+            Err(_) => {}
+        }
+    }
 
     // VBR 2 pass (M6.328): the video is gone through once to measure it, writing nothing, then encoded by what
     // was measured; the progress runs once over both passes.
     let two_pass = options.mode == crate::RateMode::Vbr2Pass && frames > 1;
     let pass = if two_pass {
-        let mut first = HdEncoder::with_pass(options, HdPass::First)?;
+        let mut first = HdEncoder::with_pass(options, HdPass::First, fields)?;
         let mut nowhere = std::io::sink();
         let mut discarded = PacketWriter::new(&mut nowhere, es_out);
         encode_range(
             (&source, range_start, frames),
-            options,
+            (options, fields),
             &mut first,
             &mut discarded,
             &mut |fraction| progress(fraction * 0.5),
@@ -461,11 +772,11 @@ pub fn transcode_h264_range(
 
     let file = File::create(es_out).map_err(|error| io_error(es_out, error))?;
     let mut writer = BufWriter::new(file);
-    let mut encoder = HdEncoder::with_pass(options, pass)?;
+    let mut encoder = HdEncoder::with_pass(options, pass, fields)?;
     let mut packets = PacketWriter::new(&mut writer, es_out);
     encode_range(
         (&source, range_start, frames),
-        options,
+        (options, fields),
         &mut encoder,
         &mut packets,
         &mut |fraction| progress(from + fraction * span),
@@ -476,11 +787,30 @@ pub fn transcode_h264_range(
     Ok(frames)
 }
 
+/// Whether an HD stream keeps the two fields of an interlaced source apart (M12.37, as a DVD's since M12.26): the
+/// output is interlaced (MPEG-2 at 29.97 or 25 frames a second, or H.264 coded as interlaced frames) and the source
+/// is interlaced at the output's frame rate, the top field first (the order the interlaced outputs are made in).
+fn keeps_fields(source: &Source, options: &HdOptions) -> bool {
+    let interlaced = match options.codec {
+        HdCodec::Mpeg2 => matches!(mpeg2_config(options), Ok((_, None))),
+        HdCodec::H264 => options.interlaced,
+    };
+    let rate = source.info().video.as_ref().map(|video| video.frame_rate);
+    interlaced
+        && crate::field_type::field_type(source.path()) == Some(crate::FieldType::UpperFirst)
+        && rate.is_some_and(|rate| {
+            rate.den != 0
+                && i128::from(rate.num) * i128::from(options.fps_den)
+                    == i128::from(options.fps_num) * i128::from(rate.den)
+        })
+}
+
 /// One pass over `frames` pictures of `source` from `range_start`: each decoded, scaled and converted on a thread of
-/// its own, a few ahead of `encoder`, whose packets go to `packets` (the encoder flushed at the end).
+/// its own, a few ahead of `encoder`, whose packets go to `packets` (the encoder flushed at the end). `fields`: each
+/// field of an interlaced source scaled and its colour subsampled on its own ([`keeps_fields`]).
 fn encode_range<W: Write>(
     (source, range_start, frames): (&Source, Tick, u64),
-    options: &HdOptions,
+    (options, fields): (&HdOptions, bool),
     encoder: &mut HdEncoder,
     packets: &mut PacketWriter<'_, W>,
     progress: &mut dyn FnMut(f32),
@@ -499,9 +829,15 @@ fn encode_range<W: Write>(
                         source,
                         time,
                         options.rendering.frame_blend,
-                        &|frame| render_rgb_frame(frame, options),
+                        &|frame| {
+                            if fields {
+                                render_rgb_fields_frame(frame, options)
+                            } else {
+                                render_rgb_frame(frame, options)
+                            }
+                        },
                     )?;
-                    rgb_to_yuv(&rgb, options)
+                    rgb_to_yuv_as(&rgb, options, fields)
                 })();
                 let failed = planes.is_err();
                 // A closed channel: the encoder stopped (an error); nothing more to do.
@@ -583,13 +919,13 @@ pub fn encode_h264_still(rgb: &[u8], options: &HdOptions) -> Result<Vec<u8>, Tra
         ));
     }
     if options.codec == HdCodec::Mpeg2 {
-        let config = mpeg2_config(options)?;
+        let (config, _) = mpeg2_config(options)?;
         let frame = mpeg2_frame(
             &rgb_to_yuv(rgb, options)?,
             config.format.coded_size(config.standard),
         )?;
-        return disccraft_mpeg2venc::encoder::Encoder::new(config)
-            .and_then(|encoder| encoder.encode_still(&frame, MPEG2_STILL_CODE))
+        return mpeg2_encoder(options)?
+            .encode_still(&frame, MPEG2_STILL_CODE)
             .map_err(|error| TranscodeError::Encode(error.to_string()));
     }
     let mut config = encoder_config(options);
@@ -673,7 +1009,7 @@ impl H264Frames {
     ///
     /// When a time stamp is out of range.
     pub fn finish(mut self) -> Result<(Vec<u8>, Vec<AccessUnit>), TranscodeError> {
-        for packet in &self.encoder.flush() {
+        for packet in &self.encoder.flush()? {
             self.add(packet)?;
         }
         Ok((self.data, self.units))
@@ -891,6 +1227,12 @@ fn encoder_config(options: &HdOptions) -> EncoderConfig {
     if options.interlaced {
         config.interlaced = Some(craft_video::h264::FieldOrder::TopFirst);
     }
+    // 1440 x 1080 is shown 16:9: its pixels are 4:3 wide (M10.40; the VUI's sample aspect ratio).
+    let (wide, tall) = output_pixel_aspect(options.width, options.height, options.wide);
+    config.sar = (
+        u16::try_from(wide).unwrap_or(1),
+        u16::try_from(tall).unwrap_or(1),
+    );
     config
 }
 
@@ -934,7 +1276,7 @@ fn finish_encoder<W: Write>(
     options: &HdOptions,
     packets: &mut PacketWriter<'_, W>,
 ) -> Result<(), TranscodeError> {
-    let rest = encoder.flush();
+    let rest = encoder.flush()?;
     for packet in &rest {
         packets.write_packet(packet, options)?;
     }
@@ -962,6 +1304,7 @@ pub(crate) fn render_fit(
             rendering: crate::Rendering::default(),
             mode: crate::RateMode::Vbr,
             interlaced: false,
+            wide: false,
         },
     )
 }
@@ -973,7 +1316,7 @@ fn render_rgb_frame(frame: &VideoFrame, options: &HdOptions) -> Result<Vec<u8>, 
         frame.height,
         frame.par,
         options.width,
-        options.height,
+        (options.height, options.wide),
     )
     .ok_or_else(|| TranscodeError::Unsupported("invalid frame geometry".to_string()))?;
     let rgba = frame.to_rgba8();
@@ -998,13 +1341,42 @@ fn render_rgb_frame(frame: &VideoFrame, options: &HdOptions) -> Result<Vec<u8>, 
     rendered.ok_or_else(|| TranscodeError::Unsupported("failed to render frame".to_string()))
 }
 
-/// The shape of an HD output frame's pixels: HDV's 1440 x 1080 is shown 16:9, its pixels 4:3 wide (M6.393); the
-/// other HD sizes have square pixels.
-fn output_pixel_aspect(width: u32, height: u32) -> (u32, u32) {
-    if (width, height) == (1440, 1080) {
-        (4, 3)
-    } else {
-        (1, 1)
+/// [`render_rgb_frame`] for an interlaced source whose fields stay apart ([`keeps_fields`]): each output line made of
+/// the source lines of its own field ([`render_rgb_fields_at`]). "Use Maximum Render Quality" does not change it,
+/// as on a DVD.
+fn render_rgb_fields_frame(
+    frame: &VideoFrame,
+    options: &HdOptions,
+) -> Result<Vec<u8>, TranscodeError> {
+    let geometry = target_geometry(
+        frame.width,
+        frame.height,
+        frame.par,
+        options.width,
+        (options.height, options.wide),
+    )
+    .ok_or_else(|| TranscodeError::Unsupported("invalid frame geometry".to_string()))?;
+    render_rgb_rows(
+        &frame.to_rgba8(),
+        (frame.width, frame.height),
+        geometry,
+        (options.width, options.height),
+        true,
+    )
+    .ok_or_else(|| TranscodeError::Unsupported("failed to render frame".to_string()))
+}
+
+/// The shape of an output frame's pixels: HDV's 1440 x 1080 is shown 16:9, its pixels 4:3 wide (M6.393); a
+/// standard-definition frame (M10.41) is shown 4:3 or, `wide`, 16:9 across its whole width, as a DVD's (8:9 and
+/// 32:27 for 720 x 480, 16:15 and 64:45 for 720 x 576); the other HD sizes have square pixels.
+fn output_pixel_aspect(width: u32, height: u32, wide: bool) -> (u32, u32) {
+    match (width, height, wide) {
+        (1440, 1080, _) => (4, 3),
+        (720, 480, false) => (8, 9),
+        (720, 480, true) => (32, 27),
+        (720, 576, false) => (16, 15),
+        (720, 576, true) => (64, 45),
+        _ => (1, 1),
     }
 }
 
@@ -1014,9 +1386,9 @@ fn target_geometry(
     source_height: u32,
     par: (u32, u32),
     output_width: u32,
-    output_height: u32,
+    (output_height, output_wide): (u32, bool),
 ) -> Option<Geometry> {
-    let (wide, tall) = output_pixel_aspect(output_width, output_height);
+    let (wide, tall) = output_pixel_aspect(output_width, output_height, output_wide);
     if (wide, tall) == (1, 1) {
         return square_geometry(
             source_width,
@@ -1577,6 +1949,17 @@ fn write_rgb(rgb: &mut [u8], output_width: u32, y: u32, x: u32, pixel: [u8; 3]) 
 
 /// Convert RGB24 to YUV 4:2:0 BT.709 limited range.
 fn rgb_to_yuv(rgb: &[u8], options: &HdOptions) -> Result<YuvPlanes, TranscodeError> {
+    rgb_to_yuv_as(rgb, options, false)
+}
+
+/// [`rgb_to_yuv`]; `fields`: each chroma line from the two lines of its own field around it (4:2:0 of an interlaced
+/// frame: the chroma lines alternate between the fields, 13818-2 6.1.1.8 / H.264 6.2), so the colours of two
+/// moments do not mix.
+fn rgb_to_yuv_as(
+    rgb: &[u8],
+    options: &HdOptions,
+    fields: bool,
+) -> Result<YuvPlanes, TranscodeError> {
     let width = usize::try_from(options.width)
         .map_err(|_| TranscodeError::Unsupported("output width too large".to_string()))?;
     let height = usize::try_from(options.height)
@@ -1596,7 +1979,7 @@ fn rgb_to_yuv(rgb: &[u8], options: &HdOptions) -> Result<YuvPlanes, TranscodeErr
 
     fill_luma(&mut y, rgb, width, height)
         .ok_or_else(|| TranscodeError::Unsupported("failed to build luma plane".to_string()))?;
-    fill_chroma(&mut u, &mut v, rgb, width, height)
+    fill_chroma(&mut u, &mut v, rgb, (width, height), fields)
         .ok_or_else(|| TranscodeError::Unsupported("failed to build chroma planes".to_string()))?;
 
     Ok(YuvPlanes {
@@ -1621,18 +2004,32 @@ fn fill_luma(y: &mut [u8], rgb: &[u8], width: usize, height: usize) -> Option<()
     Some(())
 }
 
-/// Fill the chroma planes by averaging 2x2 blocks.
-fn fill_chroma(u: &mut [u8], v: &mut [u8], rgb: &[u8], width: usize, height: usize) -> Option<()> {
+/// Fill the chroma planes by averaging 2x2 blocks: two lines next to each other, or (`fields`) the two lines of
+/// one field (chroma line `cy` of field `cy % 2`: its lines `4 (cy / 2) + cy % 2` and two below).
+fn fill_chroma(
+    u: &mut [u8],
+    v: &mut [u8],
+    rgb: &[u8],
+    (width, height): (usize, usize),
+    fields: bool,
+) -> Option<()> {
     let chroma_width = width / 2;
     let chroma_height = height / 2;
     for cy in 0..chroma_height {
+        let (y0, y1) = if fields {
+            let first = (cy / 2).checked_mul(4)?.checked_add(cy % 2)?;
+            let second = first.checked_add(2)?;
+            (first, if second < height { second } else { first })
+        } else {
+            let first = cy.checked_mul(2)?;
+            (first, first.checked_add(1)?)
+        };
         for cx in 0..chroma_width {
             let x0 = cx.checked_mul(2)?;
-            let y0 = cy.checked_mul(2)?;
             let p00 = get_rgb(rgb, width, x0, y0)?;
             let p01 = get_rgb(rgb, width, x0.checked_add(1)?, y0)?;
-            let p10 = get_rgb(rgb, width, x0, y0.checked_add(1)?)?;
-            let p11 = get_rgb(rgb, width, x0.checked_add(1)?, y0.checked_add(1)?)?;
+            let p10 = get_rgb(rgb, width, x0, y1)?;
+            let p11 = get_rgb(rgb, width, x0.checked_add(1)?, y1)?;
             let avg = average_rgb(p00, p01, p10, p11);
             let (cb, cr) = chroma_u8(avg);
             let index = cy.checked_mul(chroma_width)?.checked_add(cx)?;
@@ -1825,8 +2222,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
     use super::{
-        AccessUnit, HdOptions, frame_count, read_h264_index, rgb_to_yuv, target_geometry,
-        write_h264_index,
+        AccessUnit, HdOptions, chroma_u8, frame_count, read_h264_index, rgb_to_yuv, rgb_to_yuv_as,
+        target_geometry, write_h264_index,
     };
     use crate::TICKS_PER_SECOND;
     use craft_video::h264::{
@@ -1864,13 +2261,14 @@ mod tests {
             rendering: crate::Rendering::default(),
             mode: crate::RateMode::Vbr,
             interlaced: false,
+            wide: false,
         }
     }
 
     /// 16:9 source fills a 16:9 HD frame.
     #[test]
     fn geometry_16_9_full() {
-        let geometry = target_geometry(1280, 720, (1, 1), 1920, 1080).unwrap();
+        let geometry = target_geometry(1280, 720, (1, 1), 1920, (1080, false)).unwrap();
         assert_eq!(
             (geometry.x, geometry.y, geometry.width, geometry.height),
             (0, 0, 1920, 1080)
@@ -1916,12 +2314,12 @@ mod tests {
     /// (1440 shown).
     #[test]
     fn geometry_of_the_hdv_frame() {
-        let full = target_geometry(1920, 1080, (1, 1), 1440, 1080).unwrap();
+        let full = target_geometry(1920, 1080, (1, 1), 1440, (1080, false)).unwrap();
         assert_eq!(
             (full.x, full.y, full.width, full.height),
             (0, 0, 1440, 1080)
         );
-        let boxed = target_geometry(640, 480, (1, 1), 1440, 1080).unwrap();
+        let boxed = target_geometry(640, 480, (1, 1), 1440, (1080, false)).unwrap();
         assert_eq!(
             (boxed.x, boxed.y, boxed.width, boxed.height),
             (180, 0, 1080, 1080)
@@ -1931,7 +2329,7 @@ mod tests {
     /// 4:3 source is pillarboxed in a 16:9 HD frame.
     #[test]
     fn geometry_4_3_pillarbox() {
-        let geometry = target_geometry(640, 480, (1, 1), 1920, 1080).unwrap();
+        let geometry = target_geometry(640, 480, (1, 1), 1920, (1080, false)).unwrap();
         assert_eq!(
             (geometry.x, geometry.y, geometry.width, geometry.height),
             (240, 0, 1440, 1080)
@@ -1941,7 +2339,7 @@ mod tests {
     /// Anamorphic DVD 16:9 source fills HD width.
     #[test]
     fn geometry_dvd_16_9_full_width() {
-        let geometry = target_geometry(720, 480, (40, 33), 1920, 1080).unwrap();
+        let geometry = target_geometry(720, 480, (40, 33), 1920, (1080, false)).unwrap();
         assert_eq!(geometry.width, 1920);
         assert!(geometry.height >= 1050 && geometry.height <= 1080);
     }
@@ -1964,6 +2362,36 @@ mod tests {
         assert_eq!(planes.y[0], 16);
         assert_eq!(planes.u[0], 128);
         assert_eq!(planes.v[0], 128);
+    }
+
+    /// M12.37: the chroma of an interlaced frame whose fields stay apart is subsampled within each field: with the
+    /// top field red and the bottom field blue, the chroma lines alternate red and blue, where whole frames mix
+    /// them into one purple.
+    #[test]
+    fn yuv_of_fields_keeps_each_fields_colour() {
+        let (width, height) = (4, 8);
+        let rgb: Vec<u8> = (0..width * height)
+            .flat_map(|index| {
+                if (index / width) % 2 == 0 {
+                    [255, 0, 0]
+                } else {
+                    [0, 0, 255]
+                }
+            })
+            .collect();
+        let options = test_options(4, 8);
+        let fields = rgb_to_yuv_as(&rgb, &options, true).unwrap();
+        let (red, blue) = (chroma_u8([255, 0, 0]), chroma_u8([0, 0, 255]));
+        for line in 0..4 {
+            let expected = if line % 2 == 0 { red } else { blue };
+            assert_eq!(
+                (fields.u[line * 2], fields.v[line * 2]),
+                expected,
+                "line {line}"
+            );
+        }
+        let frames = rgb_to_yuv(&rgb, &options).unwrap();
+        assert!((0..4).all(|line| (frames.u[line * 2], frames.v[line * 2]) != red));
     }
 
     /// Index round-trips through write and read.
@@ -2051,6 +2479,7 @@ mod tests {
             rendering: crate::Rendering::default(),
             mode: crate::RateMode::Vbr,
             interlaced: false,
+            wide: false,
         };
         assert_eq!(frame_count(Tick(ticks), &options).unwrap(), 144);
     }
@@ -2114,11 +2543,13 @@ mod tests {
             rendering: crate::Rendering::default(),
             mode: crate::RateMode::Vbr,
             interlaced: false,
+            wide: false,
         }
     }
 
-    /// M10.14: with the MPEG-2 codec the pictures become an MP@HL sequence, one access unit a picture in display
-    /// order, a key frame where a GOP starts with its sequence header.
+    /// M10.14: with the MPEG-2 codec the pictures become an MP@HL sequence, one access unit a picture, a key frame
+    /// where a GOP starts with its sequence header. M12.33: in decoding order, two B pictures between the reference
+    /// pictures (each shown at its place, decoded a frame before its place in decoding order).
     #[test]
     fn mpeg2_frames_are_one_unit_a_picture() {
         let options = mpeg2_options(25, 1);
@@ -2133,12 +2564,15 @@ mod tests {
         }
         let (data, units) = frames.finish().unwrap();
         assert_eq!(units.len(), 13);
-        for (index, unit) in units.iter().enumerate() {
-            // 25 frames a second: 3600 ticks of 90 kHz a frame, shown in the order coded.
-            assert_eq!(unit.pts, index as i64 * 3600);
-            assert_eq!(unit.dts, unit.pts);
+        // I0 P3 B1 B2 P6 B4 B5 P9 B7 B8, then (the GOP of 12 closed) P11 B10, and I12.
+        let shown = [0, 3, 1, 2, 6, 4, 5, 9, 7, 8, 11, 10, 12];
+        for (index, (unit, place)) in units.iter().zip(shown).enumerate() {
+            // 25 frames a second: 3600 ticks of 90 kHz a frame.
+            assert_eq!(unit.pts, place * 3600, "unit {index}");
+            assert_eq!(unit.dts, (index as i64 - 1) * 3600, "unit {index}");
+            assert!(unit.dts <= unit.pts);
             // A GOP of 12 at 25 frames a second.
-            assert_eq!(unit.keyframe, index % 12 == 0, "unit {index}");
+            assert_eq!(unit.keyframe, place % 12 == 0, "unit {index}");
             let start = unit.offset as usize;
             let bytes = &data[start..start + unit.len as usize];
             let expected: &[u8] = if unit.keyframe {
@@ -2167,16 +2601,51 @@ mod tests {
         assert_eq!(pictures, 1);
     }
 
+    /// M10.39: MPEG-2 for the progressive formats too, as progressive sequences at their rates; only a Blu-ray's
+    /// formats (not 720 lines at 25, nor 1080 at 59.94 frames).
     #[test]
-    fn mpeg2_is_only_1080_at_29_97_or_25() {
+    fn mpeg2_is_a_blu_rays_formats() {
+        for (options, code) in [
+            (mpeg2_options(24_000, 1001), 1),
+            (mpeg2_options(24, 1), 2),
+            (
+                HdOptions {
+                    width: 1280,
+                    height: 720,
+                    ..mpeg2_options(60_000, 1001)
+                },
+                7,
+            ),
+            (
+                HdOptions {
+                    width: 1280,
+                    height: 720,
+                    ..mpeg2_options(50, 1)
+                },
+                6,
+            ),
+            (
+                HdOptions {
+                    width: 1440,
+                    ..mpeg2_options(24_000, 1001)
+                },
+                1,
+            ),
+        ] {
+            let rgb = vec![90_u8; options.width as usize * options.height as usize * 3];
+            let data = super::encode_h264_still(&rgb, &options).unwrap();
+            assert_eq!(data[7] & 0x0F, code, "{options:?}");
+            // The sequence extension: progressive_sequence.
+            assert_eq!(data[17] & 0x08, 0x08, "{options:?}");
+        }
         for options in [
             HdOptions {
                 width: 1280,
                 height: 720,
                 ..mpeg2_options(25, 1)
             },
-            mpeg2_options(24_000, 1001),
             mpeg2_options(60_000, 1001),
+            mpeg2_options(50, 1),
         ] {
             assert!(super::H264Frames::new(&options).is_err(), "{options:?}");
         }

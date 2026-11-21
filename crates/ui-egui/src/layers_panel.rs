@@ -10,6 +10,7 @@ use crate::i18n::{tl, tlf};
 use crate::icons::Icon;
 use crate::menu_tools::ButtonPart;
 use crate::workspace::Panel;
+use disccraft_menu::PsdTreeNode;
 use disccraft_project::{GraphicKind, Menu, MenuId, ShapeKind};
 use egui::{Color32, Rect, Sense, Ui, pos2, vec2};
 use serde_json::json;
@@ -152,6 +153,11 @@ impl DiscCraftApp {
             return;
         };
         ui.label(first.name.clone());
+        // M10.47: a menu made from a PSD lists the PSD's own layers, as Encore does.
+        if let Some((key, tree)) = self.psd_tree_of(root) {
+            self.psd_layers_panel(ui, (id, root), &key, &tree);
+            return;
+        }
         let collapsed = self.collapsed_layers.clone();
         let toggled = self.toggled_pages.clone();
         // The page in the viewer has its group open; a click on the opener flips that.
@@ -500,6 +506,357 @@ impl DiscCraftApp {
     }
 }
 
+/// A row of a PSD menu's layer tree (M10.47): where its layer is (the indexes from the top, level by level) and how
+/// deep.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PsdRow {
+    pub(crate) path: Vec<usize>,
+    pub(crate) depth: usize,
+}
+
+/// The rows of a PSD's layer tree, the top layer first; a group's layers follow it when `open` says it is open.
+pub(crate) fn psd_rows(
+    tree: &[PsdTreeNode],
+    open: &dyn Fn(&[usize], &PsdTreeNode) -> bool,
+) -> Vec<PsdRow> {
+    fn walk(
+        nodes: &[PsdTreeNode],
+        (prefix, depth): (&mut Vec<usize>, usize),
+        open: &dyn Fn(&[usize], &PsdTreeNode) -> bool,
+        rows: &mut Vec<PsdRow>,
+    ) {
+        for (index, node) in nodes.iter().enumerate() {
+            prefix.push(index);
+            rows.push(PsdRow {
+                path: prefix.clone(),
+                depth,
+            });
+            if node.group && open(prefix, node) {
+                walk(
+                    &node.children,
+                    (prefix, depth.saturating_add(1)),
+                    open,
+                    rows,
+                );
+            }
+            let _ = prefix.pop();
+        }
+    }
+    let mut rows = Vec::new();
+    walk(tree, (&mut Vec::new(), 0), open, &mut rows);
+    rows
+}
+
+/// The layer at `path` of a PSD's layer tree.
+pub(crate) fn psd_node<'a>(tree: &'a [PsdTreeNode], path: &[usize]) -> Option<&'a PsdTreeNode> {
+    let (first, rest) = path.split_first()?;
+    let node = tree.get(*first)?;
+    if rest.is_empty() {
+        Some(node)
+    } else {
+        psd_node(&node.children, rest)
+    }
+}
+
+/// The button set the layer at `path` belongs to (its page and number): its own, or the nearest set it is inside.
+pub(crate) fn psd_owning_button(tree: &[PsdTreeNode], path: &[usize]) -> Option<(usize, usize)> {
+    (1..=path.len())
+        .rev()
+        .find_map(|length| psd_node(tree, path.get(..length)?)?.button)
+}
+
+/// What a click in a PSD menu's layer tree asks for (M10.47).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PsdClick {
+    /// A group's opener.
+    Toggle(Vec<usize>),
+    /// A page's `(#)` group: show the page.
+    ShowPage(usize),
+    /// A button set, or a layer inside one: select the button (adding to the selection).
+    Button((usize, usize), bool),
+    /// A button set's eye.
+    ButtonEye((usize, usize)),
+    /// Another layer: the page's menu.
+    Menu,
+}
+
+impl DiscCraftApp {
+    /// The layer tree of the PSD menu `root` is made from (its background), read again when the file changes; `None`
+    /// for a menu not made from a PSD.
+    fn psd_tree_of(&mut self, root: MenuId) -> Option<(String, std::sync::Arc<Vec<PsdTreeNode>>)> {
+        let menu = self.session.project.menu(root)?;
+        let disccraft_project::MenuBackground::Image { asset } = &menu.background else {
+            return None;
+        };
+        let path = self.session.project.assets.get(asset)?.path.clone();
+        if !path.to_ascii_lowercase().ends_with(".psd") {
+            return None;
+        }
+        let modified = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok();
+        if let Some((stamp, tree)) = self.psd_trees.get(&path)
+            && *stamp == modified
+        {
+            return Some((path, std::sync::Arc::clone(tree)));
+        }
+        let tree =
+            std::sync::Arc::new(disccraft_menu::psd_layer_tree(std::path::Path::new(&path)).ok()?);
+        let _ = self
+            .psd_trees
+            .insert(path.clone(), (modified, std::sync::Arc::clone(&tree)));
+        Some((path, tree))
+    }
+
+    /// The Layers panel of a menu made from a PSD (M10.47): what DiscCraft added to the page in the viewer (its texts,
+    /// images and the buttons the PSD has no set for), then the PSD's layer tree as Encore lists it: each layer's
+    /// name and eye, the groups opening to their layers (the shown page's `(#)` group open at first), the button sets
+    /// marked. A click on a `(#)` group shows its page; on a set (or a layer in one), selects its button.
+    fn psd_layers_panel(
+        &mut self,
+        ui: &mut Ui,
+        (viewed, root): (MenuId, MenuId),
+        key: &str,
+        tree: &[PsdTreeNode],
+    ) {
+        let project = &self.session.project;
+        // Each page's menu by its number in the PSD (page 0: the top level's buttons).
+        let pages: std::collections::HashMap<usize, MenuId> = project
+            .menu_pages(root)
+            .into_iter()
+            .filter_map(|id| {
+                let page = project.menu(id)?.psd_page;
+                match page {
+                    None => Some((0, id)),
+                    Some(disccraft_project::NO_PSD_PAGE) => None,
+                    Some(page) => Some((usize::from(page), id)),
+                }
+            })
+            .collect();
+        let viewed_page = project
+            .menu(viewed)
+            .and_then(|menu| menu.psd_page)
+            .map_or(0, usize::from);
+        let Some(menu) = project.menu(viewed).cloned() else {
+            return;
+        };
+        // DiscCraft's own layers of the page, above the PSD's.
+        let psd_buttons = count_page_buttons(tree, viewed_page);
+        let mut own: Vec<LayerRow> = (psd_buttons..menu.buttons.len())
+            .rev()
+            .map(LayerRow::Button)
+            .collect();
+        own.extend((0..menu.texts.len()).rev().map(LayerRow::Text));
+        own.extend((0..menu.graphics.len()).rev().map(LayerRow::Graphic));
+        let mut own_click = None;
+        for row in own {
+            if let Some(click) = self.layer_row(ui, &menu, row, 0.0) {
+                own_click = Some(click);
+            }
+        }
+        // A group the user opened or closed stays so, whichever page is shown (showing a page by a click on a button
+        // of its group must not close the group); the others: the shown page's `(#)` group open.
+        let chosen = self.psd_groups_open.clone();
+        let open = |path: &[usize], node: &PsdTreeNode| {
+            chosen
+                .get(&(key.to_owned(), path.to_vec()))
+                .copied()
+                .unwrap_or(node.page == Some(viewed_page))
+        };
+        let mut clicked = None;
+        for row in psd_rows(tree, &open) {
+            let Some(node) = psd_node(tree, &row.path) else {
+                continue;
+            };
+            let button = node.button;
+            let state = button.and_then(|(page, index)| {
+                let menu = self.session.project.menu(*pages.get(&page)?)?;
+                let hidden = menu.buttons.get(index)?.hidden;
+                let selected = self.selection == Selection::Menu(menu.id)
+                    && self.button_selected(index)
+                    && self.selected_part.is_none();
+                Some((hidden, selected))
+            });
+            let shown = node.page == Some(viewed_page);
+            if let Some(click) =
+                self.psd_row(ui, (node, &row), open(&row.path, node), (state, shown))
+            {
+                clicked = Some(match click {
+                    PsdClick::Menu => psd_owning_button(tree, &row.path)
+                        .map_or(PsdClick::Menu, |button| PsdClick::Button(button, false)),
+                    other => other,
+                });
+            }
+        }
+        if let Some(click) = own_click {
+            match click {
+                LayerClick::Select(row, add) => self.select_layer(viewed, row, add),
+                LayerClick::ToggleHidden(row) => self.toggle_layer(&menu, row, true),
+                LayerClick::ToggleLocked(row) => self.toggle_layer(&menu, row, false),
+                LayerClick::ToggleOpen(_) | LayerClick::ShowPage | LayerClick::TogglePage => {}
+            }
+            return;
+        }
+        let Some(click) = clicked else {
+            return;
+        };
+        match click {
+            PsdClick::Toggle(path) => {
+                let was_open = psd_node(tree, &path).is_some_and(|node| open(&path, node));
+                let _ = self
+                    .psd_groups_open
+                    .insert((key.to_owned(), path), !was_open);
+            }
+            PsdClick::ShowPage(page) => {
+                if let Some(id) = pages.get(&page) {
+                    self.select(Selection::Menu(*id));
+                    self.show_panel(Panel::MenuViewer);
+                }
+            }
+            PsdClick::Button((page, index), add) => {
+                if let Some(id) = pages.get(&page) {
+                    self.select_layer(*id, LayerRow::Button(index), add);
+                }
+            }
+            PsdClick::ButtonEye((page, index)) => {
+                if let Some(found) = pages
+                    .get(&page)
+                    .and_then(|id| self.session.project.menu(*id))
+                    .cloned()
+                {
+                    self.toggle_layer(&found, LayerRow::Button(index), true);
+                }
+            }
+            PsdClick::Menu => {
+                self.select(Selection::Menu(viewed));
+                self.show_panel(Panel::MenuViewer);
+            }
+        }
+    }
+
+    /// Draws one row of a PSD's layer tree: the eye (the layer's own; a button set's also hidden when its button is),
+    /// the button mark, the opener of a group, an icon and the name, indented by its depth; reports a click on it.
+    /// `state`: a button set's button (hidden, selected); `shown`: a `(#)` group whose page is in the viewer.
+    fn psd_row(
+        &self,
+        ui: &mut Ui,
+        (node, row): (&PsdTreeNode, &PsdRow),
+        open: bool,
+        (state, shown): (Option<(bool, bool)>, bool),
+    ) -> Option<PsdClick> {
+        let width = ui.available_width().max(COLUMN * 6.0);
+        let (rect, response) = ui.allocate_exact_size(vec2(width, ROW), Sense::click());
+        let visuals = ui.visuals().clone();
+        let painter = ui.painter();
+        let selected = state.is_some_and(|(_, selected)| selected);
+        if selected {
+            painter.rect_filled(rect, 0.0, visuals.selection.bg_fill.gamma_multiply(0.6));
+        } else if shown {
+            painter.rect_filled(rect, 0.0, visuals.selection.bg_fill.gamma_multiply(0.35));
+        } else if response.hovered() {
+            painter.rect_filled(rect, 0.0, visuals.widgets.hovered.weak_bg_fill);
+        }
+        painter.line_segment(
+            [rect.left_bottom(), rect.right_bottom()],
+            visuals.widgets.noninteractive.bg_stroke,
+        );
+        let color = visuals.text_color();
+        let faint = color.gamma_multiply(0.45);
+        let cell = |column: f32| {
+            Rect::from_min_size(
+                pos2(rect.min.x + column * COLUMN, rect.min.y),
+                vec2(COLUMN, ROW),
+            )
+        };
+        let (eye, lock, mark) = (cell(0.0), cell(1.0), cell(2.0));
+        for divider in [eye, lock, mark] {
+            painter.rect_stroke(
+                divider.shrink(2.0),
+                2.0,
+                visuals.widgets.noninteractive.bg_stroke,
+                egui::StrokeKind::Inside,
+            );
+        }
+        let glyph = |at: Rect, icon: Icon, tint: Color32| {
+            crate::icons::paint(
+                painter,
+                Rect::from_center_size(at.center(), vec2(13.0, 13.0)),
+                icon,
+                tint,
+            );
+        };
+        let hidden = !node.visible || state.is_some_and(|(hidden, _)| hidden);
+        if !hidden {
+            // A button set's eye is the button's (it can be flipped); another layer's is the PSD's.
+            glyph(eye, Icon::Eye, if state.is_some() { color } else { faint });
+        }
+        if node.button.is_some() {
+            let mark = Rect::from_center_size(mark.center(), vec2(11.0, 8.0));
+            painter.rect_filled(mark, 2.5, faint);
+        }
+        let indent = INDENT * row.depth as f32;
+        let opener = Rect::from_min_size(
+            pos2(rect.min.x + COLUMN * 3.0 + 2.0 + indent, rect.min.y),
+            vec2(14.0, ROW),
+        );
+        if node.group {
+            painter.text(
+                opener.center(),
+                egui::Align2::CENTER_CENTER,
+                if open { "▼" } else { "▶" },
+                egui::FontId::proportional(9.0),
+                color,
+            );
+        }
+        let icon = if node.group {
+            Icon::Folder
+        } else if node.name.trim_start().starts_with("(%)") {
+            Icon::Film
+        } else if node.name.trim_start().starts_with("(=") {
+            Icon::Square
+        } else {
+            Icon::Image
+        };
+        let icon_rect = Rect::from_min_size(pos2(opener.max.x + 2.0, rect.min.y), vec2(18.0, ROW));
+        glyph(icon_rect, icon, if node.visible { color } else { faint });
+        painter.text(
+            pos2(icon_rect.max.x + 4.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            node.name.clone(),
+            egui::FontId::proportional(12.0),
+            if node.visible { color } else { faint },
+        );
+        if !response.clicked() {
+            return None;
+        }
+        let at = response.interact_pointer_pos()?;
+        if node.group && opener.expand2(vec2(2.0, 0.0)).contains(at) {
+            return Some(PsdClick::Toggle(row.path.clone()));
+        }
+        if let Some(button) = node.button {
+            if eye.contains(at) {
+                return Some(PsdClick::ButtonEye(button));
+            }
+            let add = ui.input(|i| i.modifiers.shift || i.modifiers.command);
+            return Some(PsdClick::Button(button, add));
+        }
+        if let Some(page) = node.page {
+            return Some(PsdClick::ShowPage(page));
+        }
+        Some(PsdClick::Menu)
+    }
+}
+
+/// How many button sets page `page` of a PSD's layer tree has.
+fn count_page_buttons(tree: &[PsdTreeNode], page: usize) -> usize {
+    tree.iter()
+        .map(|node| {
+            usize::from(node.button.is_some_and(|(found, _)| found == page))
+                + count_page_buttons(&node.children, page)
+        })
+        .sum()
+}
+
 /// A row's eye and lock (`hidden`, `locked`) and whether they are its own (a button set's own layers show the set's;
 /// the background is always shown and locked).
 fn layer_state(menu: &Menu, row: LayerRow) -> (bool, bool, bool) {
@@ -554,6 +911,68 @@ fn layer_icon(menu: &Menu, row: LayerRow) -> Icon {
 #[cfg(test)]
 mod tests {
     use super::{LayerRow, PanelRow, layer_rows, panel_rows};
+    use super::{count_page_buttons, psd_node, psd_owning_button, psd_rows};
+    use disccraft_menu::PsdTreeNode;
+
+    fn node(name: &str, children: Vec<PsdTreeNode>) -> PsdTreeNode {
+        PsdTreeNode {
+            name: name.to_owned(),
+            visible: true,
+            group: !children.is_empty(),
+            page: None,
+            button: None,
+            children,
+        }
+    }
+
+    /// M10.47: a PSD menu's tree lists its layers from the top, a group's layers after it only while it is open;
+    /// a layer inside a button set belongs to that set's button; each page counts its own sets.
+    #[test]
+    fn a_psd_tree_lists_its_open_groups_and_finds_each_layers_button() {
+        let mut play = node(
+            "(+) Play",
+            vec![node("(=1)select", vec![]), node("Play", vec![])],
+        );
+        play.button = Some((0, 0));
+        let mut back = node("(+) Back", vec![node("back", vec![])]);
+        back.button = Some((1, 0));
+        let mut page = node("(#) Page 1", vec![back]);
+        page.page = Some(1);
+        let tree = vec![node("Logo", vec![]), play, page, node("Background", vec![])];
+        let names = |open: &dyn Fn(&[usize], &PsdTreeNode) -> bool| -> Vec<String> {
+            psd_rows(&tree, open)
+                .iter()
+                .filter_map(|row| {
+                    psd_node(&tree, &row.path)
+                        .map(|node| format!("{}{}", "-".repeat(row.depth), node.name))
+                })
+                .collect()
+        };
+        assert_eq!(
+            names(&|_, _| false),
+            ["Logo", "(+) Play", "(#) Page 1", "Background"]
+        );
+        assert_eq!(
+            names(&|_, node| node.page.is_some() || node.button.is_some()),
+            [
+                "Logo",
+                "(+) Play",
+                "-(=1)select",
+                "-Play",
+                "(#) Page 1",
+                "-(+) Back",
+                "--back",
+                "Background"
+            ]
+        );
+        assert_eq!(psd_owning_button(&tree, &[1, 1]), Some((0, 0)));
+        assert_eq!(psd_owning_button(&tree, &[2, 0, 0]), Some((1, 0)));
+        assert_eq!(psd_owning_button(&tree, &[0]), None);
+        assert_eq!(
+            (count_page_buttons(&tree, 0), count_page_buttons(&tree, 1)),
+            (1, 1)
+        );
+    }
     use disccraft_project::{Link, Project};
 
     /// A menu with pages lists them as Encore's `(#)` groups above the first page's layers, the last page on top

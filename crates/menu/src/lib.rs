@@ -28,6 +28,7 @@ mod wrap;
 use disccraft_project::frame_size;
 use thiserror::Error;
 
+pub use disccraft_photo::{PsdTreeNode, psd_layer_tree};
 pub use disccraft_project::{Menu, Project, Rect};
 pub use draw::subpicture_from_png;
 pub use graphic::graphic_coverage;
@@ -367,7 +368,10 @@ pub fn menu_psd_layers(
     }
     for (index, button) in menu.buttons.iter().enumerate() {
         let group = menu.highlight_group(button.highlight_group);
-        let title = if button.label.trim().is_empty() {
+        // The button's own name (a PSD button's `(+)` group's, M10.46), else its text, else its number.
+        let title = if !button.name.trim().is_empty() {
+            button.name.clone()
+        } else if button.label.trim().is_empty() {
             format!("ボタン {}", index.saturating_add(1))
         } else {
             button.label.clone()
@@ -481,6 +485,8 @@ pub fn menu_psd_layers(
         }
         layers.push(PsdLayer::Group {
             name: format!("(+) {title}"),
+            // M10.49: the set made from a PSD's keeps that layer's id, so the edited PSD finds this button again.
+            id: button.psd_layer,
             children: [
                 children,
                 vec![PsdLayer::Raster {

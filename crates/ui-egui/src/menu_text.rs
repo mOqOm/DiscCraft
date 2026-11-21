@@ -1538,7 +1538,7 @@ fn decode_rgba_png(bytes: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
     if width == 0 || height == 0 || width > 256 || height > 256 {
         return None;
     }
-    let mut data = vec![0_u8; reader.output_buffer_size()];
+    let mut data = vec![0_u8; reader.output_buffer_size()?];
     let frame = reader.next_frame(&mut data).ok()?;
     let data = data.get(..frame.buffer_size())?;
     let rgba = match color {

@@ -411,6 +411,25 @@ fn an_interlaced_source_keeps_its_fields_on_a_dvd() {
             luma[top * 720 + other]
         );
     }
+    // M12.36: the P pictures are coded with the field tools (frame_pred_frame_dct 0): each field of the bar is
+    // predicted from a field of the reference.
+    let bytes = std::fs::read(&vob).unwrap();
+    let mut picture_type = None;
+    let mut p_pictures = Vec::new();
+    for at in 0..bytes.len().saturating_sub(8) {
+        if bytes[at..at + 3] != [0, 0, 1] {
+            continue;
+        }
+        match bytes[at + 3] {
+            0x00 => picture_type = Some((bytes[at + 5] >> 3) & 7),
+            0xB5 if bytes[at + 4] >> 4 == 8 && picture_type.take() == Some(2) => {
+                p_pictures.push((bytes[at + 7] >> 6) & 1 == 0);
+            }
+            _ => {}
+        }
+    }
+    assert!(!p_pictures.is_empty());
+    assert!(p_pictures.iter().all(|&tools| tools), "{p_pictures:?}");
     let _ = std::fs::remove_dir_all(&out);
     let _ = std::fs::remove_dir_all(&cache);
 }

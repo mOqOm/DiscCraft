@@ -143,6 +143,7 @@ fn pasted_button(item: &Value) -> Result<Button, String> {
         label_offset: [0, 0],
         thumbnail_offset: [0, 0],
         body: None,
+        psd_layer: None,
     })
 }
 

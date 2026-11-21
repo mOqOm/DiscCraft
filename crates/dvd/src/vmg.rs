@@ -8,11 +8,13 @@ use disccraft_ifo::{
 
 use crate::{DvdError, output, region_mask};
 
-/// Return the number of sectors occupied by the VMG set for `title_count` titles in `vts_count` title sets.
+/// Return the number of sectors occupied by the VMG set for `title_count` titles in `vts_count` title sets (with the
+/// parental management table when a title is a parental block, M13.17).
 pub(crate) fn vmg_set_sectors(
     title_count: usize,
     vts_count: usize,
     menus: Option<&VmgMenus>,
+    parental: bool,
 ) -> Result<u32, DvdError> {
     let count = u8::try_from(vts_count)
         .map_err(|_| DvdError::Invalid("too many title sets".to_string()))?;
@@ -24,6 +26,7 @@ pub(crate) fn vmg_set_sectors(
                 vts: 1,
                 vts_ttn: 1,
                 vts_start_sector: 0,
+                parental_mask: 0,
             };
             title_count
         ],
@@ -39,6 +42,7 @@ pub(crate) fn vmg_set_sectors(
         first_play: Pgc::default(),
         vts_attrs: vec![vec![0; 0x300]; vts_count],
         menus: menus.cloned(),
+        parental: parental.then(|| crate::parental::parental_table(count)),
     };
 
     let sectors = vmgi_sectors(&probe)?;
@@ -63,7 +67,7 @@ pub(crate) fn write_vmg(
     video: (Standard, bool),
     first_play: (&[VmCommand], u32),
     menus: Option<VmgMenus>,
-    regions: &[u8],
+    (regions, parental): (&[u8], bool),
 ) -> Result<u64, DvdError> {
     let (standard, menus_wide) = video;
 
@@ -88,6 +92,7 @@ pub(crate) fn write_vmg(
         },
         vts_attrs: vts_attrs.to_vec(),
         menus,
+        parental: parental.then(|| crate::parental::parental_table(vts_count)),
     };
 
     let data = write_vmgi(&vmgi)?;

@@ -164,6 +164,7 @@ pub fn preview_model(project: &Project) -> Result<DiscModel, DvdError> {
         .ok_or_else(|| invalid("title numbers are not contiguous"))?;
 
     Ok(DiscModel {
+        parental: None,
         title_menu,
         first_play: nav.first_play.clone(),
         vmgm,

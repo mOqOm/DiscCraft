@@ -67,6 +67,7 @@ fn closer_to_zero(dx: i32, dy: i32, best_dx: i32, best_dy: i32) -> bool {
     false
 }
 
+#[cfg(test)] // the 16-row block of the reference full search
 fn sad_block(
     cur: &Frame420,
     reference: &Frame420,
@@ -75,9 +76,20 @@ fn sad_block(
     dx: i32,
     dy: i32,
 ) -> u32 {
+    sad_rows(cur, reference, (mbx, mby, 16), dx, dy)
+}
+
+/// [`sad_block`] of a block `rows` high (16, or 8 for a field of a macroblock).
+fn sad_rows(
+    cur: &Frame420,
+    reference: &Frame420,
+    (mbx, mby, rows): (usize, usize, usize),
+    dx: i32,
+    dy: i32,
+) -> u32 {
     let mut sum = 0u32;
 
-    for row in 0..16 {
+    for row in 0..rows {
         for col in 0..16 {
             let cur_x = i32::try_from(mbx + col).unwrap_or(i32::MAX);
             let cur_y = i32::try_from(mby + row).unwrap_or(i32::MAX);
@@ -107,9 +119,14 @@ struct Window {
 }
 
 impl Window {
-    fn new(reference: &Frame420, mbx: usize, mby: usize, range: i32) -> Option<Self> {
+    /// The window of a block `rows` high.
+    fn rows(
+        reference: &Frame420,
+        (mbx, mby, rows): (usize, usize, usize),
+        range: i32,
+    ) -> Option<Self> {
         let (w, h) = (usize::from(reference.width), usize::from(reference.height));
-        if w < 16 || h < 16 {
+        if w < 16 || h < rows {
             return None;
         }
         let (x, y) = (i32::try_from(mbx).ok()?, i32::try_from(mby).ok()?);
@@ -117,7 +134,7 @@ impl Window {
             dx_min: (-x).max(-range),
             dy_min: (-y).max(-range),
             dx_max: i32::try_from(w - 16).ok()?.saturating_sub(x).min(range),
-            dy_max: i32::try_from(h - 16).ok()?.saturating_sub(y).min(range),
+            dy_max: i32::try_from(h - rows).ok()?.saturating_sub(y).min(range),
         };
         (win.dx_min <= win.dx_max && win.dy_min <= win.dy_max).then_some(win)
     }
@@ -142,6 +159,17 @@ pub(crate) fn search_fast(
     range: i32,
     preds: &[(i32, i32)],
 ) -> (i32, i32, u32) {
+    search_fast_rows(cur, reference, (mbx, mby, 16), range, preds)
+}
+
+/// [`search_fast`] of a block `rows` high (8: one field of a macroblock, in field pictures made by [`field`]).
+pub(crate) fn search_fast_rows(
+    cur: &Frame420,
+    reference: &Frame420,
+    (mbx, mby, rows): (usize, usize, usize),
+    range: i32,
+    preds: &[(i32, i32)],
+) -> (i32, i32, u32) {
     const LARGE: [(i32, i32); 8] = [
         (0, -2),
         (0, 2),
@@ -153,10 +181,10 @@ pub(crate) fn search_fast(
         (1, 1),
     ];
     const SMALL: [(i32, i32); 4] = [(0, -1), (0, 1), (-1, 0), (1, 0)];
-    let Some(win) = Window::new(reference, mbx, mby, range.max(0)) else {
+    let Some(win) = Window::rows(reference, (mbx, mby, rows), range.max(0)) else {
         return (0, 0, 0);
     };
-    let mut best = (0, 0, sad_block(cur, reference, mbx, mby, 0, 0));
+    let mut best = (0, 0, sad_rows(cur, reference, (mbx, mby, rows), 0, 0));
     for (index, &pred) in preds.iter().enumerate() {
         if win.contains(pred.0, pred.1)
             && pred != (0, 0)
@@ -164,7 +192,7 @@ pub(crate) fn search_fast(
                 .get(..index)
                 .is_some_and(|before| before.contains(&pred))
         {
-            let sad = sad_block(cur, reference, mbx, mby, pred.0, pred.1);
+            let sad = sad_rows(cur, reference, (mbx, mby, rows), pred.0, pred.1);
             if better(best, pred.0, pred.1, sad) {
                 best = (pred.0, pred.1, sad);
             }
@@ -182,7 +210,7 @@ pub(crate) fn search_fast(
             for &(ox, oy) in pattern {
                 let (dx, dy) = (centre.0 + ox, centre.1 + oy);
                 if win.contains(dx, dy) {
-                    let sad = sad_block(cur, reference, mbx, mby, dx, dy);
+                    let sad = sad_rows(cur, reference, (mbx, mby, rows), dx, dy);
                     if better(best, dx, dy, sad) {
                         best = (dx, dy, sad);
                     }
@@ -259,8 +287,7 @@ pub(crate) fn search(
 
 fn predict_chroma(
     plane: &[u8],
-    width: usize,
-    height: usize,
+    (width, height, rows): (usize, usize, usize),
     x: i32,
     y: i32,
     fx: i32,
@@ -268,7 +295,7 @@ fn predict_chroma(
 ) -> [u8; 64] {
     let mut out = [0u8; 64];
 
-    for row in 0..8 {
+    for row in 0..rows.min(8) {
         for col in 0..8 {
             let sx = x.saturating_add(i32::try_from(col).unwrap_or(0));
             let sy = y.saturating_add(i32::try_from(row).unwrap_or(0));
@@ -320,6 +347,17 @@ pub(crate) fn predict_luma(
     mv_x_half: i32,
     mv_y_half: i32,
 ) -> [u8; 256] {
+    predict_luma_rows(reference, (mbx, mby, 16), mv_x_half, mv_y_half)
+}
+
+/// [`predict_luma`] of a block `rows` high (the first `rows` × 16 samples of the result).
+pub(crate) fn predict_luma_rows(
+    reference: &Frame420,
+    (mbx, mby, rows): (usize, usize, usize),
+    mv_x_half: i32,
+    mv_y_half: i32,
+) -> [u8; 256] {
+    let rows = rows.min(16);
     let mut luma = [0u8; 256];
     let (width, height) = (usize::from(reference.width), usize::from(reference.height));
     // Floor division: -3 half pixels is 2 whole pixels back and a half forward.
@@ -336,11 +374,11 @@ pub(crate) fn predict_luma(
         .ok()
         .zip(usize::try_from(ref_y).ok())
         .filter(|(x, y)| {
-            x + 16 + usize::from(half_x) <= width && y + 16 + usize::from(half_y) <= height
+            x + 16 + usize::from(half_x) <= width && y + rows + usize::from(half_y) <= height
         });
     if let Some((x, y)) = inside {
         let step = usize::from(half_x);
-        for row in 0..16 {
+        for row in 0..rows {
             let top = (y + row) * width + x;
             let bottom = top + if half_y { width } else { 0 };
             let (Some(a), Some(b), Some(out)) = (
@@ -371,7 +409,7 @@ pub(crate) fn predict_luma(
     }
 
     let (step_x, step_y) = (i32::from(half_x), i32::from(half_y));
-    for row in 0..16 {
+    for row in 0..rows {
         for col in 0..16 {
             let x = ref_x.saturating_add(i32::try_from(col).unwrap_or(0));
             let y = ref_y.saturating_add(i32::try_from(row).unwrap_or(0));
@@ -388,10 +426,24 @@ pub(crate) fn predict_luma(
 }
 
 /// The sum of absolute differences between the macroblock of `cur` at (`mbx`, `mby`) and a prediction of it.
-fn sad_prediction(cur: &Frame420, mbx: usize, mby: usize, prediction: &[u8; 256]) -> u32 {
+pub(crate) fn sad_prediction(
+    cur: &Frame420,
+    mbx: usize,
+    mby: usize,
+    prediction: &[u8; 256],
+) -> u32 {
+    sad_prediction_rows(cur, (mbx, mby, 16), prediction)
+}
+
+/// [`sad_prediction`] of a block `rows` high.
+pub(crate) fn sad_prediction_rows(
+    cur: &Frame420,
+    (mbx, mby, rows): (usize, usize, usize),
+    prediction: &[u8; 256],
+) -> u32 {
     let width = usize::from(cur.width);
     let mut sum = 0u32;
-    for row in 0..16 {
+    for row in 0..rows.min(16) {
         let start = (mby + row) * width + mbx;
         let (Some(line), Some(predicted)) = (
             cur.y.get(start..start + 16),
@@ -416,9 +468,20 @@ pub(crate) fn refine_half(
     best: (i32, i32, u32),
     range: i32,
 ) -> (i32, i32, u32) {
+    refine_half_rows(cur, reference, (mbx, mby, 16), best, range)
+}
+
+/// [`refine_half`] of a block `rows` high.
+pub(crate) fn refine_half_rows(
+    cur: &Frame420,
+    reference: &Frame420,
+    (mbx, mby, rows): (usize, usize, usize),
+    best: (i32, i32, u32),
+    range: i32,
+) -> (i32, i32, u32) {
     let centre = (best.0.saturating_mul(2), best.1.saturating_mul(2));
     let mut found = (centre.0, centre.1, best.2);
-    let Some(win) = Window::new(reference, mbx, mby, range.max(0)) else {
+    let Some(win) = Window::rows(reference, (mbx, mby, rows), range.max(0)) else {
         return found;
     };
     // A half-pixel component reads one sample further right or down.
@@ -435,8 +498,8 @@ pub(crate) fn refine_half(
             {
                 continue;
             }
-            let prediction = predict_luma(reference, mbx, mby, vx, vy);
-            let sad = sad_prediction(cur, mbx, mby, &prediction);
+            let prediction = predict_luma_rows(reference, (mbx, mby, rows), vx, vy);
+            let sad = sad_prediction_rows(cur, (mbx, mby, rows), &prediction);
             if sad < found.2 {
                 found = (vx, vy, sad);
             }
@@ -476,8 +539,7 @@ pub(crate) fn predict(
 
     let cb = predict_chroma(
         &reference.cb,
-        chroma_width,
-        chroma_height,
+        (chroma_width, chroma_height, 8),
         chroma_x,
         chroma_y,
         fx,
@@ -485,8 +547,7 @@ pub(crate) fn predict(
     );
     let cr = predict_chroma(
         &reference.cr,
-        chroma_width,
-        chroma_height,
+        (chroma_width, chroma_height, 8),
         chroma_x,
         chroma_y,
         fx,
@@ -494,6 +555,64 @@ pub(crate) fn predict(
     );
 
     (luma, cb, cr)
+}
+
+/// One field of `frame` as a picture of its own (13818-2 6.1.1.4): its lines `parity`, `parity` + 2, … of each plane
+/// (0: the top field), half as high.
+pub(crate) fn field(frame: &Frame420, parity: usize) -> Frame420 {
+    let (w, h) = (usize::from(frame.width), usize::from(frame.height));
+    let lines = |plane: &[u8], width: usize, height: usize| -> Vec<u8> {
+        (parity..height)
+            .step_by(2)
+            .flat_map(|row| {
+                plane
+                    .get(row * width..(row + 1) * width)
+                    .unwrap_or(&[])
+                    .iter()
+                    .copied()
+            })
+            .collect()
+    };
+    Frame420 {
+        width: frame.width,
+        height: frame.height / 2,
+        y: lines(&frame.y, w, h),
+        cb: lines(&frame.cb, w / 2, h / 2),
+        cr: lines(&frame.cr, w / 2, h / 2),
+    }
+}
+
+/// The 16 x 8 luma and 8 x 4 chroma prediction of one field of the macroblock at (`mbx`, `mby`) of a frame picture
+/// (`mby` in the frame's lines) from the reference field `reference` (a [`field`] picture), for a field vector in
+/// half pixels (its vertical part in field lines): chroma from the vector halved, toward zero (13818-2 7.6.3.7).
+pub(crate) fn predict_field(
+    reference: &Frame420,
+    (mbx, mby): (usize, usize),
+    (mv_x_half, mv_y_half): (i32, i32),
+) -> ([u8; 256], [u8; 64], [u8; 64]) {
+    let luma = predict_luma_rows(reference, (mbx, mby / 2, 8), mv_x_half, mv_y_half);
+    let (chroma_width, chroma_height) = (
+        usize::from(reference.width) / 2,
+        usize::from(reference.height) / 2,
+    );
+    let (chroma_vx, chroma_vy) = (mv_x_half / 2, mv_y_half / 2);
+    let chroma_x = i32::try_from(mbx / 2)
+        .unwrap_or(0)
+        .saturating_add(chroma_vx / 2);
+    let chroma_y = i32::try_from(mby / 4)
+        .unwrap_or(0)
+        .saturating_add(chroma_vy / 2);
+    let chroma = |plane: &[u8]| {
+        predict_chroma(
+            plane,
+            (chroma_width, chroma_height, 4),
+            chroma_x,
+            chroma_y,
+            chroma_vx % 2,
+            chroma_vy % 2,
+        )
+    };
+    (luma, chroma(&reference.cb), chroma(&reference.cr))
 }
 
 /// Intra cost of a 16x16 luma block: sum of absolute deviations from the block mean.

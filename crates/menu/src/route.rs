@@ -183,8 +183,12 @@ const LINE_TOLERANCE: i64 = 9;
 /// 10 and 15 px off broke a row or column, 36 px off did not).
 const NEAR_MISS: i64 = 18;
 /// Up / down go straight only to a button within about 68° of the direction (the cosine; Encore CS6 took one at
-/// 67.3° and left one at 69.4°). Left / right have no such limit.
+/// 67.3° and left one at 69.5°, 772 px to the side) or no more than [`VERTICAL_ASIDE`] to the side. Left / right have
+/// no such limit.
 const VERTICAL_CONE_COS: f64 = 0.3746;
+/// Up / down also go straight to a button this far to the side, or less, whatever the angle (Encore CS6, 2026-11-21:
+/// it took a bar 370 px to the side at 70°, and left one 617 px to the side at 76°).
+const VERTICAL_ASIDE: i64 = 400;
 /// With nothing in a direction, a button up to about 110° round from it is still taken (Encore CS6 took one at
 /// 107.6° and left one at 116.6°): the cosine of that angle.
 const WIDE_COS: f64 = -0.342;
@@ -401,7 +405,15 @@ impl<'a> Router<'a> {
             }
             // `as` is exact enough for pixel distances.
             let (step, distance) = (step as f64, (squared as f64).sqrt());
-            if direction.vertical() && step < VERTICAL_CONE_COS * distance {
+            let aside = if direction.vertical() {
+                centre.x - from.x
+            } else {
+                centre.y - from.y
+            };
+            if direction.vertical()
+                && step < VERTICAL_CONE_COS * distance
+                && aside.abs() > VERTICAL_ASIDE
+            {
                 continue;
             }
             let score = distance / (step / distance).powf(1.5);
@@ -413,16 +425,20 @@ impl<'a> Router<'a> {
     }
 
     /// [`Self::ahead`], or with nothing ahead a button no more than about 110° round from `direction` that is not
-    /// wholly behind `index` (unless it is level with it across the direction): the closest by the gap between the
-    /// rectangles, then the one clockwise of the direction (up: right, right: down, down: left, left: up), then the
-    /// closest by centre.
+    /// wholly behind `index` (unless it is level with it across the direction): one level with it (centres within
+    /// [`LINE_TOLERANCE`]) before one ahead (up / down: outside the cone) before one behind (M10.44, Encore CS6: a
+    /// narrow tile went down to the row beside it, not to the bar 15 px below); among those the closest by the gap
+    /// between the rectangles (gaps within [`LINE_TOLERANCE`] of it count the same), then the one clockwise of the
+    /// direction (up: right, right: down, down: left, left: up), then the closest by centre.
     fn around(&self, index: usize, direction: Direction) -> Option<usize> {
         if let Some(found) = self.ahead(index, direction) {
             return Some(found);
         }
         let from = self.centres.get(index)?;
         let source = self.bounds.get(index)?;
-        let mut best: Option<((i128, bool, i128), usize)> = None;
+        // (side, gap, clockwise, distance squared, button) of every button looked at; the side is 0 level with it
+        // (within [`LINE_TOLERANCE`]), 1 ahead (up / down: outside the cone), 2 behind.
+        let mut found: Vec<(u8, i64, bool, i128, usize)> = Vec::new();
         for (other, centre) in self.centres.iter().enumerate() {
             if other == index {
                 continue;
@@ -447,12 +463,25 @@ impl<'a> Router<'a> {
                 Direction::Down => dx < 0,
                 Direction::Left => dy < 0,
             };
-            let key = (source.gap_squared(target), !clockwise, squared);
-            if best.is_none_or(|(best_key, _)| key < best_key) {
-                best = Some((key, other));
-            }
+            let side = if step.abs() <= i128::from(LINE_TOLERANCE) {
+                0
+            } else if step > 0 {
+                1
+            } else {
+                2
+            };
+            found.push((side, source.gap(target), clockwise, squared, other));
         }
-        best.map(|(_, other)| other)
+        // Level with it first, then ahead, then behind; then the smallest gap (gaps within [`LINE_TOLERANCE`] of it
+        // count the same), the clockwise side, the nearest centre.
+        let side = found.iter().map(|(side, ..)| *side).min()?;
+        found.retain(|(own, ..)| *own == side);
+        let least = found.iter().map(|(_, gap, ..)| *gap).min()?;
+        found
+            .into_iter()
+            .filter(|(_, gap, ..)| *gap <= least.saturating_add(LINE_TOLERANCE))
+            .min_by_key(|(_, _, clockwise, squared, other)| (!*clockwise, *squared, *other))
+            .map(|(.., other)| other)
     }
 
     /// Every button's (up, down, left, right), zero-based.
@@ -530,7 +559,8 @@ enum Mark {
 /// - A button in two different such lines puts both out (a text bar and the column of pictures above it).
 /// - A line is out when a button touching or overlapping one of its members across the line misses one of the
 ///   member's edges or centre by more than [`LINE_TOLERANCE`] but no more than [`NEAR_MISS`], when two of its
-///   members miss each other that way, or when a member partly overlaps another button.
+///   members miss each other that way, when a member partly overlaps another button, or (M10.44) when a member faces
+///   a button outside the line that far apart (a bar 15 px below a row).
 fn lines(
     bounds: &[Bounds],
     centres: &[Centre],
@@ -651,7 +681,13 @@ fn lines(
                 line.iter()
                     .any(|member| touch(other, *member) && near_miss(other, *member))
             });
-        if members_miss || partly_covered || missed {
+        // A member a little apart from a button outside the line (10 to 18 px, facing it).
+        let crowded = line.iter().any(|member| {
+            (0..count)
+                .filter(|other| !line.contains(other))
+                .any(|other| bound(*member).nearly_touches(&bound(other)))
+        });
+        if members_miss || partly_covered || missed || crowded {
             continue;
         }
         for member in &line {
@@ -740,15 +776,27 @@ impl Bounds {
         }
     }
 
-    /// The gap between the two rectangles, squared (0 when they touch or overlap).
-    fn gap_squared(&self, other: &Self) -> i128 {
+    /// Whether the two face each other (overlap across one axis) a little apart along the other: more than
+    /// [`LINE_TOLERANCE`] but no more than [`NEAR_MISS`] pixels.
+    fn nearly_touches(&self, other: &Self) -> bool {
+        let near = |gap: i64| gap > LINE_TOLERANCE && gap <= NEAR_MISS;
+        let x_overlap = self.left < other.right && other.left < self.right;
+        let y_overlap = self.top < other.bottom && other.top < self.bottom;
+        let x_gap = (other.left - self.right).max(self.left - other.right);
+        let y_gap = (other.top - self.bottom).max(self.top - other.bottom);
+        (x_overlap && near(y_gap)) || (y_overlap && near(x_gap))
+    }
+
+    /// The gap between the two rectangles in pixels (0 when they touch or overlap; rounded down).
+    fn gap(&self, other: &Self) -> i64 {
         let x = (other.left - self.right)
             .max(self.left - other.right)
             .max(0);
         let y = (other.top - self.bottom)
             .max(self.top - other.bottom)
             .max(0);
-        i128::from(x) * i128::from(x) + i128::from(y) * i128::from(y)
+        // `as` is exact enough for pixel distances.
+        ((x as f64).hypot(y as f64)) as i64
     }
 }
 
@@ -1193,6 +1241,73 @@ mod tests {
             auto_route_with(&rects(&with_u), &on),
             vec![(2, 2, 4, 2), (3, 1, 1, 3), (2, 2, 2, 3), (1, 1, 4, 1)]
         );
+    }
+
+    /// Encore CS6, 2026-11-21 (rp_more, M10.44): a bar 15 px below a row (facing it, not touching) breaks it, and so
+    /// the column a narrow tile at the left edge would make with the bar. The row's buttons go straight left / right
+    /// and stay at its ends; up and down look round: level buttons first (the clockwise one on a tie, up: right,
+    /// down: left), not the bar ahead outside the cone (the narrow tile goes down to the row, not to the bar 15 px
+    /// below it); gaps within 9 px count the same (the bar goes down round to Chapter 1, 16 px away, not to the tile,
+    /// 15 px away).
+    #[test]
+    fn a_bar_just_below_a_row_breaks_it() {
+        let on = RouteOptions::default();
+        let bottom = (0, 971, 1920, 109);
+        let chapters = [
+            (1468, 783, 227, 173),
+            (1199, 783, 269, 173),
+            (975, 783, 224, 173),
+            (718, 783, 257, 173),
+            (472, 783, 246, 173),
+            (214, 783, 258, 172),
+            (0, 783, 33, 173),
+        ];
+        let mut page = vec![bottom];
+        page.extend(chapters);
+        assert_eq!(
+            auto_route_with(&rects(&page), &on),
+            vec![
+                (5, 7, 5, 4),
+                (3, 3, 3, 2),
+                (2, 1, 4, 2),
+                (3, 1, 5, 3),
+                (4, 1, 6, 4),
+                (5, 1, 7, 5),
+                (6, 6, 8, 6),
+                (7, 7, 8, 7),
+            ]
+        );
+        // Two tiles over the bar: up goes across to the other tile, down to the bar; no wrapping.
+        let pair = rects(&[bottom, (975, 783, 224, 173), (718, 783, 257, 173)]);
+        assert_eq!(
+            auto_route_with(&pair, &on),
+            vec![(3, 1, 3, 2), (3, 1, 3, 2), (2, 1, 3, 2)]
+        );
+    }
+
+    /// Encore CS6, 2026-11-21 (the issue #13 reporter's Page 2, M10.44): up / down also go straight to a button less
+    /// than 400 px to the side beyond the 68° cone: Chapters 5 and 2 go down to the thin bar below the row at 70°
+    /// (the row is broken by the Doctor picture overlapping its first tiles).
+    #[test]
+    fn a_bar_a_little_outside_the_cone_is_still_ahead() {
+        let page = rects(&[
+            (36, 504, 413, 576),
+            (1465, 783, 227, 173),
+            (1196, 783, 269, 173),
+            (972, 783, 224, 173),
+            (715, 783, 257, 173),
+            (469, 783, 246, 173),
+            (213, 783, 256, 173),
+            (1692, 783, 228, 173),
+            (50, 783, 163, 173),
+            (152, 993, 1616, 23),
+            (0, 783, 50, 173),
+            (0, 0, 1920, 206),
+        ]);
+        let routes = auto_route_with(&page, &RouteOptions::default());
+        // Chapter 5 and Chapter 2 down: the bar (10).
+        assert_eq!(routes[2].1, 10);
+        assert_eq!(routes[5].1, 10);
     }
 
     /// Encore CS6, 2026-11-21: four bars the full width of the screen, one above the other, are a column.

@@ -25,7 +25,9 @@ mod model;
 pub use bd::{BdDisc, BdLocation, BdMenu, BdMenuView, BdPlaylist, BdState, BdVm, load_bdmv};
 pub use exec::{Key, Location, Registers, Vm};
 pub use explore::{Report, explore};
-pub use model::{ButtonModel, Cmd, DiscModel, MenuPgcModel, TitleModel, load_video_ts};
+pub use model::{
+    ButtonModel, Cmd, DiscModel, MenuPgcModel, ParentalModel, TitleModel, load_video_ts,
+};
 
 /// Errors returned by the DVD VM simulator.
 #[derive(Debug, Error)]

@@ -162,6 +162,16 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "timeline.setParentalChapter",
+        label: "チャプターの視聴制限の代わりを設定",
+        menu: &["タイムライン"],
+        shortcut: None,
+        params: r#"{"timeline": id, "chapter": 0 から (チャプターの番号 - 1), "level": 2-8 (このレベルより低いプレーヤーは代わりを再生) | null (代わりを外す), "asset"?: id (代わりのビデオ。level があるときは必須)}"#,
+        enabled: always_enabled,
+        run: run_set_parental_chapter,
+        journal: true,
+    },
+    CommandSpec {
         id: "timeline.setMenuRemote",
         label: "リモートメニューを設定",
         menu: &["タイムライン"],
@@ -1314,6 +1324,63 @@ fn run_set_parental_alternative(session: &mut Session, params: &Value) -> Comman
     Ok(empty_object())
 }
 
+/// M13.17: another video for a chapter, for players below a parental level (a DVD parental block); `level` null
+/// takes it away.
+fn run_set_parental_chapter(session: &mut Session, params: &Value) -> CommandResult {
+    let timeline = TimelineId(req_u64(params, "timeline")?);
+    let chapter = usize::try_from(req_u64(params, "chapter")?)
+        .map_err(|_| "parameter \"chapter\" is too large".to_string())?;
+    let level = match params.get("level") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|level| u8::try_from(level).ok())
+                .filter(|level| (2..=8).contains(level))
+                .ok_or_else(|| "parameter \"level\" must be null or 2 to 8".to_string())?,
+        ),
+    };
+    let alternative = match level {
+        Some(_) => {
+            let asset = AssetId(req_u64(params, "asset")?);
+            match session.project.assets.get(&asset) {
+                Some(found) if found.kind == disccraft_project::AssetKind::Video => Some(asset),
+                Some(_) => return Err(format!("asset {} is not a video", asset.0)),
+                None => return Err(format!("asset {} does not exist", asset.0)),
+            }
+        }
+        None => None,
+    };
+    let Some(found) = session.project.timeline_mut(timeline) else {
+        return Err(format!("timeline {} does not exist", timeline.0));
+    };
+    if chapter >= found.chapters.len() {
+        return Err(format!("chapter {} does not exist", chapter + 1));
+    }
+    found
+        .parental_chapters
+        .retain(|parental| parental.chapter != chapter);
+    if let (Some(level), Some(alternative)) = (level, alternative) {
+        if found.parental_chapters.len() >= disccraft_project::MAX_PARENTAL_CHAPTERS {
+            return Err(format!(
+                "a timeline has at most {} chapters with a parental alternative",
+                disccraft_project::MAX_PARENTAL_CHAPTERS
+            ));
+        }
+        found
+            .parental_chapters
+            .push(disccraft_project::ParentalChapter {
+                chapter,
+                level,
+                alternative,
+            });
+        found
+            .parental_chapters
+            .sort_by_key(|parental| parental.chapter);
+    }
+    Ok(empty_object())
+}
+
 /// Where the remote's MENU key goes while the timeline plays (DVD: the title set's root menu).
 fn run_set_menu_remote(session: &mut Session, params: &Value) -> CommandResult {
     let timeline = TimelineId(req_u64(params, "timeline")?);
@@ -2279,6 +2346,69 @@ mod tests {
     use std::error::Error;
     use std::fs;
     use std::path::{Path, PathBuf};
+
+    /// M13.17: a chapter gets a parental alternative (a video, for players below a level from 2 to 8), another one
+    /// replaces it, `level` null takes it away; a sound, a chapter that does not exist and a level out of range are
+    /// refused.
+    #[test]
+    fn a_chapter_gets_a_parental_alternative() -> Result<(), Box<dyn Error>> {
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-engine-parental-{}", std::process::id()));
+        fs::create_dir_all(&dir)?;
+        let movie = dir.join("movie.m2v");
+        let bars = dir.join("bars.m2v");
+        let sound = dir.join("sound.wav");
+        for path in [&movie, &bars, &sound] {
+            fs::write(path, b"")?;
+        }
+        let mut session = Session::new();
+        let video = session.project.add_asset(&movie)?;
+        let alternative = session.project.add_asset(&bars)?;
+        let audio = session.project.add_asset(&sound)?;
+        let timeline = session.project.add_timeline(video, None)?;
+        let set = |session: &mut Session, params: Value| {
+            session.execute("timeline.setParentalChapter", &params)
+        };
+        set(
+            &mut session,
+            serde_json::json!({ "timeline": timeline.0, "chapter": 0, "level": 5, "asset": alternative.0 }),
+        )?;
+        set(
+            &mut session,
+            serde_json::json!({ "timeline": timeline.0, "chapter": 0, "level": 3, "asset": alternative.0 }),
+        )?;
+        let chapters = |session: &Session| {
+            session
+                .project
+                .timeline(timeline)
+                .map(|found| found.parental_chapters.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            chapters(&session),
+            [disccraft_project::ParentalChapter {
+                chapter: 0,
+                level: 3,
+                alternative,
+            }]
+        );
+        for refused in [
+            serde_json::json!({ "timeline": timeline.0, "chapter": 0, "level": 5, "asset": audio.0 }),
+            serde_json::json!({ "timeline": timeline.0, "chapter": 1, "level": 5, "asset": alternative.0 }),
+            serde_json::json!({ "timeline": timeline.0, "chapter": 0, "level": 1, "asset": alternative.0 }),
+            serde_json::json!({ "timeline": timeline.0, "chapter": 0, "level": 9, "asset": alternative.0 }),
+            serde_json::json!({ "timeline": timeline.0, "chapter": 0, "level": 5 }),
+        ] {
+            assert!(set(&mut session, refused.clone()).is_err(), "{refused}");
+        }
+        set(
+            &mut session,
+            serde_json::json!({ "timeline": timeline.0, "chapter": 0, "level": null }),
+        )?;
+        assert!(chapters(&session).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+        Ok(())
+    }
 
     /// As in Encore CS6, a chapter on an MPEG-2 elementary stream goes to the start of the GOP before it, or to
     /// the next GOP when a chapter is already there; moving a chapter snaps the same way.

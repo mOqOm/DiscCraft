@@ -9,7 +9,7 @@
 )]
 
 use craft_psd::{GroupSpec, LayerSpec, PixelData, PsdBuilder};
-use disccraft_photo::{Image8, load_image, load_psd_menu};
+use disccraft_photo::{Image8, PsdTreeNode, load_image, load_psd_menu, psd_layer_tree};
 
 const W: u32 = 64;
 const H: u32 = 48;
@@ -384,13 +384,15 @@ fn page_groups_are_the_menus_pages() {
     assert_eq!(pixel(&pages.pages[0], 9, 9)[3], 0);
     assert_eq!(pixel(&pages.pages[0], 2, 2)[3], 0);
     assert_eq!(pixel(&pages.pages[0], 32, 32)[3], 0);
-    // Page 1 ("Z first"): its art and its button.
-    assert_eq!(pixel(&pages.pages[1], 42, 2), [200, 200, 0, 255]);
+    // Page 1 ("Z first"): its button, not its art (Encore's Blu-ray pages show only their buttons).
+    assert_eq!(pixel(&pages.pages[1], 42, 2)[3], 0);
     assert_eq!(pixel(&pages.pages[1], 32, 32), [0, 255, 255, 255]);
     assert_eq!(pixel(&pages.pages[1], 12, 12)[3], 0);
     assert_eq!(pixel(&pages.pages[1], 52, 42)[3], 0);
-    // Page 2 ("A second").
-    assert_eq!(pixel(&pages.pages[2], 52, 42), [255, 0, 255, 255]);
+    // Page 2 ("A second"): its buttons One and Two, not its art.
+    assert_eq!(pixel(&pages.pages[2], 4, 32), [255, 255, 255, 255]);
+    assert_eq!(pixel(&pages.pages[2], 22, 32), [255, 255, 255, 255]);
+    assert_eq!(pixel(&pages.pages[2], 52, 42)[3], 0);
     assert_eq!(pixel(&pages.pages[2], 42, 2)[3], 0);
     let _ = std::fs::remove_file(&path);
 }
@@ -434,4 +436,95 @@ fn a_buttons_place_covers_its_hidden_layers() {
         (button.x, button.y, button.width, button.height),
         (0, 30, 40, 10)
     );
+}
+
+/// M10.47: the layer tree lists the PSD as Encore's Layers panel does, the top layer first, with each layer's name
+/// and eye; its pages and button sets carry the numbers the menu reader gives them: the top level's sets (inside a
+/// plain group too) are page 0's, the lowest first; a shown `(#)` group is page 1 with its own sets; a hidden one is
+/// no page and its set no button.
+#[test]
+fn the_layer_tree_numbers_pages_and_buttons_as_the_menu_reader() {
+    let mut b = PsdBuilder::new(W, H);
+    let art =
+        |name: &str, x: i32| LayerSpec::new(name, x, 0, 4, 4, solid(4, 4, [200, 200, 200, 255]));
+    b.push_layer(LayerSpec::new(
+        "Background",
+        0,
+        0,
+        W,
+        H,
+        solid(W, H, [0, 0, 80, 255]),
+    ));
+    b.begin_group(GroupSpec::new("(#) Page 1"));
+    b.begin_group(GroupSpec::new("(+) Back"));
+    b.push_layer(art("back art", 0));
+    b.end_group().unwrap();
+    b.end_group().unwrap();
+    let mut hidden = GroupSpec::new("(#) Spare");
+    hidden.visible = false;
+    b.begin_group(hidden);
+    b.begin_group(GroupSpec::new("(+) Unused"));
+    b.push_layer(art("unused art", 8));
+    b.end_group().unwrap();
+    b.end_group().unwrap();
+    b.begin_group(GroupSpec::new("(+) Play"));
+    b.push_layer(art("play art", 16));
+    b.end_group().unwrap();
+    b.begin_group(GroupSpec::new("Decor"));
+    b.begin_group(GroupSpec::new("(+#) Chapter 1"));
+    b.push_layer(art("(%) thumbnail 1", 24));
+    b.end_group().unwrap();
+    b.end_group().unwrap();
+    let mut logo = art("Logo", 32);
+    logo.visible = false;
+    b.push_layer(logo);
+    b.composite(solid(W, H, [0, 0, 80, 255]));
+    let path =
+        std::env::temp_dir().join(format!("disccraft-photo-tree-{}.psd", std::process::id()));
+    std::fs::write(&path, b.to_bytes().unwrap()).unwrap();
+    let tree = psd_layer_tree(&path).unwrap();
+    let menu = load_psd_menu(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+
+    let top: Vec<(&str, bool)> = tree
+        .iter()
+        .map(|node| (node.name.as_str(), node.visible))
+        .collect();
+    assert_eq!(
+        top,
+        [
+            ("Logo", false),
+            ("Decor", true),
+            ("(+) Play", true),
+            ("(#) Spare", false),
+            ("(#) Page 1", true),
+            ("Background", true)
+        ]
+    );
+    let find = |name: &str| -> PsdTreeNode {
+        fn walk(nodes: &[PsdTreeNode], name: &str) -> Option<PsdTreeNode> {
+            nodes.iter().find_map(|node| {
+                (node.name == name)
+                    .then(|| node.clone())
+                    .or_else(|| walk(&node.children, name))
+            })
+        }
+        walk(&tree, name).unwrap()
+    };
+    assert_eq!(find("(+) Play").button, Some((0, 0)));
+    assert_eq!(find("(+#) Chapter 1").button, Some((0, 1)));
+    assert_eq!(find("(+) Back").button, Some((1, 0)));
+    assert_eq!(find("(+) Unused").button, None);
+    assert_eq!(find("(#) Page 1").page, Some(1));
+    assert_eq!(find("(#) Spare").page, None);
+    assert!(find("Decor").group && !find("Logo").group);
+    // The reader takes the same buttons in the same order.
+    let names: Vec<&str> = menu
+        .buttons
+        .iter()
+        .map(|button| button.name.as_str())
+        .collect();
+    assert_eq!(names, ["Play", "Chapter 1"]);
+    assert_eq!(menu.pages.len(), 1);
+    assert_eq!(menu.pages[0].1.len(), 1);
 }

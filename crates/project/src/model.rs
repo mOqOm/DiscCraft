@@ -163,8 +163,8 @@ pub struct DiscSettings {
     #[serde(default, skip_serializing_if = "BdVideo::is_sd")]
     pub bd_video: BdVideo,
     /// How a Blu-ray disc's HD titles are coded (Encore's Project Settings ▸ Codec, M12.28): automatically (H.264,
-    /// MPEG-2 for 1080i), H.264 (1080i too, coded interlaced), or MPEG-2 (for 1080i; the progressive formats stay
-    /// H.264).
+    /// MPEG-2 for 1080i), H.264 (1080i too, coded interlaced), or MPEG-2 (every format; the progressive ones since
+    /// M10.39).
     #[serde(default, skip_serializing_if = "BdCodec::is_auto")]
     pub bd_codec: BdCodec,
     /// The folder whose files go on the disc beside the video, for a computer to read (Encore's Build panel:
@@ -177,12 +177,13 @@ pub struct DiscSettings {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BdCodec {
-    /// H.264, and MPEG-2 for the interlaced 1080 formats (as before M12.28).
+    /// H.264, and MPEG-2 for SD and the interlaced 1080 formats (as before M12.28).
     #[default]
     Auto,
-    /// H.264 for every format, the interlaced ones coded as interlaced frames.
+    /// H.264 for every format, the interlaced ones coded as interlaced frames (SD too: M10.41).
     H264,
-    /// MPEG-2 for the interlaced 1080 formats; DiscCraft codes the progressive formats as H.264 still.
+    /// MPEG-2 for every format: the interlaced ones as 59.94i / 50i, the progressive ones (1080p, 720p) as
+    /// progressive sequences (M10.39; before it they stayed H.264).
     Mpeg2,
 }
 
@@ -196,11 +197,13 @@ impl BdCodec {
         *self == BdCodec::Auto
     }
 
-    /// Whether HD video `video` is coded as MPEG-2 on a disc of this choice (else H.264).
+    /// Whether video `video` is coded as MPEG-2 with this choice (else H.264): automatically SD and the interlaced
+    /// 1080 formats.
     #[must_use]
     pub fn mpeg2(self, video: BdVideo) -> bool {
         match self {
-            BdCodec::Auto | BdCodec::Mpeg2 => video.interlaced(),
+            BdCodec::Auto => video.interlaced() || video.is_sd(),
+            BdCodec::Mpeg2 => true,
             BdCodec::H264 => false,
         }
     }
@@ -222,9 +225,9 @@ impl BdCodec {
     }
 }
 
-/// The video format of a Blu-ray disc's titles, encoded to H.264 when HD. 1080p 23.976 / 24 and the 720p formats are
-/// the progressive ones the Blu-ray standard allows; 1080p 25 / 29.97 / 50 / 59.94 are outside it (computer players
-/// play them, home players may not).
+/// The video format of a Blu-ray disc's titles (its codec is [`BdCodec`]'s). 1080p 23.976 / 24 (1920 or 1440 wide)
+/// and the 720p formats are the progressive ones the Blu-ray standard allows, 1080i 59.94 / 50 (1920 or 1440 wide)
+/// the interlaced ones; 1080p 25 / 29.97 / 50 / 59.94 are outside it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BdVideo {
     /// SD MPEG-2 at the TV standard's size (720 x 480 or 720 x 576), as on DVD.
@@ -259,26 +262,56 @@ pub enum BdVideo {
     /// 1280 x 720, 24 frames per second.
     #[serde(rename = "720p24")]
     Hd720p24,
+    /// 1440 x 1080 shown 16:9 (pixels 4:3 wide: HDV's and AVCHD's size), 23.976 frames per second (M10.40).
+    #[serde(rename = "1440p23.976")]
+    Hd1440p23,
+    /// 1440 x 1080 shown 16:9, 24 frames per second.
+    #[serde(rename = "1440p24")]
+    Hd1440p24,
+    /// 1440 x 1080 shown 16:9, interlaced, 59.94 fields (29.97 frames) per second.
+    #[serde(rename = "1440i59.94")]
+    Hd1440i59,
+    /// 1440 x 1080 shown 16:9, interlaced, 50 fields (25 frames) per second.
+    #[serde(rename = "1440i50")]
+    Hd1440i50,
 }
 
 impl BdVideo {
     /// Every format, SD first.
-    pub const ALL: [BdVideo; 9] = [
+    pub const ALL: [BdVideo; 13] = [
         BdVideo::Sd,
         BdVideo::Hd1080p23,
         BdVideo::Hd1080p24,
         BdVideo::Hd1080i59,
         BdVideo::Hd1080i50,
+        BdVideo::Hd1440p23,
+        BdVideo::Hd1440p24,
+        BdVideo::Hd1440i59,
+        BdVideo::Hd1440i50,
         BdVideo::Hd720p59,
         BdVideo::Hd720p50,
         BdVideo::Hd720p23,
         BdVideo::Hd720p24,
     ];
 
-    /// Whether the format is interlaced 1920 x 1080 (59.94i / 50i): its frames, 29.97 or 25 a second, are coded
-    /// as MPEG-2 (the H.264 encoder codes progressive frames only).
+    /// Whether the format is interlaced 1080 lines (59.94i / 50i, 1920 or 1440 wide): its frames, 29.97 or 25 a
+    /// second, are coded as interlaced pictures (MPEG-2 automatically, or H.264).
     pub fn interlaced(self) -> bool {
-        matches!(self, BdVideo::Hd1080i59 | BdVideo::Hd1080i50)
+        matches!(
+            self,
+            BdVideo::Hd1080i59 | BdVideo::Hd1080i50 | BdVideo::Hd1440i59 | BdVideo::Hd1440i50
+        )
+    }
+
+    /// The width the format's video is coded at: 1440 for the 1440 x 1080 formats (shown 16:9 in the 1920 x 1080
+    /// frame of [`BdVideo::hd`]: the disc's graphics stay 1920 wide), else the HD frame's; `None` for SD.
+    pub fn video_width(self) -> Option<u32> {
+        match self {
+            BdVideo::Hd1440p23 | BdVideo::Hd1440p24 | BdVideo::Hd1440i59 | BdVideo::Hd1440i50 => {
+                Some(1440)
+            }
+            other => other.hd().map(|(width, ..)| width),
+        }
     }
 
     /// Whether this is SD (nothing written to the project file).
@@ -298,6 +331,10 @@ impl BdVideo {
             BdVideo::Hd720p50 => "720p50",
             BdVideo::Hd720p23 => "720p23.976",
             BdVideo::Hd720p24 => "720p24",
+            BdVideo::Hd1440p23 => "1440p23.976",
+            BdVideo::Hd1440p24 => "1440p24",
+            BdVideo::Hd1440i59 => "1440i59.94",
+            BdVideo::Hd1440i50 => "1440i50",
         }
     }
 
@@ -307,7 +344,9 @@ impl BdVideo {
     }
 
     /// The HD frame size and frame rate (numerator, denominator); `None` for SD. An interlaced format's rate is
-    /// its frames' (29.97 for 59.94i, 25 for 50i).
+    /// its frames' (29.97 for 59.94i, 25 for 50i). The frame is the menus' and subtitles' and what the pictures
+    /// are fitted to: 1920 x 1080 for the 1440 x 1080 formats too, whose video is coded narrower
+    /// ([`BdVideo::video_width`]).
     pub fn hd(self) -> Option<(u32, u32, u32, u32)> {
         match self {
             BdVideo::Sd => None,
@@ -319,6 +358,10 @@ impl BdVideo {
             BdVideo::Hd720p50 => Some((1280, 720, 50, 1)),
             BdVideo::Hd720p23 => Some((1280, 720, 24_000, 1001)),
             BdVideo::Hd720p24 => Some((1280, 720, 24, 1)),
+            BdVideo::Hd1440p23 => Some((1920, 1080, 24_000, 1001)),
+            BdVideo::Hd1440p24 => Some((1920, 1080, 24, 1)),
+            BdVideo::Hd1440i59 => Some((1920, 1080, 30_000, 1001)),
+            BdVideo::Hd1440i50 => Some((1920, 1080, 25, 1)),
         }
     }
 }
@@ -350,6 +393,22 @@ impl DiscSettings {
             VideoStandard::Ntsc => FrameRate::FPS_29_97,
             VideoStandard::Pal => FrameRate::FPS_25,
         }
+    }
+
+    /// Whether this is an SD Blu-ray whose titles are H.264 (Encore's NTSC / PAL SD H.264, M10.41): 720 x 480 or
+    /// 720 x 576 coded as interlaced frames, encoded by the Blu-ray build as an HD disc's titles are.
+    #[must_use]
+    pub fn bd_sd_h264(&self) -> bool {
+        self.kind == DiscKind::BluRay
+            && self.bd_video.is_sd()
+            && !self.bd_codec.mpeg2(self.bd_video)
+    }
+
+    /// Whether a Blu-ray's titles' video is encoded by the Blu-ray build (HD, or SD as H.264: M10.41) rather than
+    /// taken from the DVD's MPEG-2.
+    #[must_use]
+    pub fn bd_encodes_titles(&self) -> bool {
+        self.kind == DiscKind::BluRay && (self.bd_video.hd().is_some() || self.bd_sd_h264())
     }
 }
 
@@ -517,6 +576,10 @@ pub struct Asset {
     /// Codec / Dimensions / Frame Rate); `None`: the project's ("Use Project Settings"). Never SD.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bluray_video: Option<BdVideo>,
+    /// The codec this video's titles are made with on an HD Blu-ray (Encore's Transcode Settings ▸ Blu-ray ▸ Codec,
+    /// M10.39): its own choice; `None`: the project's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bluray_codec: Option<BdCodec>,
     /// How hard the DVD transcode searches for motion: the quality of the DVD quality preset it was chosen as
     /// (Encore's "High quality" presets' 5, "Low quality" ones' 2), [`MIN_QUALITY`] to [`BEST_QUALITY`].
     #[serde(default = "best_quality", skip_serializing_if = "is_best_quality")]
@@ -1151,6 +1214,33 @@ impl Project {
         self.asset_bd_video(timeline.video)
     }
 
+    /// The codec choice the titles of video asset `asset` are made with: on an HD Blu-ray its own (Encore's
+    /// Transcode Settings ▸ Blu-ray ▸ Codec, M10.39), else the project's.
+    #[must_use]
+    pub fn asset_bd_codec(&self, asset: AssetId) -> BdCodec {
+        let project = self.settings.bd_codec;
+        if self.settings.bd_video.hd().is_none() {
+            return project;
+        }
+        self.assets
+            .get(&asset)
+            .and_then(|found| found.bluray_codec)
+            .unwrap_or(project)
+    }
+
+    /// Whether the titles of video asset `asset` are coded as MPEG-2 (else H.264): its codec
+    /// ([`Project::asset_bd_codec`]) for its format ([`Project::asset_bd_video`]).
+    #[must_use]
+    pub fn asset_bd_mpeg2(&self, asset: AssetId) -> bool {
+        self.asset_bd_codec(asset).mpeg2(self.asset_bd_video(asset))
+    }
+
+    /// The codec choice timeline `timeline`'s title is made with: its video's ([`Project::asset_bd_codec`]).
+    #[must_use]
+    pub fn title_bd_codec(&self, timeline: &Timeline) -> BdCodec {
+        self.asset_bd_codec(timeline.video)
+    }
+
     /// Sets the video bit rate (kbit/s) an asset is transcoded at; `None`: automatic.
     ///
     /// # Errors
@@ -1322,9 +1412,86 @@ pub struct Timeline {
     /// block, M6.363); not set: the player stops.
     #[serde(default, skip_serializing_if = "Link::is_not_set")]
     pub parental_alternative: Link,
+    /// M13.17: chapters that a player below a parental level plays another video in place of (a DVD parental
+    /// block: the title as one PGC for each range of levels).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parental_chapters: Vec<ParentalChapter>,
+}
+
+/// A chapter of a timeline with another video for players below a parental level (M13.17, a DVD parental block).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentalChapter {
+    /// The chapter (0 = the first).
+    pub chapter: usize,
+    /// The level the chapter is for (2 to 8): a player set below it plays `alternative` instead.
+    pub level: u8,
+    /// The video played in its place, whole, with its own sound.
+    pub alternative: AssetId,
+}
+
+/// The most chapters with a parental alternative in one timeline.
+pub const MAX_PARENTAL_CHAPTERS: usize = 8;
+
+/// One version of a title with parental chapters (M13.17): the parental levels it is for and which of the
+/// timeline's [`ParentalChapter`]s it plays the alternative of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentalVariant {
+    /// The lowest and the highest player level it is for.
+    pub levels: (u8, u8),
+    /// For each of the timeline's parental chapters, in their order, whether it plays the alternative.
+    pub replaced: Vec<bool>,
+}
+
+impl ParentalVariant {
+    /// Its parental ID field (M13.16): bit `l - 1` for each level `l` it is for.
+    #[must_use]
+    pub fn parental_id(&self) -> u16 {
+        (self.levels.0..=self.levels.1).fold(0u16, |id, level| {
+            id | 1u16
+                .checked_shl(u32::from(level.saturating_sub(1)))
+                .unwrap_or(0)
+        })
+    }
 }
 
 impl Timeline {
+    /// The versions of the title its parental chapters make (M13.17), from the one for the highest levels (every
+    /// chapter as it is) down; empty without parental chapters. With chapters for levels L1 > L2 > …, the versions are
+    /// for levels L1 to 8, L2 to L1 − 1, …, and 1 to the lowest − 1, each playing the alternatives of the chapters
+    /// above its levels.
+    #[must_use]
+    pub fn parental_variants(&self) -> Vec<ParentalVariant> {
+        let mut levels: Vec<u8> = self
+            .parental_chapters
+            .iter()
+            .map(|chapter| chapter.level)
+            .filter(|level| (2..=8).contains(level))
+            .collect();
+        if levels.is_empty() {
+            return Vec::new();
+        }
+        levels.sort_unstable_by(|a, b| b.cmp(a));
+        levels.dedup();
+        let mut variants = Vec::with_capacity(levels.len() + 1);
+        let mut top = 8u8;
+        for level in levels.iter().copied().chain(std::iter::once(1)) {
+            let range = if level == 1 { (1, top) } else { (level, top) };
+            variants.push(ParentalVariant {
+                levels: range,
+                replaced: self
+                    .parental_chapters
+                    .iter()
+                    .map(|chapter| chapter.level > range.1)
+                    .collect(),
+            });
+            top = level.saturating_sub(1);
+            if top == 0 {
+                break;
+            }
+        }
+        variants
+    }
+
     /// The parental level the title asks (1 to 8), its own or the disc's `disc`; `None` when it asks none.
     pub fn effective_parental_level(&self, disc: u8) -> Option<u8> {
         Some(self.parental_level.unwrap_or(disc)).filter(|level| (1..=8).contains(level))
@@ -1610,6 +1777,7 @@ impl Project {
                 bluray_transcode: None,
                 transcode_film: false,
                 bluray_video: None,
+                bluray_codec: None,
                 transcode_quality: BEST_QUALITY,
                 max_render_quality: false,
                 frame_blend: false,
@@ -1665,6 +1833,7 @@ impl Project {
             Timeline {
                 parental_level: None,
                 parental_alternative: Link::NotSet,
+                parental_chapters: Vec::new(),
                 id,
                 name,
                 video,
@@ -2204,6 +2373,91 @@ mod flowchart_tests {
 
 #[cfg(test)]
 mod tests {
+    /// M13.17: chapters for levels 6 and 4 make three versions: 6 to 8 plays both chapters, 4 and 5 the first's
+    /// alternative, 1 to 3 both alternatives; each version's parental ID has a bit for each of its levels. A chapter
+    /// for level 8 alone makes two; none, none. An out-of-range chapter, a level 1 and a sound are problems.
+    #[test]
+    fn parental_chapters_make_a_version_for_each_range_of_levels() -> Result<(), crate::ProjectError>
+    {
+        use super::{ParentalChapter, Project};
+        let mut project = Project::default();
+        let video = project.add_asset(std::path::Path::new("movie.m2v"))?;
+        let bars = project.add_asset(std::path::Path::new("bars.m2v"))?;
+        let sound = project.add_asset(std::path::Path::new("sound.wav"))?;
+        let id = project.add_timeline(video, None)?;
+        let timeline = project
+            .timeline_mut(id)
+            .ok_or_else(|| crate::ProjectError::Invalid("no timeline".to_string()))?;
+        assert!(timeline.parental_variants().is_empty());
+        timeline.parental_chapters = vec![
+            ParentalChapter {
+                chapter: 0,
+                level: 6,
+                alternative: bars,
+            },
+            ParentalChapter {
+                chapter: 1,
+                level: 4,
+                alternative: bars,
+            },
+        ];
+        let versions: Vec<((u8, u8), Vec<bool>, u16)> = timeline
+            .parental_variants()
+            .into_iter()
+            .map(|variant| {
+                (
+                    variant.levels,
+                    variant.replaced.clone(),
+                    variant.parental_id(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            versions,
+            [
+                ((6, 8), vec![false, false], 0x00E0),
+                ((4, 5), vec![true, false], 0x0018),
+                ((1, 3), vec![true, true], 0x0007),
+            ]
+        );
+        timeline.parental_chapters.truncate(1);
+        if let Some(first) = timeline.parental_chapters.first_mut() {
+            first.level = 8;
+        }
+        let ranges: Vec<(u8, u8)> = timeline
+            .parental_variants()
+            .iter()
+            .map(|variant| variant.levels)
+            .collect();
+        assert_eq!(ranges, [(8, 8), (1, 7)]);
+
+        // One chapter: chapter 1 does not exist; a level 1 and a sound are wrong.
+        timeline.parental_chapters = vec![
+            ParentalChapter {
+                chapter: 1,
+                level: 5,
+                alternative: bars,
+            },
+            ParentalChapter {
+                chapter: 0,
+                level: 1,
+                alternative: bars,
+            },
+            ParentalChapter {
+                chapter: 0,
+                level: 5,
+                alternative: sound,
+            },
+        ];
+        let problems = project
+            .check()
+            .into_iter()
+            .filter(|problem| problem.code == "badParentalChapter")
+            .count();
+        assert_eq!(problems, 3);
+        Ok(())
+    }
+
     /// The sound and video files testers bring are taken as audio and video, whatever the case of the name.
     #[test]
     fn common_media_extensions_are_recognised() {

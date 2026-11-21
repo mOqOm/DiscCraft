@@ -17,6 +17,7 @@ mod demux_mkv;
 mod demux_mp4;
 mod h264_cut;
 mod output;
+mod parental;
 mod prepare;
 mod preview;
 mod sup;
@@ -328,7 +329,9 @@ pub fn build_video_ts_with(
     let menu_bytes = menus.as_ref().map_or(0, |(_, bytes)| *bytes);
     let menus = menus.map(|(menus, _)| menus);
 
-    let vmg_set_sectors = vmg::vmg_set_sectors(title_count, vts_count, menus.as_ref())?;
+    let parental_blocks = parental::has_parental_blocks(project);
+    let vmg_set_sectors =
+        vmg::vmg_set_sectors(title_count, vts_count, menus.as_ref(), parental_blocks)?;
     let built = build_titles(
         project,
         &nav,
@@ -346,7 +349,7 @@ pub fn build_video_ts_with(
         (standard, project.menus_wide()),
         (&first_play, nav.first_play_prohibited_ops),
         menus,
-        &project.settings.regions,
+        (&project.settings.regions, parental_blocks),
     )?;
 
     let total_bytes = built
@@ -490,14 +493,30 @@ fn build_timeline_titles(
 ) -> Result<(), DvdError> {
     for timeline in project.timelines.values() {
         let vts = next_vts(acc)?;
-        let prepared = prepare::prepare_title(
+        // M13.17: a timeline with parental chapters is built extended by its alternatives, as a parental block.
+        let extended = parental::extended_timeline(
             project,
             timeline,
+            (prep.cache_dir, &prep.budget),
+            prep.progress,
+        )?;
+        let (source_timeline, plan) = match &extended {
+            Some((extended, plan)) => (extended, Some(plan)),
+            None => (timeline, None),
+        };
+        let prepared = prepare::prepare_title(
+            project,
+            source_timeline,
             prep.cache_dir,
             &prep.budget,
             prep.progress,
         )?;
-        let loaded = source::load_title(project, timeline, project.settings.standard, &prepared)?;
+        let loaded = source::load_title(
+            project,
+            source_timeline,
+            project.settings.standard,
+            &prepared,
+        )?;
         let title_nav = nav_title(nav, timeline)?;
         let extras: Vec<&ChapterPlaylistNav> = nav
             .chapter_playlists
@@ -505,7 +524,8 @@ fn build_timeline_titles(
             .filter(|extra| extra.timeline == timeline.id)
             .collect();
         stop_between_titles()?;
-        let built = vts::build_title_set(&loaded, video_ts, vts, standard, title_nav, &extras)?;
+        let built =
+            vts::build_title_set(&loaded, video_ts, vts, standard, title_nav, (&extras, plan))?;
 
         let start = record_built(
             acc,
@@ -520,6 +540,10 @@ fn build_timeline_titles(
             built.vts_attr_block,
             built.total_bytes,
         )?;
+        // The title's mask: its parental block's PGCs' parental IDs (M13.17).
+        if let Some((_, entry)) = acc.entries.last_mut() {
+            entry.parental_mask = built.parental_mask;
+        }
         // The title's report (just recorded) says where the manual layer break's cell is.
         if let Some(report) = acc.reports.last_mut() {
             report.layer_break_cell = loaded
@@ -543,6 +567,7 @@ fn build_timeline_titles(
                     vts,
                     vts_ttn: nav_extra.vts_ttn,
                     vts_start_sector: start,
+                    parental_mask: 0,
                 },
             ));
         }
@@ -577,7 +602,8 @@ fn build_slideshow_titles(
             load_slideshow_title(project, slideshow, project.settings.standard, &prepared)?;
         let title_nav = slideshow_title_nav(nav, id)?;
         stop_between_titles()?;
-        let built = vts::build_title_set(&loaded, video_ts, vts, standard, &title_nav, &[])?;
+        let built =
+            vts::build_title_set(&loaded, video_ts, vts, standard, &title_nav, (&[], None))?;
 
         let _ = record_built(
             acc,
@@ -644,6 +670,7 @@ fn record_built(
             vts,
             vts_ttn: 1,
             vts_start_sector: start,
+            parental_mask: 0,
         },
     ));
 

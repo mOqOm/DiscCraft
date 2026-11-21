@@ -1463,6 +1463,11 @@
 	If Not Allowed:	制限で再生しないとき:
 	What plays in the title's place on a player below its parental level (not set: it stops)	プレーヤーの視聴制限レベルが足りないとき、このタイトルの代わりに再生するもの（未設定: 停止）
 	Set a parental level first	先に視聴制限レベルを設定してください
+	Parental Alternative:	視聴制限の代わり:
+	The video a player set below the level plays in this chapter's place (a DVD parental block)	視聴制限レベルをこのレベルより低く設定したプレーヤーが、このチャプターの代わりに再生するビデオ（DVD のパレンタルブロック）
+	For Levels Below:	このレベル未満:
+	Players set below this parental level play the alternative; players at it or above, and players with no level set, play the chapter	視聴制限レベルをこれより低く設定したプレーヤーは代わりを再生する。これ以上のプレーヤーと、レベルを設定していないプレーヤーはチャプターを再生する
+	Choose an alternative video first	先に代わりのビデオを選んでください
 	Disc's ({level})	ディスクのレベル（{level}）
 	Disc's (none)	ディスクのレベル（なし）
 	A player set to a lower level asks for its password before the title plays	それより低いレベルのプレーヤーは、タイトルを再生する前にパスワードを求める
@@ -1481,6 +1486,16 @@
 	Whole text	テキスト全体
 	Set the size, colour, font and style of the whole text instead	選択をやめ、テキスト全体のサイズ・色・フォント・スタイルを変える
 	Blu-ray codec:	Blu-ray のコーデック：
-	Automatic (MPEG-2 for 1080i)	自動（1080i は MPEG-2）
-	H.264 (1080i too)	H.264（1080i も）
-	MPEG-2 for 1080i	1080i は MPEG-2
+	Automatic (MPEG-2 for SD and 1080i)	自動（SD と 1080i は MPEG-2）
+	H.264 (every format)	H.264（すべての形式）
+	MPEG-2 (every format)	MPEG-2（すべての形式）
+	SD titles are made on an SD Blu-ray (the project's Blu-ray video, Transcode Defaults…)	SD のタイトルは SD の Blu-ray で作る（プロジェクトの Blu-ray の映像。トランスコードの初期設定…）
+	HD titles are made on an HD Blu-ray (the project's Blu-ray video, Transcode Defaults…)	HD のタイトルは HD の Blu-ray で作る（プロジェクトの Blu-ray の映像。トランスコードの初期設定…）
+	An SD Blu-ray's titles all take the project's codec (Transcode Defaults…)	SD の Blu-ray のタイトルはすべてプロジェクトのコーデック（トランスコードの初期設定…）
+	A DVD preset is an SD Blu-ray's in MPEG-2 (Transcode Defaults…)	DVD のプリセットは MPEG-2 の SD の Blu-ray のもの（トランスコードの初期設定…）
+	Film shown by 3:2 pulldown is a DVD's	3:2 プルダウンで見せるフィルムは DVD のもの
+	The project's Blu-ray format and codec, at the rate that fits the disc	プロジェクトの Blu-ray の形式とコーデックで、ディスクに収まるレート
+	Use the hardware encoder for HD H.264	HD の H.264 にハードウェアエンコーダーを使う
+	This computer has no hardware H.264 encoder	このコンピューターには H.264 のハードウェアエンコーダーがありません
+	{name}: the Blu-ray's 1080p and 720p H.264 in one pass (VBR or CBR), several times as fast. 1080i, standard definition and two-pass encodes stay on the processor, as does a video the encoder fails on.	{name}: Blu-ray の 1080p と 720p の H.264 を 1 パス（VBR か CBR）で、数倍の速さで変換する。1080i・SD・2 パスと、エンコーダーが失敗したビデオはプロセッサーで変換する。
+	No hardware H.264 encoder was found.	H.264 のハードウェアエンコーダーが見つかりません。
