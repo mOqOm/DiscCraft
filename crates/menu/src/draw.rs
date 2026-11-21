@@ -1604,7 +1604,7 @@ fn decode_png(path: &Path) -> Result<SourceImage, MenuError> {
     let png_err =
         |e: &dyn std::fmt::Display| MenuError::Invalid(format!("{}: {e}", path.display()));
     let file = File::open(path).map_err(|e| png_err(&e))?;
-    let mut decoder = Decoder::new(file);
+    let mut decoder = Decoder::new(std::io::BufReader::new(file));
     decoder.set_transformations(Transformations::EXPAND);
     let mut reader = decoder.read_info().map_err(|e| png_err(&e))?;
 

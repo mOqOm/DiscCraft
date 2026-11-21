@@ -156,7 +156,7 @@ fn png_packet(path: &Path) -> Option<Vec<u8>> {
     if let Some(packet) = png_xmp(reader.info()) {
         return Some(packet);
     }
-    let size = reader.output_buffer_size();
+    let size = reader.output_buffer_size()?;
     if size > MAX_PNG_PICTURE {
         return None;
     }

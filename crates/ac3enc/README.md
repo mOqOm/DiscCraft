@@ -2,7 +2,7 @@
 
 DVD / Blu-ray の変換した音声（48 kHz・16 ビットの WAV、モノラルかステレオ）を AC-3（Dolby Digital）の生のストリームにする。
 
-- 符号化: craft-libs の `craft-audio`（MIT OR Apache-2.0、revision c8087acbd9711315eefc2790949b7acf915da011、feature
+- 符号化: craft-libs の `craft-audio`（MIT OR Apache-2.0、revision 531f12d23506401fa773b6e31a12e70d646636eb、feature
   `ac3-encode`）。ETSI TS 102 366 V1.4.1 から書かれたエンコーダを公開 API（`ac3::encoder::{Encoder, Config}`）からだけ
   使い、その実装は読まない（AGENTS.md ルール 3）。
 - このクレートが受け持つこと: WAV（RIFF）の読み取り（ファイルより長いと書かれたデータは、ファイルの終わりまで）、
