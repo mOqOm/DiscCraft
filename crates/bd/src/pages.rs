@@ -7,31 +7,23 @@
 //! them).
 //!
 //! A menu's pages are built so when they share the background: the same picture or video, sound, length and loops
-//! (Encore's pages are one menu; DiscCraft's pages could differ). Otherwise, and for a pop-up menu, more than
-//! [`MAX_PAGES`] pages, or pictures too large for the player's interactive graphics, each page is a menu of its own
-//! as before (and turning a page plays its own clip).
+//! (Encore's pages are one menu; DiscCraft's pages could differ). Otherwise, and for a pop-up menu or more than
+//! [`MAX_PAGES`] pages, each page is a menu of its own as before (and turning a page plays its own clip). However
+//! large its pictures, as Encore builds them (GitHub issue #13: a 9-page menu with 21.8 MB of objects).
 //!
 //! A pop-up menu's pages are one composition in each title clip it pops up over ([`popup_page_groups`], GitHub
 //! issue #13): there the title plays under them, so they need not share a background, and a link to another of its
 //! pages turns the page over the playing title.
 
-use disccraft_project::{Menu, MenuId, Project, Rect};
+use disccraft_project::{Menu, MenuId, Project};
 
 use crate::nav::MenuPages;
 
-/// The most pages a menu's composition has (each names a palette of its own; with page 0, at most 9 palettes).
-pub(crate) const MAX_PAGES: usize = 8;
+/// The most pages a menu's composition has: an IG has up to 255 pages, page 0 turns to the others, and each page
+/// names a palette of its own (ids up to 254, M10.28). Encore's 9-page menu has 9 palettes (GitHub issue #13).
+pub(crate) const MAX_PAGES: usize = 254;
 /// The most buttons a page of a composition has ([`crate::nav::page_value`] keeps the button's index + 1 in a byte).
 const MAX_BUTTONS: usize = 254;
-/// The most bytes of decoded objects a menu's composition takes: the pages' pictures and every button's states, all
-/// decoded before the menu's first picture (M10.28: 64 Mbit/s, so 2 MiB in about 0.26 s of the clip's 0.3 s before
-/// it).
-const OBJECT_BUDGET: u64 = 2 << 20;
-/// The most bytes of decoded objects a pop-up's pages take. A pop-up's display set may come later in the title clip
-/// than the clip's start (`crate::menus::popup_ig_units`), so it is not held to a menu clip's 0.3 s; 8 MiB keeps its
-/// decoding under about a second at the decoder model's 8 MB/s (several pages each with a picture over the frame).
-const POPUP_OBJECT_BUDGET: u64 = 8 << 20;
-
 /// Which of the project's menus (by their index in the project's order) are built as pages of one composition:
 /// each group's menus, its first page first. Empty for a DVD. The preview reads the playing page this way too.
 #[must_use]
@@ -55,7 +47,7 @@ pub fn menu_page_groups(project: &Project) -> Vec<Vec<usize>> {
         if menus.len() != pages.len()
             || indices.len() != pages.len()
             || indices.first() != Some(&index)
-            || !shares_background(project, &menus)
+            || !shares_background(&menus)
         {
             continue;
         }
@@ -65,9 +57,9 @@ pub fn menu_page_groups(project: &Project) -> Vec<Vec<usize>> {
 }
 
 /// Which of the project's pop-up menus (by their index in the project's order) pop up with all their pages: each
-/// group's menus, its first page first. Every page a pop-up with buttons, few enough pages and buttons, and small
-/// enough for the decoder (as [`menu_page_groups`]); the pages need not share a background (the title plays under
-/// them). Empty for a DVD. The preview reads the pop-up's page this way too.
+/// group's menus, its first page first. Every page a pop-up with buttons, few enough pages and buttons (as
+/// [`menu_page_groups`]); the pages need not share a background (the title plays under them). Empty for a DVD. The
+/// preview reads the pop-up's page this way too.
 #[must_use]
 pub fn popup_page_groups(project: &Project) -> Vec<Vec<usize>> {
     if project.settings.kind != disccraft_project::DiscKind::BluRay {
@@ -95,11 +87,6 @@ pub fn popup_page_groups(project: &Project) -> Vec<Vec<usize>> {
             || indices.len() != pages.len()
             || indices.first() != Some(&index)
             || !menus.iter().all(fits)
-            || menus
-                .iter()
-                .map(|page| object_bytes(project, page))
-                .sum::<u64>()
-                > POPUP_OBJECT_BUDGET
         {
             continue;
         }
@@ -137,8 +124,8 @@ pub(crate) fn menu_pages(project: &Project) -> Vec<Option<MenuPages>> {
 }
 
 /// Whether `pages` (the first page first) can be one composition: always-on menus with buttons that share the
-/// first page's background, sound and play, few enough, and small enough for the decoder.
-fn shares_background(project: &Project, pages: &[&Menu]) -> bool {
+/// first page's background, sound and play, and few enough.
+fn shares_background(pages: &[&Menu]) -> bool {
     let Some(first) = pages.first() else {
         return false;
     };
@@ -159,48 +146,4 @@ fn shares_background(project: &Project, pages: &[&Menu]) -> bool {
             && page.is_motion() == first.is_motion()
     };
     pages.iter().all(same)
-        && pages
-            .iter()
-            .map(|page| object_bytes(project, page))
-            .sum::<u64>()
-            <= OBJECT_BUDGET
-}
-
-/// About how many bytes a page's objects take decoded: its picture (the area its texts, pictures, buttons and page of
-/// its PSD cover) and each button's normal, selected and activated states.
-fn object_bytes(project: &Project, menu: &Menu) -> u64 {
-    let area = |rect: Rect| u64::from(rect.w) * u64::from(rect.h);
-    let mut cover: Option<(u32, u32, u32, u32)> = None;
-    let mut add = |rect: Rect| {
-        if rect.w == 0 || rect.h == 0 {
-            return;
-        }
-        let (x1, y1) = (u32::from(rect.x), u32::from(rect.y));
-        let (x2, y2) = (x1 + u32::from(rect.w), y1 + u32::from(rect.h));
-        cover = Some(match cover {
-            None => (x1, y1, x2, y2),
-            Some((a, b, c, d)) => (a.min(x1), b.min(y1), c.max(x2), d.max(y2)),
-        });
-    };
-    for text in &menu.texts {
-        add(disccraft_menu::text_bounds(menu, text));
-    }
-    for graphic in &menu.graphics {
-        add(disccraft_menu::graphic_bounds(graphic));
-    }
-    for button in &menu.buttons {
-        add(button.rect);
-    }
-    if let Some(rect) = disccraft_menu::psd_page_bounds(project, menu) {
-        add(rect);
-    }
-    let picture = cover.map_or(0, |(x1, y1, x2, y2)| {
-        u64::from(x2.saturating_sub(x1)) * u64::from(y2.saturating_sub(y1))
-    });
-    let states: u64 = menu
-        .buttons
-        .iter()
-        .map(|button| 3 * area(button.rect))
-        .sum();
-    picture + states
 }

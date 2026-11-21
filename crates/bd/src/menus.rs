@@ -684,7 +684,8 @@ fn page_parts(
     let mut palette = colours.palette(menu_clip.menu);
     let layers = ColourLayers::new(menu_clip.menu, count, colours.next_id());
     palette.extend(layers.entries.iter().copied());
-    let mut objects = build_objects(rendered, menu_clip.menu, count, &colours)?;
+    let own = button_highlights(project, menu_clip.menu, count)?;
+    let mut objects = build_objects(rendered, (menu_clip.menu, &own), count, &colours)?;
     layers.paint(
         &mut objects,
         rendered,
@@ -699,7 +700,7 @@ fn page_parts(
     )?;
     let normal = normal_shown(menu_clip.menu) || layers.any_normal();
     if normal {
-        objects.extend(build_normal_objects(rendered, count, &colours)?);
+        objects.extend(build_normal_objects(rendered, &own, count, &colours)?);
         layers.paint(
             &mut objects,
             rendered,
@@ -1016,7 +1017,8 @@ impl PagePicture {
 
     /// The picture outside the rectangles `buttons` (x, y, width, height), as rectangles that overlap neither them
     /// nor each other, each shrunk to what it shows: the bands between the buttons' tops and bottoms, cut where the
-    /// buttons are.
+    /// buttons are. A piece is at least [`MIN_OBJECT_SIDE`] each way (grown within its band; one whose band is
+    /// narrower is left out).
     fn beside(&self, buttons: &[(u16, u16, u16, u16)]) -> Vec<(u16, u16, u16, u16)> {
         let (left, top, right, bottom) = self.bounds;
         let (right, bottom) = (right + 1, bottom + 1);
@@ -1063,7 +1065,12 @@ impl PagePicture {
         }
         rects
             .into_iter()
-            .filter_map(|(x0, y0, x1, y1)| self.shrink(x0, y0, x1, y1))
+            .filter_map(|(x0, y0, x1, y1)| {
+                let (x, y, width, height) = self.shrink(x0, y0, x1, y1)?;
+                let (x, width) = at_least(x0, x1, x, width)?;
+                let (y, height) = at_least(y0, y1, y, height)?;
+                Some((x, y, width, height))
+            })
             .collect()
     }
 
@@ -1089,6 +1096,21 @@ impl PagePicture {
             u16::try_from(d - b + 1).ok()?,
         ))
     }
+}
+
+/// The smallest an interactive graphics object is each way (BD-ROM: 8 to 4096 pixels; Encore refuses a build with a
+/// smaller one, "Spec 9.14.4.2.2.2.1.1.1").
+const MIN_OBJECT_SIDE: u16 = 8;
+
+/// The span `at`, `length` grown to [`MIN_OBJECT_SIDE`] inside `lo..hi`; `None` when that is narrower.
+fn at_least(lo: usize, hi: usize, at: u16, length: u16) -> Option<(u16, u16)> {
+    if length >= MIN_OBJECT_SIDE {
+        return Some((at, length));
+    }
+    let side = usize::from(MIN_OBJECT_SIDE);
+    let last = hi.checked_sub(side).filter(|last| *last >= lo)?;
+    let start = usize::from(at).min(last).max(lo);
+    Some((u16::try_from(start).ok()?, MIN_OBJECT_SIDE))
 }
 
 /// Lays `pixels` (a button state's palette ids) over `under` (the page's picture there): the state where it draws,
@@ -1611,9 +1633,24 @@ fn normal_shown(menu: &Menu) -> bool {
         .any(|color| color.opacity > 0)
 }
 
-/// The normal-state objects of an always-on menu whose normal colour is seen: each button's frame.
+/// Each button's own highlight, without the other buttons' (`disccraft_menu::button_highlight`): a button's states
+/// show only its own, however the buttons overlap (GitHub issue #13: a picture laid out as a button over the
+/// others showed all their highlights, and they its frame).
+fn button_highlights(
+    project: &Project,
+    menu: &Menu,
+    count: usize,
+) -> Result<Vec<HighlightLayer>, BdError> {
+    (0..count)
+        .map(|index| disccraft_menu::button_highlight(project, menu, index).map_err(menu_error))
+        .collect()
+}
+
+/// The normal-state objects of an always-on menu whose normal colour is seen: each button's frame (from `own`, each
+/// button's own highlight).
 fn build_normal_objects(
     rendered: &RenderedMenu,
+    own: &[HighlightLayer],
     button_count: usize,
     colours: &IgColours,
 ) -> Result<Vec<IgObject>, BdError> {
@@ -1630,7 +1667,8 @@ fn build_normal_objects(
             width,
             height,
             pixels: crop_highlight(
-                &rendered.highlight,
+                own.get(index)
+                    .ok_or_else(|| invalid("missing button highlight"))?,
                 geometry,
                 (width, height),
                 colours.slots(State::Normal, 0),
@@ -1641,9 +1679,10 @@ fn build_normal_objects(
     Ok(objects)
 }
 
+/// Each button's selected and activated objects, from its own highlight (`own`).
 fn build_objects(
     rendered: &RenderedMenu,
-    menu: &Menu,
+    (menu, own): (&Menu, &[HighlightLayer]),
     button_count: usize,
     colours: &IgColours,
 ) -> Result<Vec<IgObject>, BdError> {
@@ -1658,16 +1697,19 @@ fn build_objects(
         let width = rect_width(geometry.x1, geometry.x2)?;
         let height = rect_height(geometry.y1, geometry.y2)?;
         let group = button_group(menu, index);
+        let highlight = own
+            .get(index)
+            .ok_or_else(|| invalid("missing button highlight"))?;
 
         let selected_pixels = crop_highlight(
-            &rendered.highlight,
+            highlight,
             geometry,
             (width, height),
             colours.slots(State::Selected, group),
             colours,
         )?;
         let activated_pixels = crop_highlight(
-            &rendered.highlight,
+            highlight,
             geometry,
             (width, height),
             colours.slots(State::Activated, group),
@@ -1980,9 +2022,44 @@ fn bdmv_error(error: impl std::fmt::Display) -> BdError {
 
 #[cfg(test)]
 mod tests {
-    use super::{IgColours, State, build_objects, normal_shown};
+    use super::{IgColours, PagePicture, State, build_objects, normal_shown};
     use disccraft_menu::HighlightLayer;
     use disccraft_project::{ColorSet, GroupColor, HighlightGroup, Link, NormalColor, Project};
+
+    /// A page's picture beside its buttons comes in pieces of at least 8 x 8 pixels (BD-ROM, Encore's check): a
+    /// 1-pixel line grows into its band; a line in a gap narrower than 8 between two buttons is left out.
+    #[test]
+    fn the_pieces_beside_the_buttons_are_at_least_8_pixels() {
+        let width = 64;
+        let mut ids = vec![0_u8; width * 40];
+        // A line one pixel high across the top, and one between the buttons at x 20..23.
+        for x in 0..width {
+            ids[2 * width + x] = 1;
+        }
+        for y in 10..30 {
+            ids[y * width + 21] = 1;
+        }
+        let picture = PagePicture {
+            width,
+            ids,
+            bounds: (0, 2, 63, 29),
+            entries: Vec::new(),
+        };
+        let buttons = [(0, 10, 20, 20), (23, 10, 20, 20)];
+        let pieces = picture.beside(&buttons);
+        assert!(!pieces.is_empty());
+        for (x, y, w, h) in &pieces {
+            assert!(*w >= 8 && *h >= 8, "{pieces:?}");
+            // None overlaps a button.
+            for (bx, by, bw, bh) in buttons {
+                let apart = x + w <= bx || bx + bw <= *x || y + h <= by || by + bh <= *y;
+                assert!(apart, "{pieces:?}");
+            }
+        }
+        // The top line is shown (its piece starts at row 2); the 3-pixel gap's line is not.
+        assert!(pieces.iter().any(|(_, y, w, _)| *y == 2 && *w == 64));
+        assert!(!pieces.iter().any(|(x, y, _, _)| *x == 21 && *y >= 10));
+    }
 
     #[test]
     fn a_rich_highlight_keeps_the_smooth_edges_of_its_text()
@@ -1996,7 +2073,8 @@ mod tests {
         let ids = |menu: &disccraft_project::Menu| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
             let rendered = disccraft_menu::render_menu(&project, menu)?;
             let colours = IgColours::new(menu, &rendered.highlight);
-            let objects = build_objects(&rendered, menu, 1, &colours)?;
+            let own = super::button_highlights(&project, menu, 1)?;
+            let objects = build_objects(&rendered, (menu, &own), 1, &colours)?;
             let selected = objects.first().ok_or("selected object")?;
             let mut ids: Vec<u8> = selected
                 .pixels
@@ -2059,7 +2137,8 @@ mod tests {
             .find(|entry| entry.id == 1)
             .ok_or("entry 1")?;
         assert_eq!(selected.alpha, 128);
-        let objects = build_objects(&rendered, &menu, 2, &colours)?;
+        let own = super::button_highlights(&project, &menu, 2)?;
+        let objects = build_objects(&rendered, (&menu, &own), 2, &colours)?;
         let used = |id: u16| {
             objects
                 .iter()

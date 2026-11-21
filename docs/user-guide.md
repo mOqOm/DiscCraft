@@ -603,19 +603,23 @@ order they are to play (so extras can be watched in any order).
 | **File ▸ New ▸ Menu** (Ctrl+M) | An empty menu, with the same guides as Encore |
 | **File ▸ Import ▸ Menu…** (Shift+Ctrl+I) | Makes a menu from a PSD / `.pcraft`. Groups whose names start with `(+)` become buttons |
 | **New Menu** on a **Library** preset | Made from one of DiscCraft's own templates |
-| **Menu ▸ Add New Page** | The next page of the open menu (same background and settings). A page is an empty menu of its own: put its buttons on it. The pages are listed under their menu in the Menus panel (**Page 1**, **Page 2**…), the viewer's tab says which page is open, and the arrows under the viewer go from page to page. A link reaches a page through its menu's name ▸ **Page n** in the link lists. On a Blu-ray the pages are one menu, as Encore builds them: going from page to page only changes the buttons and what the page draws, while the background video and the menu's sound play on without starting again. That needs pages that share the first page's background, sound, duration and loops (as **Add New Page** makes them) and at most 8 pages; otherwise each page is built as a menu of its own and turning a page starts it from the beginning. A pop-up menu's pages pop up together over the title ([Blu-ray](#1410-blu-ray)). On a DVD each page is always a menu of its own |
+| **Menu ▸ Add New Page** | The next page of the open menu (same background and settings). A page is an empty menu of its own: put its buttons on it. The pages are listed under their menu in the Menus panel (**Page 1**, **Page 2**…), the viewer's tab says which page is open, and the arrows under the viewer go from page to page. The Layers panel shows them as Encore does, as `(#) Page n` groups above the first page's layers (the last page on top): a click on one shows that page, and its arrow opens it to the page's own layers. A link reaches a page through its menu's name ▸ **Page n** in the link lists. On a Blu-ray the pages are one menu, as Encore builds them: going from page to page only changes the buttons and what the page draws, while the background video and the menu's sound play on without starting again. That needs pages that share the first page's background, sound, duration and loops (as **Add New Page** makes them), up to 254 pages, however much they draw; otherwise each page is built as a menu of its own and turning a page starts it from the beginning. A pop-up menu's pages pop up together over the title ([Blu-ray](#1410-blu-ray)). On a DVD each page is always a menu of its own |
 
 The first menu made becomes **First Play** and the **Title Button** automatically.
 
-The rules for PSD layer names: a group starting with `(+)` is a button; `(=1)` / `(=2)` / `(=3)` are the button's
+The rules for PSD layer names: a group starting with `(+)` is a button (so are the `(+#)` chapter, `(+>)` next page
+and `(+<)` previous page buttons of a chapter index Encore made, which come in with those kinds); `(=1)` / `(=2)` / `(=3)` are the button's
 highlight (subpicture), drawn in colours 1 / 2 / 3 of the menu's colour set; `(%)` is a video thumbnail button; `(^)`
 is auto activate. With the colour set on **Automatic**, the colours come from the layers, as in Encore: the first
 button's layer colours (each layer's last opaque pixel) become highlight group 1 and the next button with different
 colours group 2; buttons with the same colours share that group, and any others use group 1. A colour a button has
-no layer for is a light tint at 47 %.
+no layer for is a light tint at 47 %. As in Encore, a button covers all the layers of its set, hidden ones too, and
+shows only its own highlight layers when it is selected: a set without them (a picture laid out as a button) shows no
+highlight. (A button made in DiscCraft without a subpicture or text highlight gets a frame instead.)
 
 A group at the top of the layers whose name starts with `(#)` is a page of the menu, as in Encore: the menu gets a
 page for each such group (the lowest first; the name after `(#)` does not matter), with the buttons in the group.
+A hidden page group is no page, as in Encore.
 The `(+)` groups outside the page groups are the first page's buttons, and the layers outside them that are not
 buttons are shown on every page. If no buttons are outside the page groups, the lowest page group is the first page
 (Encore keeps an empty first page there). On a Blu-ray these pages turn without starting the background again.
@@ -1090,6 +1094,14 @@ sensible path for you (the rules are in [Preferences ▸ Menus](#15-preferences)
 project, so the disc routes the same wherever it is built). Set it by hand when the buttons are arranged
 oddly, when a row should not wrap, or when a route should lead somewhere nobody would think to look.
 
+The automatic routing follows Adobe Encore CS6's rules. Buttons whose left (top) edges or centres line up
+within 9 px form a column (row): up and down (left and right) walk along it and wrap at the ends. A button
+just out of line (overlapping the row but 10 to 18 px off) breaks the whole row, and so do buttons that partly
+overlap each other. A bar that contains other buttons (a strip behind a row of items) is in no row and steps
+into the buttons inside it. Without a row or column, an arrow goes to the nearest button that way (up and down
+only within about 68° of straight on), or else to one beside it. When "Next" and "Previous" buttons are left
+out, the leftmost button goes up and left to "Previous" and the rightmost down and right to "Next".
+
 1. Click the menu's background — not a button or text — so the Properties panel shows the menu's sheet,
    and turn off **Automatically Route Buttons** on the **Basic** tab.
 2. **View ▸ Show Button Routing** (Ctrl+7) draws a cross on every button: the number in the middle is the
@@ -1284,7 +1296,7 @@ authoring mode, and the **Disc** panel also chooses the video's size, SD (MPEG-2
   set the timeline's **Remote Menu** to it. The viewer can call it up in the middle of a title. It shows what the
   menu draws over the video — texts, pictures and the buttons as you designed them — without the menu's
   background. A pop-up menu with pages (**Menu ▸ Add New Page**) pops up with all of them, on its first page: a
-  button to another of its pages turns the page while the title plays on (up to 8 pages of up to 254 buttons;
+  button to another of its pages turns the page while the title plays on (up to 254 pages of up to 254 buttons;
   otherwise such a button leaves the title for that page's menu, as before)
 - HD (1080p, 720p) is H.264, and clips are joined at IDR pictures, so trims come out exactly where you
   cut them — unlike a DVD, where a converted clip is cut at a GOP start.

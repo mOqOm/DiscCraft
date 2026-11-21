@@ -10,8 +10,14 @@ const PCS_TYPE: u8 = 0x16;
 const WDS_TYPE: u8 = 0x17;
 const END_TYPE: u8 = 0x80;
 
-const MAX_SEGMENT_BODY: usize = 65535;
+/// The longest segment body made: a segment goes in a PES packet of its own with PTS and DTS, so its body is at most
+/// 65535 (PES_packet_length) - 3 (PES header flags) - 10 (PTS and DTS) - 3 (segment header) bytes. Encore CS6 splits
+/// its objects at the same size (2026-11-21); at the segment's own limit of 65535, the PES packet did not fit.
+pub(crate) const MAX_SEGMENT_BODY: usize = 65519;
 const MAX_U24: u32 = 0xFF_FFFF;
+/// A segment sequence's first and last fragments (both on a segment that is the whole sequence).
+const FIRST_IN_SEQUENCE: u8 = 0x80;
+const LAST_IN_SEQUENCE: u8 = 0x40;
 
 fn err(message: &str) -> PgsError {
     PgsError(message.to_string())
@@ -135,7 +141,9 @@ fn ods_split(
     let mut segments = Vec::new();
 
     let mut body = Vec::new();
-    push_object_header(&mut body, object_id, version, 0x40, data_len);
+    // The sequence descriptor: first_in_sequence is 0x80 and last_in_sequence 0x40 (as in the ICS, and as
+    // Encore CS6 writes its split objects). They were the other way round until M10.36.
+    push_object_header(&mut body, object_id, version, FIRST_IN_SEQUENCE, data_len);
     body.extend_from_slice(&width.to_be_bytes());
     body.extend_from_slice(&height.to_be_bytes());
     body.extend_from_slice(first);
@@ -150,7 +158,11 @@ fn ods_split(
     while !remaining.is_empty() {
         let part_len = min(remaining.len(), max_part);
         let (part, next) = remaining.split_at(part_len);
-        let flags = if next.is_empty() { 0x80 } else { 0x00 };
+        let flags = if next.is_empty() {
+            LAST_IN_SEQUENCE
+        } else {
+            0x00
+        };
 
         let mut body = Vec::new();
         body.extend_from_slice(&object_id.to_be_bytes());
@@ -366,21 +378,30 @@ mod tests {
     }
 
     #[test]
-    fn ods_splits_at_65535() {
+    fn ods_splits_to_fit_a_pes_packet() {
         let rle = vec![0u8; 70000];
         let segments = ods(0, 0, 1, 1, &rle).unwrap_or_default();
 
+        // Each segment fits a PES packet with PTS and DTS (65535 - 13): 65519 bytes of body, as Encore CS6 makes.
         assert_eq!(segments.len(), 2);
-        assert_eq!(segments.first().map(|segment| segment.len()), Some(65538));
-        assert_eq!(segments.get(1).map(|segment| segment.len()), Some(4483));
+        assert_eq!(segments.first().map(|segment| segment.len()), Some(65522));
+        assert_eq!(segments.get(1).map(|segment| segment.len()), Some(4499));
+        // First in sequence 0x80, last 0x40 (Encore's split objects; they were swapped before M10.36).
         assert_eq!(
             segments.first().and_then(|segment| segment.get(6)).copied(),
-            Some(0x40)
+            Some(0x80)
         );
         assert_eq!(
             segments.get(1).and_then(|segment| segment.get(6)).copied(),
-            Some(0x80)
+            Some(0x40)
         );
+        // A middle fragment is neither.
+        let three = ods(0, 0, 1, 1, &vec![0u8; 140_000]).unwrap_or_default();
+        let flags: Vec<u8> = three
+            .iter()
+            .filter_map(|segment| segment.get(6).copied())
+            .collect();
+        assert_eq!(flags, [0x80, 0x00, 0x40]);
     }
 
     #[test]

@@ -3,11 +3,10 @@
 use std::cmp::min;
 
 use crate::rle_encode;
-use crate::segment::{end, ods, pds};
+use crate::segment::{MAX_SEGMENT_BODY, end, ods, pds};
 use crate::{PaletteEntry, PgsError, TimedSegment};
 
 const ICS_TYPE: u8 = 0x18;
-const MAX_SEGMENT_BODY: usize = 65535;
 const MAX_U24: u32 = 0xFF_FFFF;
 
 const VIDEO_DESCRIPTOR_LEN: usize = 5;
@@ -433,31 +432,31 @@ pub fn frame_ticks(id: u8) -> u64 {
     }
 }
 
-/// How long before its presentation an IG display set starts to be decoded (90 kHz ticks, M10.28): its objects
-/// decoded one after another, or (at an epoch start) the graphics plane cleared, whichever takes longer, in whole
-/// frames, as Encore times a menu's (1920 x 1080 at 29.97: 12,012). A strict player (PowerDVD) shows nothing of a
-/// display set whose objects are not decoded by then.
+/// How long before its presentation an IG display set starts to be decoded (90 kHz ticks, M10.28), in whole frames.
+/// At an epoch start, the time the graphics plane takes to clear, as Encore times a menu's (1920 x 1080 at 29.97:
+/// 12,012), however many objects follow: Encore's 9-page menu of 21.8 MB of objects (GitHub issue #13) still starts
+/// 4 frames before, its objects decoded on past the presentation. At an acquisition point (no plane to clear), the
+/// time its objects take to decode one after another.
 #[must_use]
 pub fn display_set_lead(
     c: &InteractiveComposition,
     objects: &[IgObject],
     state: CompositionState,
 ) -> u64 {
-    let decode: u64 = objects
-        .iter()
-        .map(|object| {
-            ticks(
-                u64::from(object.width) * u64::from(object.height),
-                DECODE_RATE,
-            )
-        })
-        .sum();
-    let clear = match state {
+    let lead = match state {
         CompositionState::EpochStart => ticks(u64::from(c.width) * u64::from(c.height), CLEAR_RATE),
-        CompositionState::AcquisitionPoint => 0,
+        CompositionState::AcquisitionPoint => objects
+            .iter()
+            .map(|object| {
+                ticks(
+                    u64::from(object.width) * u64::from(object.height),
+                    DECODE_RATE,
+                )
+            })
+            .sum(),
     };
     let frame = frame_ticks(c.frame_rate_id);
-    decode.max(clear).div_ceil(frame).saturating_mul(frame)
+    lead.div_ceil(frame).saturating_mul(frame)
 }
 
 /// Encode a complete IG display set at `pts` that starts an epoch.
@@ -706,9 +705,10 @@ mod tests {
 
         let segments = ics(&composition).unwrap_or_default();
 
+        // Each segment fits a PES packet with PTS and DTS (65535 - 13).
         assert_eq!(segments.len(), 2);
-        assert_eq!(segments.first().map(|segment| segment.len()), Some(65538));
-        assert_eq!(segments.get(1).map(|segment| segment.len()), Some(6563));
+        assert_eq!(segments.first().map(|segment| segment.len()), Some(65522));
+        assert_eq!(segments.get(1).map(|segment| segment.len()), Some(6579));
         assert_eq!(
             segments
                 .first()
@@ -779,6 +779,20 @@ mod tests {
         }
         assert_eq!(
             super::display_set_lead(&composition, &objects, super::CompositionState::EpochStart),
+            12_012
+        );
+        // As many objects as Encore's 9-page menu (21.8 MB): still the plane's clearing at an epoch start.
+        let mut large = objects.clone();
+        for id in 13..230 {
+            large.push(IgObject {
+                id,
+                width: 1000,
+                height: 100,
+                pixels: Vec::new(),
+            });
+        }
+        assert_eq!(
+            super::display_set_lead(&composition, &large, super::CompositionState::EpochStart),
             12_012
         );
         // Without a plane to clear, the objects' 4,321 in whole frames.
