@@ -158,6 +158,27 @@ pub fn render_menu(project: &Project, menu: &Menu) -> Result<RenderedMenu, MenuE
     render_disc_menu(project, menu, MenuPictures::default())
 }
 
+/// The highlight of the button `index` of `menu` alone (as the menu's own highlight draws it, without the other
+/// buttons'): the states of a disc's button show only its own (GitHub issue #13: a picture laid out as a button
+/// over the others took their highlights into its own).
+///
+/// # Errors
+///
+/// When the menu has no such button.
+pub fn button_highlight(
+    project: &Project,
+    menu: &Menu,
+    index: usize,
+) -> Result<HighlightLayer, MenuError> {
+    let button = menu
+        .buttons
+        .get(index)
+        .ok_or_else(|| MenuError::Invalid("the menu has no such button".to_string()))?;
+    let mut alone = menu.clone();
+    alone.buttons = vec![button.clone()];
+    highlight::build(&alone, draw::is_document_menu(project, menu))
+}
+
 /// Renders a menu for a disc like [`render_menu`], with `pictures` (a motion menu's frame, the buttons' video
 /// thumbnails).
 ///
@@ -239,7 +260,7 @@ fn render(
     draw::draw_thumbnails(menu, width, height, &mut rgb, pictures.thumbnails);
     draw::draw_labels(menu, width, height, &mut rgb);
 
-    let highlight = highlight::build(menu, width, height)?;
+    let highlight = highlight::build(menu, draw::is_document_menu(project, menu))?;
     let buttons = button_geometry(menu, &project.settings.routing);
     let colors = palette::dvd_colors(menu, &highlight);
 
@@ -297,6 +318,7 @@ pub fn menu_psd_layers(
     picture: Option<(&[u8], usize, usize)>,
 ) -> Result<(u16, u16, Vec<disccraft_photo::PsdLayer>), MenuError> {
     use disccraft_photo::PsdLayer;
+    let artwork = draw::is_document_menu(project, menu);
     let (width, height) = frame_size(&project.settings);
     let mut rgb = draw::new_frame(width, height)?;
     let scaled = picture.is_some_and(|(pixels, picture_width, picture_height)| {
@@ -351,7 +373,7 @@ pub fn menu_psd_layers(
             button.label.clone()
         };
         let rect = button.rect;
-        let values = highlight::button_values(menu, index).unwrap_or_default();
+        let values = highlight::button_values(menu, index, artwork).unwrap_or_default();
         let mut highlights = Vec::new();
         // A PSD button's layers in their own colours (M6.335) go back as they are.
         let own = highlight::color_layers(button);
@@ -651,9 +673,62 @@ fn button_geometry(menu: &Menu, options: &disccraft_project::RouteOptions) -> Ve
 
 #[cfg(test)]
 mod tests {
-    use super::{auto_route, render_menu, ycrcb_entry};
+    use super::{auto_route, button_highlight, render_menu, ycrcb_entry};
     use disccraft_project::{Link, MenuBackground, Project, Rect};
     use std::error::Error;
+
+    /// GitHub issue #13: a button's own highlight leaves the other buttons' out, and in a menu made from a PSD a button
+    /// without subpicture layers (a picture laid out as a button) has none, as in Encore, not DiscCraft's frame.
+    #[test]
+    fn a_buttons_own_highlight_and_a_psd_buttons_without_layers() -> Result<(), Box<dyn Error>> {
+        let mut project = Project::default();
+        let menu_id = project.add_menu(None)?;
+        project.menu_mut(menu_id).ok_or("menu")?.buttons.clear();
+        let wide = Rect {
+            x: 0,
+            y: 40,
+            w: 200,
+            h: 10,
+        };
+        let small = Rect {
+            x: 50,
+            y: 20,
+            w: 40,
+            h: 40,
+        };
+        project.add_button(menu_id, String::new(), Some(wide), Link::NotSet)?;
+        project.add_button(menu_id, String::new(), Some(small), Link::NotSet)?;
+        let menu = project.menu(menu_id).ok_or("menu")?.clone();
+        let value = |layer: &super::HighlightLayer, x: u16, y: u16| -> u8 {
+            if x < layer.x
+                || y < layer.y
+                || x >= layer.x + layer.width
+                || y >= layer.y + layer.height
+            {
+                return 0;
+            }
+            let at = usize::from(y - layer.y) * usize::from(layer.width) + usize::from(x - layer.x);
+            layer.pixels.get(at).copied().unwrap_or(0)
+        };
+        // The whole menu's highlight has the wide button's frame across the small one; its own has only its frame.
+        let all = render_menu(&project, &menu)?.highlight;
+        assert_ne!(value(&all, 60, 40), 0);
+        let own = button_highlight(&project, &menu, 1)?;
+        assert_eq!(value(&own, 60, 40), 0);
+        assert_ne!(value(&own, 60, 20), 0);
+        // Made from a PSD: no frame for either.
+        let psd = project.add_asset(std::path::Path::new("missing-menu.psd"))?;
+        let mut from_psd = menu.clone();
+        from_psd.background = MenuBackground::Image { asset: psd };
+        for index in 0..2 {
+            let layer = button_highlight(&project, &from_psd, index)?;
+            assert!(
+                layer.pixels.iter().all(|value| *value == 0),
+                "button {index}"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn a_buttons_subpicture_is_its_highlight_and_goes_through_a_psd() -> Result<(), Box<dyn Error>>

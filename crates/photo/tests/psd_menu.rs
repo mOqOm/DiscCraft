@@ -252,7 +252,8 @@ fn a_photocraft_document_reads_like_its_psd() {
 /// M10.27: a menu PSD with Encore's `(#)` page groups. Its top level's `(+)` groups are the first page's buttons,
 /// each `(#)` group's its own page's (the lowest group first, whatever its name). The shared picture leaves the
 /// buttons and the pages out; page 0's picture is the top level's buttons, each later page's its group, over
-/// transparency, highlights left out.
+/// transparency, highlights left out. A hidden `(#)` group is no page and its buttons are no one's (Encore, GitHub
+/// issue #13).
 #[test]
 fn page_groups_are_the_menus_pages() {
     let mut b = PsdBuilder::new(W, H);
@@ -341,6 +342,20 @@ fn page_groups_are_the_menus_pages() {
     ));
     b.end_group().unwrap();
     b.end_group().unwrap();
+    let mut hidden = GroupSpec::new("(#) Hidden");
+    hidden.visible = false;
+    b.begin_group(hidden);
+    b.begin_group(GroupSpec::new("(+) Unused"));
+    b.push_layer(LayerSpec::new(
+        "label",
+        40,
+        40,
+        10,
+        6,
+        solid(10, 6, [255, 255, 255, 255]),
+    ));
+    b.end_group().unwrap();
+    b.end_group().unwrap();
     b.composite(solid(W, H, [0, 0, 80, 255]));
     let path =
         std::env::temp_dir().join(format!("disccraft-photo-pages-{}.psd", std::process::id()));
@@ -378,4 +393,45 @@ fn page_groups_are_the_menus_pages() {
     assert_eq!(pixel(&pages.pages[2], 52, 42), [255, 0, 255, 255]);
     assert_eq!(pixel(&pages.pages[2], 42, 2)[3], 0);
     let _ = std::fs::remove_file(&path);
+}
+
+/// GitHub issue #13: like Encore's, a button covers its set's hidden layers too (a set whose text layer is hidden,
+/// its words drawn by another layer): not only the small highlight layer.
+#[test]
+fn a_buttons_place_covers_its_hidden_layers() {
+    let mut b = PsdBuilder::new(W, H);
+    b.push_layer(LayerSpec::new(
+        "Background",
+        0,
+        0,
+        W,
+        H,
+        solid(W, H, [0, 0, 80, 255]),
+    ));
+    b.begin_group(GroupSpec::new("(+) PLAY ALL"));
+    let mut text = LayerSpec::new(
+        "Play All",
+        0,
+        30,
+        40,
+        10,
+        solid(40, 10, [255, 255, 255, 255]),
+    );
+    text.visible = false;
+    b.push_layer(text);
+    let mut mark = LayerSpec::new("(=1)select", 2, 32, 4, 4, solid(4, 4, [0, 255, 0, 255]));
+    mark.visible = false;
+    b.push_layer(mark);
+    b.end_group().unwrap();
+    b.composite(solid(W, H, [0, 0, 80, 255]));
+    let path =
+        std::env::temp_dir().join(format!("disccraft-photo-hidden-{}.psd", std::process::id()));
+    std::fs::write(&path, b.to_bytes().unwrap()).unwrap();
+    let menu = load_psd_menu(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    let button = &menu.buttons[0];
+    assert_eq!(
+        (button.x, button.y, button.width, button.height),
+        (0, 30, 40, 10)
+    );
 }

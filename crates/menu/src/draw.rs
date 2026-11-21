@@ -144,6 +144,18 @@ pub(crate) fn psd_page_rect(
 }
 
 /// The pictures by page of the menu's PSD background (M10.27), when the menu names a page and its background is a
+/// Whether `menu` is made from a layered document (its background a PSD or PhotoCraft document): its buttons are
+/// pictures of that document, highlighted only by their own subpicture layers.
+pub(crate) fn is_document_menu(project: &Project, menu: &Menu) -> bool {
+    let MenuBackground::Image { asset } = &menu.background else {
+        return false;
+    };
+    project
+        .assets
+        .get(asset)
+        .is_some_and(|asset| disccraft_photo::is_document(Path::new(&asset.path)))
+}
+
 /// layered document; kept for the last few files (a menu is drawn again and again as it is edited).
 fn psd_pages(
     project: &Project,

@@ -1905,6 +1905,10 @@ fn run_apply_psd(session: &mut Session, params: &Value) -> CommandResult {
                 if !found.name.is_empty() {
                     button.name.clone_from(&found.name);
                 }
+                // A chapter index button's prefix gives its kind; an ordinary `(+)` keeps the one set by hand.
+                if found.kind != disccraft_project::ButtonKind::Normal {
+                    button.kind = found.kind;
+                }
             }
             None => menu.buttons.push(psd_button(found, group)),
         }
@@ -1939,7 +1943,7 @@ fn psd_button(found: &PsdMenuButton, highlight_group: u8) -> disccraft_project::
         routes: None,
         audio: None,
         subtitle: disccraft_project::SubtitleDefault::NoChange,
-        kind: Default::default(),
+        kind: found.kind,
         text_subpicture: false,
         transition: None,
         label_format: Default::default(),
@@ -2055,6 +2059,8 @@ struct PsdMenuButton {
     subpicture: Option<disccraft_project::Subpicture>,
     /// The colours of those layers.
     subpicture_colors: [Option<[u8; 3]>; 3],
+    /// Its kind by the group name's prefix (`(+#)` / `(+>)` / `(+<)`).
+    kind: disccraft_project::ButtonKind,
 }
 
 /// Encore's automatic colour set of a PSD menu (M6.336): the colours of highlight groups 1 and 2, and each button's
@@ -2146,6 +2152,12 @@ fn psd_buttons(
         });
         PsdMenuButton {
             name: button.name.clone(),
+            kind: match button.kind {
+                disccraft_photo::PsdButtonKind::Normal => disccraft_project::ButtonKind::Normal,
+                disccraft_photo::PsdButtonKind::Chapter => disccraft_project::ButtonKind::Chapter,
+                disccraft_photo::PsdButtonKind::Next => disccraft_project::ButtonKind::Next,
+                disccraft_photo::PsdButtonKind::Previous => disccraft_project::ButtonKind::Previous,
+            },
             rect,
             thumbnail,
             subpicture,
@@ -3395,6 +3407,82 @@ mod tests {
                 && !white(at(&session.project, added, 150, 390)?)
         );
         assert!(at(&session.project, added, 550, 70)?[0] < 50);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// The button sets of a chapter index Encore writes come in with their kinds (Encore routes `(+>)` / `(+<)` as
+    /// next / previous buttons, GitHub issue #13); applying the PSD again keeps a kind set by hand on a `(+)`.
+    #[test]
+    fn a_psds_chapter_index_buttons_keep_their_kinds() -> Result<(), Box<dyn Error>> {
+        use disccraft_photo::PsdLayer;
+        use disccraft_project::ButtonKind;
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-import-kinds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let (w, h) = (720u32, 480u32);
+        let button = |name: &str, x: u32| {
+            let mut rgba = vec![0u8; (w * h * 4) as usize];
+            for y in 300..340 {
+                for x in x..x + 100 {
+                    let i = ((y * w + x) * 4) as usize;
+                    rgba[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+                }
+            }
+            PsdLayer::Group {
+                name: name.to_owned(),
+                children: vec![PsdLayer::Raster {
+                    name: "art".to_owned(),
+                    rgba,
+                    visible: true,
+                }],
+            }
+        };
+        let path = dir.join("Index.psd");
+        disccraft_photo::write_layered_psd(
+            &path,
+            w,
+            h,
+            &[
+                button("(+) Play", 20),
+                button("(+#) Chapter 1", 140),
+                button("(+>) next", 260),
+                button("(+<) Previous", 380),
+            ],
+        )?;
+        let path_text = path.to_string_lossy().into_owned();
+        let mut session = Session::new();
+        let imported = session.execute("menu.import", &serde_json::json!({ "path": path_text }))?;
+        let menu = MenuId(value_u64(&imported, "menu")?);
+        let kinds = |session: &Session| -> Vec<ButtonKind> {
+            session
+                .project
+                .menu(menu)
+                .map(|menu| menu.buttons.iter().map(|button| button.kind).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            kinds(&session),
+            [
+                ButtonKind::Normal,
+                ButtonKind::Chapter,
+                ButtonKind::Next,
+                ButtonKind::Previous
+            ]
+        );
+        if let Some(play) = session
+            .project
+            .menu_mut(menu)
+            .and_then(|menu| menu.buttons.first_mut())
+        {
+            play.kind = ButtonKind::Main;
+        }
+        session.execute(
+            "menu.applyPsd",
+            &serde_json::json!({ "menu": menu.0, "path": path_text }),
+        )?;
+        assert_eq!(kinds(&session).first(), Some(&ButtonKind::Main));
+        assert_eq!(kinds(&session).get(2), Some(&ButtonKind::Next));
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

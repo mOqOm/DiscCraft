@@ -50,11 +50,28 @@ pub enum PhotoError {
     Invalid(String),
 }
 
+/// What a PSD button is, by its group name's prefix: `(+)` an ordinary button, and Encore's chapter index buttons
+/// `(+#)` a chapter, `(+>)` the next page and `(+<)` the previous page.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PsdButtonKind {
+    /// `(+)`.
+    #[default]
+    Normal,
+    /// `(+#)`.
+    Chapter,
+    /// `(+>)`.
+    Next,
+    /// `(+<)`.
+    Previous,
+}
+
 /// A menu button found in a PSD.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PsdButton {
     /// Button name from the Encore-compatible group name.
     pub name: String,
+    /// Its kind by the group name's prefix.
+    pub kind: PsdButtonKind,
     /// X coordinate relative to the canvas origin.
     pub x: u32,
     /// Y coordinate relative to the canvas origin.
@@ -116,13 +133,15 @@ pub struct PsdPages {
     /// The layers outside the pages that are not buttons, highlight layers hidden: the picture under every page.
     pub shared: Image8,
     /// Each page's own layers over transparency, highlight layers hidden: page 0 the top level's `(+)` groups,
-    /// then each `(#)` group (shown whatever its own eye says), the lowest first.
+    /// then each shown `(#)` group (a hidden one is no page), the lowest first.
     pub pages: Vec<Image8>,
 }
 
 const MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 pub(crate) const MAX_DIMENSION: u32 = 8192;
-const BUTTON_PREFIX: &str = "(+)";
+/// Encore's button sets: `(+)`, and those of a chapter index Encore writes, `(+#)` (a chapter), `(+>)` (to the next
+/// page) and `(+<)` (to the previous page) (docs/encore-behavior.md 9.5b; issue #13: an Encore menu's PSD lost them).
+const BUTTON_PREFIXES: [&str; 4] = ["(+)", "(+#)", "(+>)", "(+<)"];
 /// Encore's prefix of a menu page's layer group.
 const PAGE_PREFIX: &str = "(#)";
 
@@ -206,7 +225,7 @@ pub fn load_psd_menu(path: &Path) -> Result<PsdMenu, PhotoError> {
     })
 }
 
-/// How many pages the menu PSD at `path` has: 1, and one more for each `(#)` group at its top level (M10.27).
+/// How many pages the menu PSD at `path` has: 1, and one more for each shown `(#)` group at its top level (M10.27).
 ///
 /// # Errors
 ///
@@ -234,7 +253,7 @@ pub fn load_menu_pages(path: &Path) -> Result<PsdPages, PhotoError> {
             if !keep(index, layer) {
                 layer.visible = false;
             } else if is_page_group(layer) {
-                // A page shows whatever its group's own eye says (Encore hides the other pages' groups).
+                // A page shows its group (Encore hides the other pages' groups as it shows one).
                 layer.visible = true;
             }
         }
@@ -359,7 +378,8 @@ fn render_background(doc: &Document, canvas: Rect) -> Result<Image8, PhotoError>
 }
 
 /// The `(+)` groups in `layers` and the groups under them, bottom to top; `skip_pages`: not inside `(#)` groups
-/// (a paged menu's top level, whose pages have buttons of their own).
+/// (a paged menu's top level, whose pages have buttons of their own). Never inside a hidden `(#)` group, which is no
+/// page.
 fn collect_button_layers(layers: &[Layer], skip_pages: bool) -> Vec<Layer> {
     let mut out = Vec::new();
 
@@ -368,7 +388,7 @@ fn collect_button_layers(layers: &[Layer], skip_pages: bool) -> Vec<Layer> {
         if let LayerContent::Group(group) = &layer.content {
             if is_button_name(&layer.name) {
                 out.push(layer.clone());
-            } else if !(skip_pages && is_page_name(&layer.name)) {
+            } else if !(is_page_name(&layer.name) && (skip_pages || !layer.visible)) {
                 out.extend(collect_button_layers(&group.children, false));
             }
         }
@@ -514,7 +534,7 @@ fn build_button(layer: Layer, canvas: Rect) -> Option<PsdButton> {
     let highlight_bbox = highlight_bbox(&highlight_buffers, canvas);
     let button_bbox = button_bbox(&layer, canvas);
 
-    // Like Encore, the button covers its whole layer set: the visible layers and the highlight layers.
+    // Like Encore, the button covers its whole layer set: its layers, hidden ones too, and the highlight layers.
     let rect = match (button_bbox, highlight_bbox) {
         (Some(a), Some(b)) => union_bbox(&[a, b])?,
         (a, b) => a.or(b)?,
@@ -531,6 +551,7 @@ fn build_button(layer: Layer, canvas: Rect) -> Option<PsdButton> {
     });
 
     Some(PsdButton {
+        kind: button_kind(&layer.name),
         name,
         x: u32::try_from(rect.x0).ok()?,
         y: u32::try_from(rect.y0).ok()?,
@@ -643,11 +664,14 @@ fn find_thumbnail_layer(layer: &Layer) -> Option<&Layer> {
     })
 }
 
+/// Where a button set's layers draw, hidden ones too (Encore's button covers a hidden text layer of its set, GitHub
+/// issue #13), its highlight layers left out.
 fn button_bbox(layer: &Layer, canvas: Rect) -> Option<Rect> {
-    let mut hidden = layer.clone();
-    hide_highlight_layer(&mut hidden);
+    let mut all = layer.clone();
+    force_visible(&mut all);
+    hide_highlight_layer(&mut all);
 
-    let buffer = render_layer(&hidden, canvas);
+    let buffer = render_layer(&all, canvas);
     alpha_bbox(&buffer, canvas)
 }
 
@@ -1102,7 +1126,9 @@ fn clamp_i64(value: i64, min: i64, max: i64) -> i64 {
 }
 
 fn is_button_name(name: &str) -> bool {
-    name.starts_with(BUTTON_PREFIX)
+    BUTTON_PREFIXES
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
 }
 
 /// Whether `name` is a menu page's layer group's (Encore's `(#) <name>`).
@@ -1110,9 +1136,10 @@ fn is_page_name(name: &str) -> bool {
     name.trim_start().starts_with(PAGE_PREFIX)
 }
 
-/// Whether `layer` is a menu page's layer group.
+/// Whether `layer` is a menu page's layer group: a shown `(#)` group (Encore makes no page of a hidden one, GitHub
+/// issue #13).
 fn is_page_group(layer: &Layer) -> bool {
-    matches!(layer.content, LayerContent::Group(_)) && is_page_name(&layer.name)
+    matches!(layer.content, LayerContent::Group(_)) && is_page_name(&layer.name) && layer.visible
 }
 
 /// A page group's name after its `(#)`.
@@ -1123,8 +1150,23 @@ fn page_name(name: &str) -> Option<String> {
 }
 
 fn button_name(name: &str) -> Option<String> {
-    name.strip_prefix(BUTTON_PREFIX)
+    BUTTON_PREFIXES
+        .iter()
+        .find_map(|prefix| name.strip_prefix(prefix))
         .map(|rest| rest.trim().to_string())
+}
+
+/// The kind a button's group name gives it (Encore's chapter index buttons, docs/encore-behavior.md 9.5b).
+fn button_kind(name: &str) -> PsdButtonKind {
+    if name.starts_with("(+#)") {
+        PsdButtonKind::Chapter
+    } else if name.starts_with("(+>)") {
+        PsdButtonKind::Next
+    } else if name.starts_with("(+<)") {
+        PsdButtonKind::Previous
+    } else {
+        PsdButtonKind::Normal
+    }
 }
 
 fn is_thumbnail_name(name: &str) -> bool {
@@ -1145,8 +1187,8 @@ fn highlight_value(name: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PhotoError, alpha_bbox, button_name, combine_highlight_buffers, crop_buffer_to_image,
-        is_highlight_name, is_psd, load_image,
+        PhotoError, PsdButtonKind, alpha_bbox, button_kind, button_name, combine_highlight_buffers,
+        crop_buffer_to_image, is_highlight_name, is_psd, load_image,
     };
     use photocraft_compose::Buffer;
     use photocraft_geom::Rect;
@@ -1158,6 +1200,17 @@ mod tests {
         assert_eq!(button_name("(+)").as_deref(), Some(""));
         assert_eq!(button_name("(+)  Play  ").as_deref(), Some("Play"));
         assert_eq!(button_name("Play"), None);
+        // The button sets of a chapter index Encore writes.
+        assert_eq!(button_name("(+#) Chapter 1").as_deref(), Some("Chapter 1"));
+        assert_eq!(button_name("(+#)Chapter 6").as_deref(), Some("Chapter 6"));
+        assert_eq!(button_name("(+>) next 5").as_deref(), Some("next 5"));
+        assert_eq!(button_name("(+<) Previous").as_deref(), Some("Previous"));
+        assert_eq!(button_name("(+x) Other"), None);
+        // And their kinds.
+        assert_eq!(button_kind("(+) Play"), PsdButtonKind::Normal);
+        assert_eq!(button_kind("(+#)Chapter 6"), PsdButtonKind::Chapter);
+        assert_eq!(button_kind("(+>) next 5"), PsdButtonKind::Next);
+        assert_eq!(button_kind("(+<) Previous"), PsdButtonKind::Previous);
     }
 
     #[test]

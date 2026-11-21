@@ -1,7 +1,9 @@
 //! The Layers panel of the open menu, as Encore draws it: the menu's name, then one row per layer from the top
 //! down — each button as a button set `(+) name` that opens to its own layers (its text, video thumbnail and
 //! subpicture), the texts, the images and shapes, and the locked Background — with an eye (shown / hidden), a lock
-//! and the button mark in columns at the left.
+//! and the button mark in columns at the left. A menu with pages shows them as Encore's `(#)` layer groups (GitHub
+//! issue #13): the later pages' groups above the first page's layers, the last page on top, each opening to its
+//! own layers; a click on one shows that page.
 
 use crate::app::{DiscCraftApp, Selection};
 use crate::i18n::{tl, tlf};
@@ -45,6 +47,72 @@ enum LayerClick {
     ToggleHidden(LayerRow),
     ToggleLocked(LayerRow),
     ToggleOpen(usize),
+    /// A page's `(#)` group: show the page.
+    ShowPage,
+    /// A page's `(#)` group's opener.
+    TogglePage,
+}
+
+/// A row of a menu's Layers panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PanelRow {
+    /// A later page of the menu as Encore's `(#)` layer group (its number, counted from 0 as Encore does).
+    Page { page: MenuId, number: usize },
+    /// A layer of `menu`: the first page's at the top level, a later page's inside its group (`nested`).
+    Layer {
+        menu: MenuId,
+        row: LayerRow,
+        nested: bool,
+    },
+}
+
+/// The rows of the menu `root` (its first page) and its pages: each later page's `(#)` group, the last on top, with
+/// its own layers (no background) when `open_page` says it is open, then the first page's layers. `open_button`
+/// says which button sets are open.
+pub(crate) fn panel_rows(
+    project: &disccraft_project::Project,
+    root: MenuId,
+    open_page: impl Fn(MenuId) -> bool,
+    open_button: impl Fn(MenuId, usize) -> bool,
+) -> Vec<PanelRow> {
+    let mut rows = Vec::new();
+    for (number, page) in project
+        .menu_pages(root)
+        .into_iter()
+        .enumerate()
+        .skip(1)
+        .rev()
+    {
+        let Some(menu) = project.menu(page) else {
+            continue;
+        };
+        rows.push(PanelRow::Page { page, number });
+        if !open_page(page) {
+            continue;
+        }
+        rows.extend(
+            layer_rows(menu, |index| open_button(page, index))
+                .into_iter()
+                .filter(|row| *row != LayerRow::Background)
+                .map(|row| PanelRow::Layer {
+                    menu: page,
+                    row,
+                    nested: true,
+                }),
+        );
+    }
+    if let Some(first) = project.menu(root) {
+        rows.extend(
+            layer_rows(first, |index| open_button(root, index))
+                .into_iter()
+                .map(|row| PanelRow::Layer {
+                    menu: root,
+                    row,
+                    nested: false,
+                }),
+        );
+    }
+    rows
 }
 
 /// The rows of `menu` from the top layer down: the buttons (the last on top) each followed by its own layers when it
@@ -79,32 +147,144 @@ impl DiscCraftApp {
             ui.label(tl!("Open a menu to see its layers."));
             return;
         };
-        let Some(menu) = self.session.project.menu(id).cloned() else {
+        let root = self.session.project.menu_root(id);
+        let Some(first) = self.session.project.menu(root) else {
             return;
         };
-        ui.label(menu.name.clone());
+        ui.label(first.name.clone());
         let collapsed = self.collapsed_layers.clone();
-        let rows = layer_rows(&menu, |index| !collapsed.contains(&(id, index)));
+        let toggled = self.toggled_pages.clone();
+        // The page in the viewer has its group open; a click on the opener flips that.
+        let rows = panel_rows(
+            &self.session.project,
+            root,
+            |page| (page == id) != toggled.contains(&page),
+            |menu, index| !collapsed.contains(&(menu, index)),
+        );
         let mut clicked = None;
         for row in rows {
-            if let Some(click) = self.layer_row(ui, &menu, row) {
-                clicked = Some(click);
+            let click = match row {
+                PanelRow::Page { page, number } => self
+                    .page_row(
+                        ui,
+                        (page, number),
+                        (page == id) != toggled.contains(&page),
+                        page == id,
+                    )
+                    .map(|click| (page, click)),
+                PanelRow::Layer { menu, row, nested } => {
+                    let Some(found) = self.session.project.menu(menu).cloned() else {
+                        continue;
+                    };
+                    let nest = if nested { INDENT } else { 0.0 };
+                    self.layer_row(ui, &found, row, nest)
+                        .map(|click| (menu, click))
+                }
+            };
+            if click.is_some() {
+                clicked = click;
             }
         }
-        match clicked {
-            Some(LayerClick::Select(row, add)) => self.select_layer(id, row, add),
-            Some(LayerClick::ToggleHidden(row)) => self.toggle_layer(&menu, row, true),
-            Some(LayerClick::ToggleLocked(row)) => self.toggle_layer(&menu, row, false),
+        let Some((menu, click)) = clicked else {
+            return;
+        };
+        let Some(found) = self.session.project.menu(menu).cloned() else {
+            return;
+        };
+        match click {
+            LayerClick::Select(row, add) => self.select_layer(menu, row, add),
+            LayerClick::ToggleHidden(row) => self.toggle_layer(&found, row, true),
+            LayerClick::ToggleLocked(row) => self.toggle_layer(&found, row, false),
             // Closed sets are kept; a closed one opens again.
-            Some(LayerClick::ToggleOpen(index)) if !self.collapsed_layers.remove(&(id, index)) => {
-                let _ = self.collapsed_layers.insert((id, index));
+            LayerClick::ToggleOpen(index) => {
+                if !self.collapsed_layers.remove(&(menu, index)) {
+                    let _ = self.collapsed_layers.insert((menu, index));
+                }
             }
-            Some(LayerClick::ToggleOpen(_)) | None => {}
+            LayerClick::ShowPage => {
+                self.select(Selection::Menu(menu));
+                self.show_panel(Panel::MenuViewer);
+            }
+            LayerClick::TogglePage => {
+                if !self.toggled_pages.remove(&menu) {
+                    let _ = self.toggled_pages.insert(menu);
+                }
+            }
         }
     }
 
-    /// Draws one row and reports a click on it.
-    fn layer_row(&self, ui: &mut Ui, menu: &Menu, row: LayerRow) -> Option<LayerClick> {
+    /// Draws a later page's `(#)` group row (`number` counted from 0, as Encore numbers pages): its opener, a folder
+    /// and its name, marked when the viewer shows it; reports a click on it.
+    fn page_row(
+        &self,
+        ui: &mut Ui,
+        (_page, number): (MenuId, usize),
+        open: bool,
+        shown: bool,
+    ) -> Option<LayerClick> {
+        let width = ui.available_width().max(COLUMN * 6.0);
+        let (rect, response) = ui.allocate_exact_size(vec2(width, ROW), Sense::click());
+        let visuals = ui.visuals().clone();
+        let painter = ui.painter();
+        if shown {
+            painter.rect_filled(rect, 0.0, visuals.selection.bg_fill.gamma_multiply(0.35));
+        } else if response.hovered() {
+            painter.rect_filled(rect, 0.0, visuals.widgets.hovered.weak_bg_fill);
+        }
+        painter.line_segment(
+            [rect.left_bottom(), rect.right_bottom()],
+            visuals.widgets.noninteractive.bg_stroke,
+        );
+        let color = visuals.text_color();
+        for column in 0..3 {
+            let cell = Rect::from_min_size(
+                pos2(rect.min.x + column as f32 * COLUMN, rect.min.y),
+                vec2(COLUMN, ROW),
+            );
+            painter.rect_stroke(
+                cell.shrink(2.0),
+                2.0,
+                visuals.widgets.noninteractive.bg_stroke,
+                egui::StrokeKind::Inside,
+            );
+        }
+        let opener = Rect::from_min_size(
+            pos2(rect.min.x + COLUMN * 3.0 + 2.0, rect.min.y),
+            vec2(14.0, ROW),
+        );
+        painter.text(
+            opener.center(),
+            egui::Align2::CENTER_CENTER,
+            if open { "▼" } else { "▶" },
+            egui::FontId::proportional(9.0),
+            color,
+        );
+        let icon_rect = Rect::from_min_size(pos2(opener.max.x + 2.0, rect.min.y), vec2(18.0, ROW));
+        crate::icons::paint(
+            painter,
+            Rect::from_center_size(icon_rect.center(), vec2(13.0, 13.0)),
+            Icon::Folder,
+            color,
+        );
+        painter.text(
+            pos2(icon_rect.max.x + 4.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            format!("(#) {}", tlf!("Page {n}", n = number)),
+            egui::FontId::proportional(12.0),
+            color,
+        );
+        if !response.clicked() {
+            return None;
+        }
+        let at = response.interact_pointer_pos()?;
+        if opener.expand2(vec2(2.0, 0.0)).contains(at) {
+            return Some(LayerClick::TogglePage);
+        }
+        Some(LayerClick::ShowPage)
+    }
+
+    /// Draws one row (indented by `nest` inside a page's group) and reports a click on it.
+    fn layer_row(&self, ui: &mut Ui, menu: &Menu, row: LayerRow, nest: f32) -> Option<LayerClick> {
         let width = ui.available_width().max(COLUMN * 6.0);
         let (rect, response) = ui.allocate_exact_size(vec2(width, ROW), Sense::click());
         let visuals = ui.visuals().clone();
@@ -157,12 +337,13 @@ impl DiscCraftApp {
             painter.rect_filled(mark, 2.5, faint);
         }
         // The name, after the opener of a button set and the layer's icon.
-        let indent = match row {
-            LayerRow::ButtonText(_)
-            | LayerRow::ButtonThumbnail(_)
-            | LayerRow::ButtonSubpicture(_) => INDENT,
-            _ => 0.0,
-        };
+        let indent = nest
+            + match row {
+                LayerRow::ButtonText(_)
+                | LayerRow::ButtonThumbnail(_)
+                | LayerRow::ButtonSubpicture(_) => INDENT,
+                _ => 0.0,
+            };
         let opener = Rect::from_min_size(
             pos2(rect.min.x + COLUMN * 3.0 + 2.0 + indent, rect.min.y),
             vec2(14.0, ROW),
@@ -372,8 +553,63 @@ fn layer_icon(menu: &Menu, row: LayerRow) -> Icon {
 
 #[cfg(test)]
 mod tests {
-    use super::{LayerRow, layer_rows};
+    use super::{LayerRow, PanelRow, layer_rows, panel_rows};
     use disccraft_project::{Link, Project};
+
+    /// A menu with pages lists them as Encore's `(#)` groups above the first page's layers, the last page on top
+    /// (numbered from 0 as Encore does); an open group shows its page's own layers inside it, without a background.
+    #[test]
+    fn a_menus_pages_are_its_page_groups() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::default();
+        let menu = project.add_menu(None)?;
+        project.menu_mut(menu).ok_or("menu")?.buttons.clear();
+        let _ = project.add_button(menu, "Play".to_owned(), None, Link::NotSet)?;
+        let one = project.add_menu_page(menu)?;
+        let two = project.add_menu_page(menu)?;
+        let _ = project.add_button(one, "Back".to_owned(), None, Link::NotSet)?;
+        let closed = panel_rows(&project, menu, |_| false, |_, _| false);
+        assert_eq!(
+            closed,
+            vec![
+                PanelRow::Page {
+                    page: two,
+                    number: 2
+                },
+                PanelRow::Page {
+                    page: one,
+                    number: 1
+                },
+                PanelRow::Layer {
+                    menu,
+                    row: LayerRow::Button(0),
+                    nested: false
+                },
+                PanelRow::Layer {
+                    menu,
+                    row: LayerRow::Background,
+                    nested: false
+                },
+            ]
+        );
+        let open = panel_rows(&project, menu, |page| page == one, |_, _| false);
+        assert_eq!(
+            open.get(2),
+            Some(&PanelRow::Layer {
+                menu: one,
+                row: LayerRow::Button(0),
+                nested: true
+            })
+        );
+        assert_eq!(open.len(), closed.len() + 1);
+        // A menu without pages lists its own layers only.
+        let single = project.add_menu(None)?;
+        assert!(
+            panel_rows(&project, single, |_| true, |_, _| true)
+                .iter()
+                .all(|row| matches!(row, PanelRow::Layer { nested: false, .. }))
+        );
+        Ok(())
+    }
 
     /// The rows go from the top layer down: the last button first, each button set with its text when it is open,
     /// then the texts and the background.

@@ -22,7 +22,10 @@ pub struct HighlightLayer {
     pub coverage: Vec<u8>,
 }
 
-pub(crate) fn build(menu: &Menu, _width: u16, _height: u16) -> Result<HighlightLayer, MenuError> {
+/// The highlight of `menu`'s buttons; `artwork`: a menu made from a layered document (a PSD), whose buttons show
+/// only their own subpicture layers, as Encore's do: one without them (a picture laid out as a button) has no
+/// highlight, not the frame DiscCraft's own buttons get (GitHub issue #13).
+pub(crate) fn build(menu: &Menu, artwork: bool) -> Result<HighlightLayer, MenuError> {
     // A menu without buttons (shown in an editor) has a 1 x 1 transparent highlight.
     if menu.buttons.is_empty() {
         return Ok(HighlightLayer {
@@ -79,7 +82,7 @@ pub(crate) fn build(menu: &Menu, _width: u16, _height: u16) -> Result<HighlightL
                     (mask_x, mask_y),
                 )
             });
-        if !painted {
+        if !painted && !artwork {
             paint_frame(&mut pixels, x, y, layer_w, layer_h, button.rect);
         }
     }
@@ -494,14 +497,14 @@ fn subpicture_sources(
 }
 
 /// The highlight of button `index` alone over its rectangle (`width` x `height` values, row by row), as the disc
-/// draws it; `None` without such a button.
-pub(crate) fn button_values(menu: &Menu, index: usize) -> Option<Vec<u8>> {
+/// draws it (`artwork`: as [`build`]); `None` without such a button.
+pub(crate) fn button_values(menu: &Menu, index: usize, artwork: bool) -> Option<Vec<u8>> {
     let button = menu.buttons.get(index)?;
     let alone = Menu {
         buttons: vec![button.clone()],
         ..menu.clone()
     };
-    let layer = build(&alone, 0, 0).ok()?;
+    let layer = build(&alone, artwork).ok()?;
     let rect = button.rect;
     let (rect_w, rect_h) = (usize::from(rect.w), usize::from(rect.h));
     let mut values = vec![0_u8; rect_w.checked_mul(rect_h)?];
