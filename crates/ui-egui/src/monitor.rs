@@ -126,6 +126,8 @@ pub(crate) struct PreviewState {
     pub(crate) popup: Option<PreviewMenu>,
     /// 再生中のタイトルにポップアップメニューがあるか。
     pub(crate) popup_available: bool,
+    /// M13.19: プレーヤーが再生している、視聴制限のチャプターのあるタイトルの版（0 はどのチャプターもそのまま）。
+    pub(crate) variant: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -706,6 +708,13 @@ impl DiscCraftApp {
         if (1..=8).contains(&level) {
             let _ = fields.insert("parentalLevel".to_owned(), json!(level));
         }
+        // The player's country (M13.19), from the system's region ("ja-JP": JP), as a player is set up where it is.
+        if let Some(region) = sys_locale::get_locale().and_then(|locale| {
+            let region = locale.split(['-', '_']).nth(1)?.to_owned();
+            (region.len() == 2 && region.bytes().all(|b| b.is_ascii_alphabetic())).then_some(region)
+        }) {
+            let _ = fields.insert("country".to_owned(), json!(region));
+        }
         // A built Blu-ray's player picks its streams by these languages (M6.369; a DVD's are picked by the
         // monitor when the disc chose none).
         for (name, language) in [
@@ -985,6 +994,10 @@ pub(crate) fn parse_preview_state(value: &Value) -> PreviewState {
             .and_then(|n| u8::try_from(n).ok())
     };
     state.audio = small(value.get("audio"));
+    state.variant = value
+        .get("variant")
+        .and_then(Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok());
     state.bluray = value.get("bluray").and_then(Value::as_bool) == Some(true);
     state.popup_available = value.get("popupAvailable").and_then(Value::as_bool) == Some(true);
     state.popup = value.get("popup").and_then(|popup| {

@@ -19,10 +19,12 @@ use serde_json::Value;
 mod commands;
 mod gop;
 pub mod metadata;
+pub mod metadata_edit;
 mod params;
 mod player;
 mod session;
 pub mod waveform;
+pub mod xmp_schemas;
 
 /// Keeps what media files were found to be (length, picture size, thumbnails) in `dir` between runs, so a long
 /// video is not read again each time (`disccraft_transcode::enable_probe_cache`). Called by an application once

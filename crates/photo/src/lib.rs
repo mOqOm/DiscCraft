@@ -32,7 +32,10 @@ mod svg;
 mod write;
 
 pub use svg::{is_svg, render_svg_fill, render_svg_fit};
-pub use write::{PsdLayer, write_layered_psd};
+pub use write::{
+    PsdAntialias, PsdCaps, PsdCharStyle, PsdLayer, PsdScript, PsdShadow, PsdText, PsdTextAlign,
+    write_layered_psd,
+};
 
 /// Errors returned by this crate.
 #[derive(Debug, thiserror::Error)]

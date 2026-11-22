@@ -47,6 +47,7 @@ mod menu_graphic;
 mod menu_text;
 mod menu_tools;
 mod menubar;
+mod metadata_panel;
 mod monitor;
 mod monitor_controls;
 mod new_project;

@@ -3,7 +3,7 @@
 //! XMP is an RDF/XML packet (ISO 16684-1; Adobe's XMP Specification Part 1 for the data model and Part 3 for
 //! where a format keeps it). Whatever the format, the packet lies in the file as plain UTF-8 text between
 //! `<x:xmpmeta` and `</x:xmpmeta>`, so it is found by looking for those; a sidecar file (`name.xmp` beside the
-//! media, or `name.ext.xmp`) is read first. Only reading: nothing is written into the user's files.
+//! media, or `name.ext.xmp`) is read first. Writing back is [`crate::metadata_edit`]'s (M6.396).
 //!
 //! Everything read is the file's and so untrusted: the search is bounded, the packet's size and the number and
 //! length of the values are capped, and the XML parser takes no DTD.
@@ -16,7 +16,7 @@ const HEAD_BYTES: u64 = 8 << 20;
 /// How much of the tail of a file is searched (formats that put the packet last).
 const TAIL_BYTES: u64 = 2 << 20;
 /// The largest packet read.
-const MAX_PACKET: usize = 4 << 20;
+pub(crate) const MAX_PACKET: usize = 4 << 20;
 /// The most properties shown of one file.
 const MAX_ITEMS: usize = 2000;
 /// The longest value shown, characters.
@@ -30,9 +30,11 @@ const XML: &str = "http://www.w3.org/XML/1998/namespace";
 /// The properties of one schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataGroup {
-    /// The schema's name as Encore's Metadata panel lists it ("Dublin Core"), or its namespace when it is none
-    /// of those.
+    /// The schema's name as Encore's Metadata panel lists it ("Dublin Core", [`crate::xmp_schemas::SCHEMAS`]), or its
+    /// namespace when it is none of those.
     pub name: String,
+    /// The schema's namespace.
+    pub namespace: String,
     /// The properties: name and value, in the packet's order.
     pub items: Vec<(String, String)>,
 }
@@ -46,46 +48,31 @@ pub struct Metadata {
     pub groups: Vec<MetadataGroup>,
 }
 
-/// The schemas Encore's panel lists, in its order: namespace and name.
-const SCHEMAS: [(&str, &str); 12] = [
-    ("http://purl.org/dc/elements/1.1/", "Dublin Core"),
-    ("http://ns.adobe.com/xap/1.0/", "Basic"),
-    ("http://ns.adobe.com/xap/1.0/rights/", "Rights Management"),
-    ("http://ns.adobe.com/xap/1.0/mm/", "Media Management"),
-    ("http://ns.adobe.com/xap/1.0/bj/", "Basic Job Ticket"),
-    ("http://ns.adobe.com/xap/1.0/t/pg/", "Paged-Text"),
-    ("http://ns.adobe.com/xmp/1.0/DynamicMedia/", "Dynamic Media"),
-    ("http://ns.adobe.com/pdf/1.3/", "Adobe PDF"),
-    ("http://ns.adobe.com/photoshop/1.0/", "Photoshop"),
-    ("http://ns.adobe.com/exif/1.0/", "EXIF"),
-    ("http://ns.adobe.com/exif/1.0/aux/", "EXIF (additional)"),
-    ("http://ns.adobe.com/tiff/1.0/", "TIFF"),
-];
-
 /// The XMP metadata of the file at `path`: its sidecar's, else the packet in the file. Empty when the file has
 /// none (or cannot be read).
 #[must_use]
 pub fn file_metadata(path: &Path) -> Metadata {
-    for sidecar in sidecars(path) {
-        if let Some(groups) = std::fs::read(&sidecar)
-            .ok()
-            .filter(|bytes| bytes.len() <= MAX_PACKET)
-            .and_then(|bytes| packet_in(&bytes).and_then(parse_packet))
-        {
-            return Metadata {
-                sidecar: Some(sidecar),
-                groups,
-            };
-        }
-    }
-    let groups = embedded_packet(path)
-        .or_else(|| png_packet(path))
+    let (sidecar, packet) = packet_of(path);
+    let groups = packet
         .and_then(|bytes| parse_packet(&bytes))
         .unwrap_or_default();
-    Metadata {
-        sidecar: None,
-        groups,
+    Metadata { sidecar, groups }
+}
+
+/// The XMP packet of the file at `path` (`<x:xmpmeta …>…</x:xmpmeta>`): its sidecar's (and the sidecar), else the
+/// one in the file; `None` when it has none.
+pub(crate) fn packet_of(path: &Path) -> (Option<PathBuf>, Option<Vec<u8>>) {
+    for sidecar in sidecars(path) {
+        if let Some(packet) = std::fs::read(&sidecar)
+            .ok()
+            .filter(|bytes| bytes.len() <= MAX_PACKET)
+            .and_then(|bytes| packet_in(&bytes).map(<[u8]>::to_vec))
+            .filter(|packet| parse_packet(packet).is_some())
+        {
+            return (Some(sidecar), Some(packet));
+        }
     }
+    (None, embedded_packet(path).or_else(|| png_packet(path)))
 }
 
 /// Where a sidecar of `path` would be: `movie.xmp` and `movie.mp4.xmp`.
@@ -241,17 +228,22 @@ fn parse_packet(packet: &[u8]) -> Option<Vec<MetadataGroup>> {
     }
     // Encore's schemas first, in its order; the others after, by their namespace.
     let mut groups = Vec::new();
-    for (namespace, name) in SCHEMAS {
-        if let Some(at) = found.iter().position(|(known, _)| known == namespace) {
-            let (_, items) = found.remove(at);
+    for schema in crate::xmp_schemas::SCHEMAS {
+        if let Some(at) = found
+            .iter()
+            .position(|(known, _)| known == schema.namespace)
+        {
+            let (namespace, items) = found.remove(at);
             groups.push(MetadataGroup {
-                name: name.to_owned(),
+                name: schema.name.to_owned(),
+                namespace,
                 items,
             });
         }
     }
     groups.extend(found.into_iter().map(|(namespace, items)| MetadataGroup {
-        name: namespace,
+        name: namespace.clone(),
+        namespace,
         items,
     }));
     Some(groups)

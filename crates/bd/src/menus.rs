@@ -446,6 +446,8 @@ fn prepare_hd_video(
         // an MPEG-2 still ends with a sequence end code.
         disccraft_transcode::hd::HdCodec::H264 => data.extend_from_slice(&H264_END_OF_SEQUENCE),
         disccraft_transcode::hd::HdCodec::Mpeg2 => append_sequence_end(&mut data),
+        // A menu is never HEVC (M12.43).
+        disccraft_transcode::hd::HdCodec::Hevc => {}
     }
     let start = START_DTS_27MHZ;
     let frame = i64::from(fps_den)

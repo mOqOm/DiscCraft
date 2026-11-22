@@ -256,8 +256,8 @@ H.264) keeps its two fields apart on a DVD: each field is scaled on its own and 
 the source's field order, so motion stays as smooth as in the source instead of two moments blending in every line
 (with "Use Maximum Render Quality" too, which then scales such video with the usual scaler). Where the picture moves,
 the two fields are also predicted each on its own, so it looks better at the same bit rate. Converted to Blu-ray's
-interlaced formats (1080i 59.94 / 50 and SD), such video with the top field first keeps its two fields apart the same
-way (predicted as fields too with MPEG-2). Film (23.976) and video of another frame rate are scaled as whole frames as
+interlaced formats (1080i 59.94 / 50 and SD), such video keeps its two fields apart the same way (predicted as fields
+too with MPEG-2); video with the bottom field first stays bottom field first. Film (23.976) and video of another frame rate are scaled as whole frames as
 before.
 A video whose picture cannot be decoded (for example MPEG-4 Part 2, DivX / Xvid) imports, but on a disc that has to
 convert it, Check Project reports the error "The picture cannot be decoded, so the video cannot be converted for this
@@ -340,8 +340,8 @@ A DTS file (`.dts`) goes into a DVD's or a Blu-ray's audio track as it is, witho
 
 - The row in the Project panel shows the size, frame rate, length and whether a conversion is needed
 - A video's Properties also show its **Field type**, as Encore words it: **No Fields (Progressive Scan)**, **Odd
-  Field First** or **Even Field First** (read from the headers of MPEG-2 and H.264 video; interlaced H.264 is shown as
-  odd field first)
+  Field First** or **Even Field First** (read from the headers of MPEG-2 and H.264 video, H.264 from its first picture's; interlaced H.264 in MP4
+  and MKV is shown as odd field first)
 - Media that does not fit the format is converted automatically at build time (audio to Dolby Digital (AC-3)
   192 kbps; the video bit rate is chosen to fit the disc, up to 9.8 Mbps by default)
 - MPEG-2 video that already fits a DVD is not converted: elementary streams (`.m2v`), program streams with
@@ -364,11 +364,20 @@ A DTS file (`.dts`) goes into a DVD's or a Blu-ray's audio track as it is, witho
   the original, so the original may even be gone (useful after deleting the source media, or for files converted with
   another program). The transcode status becomes "Transcoded"; **Revert to Original** forgets the located files.
   The located files are found again when the project is moved together with them
-- **Window ▸ Metadata** shows the XMP metadata of the selected asset's file (of a timeline: its video's), by schema
-  (Dublin Core, Basic, Rights Management, Media Management, Dynamic Media and so on; other schemas under their
-  namespace), with a search field and **Reload**. A sidecar file (`name.xmp` or `name.ext.xmp` beside the media) is
-  read before the file itself; a PNG's packet is also read when it is compressed. It only shows: DiscCraft writes nothing into your media files, so the values cannot be
-  edited here
+- **Window ▸ Metadata** shows and edits the XMP metadata of the selected asset's file (of a timeline: its video's),
+  laid out as in Encore. At the top the search field, then a row with the file's name and **Reload**. Below, the 12
+  schemas are always listed (Dublin Core, Basic, Rights Management, Media Management, Basic Job Ticket, Paged-Text,
+  Dynamic Media, Adobe PDF, Photoshop and the three EXIF schemas; greyed while no asset is selected), and each lists
+  every one of its standard properties when opened, whether the file has a value or not (Dublin Core's 14, from
+  Contributor to Type). The properties Encore edits have an edit box (lists such as Creator or Subject separated by ;,
+  the rating chosen from a list, Marked a check box), the others show their value (dates as "11/10/26, 21:44:09"), and
+  a structure opens with ▸. Leaving a box or pressing Enter writes that property at once (an empty one removes it),
+  and every other property stays as it was written. It goes into the sidecar when there is one (`name.xmp` or
+  `name.ext.xmp` beside the media, also read before the file itself); into the file itself for a PNG, JPEG or MP4
+  (where XMP keeps it; an MP4 gets it at its end, so its video data does not move); else (MOV, MPEG, PSD and others)
+  into a new sidecar `name.xmp` (`name.ext.xmp` when another file has the same name). Schemas the panel does not know
+  follow under their namespace, shown only. The search field keeps the properties whose name or value has the text.
+  The commands are `asset.getMetadata` and `asset.setMetadata` (properties named as `dc:title`)
 - **Window ▸ Progress** (F10) shows what a build or Transcode Now is converting and how far it is, the list of the
   files it still has to convert (each goes from the list when it is done), and the media files being read in the
   background. **Stop** stops the conversions (each gives up at its next picture): the build or Transcode Now ends as
@@ -829,6 +838,11 @@ is the whole job, including the loop, the audio and what to hide afterwards.
   new groups add buttons and the buttons of groups that are gone are removed. A menu made from a PSD with `(#)`
   pages reads every page again
 - **Menu ▸ Save Menu as File…**: writes the menu as a PSD
+- In the PSD (both commands above), the texts and the buttons' texts are editable type layers, as Encore writes
+  them: in Photoshop they can be retyped with the Type tool and keep their font, size, colour, alignment, paragraph
+  box and angle, and a drop shadow is a layer style. Until a text is retyped, the layer shows the text as DiscCraft
+  draws it (Photoshop lays text over the picture with its text gamma, so the soft edges look a little brighter). A
+  text with other layer effects (stroke, glow, bevel, overlay) is written as pixels
 - **Menu ▸ Replace Menu…**: replaces the open menu with a PSD's design, keeping the links by button number
 - **Menu ▸ Save Menu as Template…** (Ctrl+Alt+M): saves it in the Library's **User** set
 
@@ -1009,7 +1023,7 @@ DTS tracks are silent.
 | Destination | When empty, the place shown in faint text (`<project name>_DVD` / `_BD` beside the project; `<project name>.iso` for an image; `<project name>_DDP` for a DDP image). For a folder or a DDP image, naming an existing folder makes a `<disc name>` folder inside it (a place that already has `VIDEO_TS` / `BDMV`, or a DDP image's `DDPID`, is built again in place). An image cannot be given a folder |
 | Disc Info | The usage bar (**Refresh Usage** calculates it), the disc's name (also the ISO's volume label), the size (**Custom**, last in the list, takes a size of your own in GB beside it — 1 GB = 1,000,000,000 bytes — from 0.001 GB up to a single-layer DVD's 4.7 GB, or a BDXL's 128 GB on a Blu-ray; a larger DVD is DVD9. The usage bar and the project check then measure against it), **DVD-ROM content** / **BD-ROM content** (**Browse…** chooses a folder; its files and folders go in the disc's root, beside `VIDEO_TS` / `BDMV`: a manual or photos to read on a computer. A folder build copies them, an image holds them. They take that much of the capacity from the video, and the line under the bar shows their size. **Clear** takes them off. A file must be under 4 GB, folders at most 7 deep) |
 | Layer Break | DVD-9 only. Automatic / manual. Manual is set by timeline and position (timecode / frame / seconds, **Playhead**) |
-| Region Codes | DVD only. All regions / custom (ticks for 1 to 8). **Parental level**: none, or 1 to 8 (8 is the most restricted). A player whose parental level is set lower asks for its password before the disc plays (at the start, and when a title is started from the remote) and stops when it is not given; a player with no level set plays as usual. A timeline, slideshow or chapter playlist can ask a level of its own (**Parental level** in its properties: the disc's, none, or 1 to 8), and a timeline can name what plays in its place when the level is not raised (**If Not Allowed**: another title or a menu; not set, the player stops). A timeline's chapter can have another video for players below a level (the DVD standard's parental block: **Parental Alternative** and **For Levels Below** (2 to 8) in the chapter's properties; the command is `timeline.setParentalChapter`): the title then becomes a version for each range of levels, which the player chooses by its own level (it asks no password; the other video goes on the disc with its own sound; the preview shows the full version). The same levels are written for every country, and this has not been tried on a hardware player |
+| Region Codes | DVD only. All regions / custom (ticks for 1 to 8). **Parental level**: none, or 1 to 8 (8 is the most restricted). A player whose parental level is set lower asks for its password before the disc plays (at the start, and when a title is started from the remote) and stops when it is not given; a player with no level set plays as usual. A timeline, slideshow or chapter playlist can ask a level of its own (**Parental level** in its properties: the disc's, none, or 1 to 8), and a timeline can name what plays in its place when the level is not raised (**If Not Allowed**: another title or a menu; not set, the player stops). A timeline's chapter can have another video for players below a level (the DVD standard's parental block: **Parental Alternative** and **For Levels Below** (2 to 8) in the chapter's properties; the command is `timeline.setParentalChapter`): the title then becomes a version for each range of levels, which the player chooses by its own level (it asks no password; the other video goes on the disc with its own sound; the Project Preview plays the version for the player's parental level in Preferences ▸ Preview, the other video in its chapter, while the Monitor shows the timeline itself). The same levels are written for every country, and this has not been tried on a hardware player |
 | Project Check | The check results (the same rows as the check window) |
 | Result | Errors, the number of titles / chapters / the size, **Simulate** (runs the VM after building to a folder) |
 

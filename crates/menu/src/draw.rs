@@ -1,9 +1,12 @@
 //! Drawing helpers for menu frames.
 
 use crate::MenuError;
+use disccraft_photo::{
+    PsdAntialias, PsdCaps, PsdCharStyle, PsdScript, PsdShadow, PsdText, PsdTextAlign,
+};
 use disccraft_project::{
     AssetId, Button, DropShadow, MAX_TEXT_SCALE, MAX_TEXT_SIZE, MIN_TEXT_SCALE, MIN_TEXT_SIZE,
-    Menu, MenuBackground, MenuText, Orientation, Project, Rect, SpanStyle, TextAntialias,
+    Menu, MenuBackground, MenuText, Orientation, Project, Rect, SpanStyle, TextAntialias, TextCaps,
     TextFormat, TextScript,
 };
 use filmcraft_text::{
@@ -780,6 +783,26 @@ fn text_layout(
     family: &str,
     sx: f32,
 ) -> Option<(Vec<crate::text_block::Piece>, (f32, f32), bool, Paints)> {
+    framed_text_layout(text, family, sx).map(|(laid, _)| laid)
+}
+
+/// Where a text is set in the frame (M6.398, for a type layer in a PSD): the transform from its block's space into
+/// the frame, and the block's bounds in that space before its box widens them (a vertical text's columns).
+struct Framing {
+    pen: filmcraft_text::Xform,
+    block: [f32; 4],
+}
+
+/// [`text_layout`] with its [`Framing`].
+#[allow(clippy::type_complexity)]
+fn framed_text_layout(
+    text: &MenuText,
+    family: &str,
+    sx: f32,
+) -> Option<(
+    (Vec<crate::text_block::Piece>, (f32, f32), bool, Paints),
+    Framing,
+)> {
     if text.text.trim().is_empty() {
         return None;
     }
@@ -814,7 +837,7 @@ fn text_layout(
     let mut overset = false;
     let mut paints = Paints::default();
     let em = room_em(size, &format);
-    let (pieces, bounds) = if text.vertical {
+    let (pieces, bounds, block) = if text.vertical {
         let rules = crate::wrap::Rules::of(&format);
         // Characters with formatting of their own (M6.389) are measured and set as they are.
         let spans = byte_spans(text);
@@ -887,7 +910,7 @@ fn text_layout(
             None => (y0, y1),
         };
         let left = tall(scale.0 * sx).map_or(x0, |reach| x1 - reach.max(x1 - x0));
-        (pieces, [left, top, x1, bottom])
+        (pieces, [left, top, x1, bottom], [x0, y0, x1, y1])
     } else {
         let limit = limit(scale.0 * sx);
         let tall = tall(scale.1);
@@ -959,7 +982,7 @@ fn text_layout(
             laid = Arc::new(owned);
         }
         let bounds = laid.bounds;
-        (vec![(laid, crate::text_block::IDENTITY)], bounds)
+        (vec![(laid, crate::text_block::IDENTITY)], bounds, bounds)
     };
     // The drawn (scaled, turned, squeezed) box starts at the text's x, y.
     let (w, h) = oriented_size_of(bounds, sx, text.orientation, scale);
@@ -972,7 +995,8 @@ fn text_layout(
     let finite = pieces
         .iter()
         .all(|(_, xf)| xf.iter().all(|value| value.is_finite()));
-    (finite && w.is_finite() && h.is_finite()).then_some((pieces, (w, h), overset, paints))
+    (finite && w.is_finite() && h.is_finite())
+        .then_some(((pieces, (w, h), overset, paints), Framing { pen, block }))
 }
 
 /// How much of `lines` (whole lines, a byte length) fits in `room`, by `extent` (the size of some lines): all of
@@ -1865,22 +1889,12 @@ fn label_layout(
     if button.label.is_empty() {
         return None;
     }
-    let rect = button.label_rect();
-    // The text is sized for the button standing upright, then turned with it.
-    let upright = if button.orientation.swaps_sides() {
-        Rect {
-            w: rect.h,
-            h: rect.w,
-            ..rect
-        }
-    } else {
-        rect
-    };
-    // The button's text with its own Character formatting (sized by the button).
+    // The button's text with its own Character formatting (sized by the button standing upright, then turned
+    // with it).
     let laid = formatted_layout(
         &button.label,
         family,
-        font_size(upright),
+        label_size(button),
         button.label_font_style.as_deref(),
         &button.label_format,
     );
@@ -1894,6 +1908,223 @@ fn label_layout(
     pen.iter()
         .all(|value| value.is_finite())
         .then_some((laid, pen))
+}
+
+/// The size of a button's text: from the button standing upright.
+fn label_size(button: &Button) -> f32 {
+    let rect = button.label_rect();
+    font_size(if button.orientation.swaps_sides() {
+        Rect {
+            w: rect.h,
+            h: rect.w,
+            ..rect
+        }
+    } else {
+        rect
+    })
+}
+
+/// A menu text as a type layer of a PSD (M6.398: Encore writes a menu's texts as editable type): the text, its
+/// formatting and alignment, a paragraph text's box, and the transform that sets it where DiscCraft draws it.
+/// `None` for an empty text.
+pub(crate) fn text_type(menu: &Menu, text: &MenuText) -> Option<PsdText> {
+    let family = family_for(text.font.as_deref());
+    let ((pieces, _, _, _), framing) = framed_text_layout(text, &family, squeeze(menu))?;
+    let size = f32::from(text.size.clamp(MIN_TEXT_SIZE, MAX_TEXT_SIZE));
+    let color = text.color.unwrap_or(menu.text_color);
+    let face = text.font_style.as_deref();
+    let style = psd_char_style(&family, (size, face, &text.format), color);
+    let runs = byte_spans(text)
+        .into_iter()
+        .map(|(range, span)| {
+            let (family, size, face, format) =
+                span_setting(&family, (size, face, &text.format), &span);
+            (
+                range,
+                psd_char_style(
+                    &family,
+                    (size, face.as_deref(), &format),
+                    span.color.unwrap_or(color),
+                ),
+            )
+        })
+        .collect();
+    let (origin, area) = if text.vertical {
+        // The first (right) column, on its centre line, at its top, middle or bottom.
+        let [_, y0, x1, y1] = framing.block;
+        let y = match text.format.align {
+            disccraft_project::TextAlign::Left | disccraft_project::TextAlign::Justify => y0,
+            disccraft_project::TextAlign::Center => (y0 + y1) * 0.5,
+            disccraft_project::TextAlign::Right => y1,
+        };
+        ((x1 - size * 0.5, y), None)
+    } else {
+        let (laid, _) = pieces.first()?;
+        if text.box_width.is_some() {
+            // Text space starts at the box's top left. Photoshop sets the first baseline the font's ascent below
+            // it, so the box's top is put there above DiscCraft's first baseline.
+            let [x0, y0, x1, y1] = laid.bounds;
+            let top = laid
+                .lines
+                .first()
+                .zip(font_ascent(&family, face, size))
+                .map_or(y0, |(line, ascent)| line.baseline - ascent);
+            // Room below the lines when the box has no height of its own, so that none is set out of it.
+            let slack = if text.box_height.is_some() { 0.0 } else { size };
+            ((x0, top), Some([0.0, 0.0, x1 - x0, y1 - top + slack]))
+        } else {
+            let line = laid.lines.first()?;
+            ((anchor(line, text.format.align), line.baseline), None)
+        }
+    };
+    Some(PsdText {
+        text: text.text.clone(),
+        style,
+        runs,
+        align: psd_align(text.format.align),
+        vertical: text.vertical,
+        area,
+        transform: placed(&framing.pen, origin)?,
+        antialias: psd_antialias(text.format.antialias),
+        shadow: text.shadow.as_ref().map(psd_shadow),
+    })
+}
+
+/// A button's text as a type layer of a PSD (M6.398), as [`text_type`]; `None` for no text.
+pub(crate) fn label_type(menu: &Menu, button: &Button) -> Option<PsdText> {
+    let family = family_for(menu.label_font.as_deref());
+    let (laid, pen) = label_layout(button, &family, squeeze(menu))?;
+    let line = laid.lines.first()?;
+    let format = &button.label_format;
+    Some(PsdText {
+        text: button.label.clone(),
+        style: psd_char_style(
+            &family,
+            (
+                label_size(button),
+                button.label_font_style.as_deref(),
+                format,
+            ),
+            menu.text_color,
+        ),
+        runs: Vec::new(),
+        align: psd_align(format.align),
+        vertical: false,
+        area: None,
+        transform: placed(&pen, (anchor(line, format.align), line.baseline))?,
+        antialias: psd_antialias(format.antialias),
+        shadow: None,
+    })
+}
+
+/// Where a line's alignment anchors point text: its left end, middle or right end.
+fn anchor(line: &filmcraft_text::Line, align: disccraft_project::TextAlign) -> f32 {
+    match align {
+        disccraft_project::TextAlign::Left | disccraft_project::TextAlign::Justify => line.x,
+        disccraft_project::TextAlign::Center => line.x + line.width * 0.5,
+        disccraft_project::TextAlign::Right => line.x + line.width,
+    }
+}
+
+/// `pen` after moving the origin to `origin`, in doubles; `None` when it is not finite.
+fn placed(pen: &filmcraft_text::Xform, (x, y): (f32, f32)) -> Option<[f64; 6]> {
+    let xf = crate::text_block::compose(pen, &[1.0, 0.0, 0.0, 1.0, x, y]);
+    xf.iter()
+        .all(|value| value.is_finite())
+        .then(|| xf.map(f64::from))
+}
+
+fn psd_char_style(
+    family: &str,
+    (size, face, format): (f32, Option<&str>, &TextFormat),
+    color: [u8; 3],
+) -> PsdCharStyle {
+    PsdCharStyle {
+        family: family.to_owned(),
+        style: face.map(str::to_owned),
+        postscript: postscript_name(family, face),
+        size,
+        color,
+        faux_bold: format.bold,
+        faux_italic: format.italic,
+        underline: format.underline,
+        strikethrough: format.strikethrough,
+        caps: match format.caps {
+            TextCaps::Normal => PsdCaps::Normal,
+            TextCaps::All => PsdCaps::All,
+            TextCaps::Small => PsdCaps::Small,
+        },
+        script: match format.script {
+            TextScript::Normal => PsdScript::Normal,
+            TextScript::Superscript => PsdScript::Superscript,
+            TextScript::Subscript => PsdScript::Subscript,
+        },
+        tracking: f32::from(format.tracking),
+        baseline_shift: f32::from(format.baseline),
+    }
+}
+
+/// The typographic ascent (the OS/2 table's) of the face of `family` DiscCraft draws in `face` at `size` pixels.
+fn font_ascent(family: &str, face: Option<&str>, size: f32) -> Option<f32> {
+    use skrifa::raw::TableProvider;
+    ensure_system_fonts();
+    let resolved = filmcraft_text::resolve(family, face.unwrap_or("Regular"));
+    if resolved.missing {
+        return None;
+    }
+    let face = filmcraft_text::fonts::face(resolved.face);
+    let font = face.font()?;
+    let units = f32::from(font.head().ok()?.units_per_em());
+    let ascent = f32::from(font.os2().ok()?.s_typo_ascender()) / units * size;
+    (ascent.is_finite() && ascent > 0.0).then_some(ascent)
+}
+
+/// The PostScript name of the face of `family` DiscCraft draws in `face` (its regular one for `None`), as its
+/// name table gives it; `None` when the family is not on this computer.
+fn postscript_name(family: &str, face: Option<&str>) -> Option<String> {
+    use skrifa::MetadataProvider;
+    ensure_system_fonts();
+    let resolved = filmcraft_text::resolve(family, face.unwrap_or("Regular"));
+    if resolved.missing {
+        return None;
+    }
+    let face = filmcraft_text::fonts::face(resolved.face);
+    let font = face.font()?;
+    let name = font
+        .localized_strings(skrifa::string::StringId::POSTSCRIPT_NAME)
+        .english_or_first()?
+        .to_string();
+    (!name.trim().is_empty()).then_some(name)
+}
+
+fn psd_align(align: disccraft_project::TextAlign) -> PsdTextAlign {
+    match align {
+        disccraft_project::TextAlign::Left => PsdTextAlign::Left,
+        disccraft_project::TextAlign::Center => PsdTextAlign::Center,
+        disccraft_project::TextAlign::Right => PsdTextAlign::Right,
+        disccraft_project::TextAlign::Justify => PsdTextAlign::Justify,
+    }
+}
+
+fn psd_antialias(mode: TextAntialias) -> PsdAntialias {
+    match mode {
+        TextAntialias::None => PsdAntialias::None,
+        TextAntialias::Crisp => PsdAntialias::Crisp,
+        TextAntialias::Strong => PsdAntialias::Strong,
+        TextAntialias::Smooth => PsdAntialias::Smooth,
+        TextAntialias::Sharp => PsdAntialias::Sharp,
+    }
+}
+
+fn psd_shadow(shadow: &DropShadow) -> PsdShadow {
+    PsdShadow {
+        color: shadow.color,
+        opacity: f32::from(shadow.opacity.min(100)) / 100.0,
+        angle: f32::from(shadow.angle),
+        distance: f32::from(shadow.distance),
+        size: f32::from(shadow.size),
+        spread: f32::from(shadow.spread.min(100)) / 100.0,
+    }
 }
 
 /// Where the middle of a button's text is drawn: the middle of its part of the content box, moved by its offset,

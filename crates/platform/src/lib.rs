@@ -11,11 +11,12 @@
 )]
 
 pub mod displays;
-pub mod hw_h264;
+pub mod hw_video;
 pub mod memory;
 
 pub use displays::{Display, displays};
-pub use hw_h264::{
-    HwH264Config, HwH264Encoder, HwPacket, hardware_h264_encoders, use_for_transcodes,
+pub use hw_video::{
+    HwCodec, HwPacket, HwVideoConfig, HwVideoEncoder, hardware_encoders, hardware_h264_encoders,
+    use_for_transcodes,
 };
 pub use memory::installed_memory_bytes;

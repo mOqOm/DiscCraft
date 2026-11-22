@@ -1,13 +1,25 @@
-//! Hardware H.264 encoding (M12.39, docs/adr/0002-gpu-conversion.md): the graphics card's encoder through the
-//! operating system. Windows: a Media Foundation H.264 encoder MFT registered as hardware (NVIDIA, AMD and Intel
-//! drivers register theirs), driven as the Microsoft Learn pages "Asynchronous MFTs" and "H.264 Video Encoder"
-//! describe: unlocked with `MF_TRANSFORM_ASYNC_UNLOCK`, the output type (H.264, size, rate, profile, level) set
-//! before the input type (NV12), the rate control and GOP through `ICodecAPI`, then a frame in for each
-//! `METransformNeedInput` event and a packet out for each `METransformHaveOutput`. Other systems have none yet.
+//! Hardware video encoding (M12.39 H.264, M12.44 HEVC; docs/adr/0002-gpu-conversion.md): the graphics card's
+//! encoder through the operating system. Windows: a Media Foundation encoder MFT registered as hardware (NVIDIA, AMD
+//! and Intel drivers register theirs), driven as the Microsoft Learn pages "Asynchronous MFTs", "H.264 Video
+//! Encoder" and "H.265 / HEVC Video Encoder" describe: unlocked with `MF_TRANSFORM_ASYNC_UNLOCK`, the output type
+//! (H.264 or HEVC, size, rate, profile, level) set before the input type (NV12, or P010 for 10-bit HEVC), the rate
+//! control and GOP through `ICodecAPI`, then a frame in for each `METransformNeedInput` event and a packet out for
+//! each `METransformHaveOutput`. Other systems have none yet.
+
+/// The stream a hardware encoder makes, and the pictures it takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HwCodec {
+    /// H.264 High profile from NV12 pictures (the luma, then the chroma samples interleaved, a byte each).
+    H264,
+    /// HEVC Main 10 from P010 pictures (as NV12, but each sample two bytes, little-endian, its 10 bits at the top).
+    HevcMain10,
+}
 
 /// What an encode asks of the hardware encoder.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HwH264Config {
+pub struct HwVideoConfig {
+    /// The stream to make.
+    pub codec: HwCodec,
     /// Picture width and height.
     pub width: u32,
     /// Picture height.
@@ -26,7 +38,7 @@ pub struct HwH264Config {
     pub gop: u32,
     /// B pictures between reference pictures.
     pub b_frames: u32,
-    /// Slices a picture (a Blu-ray's 1080 lines take 4).
+    /// Slices a picture (a Blu-ray's 1080 lines take 4; H.264 only).
     pub slices: u32,
     /// The shape of a pixel (the VUI's sample aspect ratio).
     pub sar: (u32, u32),
@@ -47,28 +59,39 @@ pub struct HwPacket {
     pub key: bool,
 }
 
+/// The hardware encoders the system offers for `codec`, by name (empty without any).
+#[must_use]
+pub fn hardware_encoders(codec: HwCodec) -> Vec<String> {
+    imp::encoder_names(codec)
+}
+
 /// The hardware H.264 encoders the system offers, by name (empty without any).
 #[must_use]
 pub fn hardware_h264_encoders() -> Vec<String> {
-    imp::encoder_names()
+    hardware_encoders(HwCodec::H264)
 }
 
-/// Uses the system's hardware H.264 encoder for the HD transcodes when `on` (M12.40): registers
-/// [`transcode_factory`] with the transcodes, or takes it away.
+/// Uses the system's hardware encoders for the HD transcodes' H.264 (M12.40) and HEVC (M12.44) when `on`:
+/// registers [`transcode_factory`] with the transcodes, or takes it away.
 pub fn use_for_transcodes(on: bool) {
-    let factory: disccraft_transcode::hd::HardwareH264Factory = transcode_factory;
-    disccraft_transcode::hd::set_hardware_h264(on.then_some(factory));
+    let factory: disccraft_transcode::hd::HardwareFactory = transcode_factory;
+    disccraft_transcode::hd::set_hardware_encoder(on.then_some(factory));
 }
 
-/// The system's first hardware H.264 encoder, set up for an HD transcode's stream.
+/// The system's first hardware encoder for the codec asked, set up for an HD transcode's stream.
 ///
 /// # Errors
 ///
 /// When there is none, or it refuses the settings.
 pub fn transcode_factory(
-    config: &disccraft_transcode::hd::HardwareH264Config,
-) -> Result<Box<dyn disccraft_transcode::hd::HardwareH264>, String> {
-    let encoder = HwH264Encoder::open(&HwH264Config {
+    config: &disccraft_transcode::hd::HardwareConfig,
+) -> Result<Box<dyn disccraft_transcode::hd::HardwareVideo>, String> {
+    let codec = match config.codec {
+        disccraft_transcode::hd::HardwareCodec::H264 => HwCodec::H264,
+        disccraft_transcode::hd::HardwareCodec::HevcMain10 => HwCodec::HevcMain10,
+    };
+    let encoder = HwVideoEncoder::open(&HwVideoConfig {
+        codec,
         width: config.width,
         height: config.height,
         fps_num: config.fps_num,
@@ -86,16 +109,16 @@ pub fn transcode_factory(
     Ok(Box::new(ForTranscodes(encoder)))
 }
 
-/// A [`HwH264Encoder`] as the transcodes take one.
-struct ForTranscodes(HwH264Encoder);
+/// A [`HwVideoEncoder`] as the transcodes take one.
+struct ForTranscodes(HwVideoEncoder);
 
-impl disccraft_transcode::hd::HardwareH264 for ForTranscodes {
+impl disccraft_transcode::hd::HardwareVideo for ForTranscodes {
     fn encode(
         &mut self,
-        nv12: &[u8],
+        picture: &[u8],
         pts: i64,
     ) -> Result<Vec<disccraft_transcode::hd::HardwarePacket>, String> {
-        self.0.encode(nv12, pts, false).map(for_transcodes)
+        self.0.encode(picture, pts, false).map(for_transcodes)
     }
 
     fn finish(&mut self) -> Result<Vec<disccraft_transcode::hd::HardwarePacket>, String> {
@@ -114,26 +137,26 @@ fn for_transcodes(packets: Vec<HwPacket>) -> Vec<disccraft_transcode::hd::Hardwa
         .collect()
 }
 
-/// A hardware H.264 encoder at work.
-pub struct HwH264Encoder {
+/// A hardware video encoder at work.
+pub struct HwVideoEncoder {
     inner: imp::Encoder,
 }
 
-impl std::fmt::Debug for HwH264Encoder {
+impl std::fmt::Debug for HwVideoEncoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HwH264Encoder")
+        f.debug_struct("HwVideoEncoder")
             .field("name", &self.inner.name())
             .finish()
     }
 }
 
-impl HwH264Encoder {
-    /// The first hardware encoder the system offers, set up for `config`.
+impl HwVideoEncoder {
+    /// The first hardware encoder the system offers for `config.codec`, set up for `config`.
     ///
     /// # Errors
     ///
     /// When there is none, or it refuses the settings.
-    pub fn open(config: &HwH264Config) -> Result<Self, String> {
+    pub fn open(config: &HwVideoConfig) -> Result<Self, String> {
         imp::Encoder::open(config).map(|inner| Self { inner })
     }
 
@@ -143,14 +166,14 @@ impl HwH264Encoder {
         self.inner.name()
     }
 
-    /// Encodes one NV12 picture (the luma plane, then the chroma samples interleaved, both `width` wide) shown at
-    /// `pts` (100 ns), a key frame when `key`: the packets the encoder has ready.
+    /// Encodes one picture in the codec's layout ([`HwCodec`]: NV12 or P010) shown at `pts` (100 ns), a key frame
+    /// when `key`: the packets the encoder has ready.
     ///
     /// # Errors
     ///
     /// When the encoder fails.
-    pub fn encode(&mut self, nv12: &[u8], pts: i64, key: bool) -> Result<Vec<HwPacket>, String> {
-        self.inner.encode(nv12, pts, key)
+    pub fn encode(&mut self, picture: &[u8], pts: i64, key: bool) -> Result<Vec<HwPacket>, String> {
+        self.inner.encode(picture, pts, key)
     }
 
     /// The packets still held back, at the end of the stream.
@@ -174,32 +197,54 @@ mod imp {
         CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncMPVDefaultBPictureCount,
         CODECAPI_AVEncMPVGOPSize, CODECAPI_AVEncSliceControlMode, CODECAPI_AVEncSliceControlSize,
         CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI, IMFActivate, IMFMediaEventGenerator,
-        IMFSample, IMFShutdown, IMFTransform, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS,
+        IMFMediaType, IMFSample, IMFShutdown, IMFTransform, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS,
         METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
         MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_STREAM_CHANGE, MF_EVENT_FLAG_NO_WAIT,
         MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
         MF_MT_MAJOR_TYPE, MF_MT_MPEG2_LEVEL, MF_MT_MPEG2_PROFILE, MF_MT_PIXEL_ASPECT_RATIO,
-        MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MFCreateMediaType,
-        MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFSTARTUP_FULL,
-        MFSampleExtension_CleanPoint, MFSampleExtension_DecodeTimestamp, MFStartup,
+        MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_VIDEO_PRIMARIES,
+        MF_MT_YUV_MATRIX, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MFCreateMediaType,
+        MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFNominalRange_16_235,
+        MFSTARTUP_FULL, MFSampleExtension_CleanPoint, MFSampleExtension_DecodeTimestamp, MFStartup,
         MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
         MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
         MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
         MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER,
         MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
-        MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_NV12,
-        MFVideoInterlace_Progressive, eAVEncCommonRateControlMode_CBR,
-        eAVEncCommonRateControlMode_PeakConstrainedVBR, eAVEncH264VLevel4_1,
-        eAVEncH264VProfile_High,
+        MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC,
+        MFVideoFormat_NV12, MFVideoFormat_P010, MFVideoInterlace_Progressive,
+        MFVideoPrimaries_BT709, MFVideoTransFunc_709, MFVideoTransferMatrix_BT709,
+        eAVEncCommonRateControlMode_CBR, eAVEncCommonRateControlMode_PeakConstrainedVBR,
+        eAVEncH264VLevel4_1, eAVEncH264VProfile_High, eAVEncH265VProfile_Main_420_10,
     };
     use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
     use windows::Win32::System::Variant::VARIANT;
     use windows::core::{GUID, Interface, PWSTR};
 
-    use super::{HwH264Config, HwPacket};
+    use super::{HwCodec, HwPacket, HwVideoConfig};
 
     fn text(error: &windows::core::Error) -> String {
-        format!("hardware H.264 encoder: {error}")
+        format!("hardware video encoder: {error}")
+    }
+
+    /// What `codec` takes and makes: the input and output subtypes, the profile and the level (H.264: 4.1, as the
+    /// Blu-ray's; HEVC: none, the encoder's own for the size and rates: the NVIDIA encoder refused level 4.1 / 5.1
+    /// output types after a peak rate above the Main tier's, M12.44).
+    fn formats(codec: HwCodec) -> (GUID, GUID, u32, Option<u32>) {
+        match codec {
+            HwCodec::H264 => (
+                MFVideoFormat_NV12,
+                MFVideoFormat_H264,
+                u32::try_from(eAVEncH264VProfile_High.0).unwrap_or(100),
+                Some(u32::try_from(eAVEncH264VLevel4_1.0).unwrap_or(41)),
+            ),
+            HwCodec::HevcMain10 => (
+                MFVideoFormat_P010,
+                MFVideoFormat_HEVC,
+                u32::try_from(eAVEncH265VProfile_Main_420_10.0).unwrap_or(2),
+                None,
+            ),
+        }
     }
 
     /// COM on this thread (a thread already in another mode keeps it) and Media Foundation.
@@ -211,16 +256,17 @@ mod imp {
         unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }.map_err(|error| text(&error))
     }
 
-    /// The hardware encoders from NV12 to H.264, the system's preferred first.
-    fn activates() -> Result<Vec<IMFActivate>, String> {
+    /// The hardware encoders for `codec` (from its input to its output subtype), the system's preferred first.
+    fn activates(codec: HwCodec) -> Result<Vec<IMFActivate>, String> {
         start()?;
+        let (from, to, ..) = formats(codec);
         let input = MFT_REGISTER_TYPE_INFO {
             guidMajorType: MFMediaType_Video,
-            guidSubtype: MFVideoFormat_NV12,
+            guidSubtype: from,
         };
         let output = MFT_REGISTER_TYPE_INFO {
             guidMajorType: MFMediaType_Video,
-            guidSubtype: MFVideoFormat_H264,
+            guidSubtype: to,
         };
         let mut list: *mut Option<IMFActivate> = std::ptr::null_mut();
         let mut count = 0u32;
@@ -273,8 +319,8 @@ mod imp {
         text
     }
 
-    pub(super) fn encoder_names() -> Vec<String> {
-        activates()
+    pub(super) fn encoder_names(codec: HwCodec) -> Vec<String> {
+        activates(codec)
             .map(|list| list.iter().map(friendly_name).collect())
             .unwrap_or_default()
     }
@@ -290,6 +336,23 @@ mod imp {
         /// `METransformNeedInput` events not answered with a picture yet.
         wanted: u32,
         drained: bool,
+    }
+
+    /// Marks `kind` as BT.709 video in the 16 to 235 range (the transcodes' pictures): an encoder that writes the
+    /// VUI's colour description takes it from here (the NVIDIA H.264 and HEVC encoders left it out without, M12.44).
+    fn mark_bt709(kind: &IMFMediaType) -> Result<(), String> {
+        let marks = [
+            (&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0),
+            (&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709.0),
+            (&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0),
+            (&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0),
+        ];
+        for (key, value) in marks {
+            // SAFETY: a plain COM call on a live media type with a valid key.
+            unsafe { kind.SetUINT32(key, u32::try_from(value).unwrap_or(0)) }
+                .map_err(|error| text(&error))?;
+        }
+        Ok(())
     }
 
     fn pack(high: u32, low: u32) -> u64 {
@@ -310,12 +373,31 @@ mod imp {
             &self.name
         }
 
-        pub(super) fn open(config: &HwH264Config) -> Result<Self, String> {
-            let activate = activates()?
-                .into_iter()
-                .next()
-                .ok_or_else(|| "no hardware H.264 encoder".to_string())?;
-            let name = friendly_name(&activate);
+        /// The first of the system's hardware encoders for `config.codec` that takes `config`.
+        pub(super) fn open(config: &HwVideoConfig) -> Result<Self, String> {
+            let mut refused = Vec::new();
+            for activate in activates(config.codec)? {
+                let name = friendly_name(&activate);
+                match Self::open_with(&activate, name.clone(), config) {
+                    Ok(encoder) => return Ok(encoder),
+                    Err(error) => refused.push(format!("{name}: {error}")),
+                }
+                // SAFETY: a plain COM call on the activation object; its MFT is not used after this.
+                let _ = unsafe { activate.ShutdownObject() };
+            }
+            Err(if refused.is_empty() {
+                format!("no hardware {:?} encoder", config.codec)
+            } else {
+                refused.join("; ")
+            })
+        }
+
+        fn open_with(
+            activate: &IMFActivate,
+            name: String,
+            config: &HwVideoConfig,
+        ) -> Result<Self, String> {
+            let (input_subtype, output_subtype, profile, level) = formats(config.codec);
             // SAFETY: the activation object makes the MFT it stands for.
             let transform: IMFTransform =
                 unsafe { activate.ActivateObject() }.map_err(|error| text(&error))?;
@@ -353,8 +435,8 @@ mod imp {
             };
             let set_after = |codec: Option<&ICodecAPI>| {
                 set_codec(codec, &CODECAPI_AVEncCommonBufferSize, config.buffer_bits);
-                // Slices of whole macroblock rows (mode 2): the rows shared out over the slices.
-                if config.slices > 1 {
+                // Slices of whole macroblock rows (mode 2): the rows shared out over the slices (H.264).
+                if config.codec == HwCodec::H264 && config.slices > 1 {
                     let rows = config.height.div_ceil(16);
                     set_codec(codec, &CODECAPI_AVEncSliceControlMode, 2);
                     set_codec(
@@ -372,7 +454,7 @@ mod imp {
                     .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
                     .map_err(|error| text(&error))?;
                 output
-                    .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)
+                    .SetGUID(&MF_MT_SUBTYPE, &output_subtype)
                     .map_err(|error| text(&error))?;
                 output
                     .SetUINT32(&MF_MT_AVG_BITRATE, config.bitrate)
@@ -393,22 +475,19 @@ mod imp {
                     )
                     .map_err(|error| text(&error))?;
                 output
-                    .SetUINT32(
-                        &MF_MT_MPEG2_PROFILE,
-                        u32::try_from(eAVEncH264VProfile_High.0).unwrap_or(100),
-                    )
+                    .SetUINT32(&MF_MT_MPEG2_PROFILE, profile)
                     .map_err(|error| text(&error))?;
-                output
-                    .SetUINT32(
-                        &MF_MT_MPEG2_LEVEL,
-                        u32::try_from(eAVEncH264VLevel4_1.0).unwrap_or(41),
-                    )
-                    .map_err(|error| text(&error))?;
+                if let Some(level) = level {
+                    output
+                        .SetUINT32(&MF_MT_MPEG2_LEVEL, level)
+                        .map_err(|error| text(&error))?;
+                }
+                mark_bt709(&output)?;
                 transform
                     .SetOutputType(0, &output, 0)
                     .map_err(|error| format!("output type: {}", text(&error)))?;
 
-                // The encoder's own NV12 input type (a hardware encoder refuses one made here without its
+                // The encoder's own input type (NV12 / P010; a hardware encoder refuses one made here without its
                 // attributes), with the picture's size and rate.
                 let mut offered = None;
                 for index in 0..64 {
@@ -417,7 +496,7 @@ mod imp {
                     };
                     if kind
                         .GetGUID(&MF_MT_SUBTYPE)
-                        .is_ok_and(|subtype| subtype == MFVideoFormat_NV12)
+                        .is_ok_and(|subtype| subtype == input_subtype)
                     {
                         offered = Some(kind);
                         break;
@@ -429,7 +508,7 @@ mod imp {
                         let made = MFCreateMediaType().map_err(|error| text(&error))?;
                         made.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
                             .map_err(|error| text(&error))?;
-                        made.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)
+                        made.SetGUID(&MF_MT_SUBTYPE, &input_subtype)
                             .map_err(|error| text(&error))?;
                         made
                     }
@@ -449,6 +528,7 @@ mod imp {
                         u32::try_from(MFVideoInterlace_Progressive.0).unwrap_or(2),
                     )
                     .map_err(|error| text(&error))?;
+                mark_bt709(&input)?;
                 transform
                     .SetInputType(0, &input, 0)
                     .map_err(|error| format!("input type: {}", text(&error)))?;
@@ -612,7 +692,7 @@ mod imp {
 
         pub(super) fn encode(
             &mut self,
-            nv12: &[u8],
+            picture: &[u8],
             pts: i64,
             key: bool,
         ) -> Result<Vec<HwPacket>, String> {
@@ -624,9 +704,9 @@ mod imp {
                 set_codec(self.codec.as_ref(), &CODECAPI_AVEncVideoForceKeyFrame, 1);
             }
             let length =
-                u32::try_from(nv12.len()).map_err(|_| "a picture too large".to_string())?;
+                u32::try_from(picture.len()).map_err(|_| "a picture too large".to_string())?;
             // SAFETY: the buffer is made `length` bytes long, locked for writing, filled with exactly `length`
-            // bytes from `nv12` and unlocked; the sample keeps the buffer, the MFT the sample.
+            // bytes from `picture` and unlocked; the sample keeps the buffer, the MFT the sample.
             unsafe {
                 let buffer = MFCreateMemoryBuffer(length).map_err(|error| text(&error))?;
                 let mut data: *mut u8 = std::ptr::null_mut();
@@ -636,9 +716,9 @@ mod imp {
                     .map_err(|error| text(&error))?;
                 if data.is_null() || capacity < length {
                     let _ = buffer.Unlock();
-                    return Err("hardware H.264 encoder: a short input buffer".to_string());
+                    return Err("hardware video encoder: a short input buffer".to_string());
                 }
-                std::ptr::copy_nonoverlapping(nv12.as_ptr(), data, nv12.len());
+                std::ptr::copy_nonoverlapping(picture.as_ptr(), data, picture.len());
                 buffer.Unlock().map_err(|error| text(&error))?;
                 buffer
                     .SetCurrentLength(length)
@@ -693,9 +773,9 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
-    use super::{HwH264Config, HwPacket};
+    use super::{HwCodec, HwPacket, HwVideoConfig};
 
-    pub(super) fn encoder_names() -> Vec<String> {
+    pub(super) fn encoder_names(_codec: HwCodec) -> Vec<String> {
         Vec::new()
     }
 
@@ -706,17 +786,17 @@ mod imp {
             ""
         }
 
-        pub(super) fn open(_config: &HwH264Config) -> Result<Self, String> {
-            Err("hardware H.264 encoding is on Windows only".to_string())
+        pub(super) fn open(_config: &HwVideoConfig) -> Result<Self, String> {
+            Err("hardware video encoding is on Windows only".to_string())
         }
 
         pub(super) fn encode(
             &mut self,
-            _nv12: &[u8],
+            _picture: &[u8],
             _pts: i64,
             _key: bool,
         ) -> Result<Vec<HwPacket>, String> {
-            Err("hardware H.264 encoding is on Windows only".to_string())
+            Err("hardware video encoding is on Windows only".to_string())
         }
 
         pub(super) fn finish(&mut self) -> Result<Vec<HwPacket>, String> {

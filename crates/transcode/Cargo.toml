@@ -21,7 +21,7 @@ filmcraft-media.workspace = true
 filmcraft-codecs.workspace = true
 filmcraft-frame.workspace = true
 filmcraft-time.workspace = true
-craft-video = { workspace = true, features = ["h264-encode"] }
+craft-video = { workspace = true, features = ["h264-encode", "hevc-encode"] }
 thiserror.workspace = true
 
 [lints]
