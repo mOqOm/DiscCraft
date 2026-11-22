@@ -1645,6 +1645,7 @@ mod tests {
             transcode_quality: disccraft_project::BEST_QUALITY,
             max_render_quality: false,
             frame_blend: false,
+            menu_file: false,
         }
     }
 

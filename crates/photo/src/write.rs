@@ -214,10 +214,180 @@ pub fn write_layered_psd(
         .iter()
         .map(|layer| build_layer(layer, format, canvas, expected))
         .collect::<Result<_, _>>()?;
+    save(&doc, path)
+}
 
+/// What is laid over a menu's own PSD when the menu is written out again (M6.399): the PSD keeps its layers, and
+/// what was added to the menu since goes over them.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PsdAdditions {
+    /// The `(#)` page group the additions go into (1 for the lowest); `None`: the document's top level.
+    pub page: Option<usize>,
+    /// Leave the page groups out (a page added to a menu shown by page shows only the layers its pages share).
+    pub shared_only: bool,
+    /// Layers laid over the page, bottom to top.
+    pub layers: Vec<PsdLayer>,
+    /// The menu's buttons, bottom to top.
+    pub buttons: Vec<PsdButtonAddition>,
+}
+
+/// A button of [`PsdAdditions`]: when the PSD has its button set (by its layer id, else its name), `into` goes into
+/// that set; else the whole `set` is laid over the page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PsdButtonAddition {
+    /// The PSD layer id of its set.
+    pub id: Option<u32>,
+    /// Its set's name after the `(+)` (empty: found by its id only).
+    pub name: String,
+    /// Layers laid at the top of its set when the PSD has the set (its text added since).
+    pub into: Vec<PsdLayer>,
+    /// The whole set, for a button the PSD has no set for.
+    pub set: PsdLayer,
+}
+
+/// Write the PSD (or PhotoCraft document) at `source` to `path` as a PSD with all its own layers, and `additions`
+/// (drawn on a `width` x `height` canvas) laid over them (M6.399: a menu made from a PSD, or edited in an image
+/// editor, is no longer flattened into one picture when it is written out). `Ok(false)`, writing nothing, when the
+/// document's canvas is another size.
+///
+/// # Errors
+///
+/// When the document cannot be read, an added layer's bytes do not match the canvas, or the file cannot be written.
+pub fn write_psd_over(
+    source: &Path,
+    path: &Path,
+    (width, height): (u32, u32),
+    additions: &PsdAdditions,
+) -> Result<bool, PhotoError> {
+    let (mut doc, canvas) = crate::load_document(source)?;
+    if crate::rect_width_u32(canvas) != Some(width)
+        || crate::rect_height_u32(canvas) != Some(height)
+    {
+        return Ok(false);
+    }
+    let format = doc.pixel_format();
+    let expected = usize::try_from(width)
+        .ok()
+        .zip(usize::try_from(height).ok())
+        .and_then(|(w, h)| w.checked_mul(h))
+        .and_then(|area| area.checked_mul(4))
+        .ok_or_else(|| PhotoError::Invalid("canvas too large".to_string()))?;
+    let build = |layer: &PsdLayer| build_layer(layer, format, canvas, expected);
+    let mut top: Vec<Layer> = additions
+        .layers
+        .iter()
+        .map(build)
+        .collect::<Result<_, _>>()?;
+    let mut buttons = Vec::with_capacity(additions.buttons.len());
+    for button in &additions.buttons {
+        buttons.push((
+            button.id,
+            button.name.trim().to_owned(),
+            button
+                .into
+                .iter()
+                .map(build)
+                .collect::<Result<Vec<_>, _>>()?,
+            build(&button.set)?,
+        ));
+    }
+
+    if additions.shared_only {
+        doc.layers.retain(|layer| !crate::is_page_group(layer));
+    }
+    // The page group the additions go into, by its place among the top level's layers.
+    let page = additions
+        .page
+        .filter(|page| *page >= 1 && !additions.shared_only)
+        .and_then(|page| {
+            doc.layers
+                .iter()
+                .enumerate()
+                .filter(|(_, layer)| crate::is_page_group(layer))
+                .nth(page - 1)
+                .map(|(index, _)| index)
+        });
+    let target: &mut Vec<Layer> = &mut doc.layers;
+    match page.and_then(|index| target.get_mut(index)) {
+        Some(Layer {
+            content: LayerContent::Group(group),
+            ..
+        }) => lay_over(&mut group.children, &mut top, buttons),
+        _ => lay_over(target, &mut top, buttons),
+    }
+    save(&doc, path)?;
+    Ok(true)
+}
+
+/// Lays `buttons` (id, name, layers for its set, the whole set) into their sets in `layers` (a page's), the sets
+/// the page does not have over the page after `top`.
+#[allow(clippy::type_complexity)]
+fn lay_over(
+    layers: &mut Vec<Layer>,
+    top: &mut Vec<Layer>,
+    buttons: Vec<(Option<u32>, String, Vec<Layer>, Layer)>,
+) {
+    let mut sets = Vec::new();
+    for (id, name, into, set) in buttons {
+        let path = id
+            .and_then(|id| set_path(layers, &|layer| layer.psd_id == Some(id)))
+            .or_else(|| {
+                (!name.is_empty())
+                    .then(|| {
+                        set_path(layers, &|layer| {
+                            crate::button_name(&layer.name).as_deref() == Some(name.as_str())
+                        })
+                    })
+                    .flatten()
+            });
+        match path.and_then(|path| children_at(layers, &path)) {
+            Some(children) => children.extend(into),
+            None => sets.push(set),
+        }
+    }
+    layers.append(top);
+    layers.extend(sets);
+}
+
+/// Where the first button set `wanted` takes is among `layers` (indexes down the groups), not looking into page
+/// groups (another page's sets).
+fn set_path(layers: &[Layer], wanted: &dyn Fn(&Layer) -> bool) -> Option<Vec<usize>> {
+    for (index, layer) in layers.iter().enumerate() {
+        let LayerContent::Group(group) = &layer.content else {
+            continue;
+        };
+        if crate::is_button_name(&layer.name) {
+            if wanted(layer) {
+                return Some(vec![index]);
+            }
+        } else if !crate::is_page_group(layer)
+            && let Some(mut rest) = set_path(&group.children, wanted)
+        {
+            rest.insert(0, index);
+            return Some(rest);
+        }
+    }
+    None
+}
+
+/// The layers of the group at `path` (from [`set_path`]).
+fn children_at<'a>(layers: &'a mut [Layer], path: &[usize]) -> Option<&'a mut Vec<Layer>> {
+    let (first, rest) = path.split_first()?;
+    let LayerContent::Group(group) = &mut layers.get_mut(*first)?.content else {
+        return None;
+    };
+    if rest.is_empty() {
+        Some(&mut group.children)
+    } else {
+        children_at(&mut group.children, rest)
+    }
+}
+
+/// Exports `doc` as a PSD to `path`.
+fn save(doc: &Document, path: &Path) -> Result<(), PhotoError> {
     let display = path.display().to_string();
     let exported = catch_unwind(AssertUnwindSafe(|| {
-        photocraft_io::export(&doc, "psd", &photocraft_io::ExportOptions::default())
+        photocraft_io::export(doc, "psd", &photocraft_io::ExportOptions::default())
     }))
     .map_err(|_| PhotoError::Invalid("internal error while writing the PSD".to_string()))?
     .map_err(|error| PhotoError::Io {
@@ -863,6 +1033,100 @@ mod tests {
                 .map(|px| [px[0], px[1], px[2], px[3]])
         };
         assert_eq!(at(20, 15), Some([255, 255, 255, 255]));
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M6.399: written over a PSD with pages, the additions go into the page's `(#)` group (a button's new text
+    /// into its set there, a button without one as a new set) and every layer of the PSD stays; a page that shows
+    /// only the shared layers leaves the page groups out; a canvas of another size writes nothing.
+    #[test]
+    fn additions_go_over_their_page_of_the_psd() -> Result<(), Box<dyn Error>> {
+        use super::{PsdAdditions, PsdButtonAddition, write_psd_over};
+        use crate::psd_layer_tree;
+        let dir = std::env::temp_dir().join(format!("disccraft-psd-pages-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let (w, h) = (32_usize, 24_usize);
+        let raster = |name: &str| PsdLayer::Raster {
+            name: name.to_owned(),
+            rgba: solid(w, h, [255, 255, 255, 255]),
+            visible: true,
+        };
+        let set = |name: &str| PsdLayer::Group {
+            name: format!("(+) {name}"),
+            id: None,
+            children: vec![raster(name)],
+        };
+        let source = dir.join("pages.psd");
+        write_layered_psd(
+            &source,
+            32,
+            24,
+            &[
+                raster("背景"),
+                set("Play"),
+                PsdLayer::Group {
+                    name: "(#) One".to_owned(),
+                    id: None,
+                    children: vec![set("Next")],
+                },
+                PsdLayer::Group {
+                    name: "(#) Two".to_owned(),
+                    id: None,
+                    children: vec![set("Back"), raster("art")],
+                },
+            ],
+        )?;
+        let additions = PsdAdditions {
+            page: Some(2),
+            shared_only: false,
+            layers: vec![raster("added text")],
+            buttons: vec![
+                PsdButtonAddition {
+                    id: None,
+                    name: "Back".to_owned(),
+                    into: vec![raster("Back again")],
+                    set: set("unused"),
+                },
+                PsdButtonAddition {
+                    id: None,
+                    name: "Extra".to_owned(),
+                    into: vec![raster("unused")],
+                    set: set("Extra"),
+                },
+            ],
+        };
+        let out = dir.join("out.psd");
+        assert!(write_psd_over(&source, &out, (32, 24), &additions)?);
+        let tree = psd_layer_tree(&out)?;
+        let names = |nodes: &[crate::PsdTreeNode]| -> Vec<String> {
+            nodes.iter().map(|node| node.name.clone()).collect()
+        };
+        assert_eq!(names(&tree), ["(#) Two", "(#) One", "(+) Play", "背景"]);
+        let two = tree.first().ok_or("page two")?;
+        assert_eq!(
+            names(&two.children),
+            ["(+) Extra", "added text", "art", "(+) Back"]
+        );
+        let back = two.children.last().ok_or("Back set")?;
+        assert_eq!(names(&back.children), ["Back again", "Back"]);
+
+        // A page added later: the shared layers only, the additions at the top level.
+        let shared = PsdAdditions {
+            page: None,
+            shared_only: true,
+            layers: vec![raster("added text")],
+            buttons: Vec::new(),
+        };
+        assert!(write_psd_over(&source, &out, (32, 24), &shared)?);
+        assert_eq!(
+            names(&psd_layer_tree(&out)?),
+            ["added text", "(+) Play", "背景"]
+        );
+        // Another canvas size: nothing written.
+        let other = dir.join("other.psd");
+        assert!(!write_psd_over(&source, &other, (64, 48), &shared)?);
+        assert!(!other.exists());
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

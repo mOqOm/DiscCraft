@@ -235,7 +235,8 @@ switches as well.
 - **File ▸ Import ▸ Timeline…** (Shift+Ctrl+T): makes an asset and a timeline for each chosen video
 - **File ▸ Import ▸ Slideshow…** (Shift+Ctrl+G): makes one slideshow with the chosen images as its slides
 - **File ▸ Import ▸ Menu… / Pop-up Menu… / Menu Page…** (Shift+Ctrl+I / Shift+Ctrl+K /
-  Shift+Ctrl+U): makes a menu from a layered PSD (or a PhotoCraft `.pcraft`)
+  Shift+Ctrl+U): makes a menu from a layered PSD (or a PhotoCraft `.pcraft`). As in Encore, the Project panel shows
+  the menu only: the PSD is part of the menu (it is not listed among the assets and goes when the menu is deleted)
 
 A large video hours long (an mkv or mp4 of tens of gigabytes) is opened in the background right after it is imported.
 The window does not stop meanwhile; the status bar says "Reading media…", and when the file is open its length, size and
@@ -843,6 +844,10 @@ is the whole job, including the loop, the audio and what to hide afterwards.
   box and angle, and a drop shadow is a layer style. Until a text is retyped, the layer shows the text as DiscCraft
   draws it (Photoshop lays text over the picture with its text gamma, so the soft edges look a little brighter). A
   text with other layer effects (stroke, glow, bevel, overlay) is written as pixels
+- A menu made from a PSD, or edited in PhotoCraft or another image editor, keeps its PSD's own layers in both
+  commands' PSD (they are not flattened into one picture): what was added in DiscCraft since goes over them, a
+  button's new text into its `(+)` set, and a new button as a new set. On a menu with `(#)` pages, the additions go
+  into the page's group
 - **Menu ▸ Replace Menu…**: replaces the open menu with a PSD's design, keeping the links by button number
 - **Menu ▸ Save Menu as Template…** (Ctrl+Alt+M): saves it in the Library's **User** set
 

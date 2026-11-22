@@ -592,6 +592,10 @@ pub struct Asset {
     /// rate), the two are mixed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub frame_blend: bool,
+    /// The file a menu was made from or edited in (a PSD imported as a menu, or saved from an image editor): part of
+    /// its menu, not listed among the assets (Encore shows such a menu as a menu only, M6.399).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub menu_file: bool,
 }
 
 /// The best transcode quality (Encore's presets' 5): the encoder's whole motion search.
@@ -1781,6 +1785,7 @@ impl Project {
                 transcode_quality: BEST_QUALITY,
                 max_render_quality: false,
                 frame_blend: false,
+                menu_file: false,
             },
         );
         Ok(id)

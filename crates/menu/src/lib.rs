@@ -349,151 +349,212 @@ pub fn menu_psd_layers(
         visible: true,
     }];
     for graphic in &menu.graphics {
-        layers.push(PsdLayer::Raster {
-            // A replacement layer keeps Encore's `(!)` in front of its name.
-            name: if graphic.replacement {
-                format!("(!) {}", graphic.kind_name(project))
-            } else {
-                graphic.kind_name(project)
-            },
-            rgba: graphic_rgba(project, graphic, width, height),
-            visible: true,
-        });
+        layers.push(graphic_psd_layer(project, graphic, width, height));
     }
     for text in &menu.texts {
         layers.push(text_psd_layer(menu, text, width, height));
     }
     for (index, button) in menu.buttons.iter().enumerate() {
-        let group = menu.highlight_group(button.highlight_group);
-        // The button's own name (a PSD button's `(+)` group's, M10.46), else its text, else its number.
-        let title = if !button.name.trim().is_empty() {
-            button.name.clone()
-        } else if button.label.trim().is_empty() {
-            format!("ボタン {}", index.saturating_add(1))
-        } else {
-            button.label.clone()
-        };
-        let rect = button.rect;
-        let values = highlight::button_values(menu, index, artwork).unwrap_or_default();
-        let mut highlights = Vec::new();
-        // A PSD button's layers in their own colours (M6.335) go back as they are.
-        let own = highlight::color_layers(button);
-        for (n, layer) in (1_u8..).zip(own.iter().flatten()) {
-            let Some(layer) = layer else {
-                continue;
-            };
-            let mut rgba = vec![0u8; usize::from(width) * usize::from(height) * 4];
-            for (row, line) in layer
-                .chunks(usize::from(rect.w).max(1).saturating_mul(4))
-                .enumerate()
-            {
-                let y = usize::from(rect.y) + row;
-                let x = usize::from(rect.x);
-                if y >= usize::from(height) || x >= usize::from(width) {
-                    continue;
-                }
-                let take = line.len().min((usize::from(width) - x) * 4);
-                let start = (y * usize::from(width) + x) * 4;
-                if let (Some(target), Some(source)) =
-                    (rgba.get_mut(start..start + take), line.get(..take))
-                {
-                    target.copy_from_slice(source);
-                }
-            }
-            highlights.push(PsdLayer::Raster {
-                name: format!("(={n}) ハイライト"),
-                rgba,
-                visible: false,
-            });
-        }
-        for n in 1..=3_u8 {
-            if own.is_some() || !values.contains(&n) {
-                continue;
-            }
-            let [r, g, b] = group.selected_color(n).0;
-            let mut rgba = vec![0u8; usize::from(width) * usize::from(height) * 4];
-            for (row, line) in values.chunks(usize::from(rect.w).max(1)).enumerate() {
-                for (col, value) in line.iter().enumerate() {
-                    let x = usize::from(rect.x) + col;
-                    let y = usize::from(rect.y) + row;
-                    if *value != n || x >= usize::from(width) || y >= usize::from(height) {
-                        continue;
-                    }
-                    let i = (y * usize::from(width) + x) * 4;
-                    if let Some(pixel) = rgba.get_mut(i..i + 4) {
-                        pixel.copy_from_slice(&[r, g, b, 255]);
-                    }
-                }
-            }
-            highlights.push(PsdLayer::Raster {
-                name: format!("(={n}) ハイライト"),
-                rgba,
-                visible: false,
-            });
-        }
-        let mut label = draw::label_rgba(menu, button, width, height);
-        // The text as an editable type layer (M6.398) when the group has a highlight layer to keep the button's
-        // corners (a type layer's pixels are set anew when its text is edited).
-        let typed = if highlights.is_empty() {
-            None
-        } else {
-            draw::label_type(menu, button)
-        };
-        // The button's corners, faintly, so the group covers the whole button.
-        let marked = match (&typed, highlights.first_mut()) {
-            (Some(_), Some(PsdLayer::Raster { rgba, .. })) => rgba,
-            _ => &mut label,
-        };
-        mark_corners(marked, rect, (width, height));
-        let mut children = Vec::new();
-        if let Some(area) = button.thumbnail_placed().map(|area| {
-            disccraft_project::rotated_bounds_about(
-                area,
-                button.content_centre(),
-                button.orientation.angle,
-            )
-        }) {
-            // Encore's video thumbnail layer: a grey placeholder where the video goes.
-            let mut placeholder = vec![0u8; usize::from(width) * usize::from(height) * 4];
-            for y in area.y..area.y.saturating_add(area.h).min(height) {
-                for x in area.x..area.x.saturating_add(area.w).min(width) {
-                    let i = (usize::from(y) * usize::from(width) + usize::from(x)) * 4;
-                    if let Some(pixel) = placeholder.get_mut(i..i + 4) {
-                        pixel.copy_from_slice(&THUMBNAIL_PLACEHOLDER);
-                    }
-                }
-            }
-            children.push(PsdLayer::Raster {
-                name: "(%) ビデオ".to_owned(),
-                rgba: placeholder,
-                visible: true,
-            });
-        }
-        layers.push(PsdLayer::Group {
-            name: format!("(+) {title}"),
-            // M10.49: the set made from a PSD's keeps that layer's id, so the edited PSD finds this button again.
-            id: button.psd_layer,
-            children: [
-                children,
-                vec![match typed {
-                    Some(setting) => PsdLayer::Text {
-                        name: title,
-                        rgba: label,
-                        visible: true,
-                        text: Box::new(setting),
-                    },
-                    None => PsdLayer::Raster {
-                        name: title,
-                        rgba: label,
-                        visible: true,
-                    },
-                }],
-                highlights,
-            ]
-            .concat(),
-        });
+        layers.push(button_psd_set(
+            menu,
+            (index, button),
+            artwork,
+            (width, height),
+        ));
     }
     Ok((width, height, layers))
+}
+
+/// A menu graphic (image or shape) as a pixel layer of its PSD; a replacement layer keeps Encore's `(!)` in front of
+/// its name.
+fn graphic_psd_layer(
+    project: &Project,
+    graphic: &disccraft_project::MenuGraphic,
+    width: u16,
+    height: u16,
+) -> disccraft_photo::PsdLayer {
+    disccraft_photo::PsdLayer::Raster {
+        name: if graphic.replacement {
+            format!("(!) {}", graphic.kind_name(project))
+        } else {
+            graphic.kind_name(project)
+        },
+        rgba: graphic_rgba(project, graphic, width, height),
+        visible: true,
+    }
+}
+
+/// The name of a button's set: the button's own name (a PSD button's `(+)` group's, M10.46), else its text, else
+/// its number.
+fn button_title(index: usize, button: &disccraft_project::Button) -> String {
+    if !button.name.trim().is_empty() {
+        button.name.clone()
+    } else if button.label.trim().is_empty() {
+        format!("ボタン {}", index.saturating_add(1))
+    } else {
+        button.label.clone()
+    }
+}
+
+/// A button as a `(+)` set of its menu's PSD: its video thumbnail's placeholder, its text (an editable type layer,
+/// M6.398) and its highlight as hidden `(=1)` / `(=2)` / `(=3)` layers; the button's corners are marked faintly so
+/// the set covers the whole button.
+fn button_psd_set(
+    menu: &Menu,
+    (index, button): (usize, &disccraft_project::Button),
+    artwork: bool,
+    (width, height): (u16, u16),
+) -> disccraft_photo::PsdLayer {
+    use disccraft_photo::PsdLayer;
+    let group = menu.highlight_group(button.highlight_group);
+    let title = button_title(index, button);
+    let rect = button.rect;
+    let values = highlight::button_values(menu, index, artwork).unwrap_or_default();
+    let mut highlights = Vec::new();
+    // A PSD button's layers in their own colours (M6.335) go back as they are.
+    let own = highlight::color_layers(button);
+    for (n, layer) in (1_u8..).zip(own.iter().flatten()) {
+        let Some(layer) = layer else {
+            continue;
+        };
+        let mut rgba = vec![0u8; usize::from(width) * usize::from(height) * 4];
+        for (row, line) in layer
+            .chunks(usize::from(rect.w).max(1).saturating_mul(4))
+            .enumerate()
+        {
+            let y = usize::from(rect.y) + row;
+            let x = usize::from(rect.x);
+            if y >= usize::from(height) || x >= usize::from(width) {
+                continue;
+            }
+            let take = line.len().min((usize::from(width) - x) * 4);
+            let start = (y * usize::from(width) + x) * 4;
+            if let (Some(target), Some(source)) =
+                (rgba.get_mut(start..start + take), line.get(..take))
+            {
+                target.copy_from_slice(source);
+            }
+        }
+        highlights.push(PsdLayer::Raster {
+            name: format!("(={n}) ハイライト"),
+            rgba,
+            visible: false,
+        });
+    }
+    for n in 1..=3_u8 {
+        if own.is_some() || !values.contains(&n) {
+            continue;
+        }
+        let [r, g, b] = group.selected_color(n).0;
+        let mut rgba = vec![0u8; usize::from(width) * usize::from(height) * 4];
+        for (row, line) in values.chunks(usize::from(rect.w).max(1)).enumerate() {
+            for (col, value) in line.iter().enumerate() {
+                let x = usize::from(rect.x) + col;
+                let y = usize::from(rect.y) + row;
+                if *value != n || x >= usize::from(width) || y >= usize::from(height) {
+                    continue;
+                }
+                let i = (y * usize::from(width) + x) * 4;
+                if let Some(pixel) = rgba.get_mut(i..i + 4) {
+                    pixel.copy_from_slice(&[r, g, b, 255]);
+                }
+            }
+        }
+        highlights.push(PsdLayer::Raster {
+            name: format!("(={n}) ハイライト"),
+            rgba,
+            visible: false,
+        });
+    }
+    let mut label = draw::label_rgba(menu, button, width, height);
+    // The text as an editable type layer (M6.398) when the group has a highlight layer to keep the button's
+    // corners (a type layer's pixels are set anew when its text is edited).
+    let typed = if highlights.is_empty() {
+        None
+    } else {
+        draw::label_type(menu, button)
+    };
+    // The button's corners, faintly, so the group covers the whole button.
+    let marked = match (&typed, highlights.first_mut()) {
+        (Some(_), Some(PsdLayer::Raster { rgba, .. })) => rgba,
+        _ => &mut label,
+    };
+    mark_corners(marked, rect, (width, height));
+    let mut children = Vec::new();
+    if let Some(area) = button.thumbnail_placed().map(|area| {
+        disccraft_project::rotated_bounds_about(
+            area,
+            button.content_centre(),
+            button.orientation.angle,
+        )
+    }) {
+        // Encore's video thumbnail layer: a grey placeholder where the video goes.
+        let mut placeholder = vec![0u8; usize::from(width) * usize::from(height) * 4];
+        for y in area.y..area.y.saturating_add(area.h).min(height) {
+            for x in area.x..area.x.saturating_add(area.w).min(width) {
+                let i = (usize::from(y) * usize::from(width) + usize::from(x)) * 4;
+                if let Some(pixel) = placeholder.get_mut(i..i + 4) {
+                    pixel.copy_from_slice(&THUMBNAIL_PLACEHOLDER);
+                }
+            }
+        }
+        children.push(PsdLayer::Raster {
+            name: "(%) ビデオ".to_owned(),
+            rgba: placeholder,
+            visible: true,
+        });
+    }
+    PsdLayer::Group {
+        name: format!("(+) {title}"),
+        // M10.49: the set made from a PSD's keeps that layer's id, so the edited PSD finds this button again.
+        id: button.psd_layer,
+        children: [
+            children,
+            vec![match typed {
+                Some(setting) => PsdLayer::Text {
+                    name: title,
+                    rgba: label,
+                    visible: true,
+                    text: Box::new(setting),
+                },
+                None => PsdLayer::Raster {
+                    name: title,
+                    rgba: label,
+                    visible: true,
+                },
+            }],
+            highlights,
+        ]
+        .concat(),
+    }
+}
+
+/// A button's text, added in DiscCraft to a button whose set is in the menu's PSD, as a layer for that set (M6.399);
+/// `None` for no text.
+fn label_psd_layer(
+    menu: &Menu,
+    (index, button): (usize, &disccraft_project::Button),
+    (width, height): (u16, u16),
+) -> Option<disccraft_photo::PsdLayer> {
+    use disccraft_photo::PsdLayer;
+    if button.label.trim().is_empty() {
+        return None;
+    }
+    let name = button_title(index, button);
+    let rgba = draw::label_rgba(menu, button, width, height);
+    Some(match draw::label_type(menu, button) {
+        Some(setting) => PsdLayer::Text {
+            name,
+            rgba,
+            visible: true,
+            text: Box::new(setting),
+        },
+        None => PsdLayer::Raster {
+            name,
+            rgba,
+            visible: true,
+        },
+    })
 }
 
 /// A menu text as a layer of its PSD: an editable type layer (M6.398) showing what DiscCraft draws, its drop
@@ -582,9 +643,80 @@ pub fn export_menu_psd(
     picture: Option<(&[u8], usize, usize)>,
     path: &std::path::Path,
 ) -> Result<(), MenuError> {
+    // A menu whose background is a PSD (made from one, or edited in an image editor) keeps that PSD's layers, and
+    // what was added to it since goes over them (M6.399); a PSD of another size than the frame is drawn into it.
+    if picture.is_none()
+        && let Some(source) = menu_document(project, menu)
+    {
+        let (width, height) = frame_size(&project.settings);
+        let additions = menu_psd_additions(project, menu, (width, height));
+        if disccraft_photo::write_psd_over(
+            &source,
+            path,
+            (u32::from(width), u32::from(height)),
+            &additions,
+        )
+        .map_err(|error| MenuError::Invalid(error.to_string()))?
+        {
+            return Ok(());
+        }
+    }
     let (width, height, layers) = menu_psd_layers(project, menu, picture)?;
     disccraft_photo::write_layered_psd(path, u32::from(width), u32::from(height), &layers)
         .map_err(|error| MenuError::Invalid(error.to_string()))
+}
+
+/// The layered document (PSD or PhotoCraft file) a menu's background is, when it is one and the file is there.
+fn menu_document(project: &Project, menu: &Menu) -> Option<std::path::PathBuf> {
+    let disccraft_project::MenuBackground::Image { asset } = &menu.background else {
+        return None;
+    };
+    let path = std::path::PathBuf::from(&project.assets.get(asset)?.path);
+    (disccraft_photo::is_document(&path) && path.is_file()).then_some(path)
+}
+
+/// What a menu adds to its own PSD (M6.399): its graphics and texts over its page, and its buttons: the text of a
+/// button whose set the PSD has goes into that set, a button without one is a new set.
+fn menu_psd_additions(
+    project: &Project,
+    menu: &Menu,
+    (width, height): (u16, u16),
+) -> disccraft_photo::PsdAdditions {
+    let artwork = draw::is_document_menu(project, menu);
+    let mut layers: Vec<disccraft_photo::PsdLayer> = menu
+        .graphics
+        .iter()
+        .map(|graphic| graphic_psd_layer(project, graphic, width, height))
+        .collect();
+    layers.extend(
+        menu.texts
+            .iter()
+            .map(|text| text_psd_layer(menu, text, width, height)),
+    );
+    let buttons = menu
+        .buttons
+        .iter()
+        .enumerate()
+        .map(|(index, button)| disccraft_photo::PsdButtonAddition {
+            id: button.psd_layer,
+            name: button.name.clone(),
+            into: label_psd_layer(menu, (index, button), (width, height))
+                .into_iter()
+                .collect(),
+            set: button_psd_set(menu, (index, button), artwork, (width, height)),
+        })
+        .collect();
+    let (page, shared_only) = match menu.psd_page {
+        Some(disccraft_project::NO_PSD_PAGE) => (None, true),
+        Some(page) => ((page >= 1).then_some(usize::from(page)), false),
+        None => (None, false),
+    };
+    disccraft_photo::PsdAdditions {
+        page,
+        shared_only,
+        layers,
+        buttons,
+    }
 }
 
 /// The font families on this computer, sorted by name (for a font list in an editor).
