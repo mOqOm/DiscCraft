@@ -49,8 +49,8 @@ or the Apache License 2.0, at your option. FilmCraft, PhotoCraft, EffectCraft an
 revisions. DiscCraft uses directly craft-audio (its AC-3 encoder, which makes the transcoded soundtracks Dolby Digital, and its
 AC-3 decoder, with which a raw AC-3 file is heard in the monitor;
 revision c42c34bfa127b095fb0a8d5ccaba0c168c254062), craft-video (its H.264 encoder, formerly FilmCraft's
-filmcraft-h264enc, which makes the HD Blu-ray video, and its HEVC encoder, which makes Ultra HD video; the same
-revision; in tests also its MPEG-2 decoder), craft-media
+filmcraft-h264enc, which makes the HD Blu-ray video, and, only in a build with the transcode crate's `hevc` feature,
+its HEVC encoder for Ultra HD video; the same revision; in tests also its MPEG-2 decoder), craft-media
 (its MPEG-2 Systems, Matroska and MP4 readers, which take out video and audio that fit a disc as they are; the same
 revision) and craft-ui (its docking, which arranges the panels and workspaces; the same revision), and in tests
 only craft-psd (PSD writer, the same revision). craft-video and craft-media are taken from the fork https://github.com/mOqOm/craft-libs (branch

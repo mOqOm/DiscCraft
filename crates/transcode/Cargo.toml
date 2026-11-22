@@ -21,8 +21,14 @@ filmcraft-media.workspace = true
 filmcraft-codecs.workspace = true
 filmcraft-frame.workspace = true
 filmcraft-time.workspace = true
-craft-video = { workspace = true, features = ["h264-encode", "hevc-encode"] }
+craft-video = { workspace = true, features = ["h264-encode"] }
 thiserror.workspace = true
+
+[features]
+# HEVC (H.265) for Ultra HD video (M12.43, M12.44): craft-video's HEVC encoder, and the hardware encoder's HEVC. Off
+# by default (M12.45): left out of the published programs until the patent check of AGENTS.md rule 6; without it an
+# HEVC transcode is refused. `cargo test -p disccraft-transcode --features hevc` runs its tests.
+hevc = ["craft-video/hevc-encode"]
 
 [lints]
 workspace = true

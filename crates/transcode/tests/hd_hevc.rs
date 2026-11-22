@@ -3,6 +3,8 @@
 //! the parameter sets before every IDR picture; it decodes without errors and looks like the source. ffmpeg is the
 //! oracle (skipped without it).
 
+// M12.45: HEVC is built only with the `hevc` feature.
+#![cfg(feature = "hevc")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

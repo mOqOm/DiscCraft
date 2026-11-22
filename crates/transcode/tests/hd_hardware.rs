@@ -214,6 +214,14 @@ fn a_registered_hardware_encoder_makes_progressive_hd_h264() {
         mode: RateMode::Vbr2Pass,
         ..options.clone()
     };
+    if !cfg!(feature = "hevc") {
+        // M12.45: without the `hevc` feature HEVC is refused, the hardware encoder not asked.
+        assert!(transcode_h264(&source, &es, &index, &hevc, &mut |_| {}).is_err());
+        assert_eq!(PICTURES.load(Ordering::SeqCst), before);
+        set_hardware_encoder(None);
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
     let (frames, units, bytes) = run(&hevc);
     assert_eq!(PICTURES.load(Ordering::SeqCst) - before, pictures);
     assert_eq!(usize::try_from(frames).unwrap(), pictures);

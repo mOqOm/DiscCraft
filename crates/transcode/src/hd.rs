@@ -290,7 +290,8 @@ fn nv12_of(planes: &YuvPlanes, (width, height): (usize, usize)) -> Result<Vec<u8
 /// first pass of two), or (M12.40) a hardware H.264 encoder.
 enum HdEncoder {
     H264(Box<Encoder>),
-    /// M12.43: the encoder, and its parameter sets as Annex B (VPS, SPS, PPS).
+    /// M12.43: the encoder, and its parameter sets as Annex B (VPS, SPS, PPS). Only with the `hevc` feature (M12.45).
+    #[cfg(feature = "hevc")]
     Hevc(Box<craft_video::hevc::Encoder>, Vec<u8>),
     Hardware(HardwareState),
     Mpeg2(
@@ -443,8 +444,9 @@ impl HdEncoder {
         let factory = hardware_encoder()?;
         let codec = match options.codec {
             HdCodec::H264 if !options.interlaced => HardwareCodec::H264,
-            HdCodec::Hevc => HardwareCodec::HevcMain10,
-            HdCodec::H264 | HdCodec::Mpeg2 => return None,
+            // HEVC only with the `hevc` feature (M12.45).
+            HdCodec::Hevc if cfg!(feature = "hevc") => HardwareCodec::HevcMain10,
+            HdCodec::H264 | HdCodec::Hevc | HdCodec::Mpeg2 => return None,
         };
         if !matches!(pass, HdPass::Single) {
             return None;
@@ -487,27 +489,7 @@ impl HdEncoder {
                     .map(|encoder| Self::H264(Box::new(encoder)))
                     .map_err(|error| TranscodeError::Encode(error.to_string()))
             }
-            HdCodec::Hevc => {
-                let mut config = craft_video::hevc::EncoderConfig::new(
-                    options.width,
-                    options.height,
-                    options.fps_num,
-                    options.fps_den,
-                );
-                config.profile = craft_video::hevc::Profile::Main10;
-                config.rate = craft_video::hevc::RateControl::Bitrate {
-                    kbps: options.target_kbps,
-                };
-                config.keyint = keyint(options);
-                let encoder = craft_video::hevc::Encoder::new(config)
-                    .map_err(|error| TranscodeError::Encode(error.to_string()))?;
-                let mut sets = Vec::new();
-                for set in encoder.parameter_sets() {
-                    sets.extend_from_slice(&[0, 0, 0, 1]);
-                    sets.extend_from_slice(&set);
-                }
-                Ok(Self::Hevc(Box::new(encoder), sets))
-            }
+            HdCodec::Hevc => hevc_encoder(options),
             HdCodec::Mpeg2 => {
                 let mut encoder = mpeg2_encoder(options)?;
                 encoder.set_quality(options.quality);
@@ -527,7 +509,9 @@ impl HdEncoder {
     fn stats(&self) -> Option<HdStats> {
         match self {
             Self::H264(encoder) => encoder.pass_stats().map(HdStats::H264),
-            Self::Hardware(_) | Self::Hevc(..) => None,
+            Self::Hardware(_) => None,
+            #[cfg(feature = "hevc")]
+            Self::Hevc(..) => None,
             Self::Mpeg2(_, pictures) => Some(HdStats::Mpeg2(pictures.clone())),
         }
     }
@@ -546,6 +530,7 @@ impl HdEncoder {
                 .into_iter()
                 .map(Coded::from)
                 .collect()),
+            #[cfg(feature = "hevc")]
             Self::Hevc(encoder, sets) => {
                 let (y, u, v) = (ten_bit(&planes.y), ten_bit(&planes.u), ten_bit(&planes.v));
                 let packet = encoder
@@ -599,6 +584,7 @@ impl HdEncoder {
         match self {
             Self::H264(encoder) => Ok(encoder.flush().into_iter().map(Coded::from).collect()),
             // No pictures are held back.
+            #[cfg(feature = "hevc")]
             Self::Hevc(..) => Ok(Vec::new()),
             Self::Hardware(state) => {
                 let packets = state.encoder.finish().map_err(TranscodeError::Encode)?;
@@ -643,7 +629,41 @@ fn mpeg2_coded(
         .collect()
 }
 
+/// The HEVC encoder (M12.43) of a transcode, with its parameter sets as Annex B.
+#[cfg(feature = "hevc")]
+fn hevc_encoder(options: &HdOptions) -> Result<HdEncoder, TranscodeError> {
+    let mut config = craft_video::hevc::EncoderConfig::new(
+        options.width,
+        options.height,
+        options.fps_num,
+        options.fps_den,
+    );
+    config.profile = craft_video::hevc::Profile::Main10;
+    config.rate = craft_video::hevc::RateControl::Bitrate {
+        kbps: options.target_kbps,
+    };
+    config.keyint = keyint(options);
+    let encoder = craft_video::hevc::Encoder::new(config)
+        .map_err(|error| TranscodeError::Encode(error.to_string()))?;
+    let mut sets = Vec::new();
+    for set in encoder.parameter_sets() {
+        sets.extend_from_slice(&[0, 0, 0, 1]);
+        sets.extend_from_slice(&set);
+    }
+    Ok(HdEncoder::Hevc(Box::new(encoder), sets))
+}
+
+/// Without the `hevc` feature (M12.45: HEVC is left out of the published programs until the patent check of
+/// AGENTS.md rule 6) an HEVC transcode is refused.
+#[cfg(not(feature = "hevc"))]
+fn hevc_encoder(_options: &HdOptions) -> Result<HdEncoder, TranscodeError> {
+    Err(TranscodeError::Encode(
+        "HEVC is not in this build of DiscCraft".to_string(),
+    ))
+}
+
 /// 8-bit samples as 10-bit ones (M12.43: the pictures are made at 8 bits; Main 10 carries them shifted up).
+#[cfg(feature = "hevc")]
 fn ten_bit(samples: &[u8]) -> Vec<u16> {
     samples
         .iter()
@@ -654,6 +674,7 @@ fn ten_bit(samples: &[u8]) -> Vec<u16> {
 /// An HEVC access unit as Annex B (M12.43): an access unit delimiter (H.265 7.3.2.5, pic_type 2: any slice type),
 /// `parameter_sets` (already Annex B) before an IDR picture, then each NAL unit of `coded` (each prefixed by a 4-byte
 /// length, ISO/IEC 14496-15) after a start code.
+#[cfg(feature = "hevc")]
 fn hevc_annex_b(coded: &[u8], parameter_sets: Option<&[u8]>) -> Result<Vec<u8>, TranscodeError> {
     let broken = || TranscodeError::Encode("a malformed HEVC access unit".to_string());
     let mut out = Vec::with_capacity(coded.len().saturating_add(64));
