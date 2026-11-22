@@ -105,19 +105,71 @@ fn mpeg2(data: &[u8]) -> Option<FieldType> {
     })
 }
 
-/// The scan an H.264 sequence parameter set says: frames, or fields (taken as upper first: the order is in each
-/// picture's timing, which is not read here, and upper first is what interlaced HD video has).
-fn of_sps(sps: crate::h264_sps::Sps) -> FieldType {
+/// The scan an H.264 sequence parameter set says: frames, or fields; then (M12.42) the bottom field first when the
+/// stream's first picture says so ([`crate::h264_sps::top_field_first_in_annex_b`], `stream` the Annex B bytes
+/// around it), else the top field first (what interlaced HD video mostly has, and what a stream without its pictures
+/// at hand, an `avcC` record's, is taken for).
+fn of_sps(sps: crate::h264_sps::Sps, stream: Option<&[u8]>) -> FieldType {
     if sps.frame_mbs_only {
         FieldType::Progressive
+    } else if stream.and_then(|data| crate::h264_sps::top_field_first_in_annex_b(data, &sps))
+        == Some(false)
+    {
+        FieldType::LowerFirst
     } else {
         FieldType::UpperFirst
     }
 }
 
-/// The first Annex B sequence parameter set's scan (an elementary stream, a transport stream).
+/// The first Annex B sequence parameter set's scan (an elementary stream, or a transport stream's video, whose
+/// packets' headers are taken out first so they do not cut through the parameter sets and slice headers).
 fn h264_annex_b(data: &[u8]) -> Option<FieldType> {
-    crate::h264_sps::first_in_annex_b(data).map(of_sps)
+    let video = ts_video(data);
+    let stream = video.as_deref().unwrap_or(data);
+    let sps = crate::h264_sps::first_in_annex_b(stream)?;
+    Some(of_sps(sps, Some(stream)))
+}
+
+/// The payload of the packets of the PID that carries video in a transport stream (`data` from its start: 188-byte
+/// packets, or 192 with a four-byte time code first, as a Blu-ray's .m2ts), in order: the PID whose payload holds the
+/// first H.264 sequence parameter set (a start code before NAL type 7). `None` when `data` is no transport stream.
+fn ts_video(data: &[u8]) -> Option<Vec<u8>> {
+    let (size, offset) = [(188usize, 0usize), (192, 4)]
+        .into_iter()
+        .find(|&(size, offset)| {
+            (0..3).all(|packet| data.get(offset + packet * size) == Some(&0x47))
+        })?;
+    let mut payloads: Vec<(u16, Vec<u8>)> = Vec::new();
+    for packet in data.get(offset..)?.chunks_exact(size) {
+        let [sync, high, low, flags, ..] = *packet else {
+            continue;
+        };
+        if sync != 0x47 {
+            break;
+        }
+        let pid = u16::from(high & 0x1F) << 8 | u16::from(low);
+        let control = (flags >> 4) & 3;
+        if control & 1 == 0 {
+            continue;
+        }
+        let start = if control & 2 != 0 {
+            5usize.saturating_add(usize::from(*packet.get(4)?))
+        } else {
+            4
+        };
+        let Some(payload) = packet.get(start..) else {
+            continue;
+        };
+        match payloads.iter_mut().find(|(id, _)| *id == pid) {
+            Some((_, bytes)) => bytes.extend_from_slice(payload),
+            None => payloads.push((pid, payload.to_vec())),
+        }
+    }
+    payloads.into_iter().map(|(_, bytes)| bytes).find(|bytes| {
+        bytes
+            .array_windows()
+            .any(|&[a, b, c, nal]| [a, b, c] == [0, 0, 1] && nal & 0x1F == 7 && nal & 0x80 == 0)
+    })
 }
 
 /// The scan of the first sequence parameter set of an `avcC` record: configurationVersion 1, the profile, its
@@ -138,7 +190,7 @@ fn h264_avcc(data: &[u8]) -> Option<FieldType> {
             let nal = data.get(at + 9..at + 8 + length)?;
             // The record repeats the SPS's profile and level.
             let sps = crate::h264_sps::parse(nal)?;
-            (sps.profile == profile && sps.level == level).then_some(of_sps(sps))
+            (sps.profile == profile && sps.level == level).then_some(of_sps(sps, None))
         })
 }
 

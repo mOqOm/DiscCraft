@@ -69,7 +69,7 @@ What works today:
   straight from the source file, so no working space the size of the video is needed). Audio goes on as it is as LPCM (up to
   7.1 and 192 kHz, 24-bit), AC-3 or DTS
 - Menus: still menus, buttons and highlights, motion menus, timeouts (duration and end action), auto-activate, PSD import with
-  button detection from layer names, chapter index
+  button detection from layer names, layered PSD export with editable text, chapter index
 - Sources: video (MP4 / MOV / MKV / m2v and more), audio (WAV / AC-3 / MP3 / FLAC and more), images (PNG / JPEG / PSD / TIFF),
   vector graphics (SVG, drawn at the displayed size so they never blur), subtitles (SRT / WebVTT / timecode text;
   UTF-8 / UTF-16 / Shift_JIS)

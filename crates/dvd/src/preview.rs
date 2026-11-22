@@ -8,8 +8,8 @@
 //! the same on both discs (the Blu-ray build writes them as HDMV movie objects and interactive graphics instead of
 //! DVD program chains). What only a Blu-ray does, a pop-up menu over the playing title, the preview adds on top.
 
-use disccraft_project::Project;
-use disccraft_vm::{ButtonModel, DiscModel, MenuPgcModel, TitleModel};
+use disccraft_project::{DiscKind, Project};
+use disccraft_vm::{ButtonModel, DiscModel, MenuPgcModel, ParentalModel, TitleModel};
 
 use disccraft_nav::compile;
 
@@ -88,6 +88,9 @@ pub fn preview_model(project: &Project) -> Result<DiscModel, DvdError> {
     // slideshow.
     // Timelines, slideshows and chapter playlists.
     let mut titles: Vec<Option<TitleModel>> = vec![None; title_count];
+    // M13.19: each title with parental chapters (a DVD's) and the parental IDs of its versions, as the build writes
+    // its parental block (M13.17).
+    let mut parental_titles: Vec<(u8, Vec<u16>)> = Vec::new();
     let mut put = |title: u8, model: TitleModel| -> Result<(), DvdError> {
         let slot = usize::from(title)
             .checked_sub(1)
@@ -104,6 +107,16 @@ pub fn preview_model(project: &Project) -> Result<DiscModel, DvdError> {
             .ok_or_else(|| invalid("missing compiled title"))?;
         let chapters = u16::try_from(timeline.chapters.len())
             .map_err(|_| DvdError::Unsupported("too many chapters".to_string()))?;
+        let variants = timeline.parental_variants();
+        if project.settings.kind == DiscKind::Dvd && !variants.is_empty() {
+            parental_titles.push((
+                title_nav.title,
+                variants
+                    .iter()
+                    .map(disccraft_project::ParentalVariant::parental_id)
+                    .collect(),
+            ));
+        }
         put(
             title_nav.title,
             TitleModel {
@@ -163,8 +176,26 @@ pub fn preview_model(project: &Project) -> Result<DiscModel, DvdError> {
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| invalid("title numbers are not contiguous"))?;
 
+    let parental = (!parental_titles.is_empty()).then(|| {
+        // Every title in title set 1 here: the build gives every set the same masks (`parental_table`).
+        let table = crate::parental::parental_table(1);
+        let mut by_title = vec![(1u8, Vec::new()); titles.len()];
+        for (title, ids) in parental_titles {
+            if let Some(slot) = usize::from(title)
+                .checked_sub(1)
+                .and_then(|index| by_title.get_mut(index))
+            {
+                slot.1 = ids;
+            }
+        }
+        ParentalModel {
+            countries: table.countries,
+            levels: table.levels,
+            titles: by_title,
+        }
+    });
     Ok(DiscModel {
-        parental: None,
+        parental,
         title_menu,
         first_play: nav.first_play.clone(),
         vmgm,

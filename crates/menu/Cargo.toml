@@ -12,6 +12,7 @@ disccraft-project.workspace = true
 disccraft-photo.workspace = true
 encoding_rs.workspace = true
 filmcraft-text.workspace = true
+skrifa.workspace = true
 png.workspace = true
 thiserror.workspace = true
 

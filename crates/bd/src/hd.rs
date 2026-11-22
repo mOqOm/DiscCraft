@@ -27,7 +27,8 @@ const MENU_H264_KBPS: (u32, u32) = (15_000, 30_000);
 pub(crate) fn menu_rates(choice: BdCodec, video: BdVideo) -> (u32, u32) {
     match codec(choice, video) {
         HdCodec::Mpeg2 => disccraft_dvd::hd_default_kbps(true),
-        HdCodec::H264 => MENU_H264_KBPS,
+        // [`codec`] makes no HEVC: an Ultra HD disc is not built (M12.43).
+        HdCodec::H264 | HdCodec::Hevc => MENU_H264_KBPS,
     }
 }
 
@@ -50,7 +51,8 @@ pub(crate) fn kind(choice: BdCodec, video: BdVideo) -> StreamKind {
 pub(crate) fn kind_of(codec: HdCodec) -> StreamKind {
     match codec {
         HdCodec::Mpeg2 => StreamKind::Mpeg2Video,
-        HdCodec::H264 => StreamKind::H264Video,
+        // HEVC is never multiplexed onto a disc yet (M12.43: no Ultra HD Blu-ray), [`codec`] makes none.
+        HdCodec::H264 | HdCodec::Hevc => StreamKind::H264Video,
     }
 }
 
@@ -86,7 +88,8 @@ pub(crate) fn coding_of(video: BdVideo, codec: HdCodec) -> Option<StreamCoding> 
             frame_rate,
             aspect: 3,
         },
-        HdCodec::H264 => StreamCoding::H264Video {
+        // As in [`kind_of`]: no HEVC on a disc yet.
+        HdCodec::H264 | HdCodec::Hevc => StreamCoding::H264Video {
             video_format,
             frame_rate,
             aspect: 3,

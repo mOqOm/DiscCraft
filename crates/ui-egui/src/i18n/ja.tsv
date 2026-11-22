@@ -1242,11 +1242,9 @@
 	Transcode stopped	トランスコードを停止しました
 	Metadata	メタデータ
 	Search	検索
-	Select an asset to see its metadata	アセットを選ぶと、そのメタデータが出ます
 	Reload	再読み込み
 	Reads the file's metadata again	ファイルのメタデータを読み直します
 	From the sidecar file {name}	サイドカーファイル {name} から
-	This file has no XMP metadata	このファイルに XMP メタデータはありません
 	Dublin Core	ダブリンコア
 	Rights Management	著作権管理
 	Media Management	メディア管理
@@ -1499,3 +1497,227 @@
 	This computer has no hardware H.264 encoder	このコンピューターには H.264 のハードウェアエンコーダーがありません
 	{name}: the Blu-ray's 1080p and 720p H.264 in one pass (VBR or CBR), several times as fast. 1080i, standard definition and two-pass encodes stay on the processor, as does a video the encoder fails on.	{name}: Blu-ray の 1080p と 720p の H.264 を 1 パス（VBR か CBR）で、数倍の速さで変換する。1080i・SD・2 パスと、エンコーダーが失敗したビデオはプロセッサーで変換する。
 	No hardware H.264 encoder was found.	H.264 のハードウェアエンコーダーが見つかりません。
+	Rejected	却下
+	Separate several with ;	複数は ; で区切る
+	Wrote the metadata into the file	ファイルにメタデータを書き込みました
+	Wrote the metadata to the sidecar {name}	サイドカー {name} にメタデータを書き込みました
+xmp	Dublin Core	ダブリンコア
+xmp:dc	Contributor	寄稿者
+xmp:dc	Coverage	適用範囲
+xmp:dc	Creator	作成者
+xmp:dc	Date	日付
+xmp:dc	Description	説明
+xmp:dc	Format	形式
+xmp:dc	Identifier	識別子
+xmp:dc	Publisher	発行者
+xmp:dc	Relation	関係
+xmp:dc	Rights	権利
+xmp:dc	Source	ソース
+xmp:dc	Subject	サブジェクト
+xmp:dc	Title	タイトル
+xmp:dc	Type	種類
+xmp	Basic	基本
+xmp:xmp	Advisory	注意
+xmp:xmp	Base URL	ベース URL
+xmp:xmp	Create Date	作成日
+xmp:xmp	Creator Tool	作成ツール
+xmp:xmp	Identifier	識別子
+xmp:xmp	Label	ラベル
+xmp:xmp	Metadata Date	メタデータ変更日時
+xmp:xmp	Modify Date	修正日
+xmp:xmp	Nickname	ニックネーム
+xmp:xmp	Rating	レーティング
+xmp	Rights Management	著作権管理
+xmp:xmpRights	Certificate	証明書
+xmp:xmpRights	Marked	マーク付き
+xmp:xmpRights	Owner	所有者
+xmp:xmpRights	Usage Terms	使用条件
+xmp:xmpRights	Web Statement	Web ステートメント
+xmp	Media Management	メディア管理
+xmp:xmpMM	Document ID	ドキュメント ID
+xmp:xmpMM	Instance ID	インスタンス ID
+xmp:xmpMM	Manager	管理ソフトウェア
+xmp:xmpMM	Manage To	管理場所
+xmp:xmpMM	Manage UI	UI の管理
+xmp:xmpMM	Manager Variant	管理ソフトウェアのバリエーション
+xmp:xmpMM	Rendition Class	レンディションクラス
+xmp:xmpMM	Rendition Params	レンディションパラメーター
+xmp:xmpMM	Version ID	バージョン ID
+xmp:xmpMM	Last URL	最後の URL
+xmp:xmpMM	Save ID	保存 ID
+xmp	Basic Job Ticket	基本ジョブチケット
+xmp:xmpBJ	Job Reference	ジョブ参照
+xmp	Paged-Text	ページ化テキスト
+xmp:xmpTPg	Max Page Size	最大ページサイズ
+xmp:xmpTPg	Number of Pages	ページ数
+xmp	Dynamic Media	ダイナミックメディア
+xmp:xmpDM	Project Reference	プロジェクト参照
+xmp:xmpDM	Video Frame Rate	ビデオフレームレート
+xmp:xmpDM	Video Frame Size	ビデオフレームサイズ
+xmp:xmpDM	Video Pixel Aspect Ratio	ビデオのピクセル縦横比
+xmp:xmpDM	Video Pixel Depth	ビデオの色深度
+xmp:xmpDM	Video Color Space	ビデオカラースペース
+xmp:xmpDM	Video Alpha Mode	ビデオアルファモード
+xmp:xmpDM	Video Alpha Premultiple Color	ビデオアルファプリマルチプルカラー
+xmp:xmpDM	Video Alpha Unity Is Transparent	ビデオアルファユニティの透明
+xmp:xmpDM	Video Compressor	ビデオの圧縮形式
+xmp:xmpDM	Video Field Order	ビデオのフィールドオーダー
+xmp:xmpDM	Pull Down	プルダウン
+xmp:xmpDM	Audio Sample Rate	オーディオのサンプルレート
+xmp:xmpDM	Audio Sample Type	オーディオサンプルタイプ
+xmp:xmpDM	Audio Channel Type	オーディオのチャンネルタイプ
+xmp:xmpDM	Audio Compressor	オーディオの圧縮形式
+xmp:xmpDM	Speaker Placement	スピーカーの配置
+xmp:xmpDM	File Data Rate	ファイルのデータレート
+xmp:xmpDM	Tape Name	テープ名
+xmp:xmpDM	Alternative Tape Name	代替テープ名
+xmp:xmpDM	Start Timecode	開始タイムコード
+xmp:xmpDM	Alternative Timecode	代替タイムコード
+xmp:xmpDM	Duration	デュレーション
+xmp:xmpDM	Scene	シーン
+xmp:xmpDM	Shot Name	テイク名
+xmp:xmpDM	Shot Date	撮影日
+xmp:xmpDM	Shot Location	撮影場所
+xmp:xmpDM	Log Comment	ログコメント
+xmp:xmpDM	Absolute Peak Audio File Path	ピークオーディオファイルの絶対パス
+xmp:xmpDM	Relative Peak Audio File Path	ピークオーディオファイルの相対パス
+xmp:xmpDM	Video Modified Date	ビデオの更新日
+xmp:xmpDM	Audio Modified Date	オーディオの更新日
+xmp:xmpDM	Metadata Modified Date	メタデータの更新日
+xmp:xmpDM	Artist	アーティスト
+xmp:xmpDM	Album	アルバム
+xmp:xmpDM	Track Number	オーディオトラック番号
+xmp:xmpDM	Genre	ジャンル
+xmp:xmpDM	Release Date	リリース日
+xmp:xmpDM	Composer	作曲者
+xmp:xmpDM	Engineer	エンジニア
+xmp:xmpDM	Tempo	テンポ
+xmp:xmpDM	Instrument	楽器
+xmp:xmpDM	Intro Time	イントロの長さ
+xmp:xmpDM	Out Cue	アウトキュー
+xmp:xmpDM	Relative Timestamp	関連するタイムスタンプ
+xmp:xmpDM	Loop	ループ
+xmp:xmpDM	Number of Beats	ビート数
+xmp:xmpDM	Key	ルートノート
+xmp:xmpDM	Stretch Mode	オーディオストレッチモード
+xmp:xmpDM	Time Scale Parameters	オーディオストレッチモードの時間スケール
+xmp:xmpDM	Resample Parameters	オーディオストレッチモードの再サンプリング
+xmp:xmpDM	Beat Splice Parameters	オーディオストレッチモードのビートスプライス
+xmp:xmpDM	Time Signature	音楽の拍子
+xmp:xmpDM	Scale Type	音楽のスケールタイプ
+xmp	Adobe PDF	Adobe PDF
+xmp:pdf	Keywords	キーワード
+xmp:pdf	PDF Version	PDF のバージョン
+xmp:pdf	Producer	作成ツール
+xmp	Photoshop	Photoshop
+xmp:photoshop	Author's Position	作成者の肩書
+xmp:photoshop	Caption Writer	キャプション作成者
+xmp:photoshop	Category	カテゴリ
+xmp:photoshop	City	市町村名
+xmp:photoshop	Country	国名
+xmp:photoshop	Credit	クレジット
+xmp:photoshop	Date Created	作成日
+xmp:photoshop	Headline	ヘッドライン
+xmp:photoshop	Instructions	詳細
+xmp:photoshop	Source	ソース
+xmp:photoshop	State	都道府県
+xmp:photoshop	Supplemental Categories	追加カテゴリ
+xmp:photoshop	Transmission Reference	送信記録
+xmp:photoshop	Urgency	重要度
+xmp	EXIF Schema for EXIF-specific Properties	EXIF 固有のプロパティの EXIF スキーマ
+xmp:exif	Exif Version	Exif バージョン
+xmp:exif	Flashpix Version	対応フラッシュピックスバージョン
+xmp:exif	Color Space	色空間情報
+xmp:exif	Compressed Bits Per Pixel	画像圧縮モード
+xmp:exif	Pixel X Dimension	実効画像幅
+xmp:exif	Pixel Y Dimension	実効画像高さ
+xmp:exif	User Comment	ユーザーコメント
+xmp:exif	Related Sound File	関連音声ファイル
+xmp:exif	Date Time Original	原画像データの生成日時
+xmp:exif	Date Time Digitized	デジタルデータの作成日時
+xmp:exif	Exposure Time	露出時間
+xmp:exif	F-Stop	F-Stop
+xmp:exif	Exposure Program	露出プログラム
+xmp:exif	Spectral Sensitivity	スペクトル感度
+xmp:exif	Opto-Electronic Conversion Function (OECF)	光電変換関数 (OECF)
+xmp:exif	Shutter Speed	シャッタースピード
+xmp:exif	Aperture	絞り値
+xmp:exif	Brightness	輝度値
+xmp:exif	Exposure Bias	露光補正値
+xmp:exif	Max Aperture	レンズ最小 F 値
+xmp:exif	Subject Distance	被写体距離
+xmp:exif	Metering Mode	測光方式
+xmp:exif	Light Source	光源
+xmp:exif	Flash	フラッシュ
+xmp:exif	Focal Length	焦点距離
+xmp:exif	Flash Energy	フラッシュ強度
+xmp:exif	Spatial Frequency Response	空間周波数応答
+xmp:exif	Focal Plane X Resolution	焦点面の幅の解像度
+xmp:exif	Focal Plane Y Resolution	焦点面の高さの解像度
+xmp:exif	Focal Plane Resolution Unit	焦点面解像度単位
+xmp:exif	Exposure Index	露出インデックス
+xmp:exif	Sensing Method	センサー方式
+xmp:exif	File Source	ファイルソース
+xmp:exif	Scene Type	シーンタイプ
+xmp:exif	CFA Pattern	CFA パターン
+xmp:exif	Custom Rendered	個別画像処理
+xmp:exif	Exposure Mode	露出モード
+xmp:exif	White Balance	ホワイトバランス
+xmp:exif	Digital Zoom Ratio	デジタルズーム倍率
+xmp:exif	Focal Length In 35mm Film	35mm 換算レンズ焦点距離
+xmp:exif	Scene Capture Type	撮影シーンタイプ
+xmp:exif	Gain Control	ゲイン制御
+xmp:exif	Contrast	コントラスト
+xmp:exif	Saturation	撮影彩度
+xmp:exif	Sharpness	撮影シャープネス
+xmp:exif	Device Setting Description	撮影条件記述情報
+xmp:exif	Subject Distance Range	被写体距離レンジ
+xmp:exif	Image Unique ID	画像ユニーク ID
+xmp:exif	GPS Version ID	GPS タグのバージョン
+xmp:exif	GPS Latitude	GPS 緯度（数値）
+xmp:exif	GPS Longitude	GPS 経度（数値）
+xmp:exif	GPS Altitude Reference	GPS 高度の単位
+xmp:exif	GPS Altitude	GPS 高度（数値）
+xmp:exif	GPS Time Stamp	GPS 時間（原子時計の時間）
+xmp:exif	GPS Satellites	GPS 測位に使った衛星信号
+xmp:exif	GPS Status	GPS 受信機の状態
+xmp:exif	GPS Measure Mode	GPS の測位方法
+xmp:exif	GPS DOP	GPS 測位の信頼性
+xmp:exif	GPS Speed Reference	GPS 速度の単位
+xmp:exif	GPS Speed	GPS 速度（数値）
+xmp:exif	GPS Track Reference	GPS 進行方向の単位
+xmp:exif	GPS Track	GPS 進行方向（数値）
+xmp:exif	GPS Image Direction Reference	GPS 撮影した画像の方向の単位
+xmp:exif	GPS Image Direction	GPS 撮影した画像の方向（数値）
+xmp:exif	GPS Map Datum	GPS 測位に用いた地図データ
+xmp:exif	GPS Destination Latitude	GPS 目的地の緯度（数値）
+xmp:exif	GPS Destination Longitude	GPS 目的地の経度（数値）
+xmp:exif	GPS Destination Bearing Reference	GPS 目的地の方角の単位
+xmp:exif	GPS Destination Bearing	GPS 目的の方角（数値）
+xmp:exif	GPS Destination Distance Reference	GPS 目的地までの距離の単位
+xmp:exif	GPS Destination Distance	GPS 目的地までの距離（数値）
+xmp:exif	GPS Processing Method	GPS 測位方式の名称
+xmp:exif	GPS Area Information	GPS 測位地点の名称
+xmp:exif	GPS Differential	GPS 補正測位
+xmp	EXIF Schema for Additional EXIF Properties	追加の EXIF プロパティの EXIF スキーマ
+xmp:aux	Lens	レンズ
+xmp:aux	Serial Number	シリアル番号
+xmp	EXIF Schema for TIFF Properties	TIFF プロパティの EXIF スキーマ
+xmp:tiff	Image Width	画像の幅
+xmp:tiff	Image Length	画像の高さ
+xmp:tiff	Compression	圧縮の種類
+xmp:tiff	Photometric Interpretation	画素構成
+xmp:tiff	Orientation	画像方向
+xmp:tiff	Samples Per Pixel	コンポーネント数
+xmp:tiff	Planar Configuration	画像データの並び
+xmp:tiff	YCbCr Positioning	YCC の画素構成（Y と C の位置）
+xmp:tiff	X Resolution	画像の幅の解像度
+xmp:tiff	Y Resolution	画像の高さの解像度
+xmp:tiff	Resolution Unit	画像の幅と高さの解像度の単位
+xmp:tiff	Date Time	ファイル変更日時
+xmp:tiff	Image Description	画像タイトル
+xmp:tiff	Make	画像入力機器のメーカー名
+xmp:tiff	Model	画像入力機器のモデル名
+xmp:tiff	Software	使用ソフトウェア名
+xmp:tiff	Artist	作者名
+xmp:tiff	Copyright	撮影著作権者 / 編集著作権者

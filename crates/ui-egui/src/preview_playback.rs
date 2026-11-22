@@ -53,6 +53,9 @@ pub(crate) struct PreviewPlayback {
     /// The video clip of the timeline that is playing (M6.271): what is added to a time in its file to get the
     /// time on the timeline, and where on the timeline the clip ends (`None`: at its file's end).
     clip: (f64, Option<f64>),
+    /// M13.19: the chapter (from 1) of the timeline whose parental alternative plays in its place, its own video
+    /// and sound from its start; then the title goes on at the next chapter.
+    alternative: Option<(u16, TimelineId)>,
 }
 
 /// A slideshow being shown in the preview.
@@ -506,6 +509,25 @@ pub(crate) fn title_timeline(project: &Project, title: u8) -> Option<TimelineId>
     project.timelines.keys().nth(index).copied()
 }
 
+/// M13.19: the parental alternative that plays in place of chapter `chapter` (from 1) of `timeline` in its version
+/// `variant` ([`Timeline::parental_variants`], the one the player plays: the preview state's), when that version
+/// replaces the chapter.
+pub(crate) fn parental_alternative(
+    timeline: &Timeline,
+    variant: Option<usize>,
+    chapter: u16,
+) -> Option<AssetId> {
+    let variants = timeline.parental_variants();
+    let version = variants.get(variant?)?;
+    let index = usize::from(chapter).checked_sub(1)?;
+    timeline
+        .parental_chapters
+        .iter()
+        .zip(&version.replaced)
+        .find(|(parental, replaced)| **replaced && parental.chapter == index)
+        .map(|(parental, _)| parental.alternative)
+}
+
 /// チャプター `chapter`（1 から）の頭（秒）。ないチャプターは頭から。
 pub(crate) fn chapter_start(timeline: &Timeline, chapter: u16) -> f64 {
     usize::from(chapter)
@@ -650,11 +672,21 @@ impl DiscCraftApp {
                 .find(|chapter| chapter_start(timeline, *chapter) <= position + half_frame)?;
             (now > playback.at.1).then_some((playback.at.0, now))
         });
+        // A chapter the player's version replaces with its parental alternative (M13.19): the playback starts
+        // again there, with the alternative.
+        let into_alternative = passed.is_some_and(|(_, chapter)| {
+            self.preview_playback
+                .as_ref()
+                .and_then(|playback| self.session.project.timeline(playback.timeline?))
+                .and_then(|timeline| parental_alternative(timeline, self.preview.variant, chapter))
+                .is_some()
+        });
         if let Some((title, chapter)) = passed
             && !paused
         {
             self.preview_chapter(chapter);
             if self.preview.title == Some((title, chapter))
+                && !into_alternative
                 && let Some(playback) = self.preview_playback.as_mut()
             {
                 playback.at = (title, chapter);
@@ -683,6 +715,23 @@ impl DiscCraftApp {
             let texture = ctx.load_texture("preview_frame", image, egui::TextureOptions::LINEAR);
             // The time on the timeline: the clip's file plays from the clip's in point.
             playback.frame = Some((texture, frame.seconds + playback.clip.0));
+        }
+        // A parental alternative that has played to its end (M13.19): the title goes on at the next chapter (the
+        // VM is told, and the playback starts there), or after the last chapter ends.
+        if let Some((chapter, id)) = playback.alternative
+            && matches!(player.status(), PlayerStatus::Ended)
+        {
+            let chapters = self.session.project.timeline(id).map_or(0, |timeline| {
+                u16::try_from(timeline.chapters.len()).unwrap_or(u16::MAX)
+            });
+            self.preview_playback = None;
+            if chapter < chapters {
+                self.preview_chapter(chapter.saturating_add(1));
+            } else {
+                self.send_remote(RemoteKey::Finish);
+            }
+            ctx.request_repaint();
+            return;
         }
         // A chapter playlist: the entry that was playing has reached its end — its next chapter, or for the
         // last chapter (when more entries follow, as in a Random or Shuffle playlist) the timeline's end.
@@ -796,9 +845,18 @@ impl DiscCraftApp {
             view: SlideView::default(),
             blend: None,
             clip: (0.0, None),
+            alternative: None,
         };
         let (id, segments) = match title_kind(&self.session.project, title) {
-            Some(TitleKind::Timeline(id)) => (id, Vec::new()),
+            Some(TitleKind::Timeline(id)) => {
+                // M13.19: the player's version of the title plays this chapter's parental alternative.
+                if let Some(asset) = self.session.project.timeline(id).and_then(|timeline| {
+                    parental_alternative(timeline, self.preview.variant, chapter)
+                }) {
+                    return self.start_preview_alternative(playback, (id, asset), resume);
+                }
+                (id, Vec::new())
+            }
             Some(TitleKind::ChapterPlaylist(list)) => {
                 let project = &self.session.project;
                 let Some(list) = project.chapter_playlists.get(&list) else {
@@ -971,6 +1029,77 @@ impl DiscCraftApp {
         // Preferences ▸ Preview ▸ Preview playback quality (M6.341).
         let size = self.preview_prefs.quality().size(size);
         let player = Player::start_sized(video, player_audio, file_from, fps, Some(size));
+        playback._audio = match (device, player.audio()) {
+            (Some(device), Some(feed)) => match device.play(feed) {
+                Ok(out) => Some(out),
+                Err(message) => {
+                    self.status = tlf!("Playing without sound: {message}", message = message);
+                    None
+                }
+            },
+            _ => None,
+        };
+        playback.player = Some(player);
+        playback
+    }
+
+    /// M13.19: plays the parental alternative `asset` of the chapter `playback` is at, in timeline `id`'s title, as
+    /// the disc's version for the player's level plays it: the alternative's own video and sound, from its start (or
+    /// `resume`, seconds into it), at the title's picture shape. The title's subtitles are not shown over it (the
+    /// build gives the alternative none).
+    fn start_preview_alternative(
+        &mut self,
+        mut playback: PreviewPlayback,
+        (id, asset): (TimelineId, AssetId),
+        resume: Option<f64>,
+    ) -> PreviewPlayback {
+        playback.alternative = Some((playback.at.1, id));
+        let project = &self.session.project;
+        let (Some(timeline), Some(video)) = (
+            project.timeline(id),
+            project
+                .assets
+                .get(&asset)
+                .map(|asset| asset.media_file().into_owned()),
+        ) else {
+            return playback;
+        };
+        playback.wide = timeline.wide(&project.settings);
+        let hd = disc_hd(&project.settings);
+        if hd.is_some() {
+            playback.wide = true;
+        }
+        let fps = hd.map_or_else(
+            || self.preview_fps(),
+            |(_, _, num, den)| f64::from(num) / f64::from(den.max(1)),
+        );
+        let size = hd.map_or_else(
+            || sd_size(playback.wide, project.settings.standard),
+            |(width, height, _, _)| (width, height),
+        );
+        let size = self.preview_prefs.quality().size(size);
+        let device = match crate::audio_out::AudioDevice::open_default() {
+            Ok(device) => Some(device),
+            Err(message) => {
+                self.status = tlf!("Playing without sound: {message}", message = message);
+                None
+            }
+        };
+        // Its own sound, at the picture's place in its file.
+        let player_audio = device.as_ref().map(|device| PlayerAudio {
+            parts: Vec::new(),
+            path: video.clone(),
+            rate: device.rate(),
+            from: None,
+            until: None,
+        });
+        let player = Player::start_sized(
+            video,
+            player_audio,
+            resume.unwrap_or(0.0).max(0.0),
+            fps,
+            Some(size),
+        );
         playback._audio = match (device, player.audio()) {
             (Some(device), Some(feed)) => match device.play(feed) {
                 Ok(out) => Some(out),
@@ -1425,8 +1554,9 @@ impl DiscCraftApp {
 #[cfg(test)]
 mod tests {
     use super::{
-        ShowPlace, TitleKind, audio_source, chapter_start, playlist_segments, preferred_track,
-        show_place, slide_at, slide_times, sound_at, subtitle_track, title_kind, title_timeline,
+        ShowPlace, TitleKind, audio_source, chapter_start, parental_alternative, playlist_segments,
+        preferred_track, show_place, slide_at, slide_times, sound_at, subtitle_track, title_kind,
+        title_timeline,
     };
     use disccraft_project::{
         Asset, AssetId, AssetKind, AudioTrack, Chapter, Project, SubtitleTrack, Tick, Timeline,
@@ -1458,6 +1588,38 @@ mod tests {
         }
     }
 
+    /// M13.19: the version the player plays replaces the chapters whose level is above its range: with chapter 2
+    /// for level 5 (alternative 8) and chapter 3 for level 3 (alternative 9), the versions are levels 5–8 (none
+    /// replaced), 3–4 (chapter 2) and 1–2 (chapters 2 and 3).
+    #[test]
+    fn a_version_plays_the_alternatives_of_the_chapters_it_replaces() {
+        let mut timeline = timeline(1, 1);
+        timeline.chapters = vec![chapter(0), chapter(10), chapter(20)];
+        timeline.parental_chapters = vec![
+            disccraft_project::ParentalChapter {
+                chapter: 1,
+                level: 5,
+                alternative: AssetId(8),
+            },
+            disccraft_project::ParentalChapter {
+                chapter: 2,
+                level: 3,
+                alternative: AssetId(9),
+            },
+        ];
+        let played = |variant: Option<usize>| -> Vec<Option<AssetId>> {
+            (1..=3)
+                .map(|chapter| parental_alternative(&timeline, variant, chapter))
+                .collect()
+        };
+        assert_eq!(played(None), [None, None, None]);
+        assert_eq!(played(Some(0)), [None, None, None]);
+        assert_eq!(played(Some(1)), [None, Some(AssetId(8)), None]);
+        assert_eq!(played(Some(2)), [None, Some(AssetId(8)), Some(AssetId(9))]);
+        assert_eq!(played(Some(3)), [None, None, None]);
+        assert_eq!(parental_alternative(&timeline, Some(1), 0), None);
+    }
+
     fn asset(id: u64, path: &str) -> Asset {
         Asset {
             id: AssetId(id),
@@ -1483,6 +1645,7 @@ mod tests {
             transcode_quality: disccraft_project::BEST_QUALITY,
             max_render_quality: false,
             frame_blend: false,
+            menu_file: false,
         }
     }
 

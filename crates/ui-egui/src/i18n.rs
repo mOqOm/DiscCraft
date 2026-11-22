@@ -165,6 +165,14 @@ pub(crate) fn t(text: &str) -> &str {
     current().tr(text)
 }
 
+/// Whether the Japanese catalog has an entry for `text` under `context` (M6.397: the Metadata panel's names).
+#[cfg(test)]
+pub(crate) fn has_contextual(context: &str, text: &str) -> bool {
+    Language::Ja
+        .catalog()
+        .is_some_and(|catalog| catalog.contextual(context, text).is_some())
+}
+
 /// Like [`t`], for an English string that needs a disambiguating `context`; falls back to the
 /// context-free translation.
 #[allow(dead_code)]

@@ -194,6 +194,13 @@ pub struct DiscCraftApp {
         std::collections::HashMap<u64, std::sync::Arc<disccraft_engine::metadata::Metadata>>,
     /// What the Metadata panel's search field holds.
     pub(crate) metadata_search: String,
+    /// M6.396 / M6.397: the Metadata panel's editable properties of the asset shown: the asset, the values read and
+    /// the values being edited, by key (`dc:title`).
+    pub(crate) metadata_draft: Option<(
+        u64,
+        std::collections::HashMap<String, String>,
+        std::collections::HashMap<String, String>,
+    )>,
     /// The Interpret Footage dialog, while it is open.
     pub(crate) interpret_footage_dialog: Option<crate::interpret_footage::InterpretDraft>,
     /// 開いている「リンクの指定」ダイアログ（Ctrl+L）。
@@ -492,6 +499,7 @@ impl DiscCraftApp {
             },
             metadata_cache: std::collections::HashMap::new(),
             metadata_search: String::new(),
+            metadata_draft: None,
             link_dialog: None,
             shadow_dialog: None,
             preview_motion: None,

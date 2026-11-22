@@ -570,6 +570,10 @@ impl Preview {
         let audio_track = Vm::restore_with_registers(model, self.location, self.registers)
             .ok()
             .and_then(|vm| vm.audio_track());
+        // M13.19: the version of a title with parental chapters the player plays (0: every chapter as it is).
+        let variant = Vm::restore_with_registers(model, self.location, self.registers)
+            .ok()
+            .and_then(|vm| vm.title_variant());
         let titles: Vec<Value> = model
             .titles
             .iter()
@@ -595,6 +599,7 @@ impl Preview {
             Value::Bool(self.title_popup().is_some()),
         );
         map.insert("audio".to_string(), json!(audio_track));
+        map.insert("variant".to_string(), json!(variant));
         map.insert(
             "subtitle".to_string(),
             json!({ "on": subtitle_on, "track": subtitle_track }),
@@ -602,6 +607,13 @@ impl Preview {
         map.insert("menus".to_string(), Value::Array(menus));
         map.insert("titles".to_string(), Value::Array(titles));
         Value::Object(map)
+    }
+
+    /// Sets the player's country (SPRM12, ISO 3166 alpha-2; M13.19).
+    pub(crate) fn set_country(&mut self, country: [u8; 2]) {
+        if let Some(slot) = self.registers.sprm.get_mut(12) {
+            *slot = u16::from_be_bytes(country);
+        }
     }
 
     /// 現在の位置（テストと将来の制御チャネル用）。
@@ -638,7 +650,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "プレビューを開く",
         menu: &["プレビュー"],
         shortcut: None,
-        params: r#"{"path"?: "VIDEO_TS フォルダ（なければビルドせずにプロジェクトから）", "menu"?: VMGM の PGCN, "button"?: n (menu のときに選んでおくボタン。1 から), "title"?: n, "chapter"?: n, "parentalLevel"?: 1..8 (プレーヤーの視聴制限レベル), "audioLanguage"?: "en" など (ビルドした Blu-ray: プレーヤーのオーディオの言語), "subtitleLanguage"?: 同じく字幕}"#,
+        params: r#"{"path"?: "VIDEO_TS フォルダ（なければビルドせずにプロジェクトから）", "menu"?: VMGM の PGCN, "button"?: n (menu のときに選んでおくボタン。1 から), "title"?: n, "chapter"?: n, "parentalLevel"?: 1..8 (プレーヤーの視聴制限レベル), "audioLanguage"?: "en" など (ビルドした Blu-ray: プレーヤーのオーディオの言語), "subtitleLanguage"?: 同じく字幕, "country"?: "JP" など (プレーヤーの国、ISO 3166。DVD のパレンタルブロックの版を選ぶ。既定は US)}"#,
         enabled: always_enabled,
         run: run_open,
         journal: false,
@@ -716,6 +728,18 @@ fn run_open(session: &mut Session, params: &Value) -> CommandResult {
                 .ok_or_else(|| format!("parameter \"{name}\" must be a positive number")),
         }
     };
+    // M13.19: the player's country (SPRM12), with which a DVD's parental block looks its level's mask up; a player
+    // always has one, so the preview's is the United States unless it is given.
+    let country: [u8; 2] = match opt_str(params, "country")?.filter(|code| !code.is_empty()) {
+        None => *b"US",
+        Some(code) => code
+            .to_ascii_uppercase()
+            .as_bytes()
+            .try_into()
+            .ok()
+            .filter(|code: &[u8; 2]| code.iter().all(u8::is_ascii_uppercase))
+            .ok_or_else(|| "parameter \"country\" must be a two-letter code".to_string())?,
+    };
     let parental = match params.get("parentalLevel") {
         None | Some(Value::Null) => None,
         Some(value) => Some(
@@ -770,7 +794,10 @@ fn run_open(session: &mut Session, params: &Value) -> CommandResult {
                 .preview
                 .open_bd(Path::new(&path), &session.project, languages)?;
         }
-        Some(path) => session.preview.open(Path::new(&path), start, parental)?,
+        Some(path) => {
+            session.preview.open(Path::new(&path), start, parental)?;
+            session.preview.set_country(country);
+        }
         // Encore のプロジェクトプレビュー: ビルドせずに、ビルドが書くのと同じナビゲーションで（ボタンの
         // トランジションも隠しタイトルに広げて）。
         None => {
@@ -781,6 +808,7 @@ fn run_open(session: &mut Session, params: &Value) -> CommandResult {
             let model =
                 disccraft_dvd::preview_model(&project).map_err(|error| error.to_string())?;
             session.preview.open_model(model, start, parental)?;
+            session.preview.set_country(country);
             session.preview.set_bluray(&project);
         }
     }
@@ -1178,6 +1206,63 @@ mod tests {
                 )
                 .is_err()
         );
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M13.19: a DVD title with a chapter for level 5 that has a parental alternative: the state says which version
+    /// of it the player plays, as the built disc's parental block chooses (M13.17): every chapter as it is on a player
+    /// with no level, or one set to 5 or more; the alternative's version on one set lower.
+    #[test]
+    fn the_preview_says_which_parental_version_plays() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::{Chapter, Link, ParentalChapter, Tick};
+        let dir = std::env::temp_dir().join(format!(
+            "disccraft-preview-parental-version-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir)?;
+        let (video, cut) = (dir.join("movie.m2v"), dir.join("cut.m2v"));
+        std::fs::write(&video, b"")?;
+        std::fs::write(&cut, b"")?;
+        let mut session = Session::new();
+        session.project.settings.kind = disccraft_project::DiscKind::Dvd;
+        let asset = session.project.add_asset(&video)?;
+        let alternative = session.project.add_asset(&cut)?;
+        let timeline = session.project.add_timeline(asset, None)?;
+        session.project.settings.first_play = Link::Timeline {
+            id: timeline,
+            chapter: 0,
+        };
+        let edited = session
+            .project
+            .timeline_mut(timeline)
+            .ok_or("no timeline")?;
+        edited.chapters.push(Chapter {
+            // A second in (ticks of a 29.97 frame times 30).
+            time: Tick(30 * 8_475_667_200),
+            name: String::new(),
+            poster: None,
+        });
+        edited.parental_chapters = vec![ParentalChapter {
+            chapter: 1,
+            level: 5,
+            alternative,
+        }];
+        for (level, version) in [
+            (None, 0),
+            (Some(8), 0),
+            (Some(5), 0),
+            (Some(4), 1),
+            (Some(1), 1),
+        ] {
+            let params = level.map_or_else(|| json!({}), |level| json!({ "parentalLevel": level }));
+            let state = session.execute("preview.open", &params)?;
+            assert_eq!(
+                state.get("variant"),
+                Some(&json!(version)),
+                "level {level:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

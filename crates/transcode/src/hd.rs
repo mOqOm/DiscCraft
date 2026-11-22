@@ -64,6 +64,11 @@ pub enum HdCodec {
     /// at that rate, of the source's two moments with the field tools; or (M10.39) a progressive sequence of
     /// 1080 lines at 23.976 or 24, or of 720 lines at 23.976, 24, 50 or 59.94 frames a second.
     Mpeg2,
+    /// M12.43: H.265 / HEVC Main 10 (Ultra HD Blu-ray's codec, 3840 x 2160 or 1920 x 1080), progressive frames: I and
+    /// P pictures (craft-video's encoder does not reorder), an IDR picture each second at most (the format's 1.001 s),
+    /// BT.709 colour, the 8-bit pictures carried at 10 bits. Annex B with an access unit delimiter before every
+    /// picture and the parameter sets before every IDR picture. One pass (a two-pass encode is made in one).
+    Hevc,
 }
 
 /// One coded picture from either encoder, its times counted in frames.
@@ -85,16 +90,16 @@ impl From<Packet> for Coded {
     }
 }
 
-/// M12.40: a hardware H.264 encoder from outside this crate (the system's: the applications register it with
-/// [`set_hardware_h264`], the `platform` crate making it). It takes NV12 pictures (the luma, then the chroma samples
-/// interleaved) and gives Annex B access units in decoding order, without B pictures.
-pub trait HardwareH264 {
-    /// Encodes the picture `nv12` shown at `pts` (100 ns units): the access units it has ready.
+/// M12.40 / M12.44: a hardware video encoder from outside this crate (the system's: the applications register it
+/// with [`set_hardware_encoder`], the `platform` crate making it). It takes pictures in its codec's layout
+/// ([`HardwareCodec`]) and gives Annex B access units in decoding order, without B pictures.
+pub trait HardwareVideo {
+    /// Encodes `picture` shown at `pts` (100 ns units): the access units it has ready.
     ///
     /// # Errors
     ///
     /// When the encoder fails.
-    fn encode(&mut self, nv12: &[u8], pts: i64) -> Result<Vec<HardwarePacket>, String>;
+    fn encode(&mut self, picture: &[u8], pts: i64) -> Result<Vec<HardwarePacket>, String>;
 
     /// The access units still held back, at the end.
     ///
@@ -104,10 +109,11 @@ pub trait HardwareH264 {
     fn finish(&mut self) -> Result<Vec<HardwarePacket>, String>;
 }
 
-/// One access unit from a [`HardwareH264`] encoder.
+/// One access unit from a [`HardwareVideo`] encoder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HardwarePacket {
-    /// The access unit, start code prefixed (with its access unit delimiter).
+    /// The access unit, start code prefixed (H.264: with its access unit delimiter; HEVC: the transcode adds the
+    /// delimiter and the parameter sets where they are missing).
     pub data: Vec<u8>,
     /// Its presentation time, 100 ns units, as given.
     pub pts: i64,
@@ -115,9 +121,21 @@ pub struct HardwarePacket {
     pub key: bool,
 }
 
-/// What an HD stream asks of a [`HardwareH264`] encoder: Blu-ray's High profile at level 4.1.
+/// The stream a [`HardwareVideo`] encoder makes, and the pictures it takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardwareCodec {
+    /// Blu-ray's H.264 (High profile, level 4.1) from NV12 pictures: the luma, then the chroma samples interleaved.
+    H264,
+    /// HEVC Main 10 (M12.44) from P010 pictures: as NV12, but each sample two bytes, little-endian, its 10 bits at
+    /// the top.
+    HevcMain10,
+}
+
+/// What an HD stream asks of a [`HardwareVideo`] encoder.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HardwareH264Config {
+pub struct HardwareConfig {
+    /// The stream to make.
+    pub codec: HardwareCodec,
     /// Picture width.
     pub width: u32,
     /// Picture height.
@@ -134,36 +152,38 @@ pub struct HardwareH264Config {
     pub cbr: bool,
     /// Frames from one key frame to the next.
     pub gop: u32,
-    /// Slices a picture.
+    /// Slices a picture (H.264).
     pub slices: u32,
     /// The shape of a pixel (the VUI's sample aspect ratio).
     pub sar: (u32, u32),
 }
 
-/// Makes a [`HardwareH264`] encoder for an HD stream, or says why it cannot.
-pub type HardwareH264Factory = fn(&HardwareH264Config) -> Result<Box<dyn HardwareH264>, String>;
+/// Makes a [`HardwareVideo`] encoder for an HD stream, or says why it cannot.
+pub type HardwareFactory = fn(&HardwareConfig) -> Result<Box<dyn HardwareVideo>, String>;
 
-static HARDWARE_H264: std::sync::RwLock<Option<HardwareH264Factory>> = std::sync::RwLock::new(None);
+static HARDWARE: std::sync::RwLock<Option<HardwareFactory>> = std::sync::RwLock::new(None);
 
-/// Uses `factory`'s hardware encoder for the HD H.264 the transcodes make (M12.40), or none (`None`, the default):
-/// progressive formats in one pass (VBR or CBR); an interlaced format and a two-pass encode stay on the CPU, and so
-/// does a video whose hardware encode cannot start or fails (it is encoded again on the CPU).
-pub fn set_hardware_h264(factory: Option<HardwareH264Factory>) {
-    if let Ok(mut slot) = HARDWARE_H264.write() {
+/// Uses `factory`'s hardware encoders for the HD H.264 (M12.40) and HEVC (M12.44) the transcodes make, or none
+/// (`None`, the default): progressive formats in one pass (VBR or CBR; HEVC is always one pass); an interlaced format
+/// and a two-pass H.264 encode stay on the CPU, and so does a video whose hardware encode cannot start or fails (it
+/// is encoded again on the CPU).
+pub fn set_hardware_encoder(factory: Option<HardwareFactory>) {
+    if let Ok(mut slot) = HARDWARE.write() {
         *slot = factory;
     }
 }
 
-fn hardware_h264() -> Option<HardwareH264Factory> {
-    HARDWARE_H264.read().ok().and_then(|slot| *slot)
+fn hardware_encoder() -> Option<HardwareFactory> {
+    HARDWARE.read().ok().and_then(|slot| *slot)
 }
 
 /// The hardware encoder's settings for `options`: the CPU's GOP, slices and pixel shape; 90 % of the target as the
 /// average (a hardware encoder overshot it by about a tenth on detailed pictures, M12.39).
-fn hardware_config(options: &HdOptions) -> HardwareH264Config {
+fn hardware_config(options: &HdOptions, codec: HardwareCodec) -> HardwareConfig {
     let cbr = options.mode == crate::RateMode::Cbr;
     let target = options.target_kbps.saturating_mul(1000);
-    HardwareH264Config {
+    HardwareConfig {
+        codec,
         width: options.width,
         height: options.height,
         fps_num: options.fps_num,
@@ -176,17 +196,23 @@ fn hardware_config(options: &HdOptions) -> HardwareH264Config {
         },
         cbr,
         gop: keyint(options),
-        slices: 4,
+        slices: match codec {
+            HardwareCodec::H264 => 4,
+            HardwareCodec::HevcMain10 => 1,
+        },
         sar: output_pixel_aspect(options.width, options.height, options.wide),
     }
 }
 
-/// A hardware encoder at work and where it is: one frame in 100 ns units, and the pictures given out so far.
+/// A hardware encoder at work and where it is: one frame in 100 ns units, and the pictures given out so far; for
+/// HEVC (M12.44) the last parameter sets it gave (Annex B), to repeat before an IDR picture without them.
 struct HardwareState {
-    encoder: Box<dyn HardwareH264>,
+    encoder: Box<dyn HardwareVideo>,
+    codec: HardwareCodec,
     frame: i64,
     given: i64,
     last_pts: Option<i64>,
+    sets: Vec<u8>,
 }
 
 impl HardwareState {
@@ -207,8 +233,14 @@ impl HardwareState {
                 }
                 self.last_pts = Some(pts);
                 self.given = self.given.saturating_add(1);
+                let data = match self.codec {
+                    HardwareCodec::H264 => packet.data,
+                    HardwareCodec::HevcMain10 => {
+                        hevc_hardware_unit(&packet.data, packet.key, &mut self.sets)?
+                    }
+                };
                 Ok(Coded {
-                    data: packet.data,
+                    data,
                     pts,
                     dts: pts,
                     keyframe: packet.key,
@@ -258,6 +290,9 @@ fn nv12_of(planes: &YuvPlanes, (width, height): (usize, usize)) -> Result<Vec<u8
 /// first pass of two), or (M12.40) a hardware H.264 encoder.
 enum HdEncoder {
     H264(Box<Encoder>),
+    /// M12.43: the encoder, and its parameter sets as Annex B (VPS, SPS, PPS). Only with the `hevc` feature (M12.45).
+    #[cfg(feature = "hevc")]
+    Hevc(Box<craft_video::hevc::Encoder>, Vec<u8>),
     Hardware(HardwareState),
     Mpeg2(
         Box<disccraft_mpeg2venc::encoder::Encoder>,
@@ -400,35 +435,51 @@ fn mpeg2_frame(
 
 impl HdEncoder {
     fn new(options: &HdOptions) -> Result<Self, TranscodeError> {
-        Self::with_pass(options, HdPass::Single, false)
+        Self::with_pass(options, HdPass::Single, None)
     }
 
-    /// The registered hardware encoder for a video's progressive H.264 in one pass (M12.40); `None` when there is
-    /// none, the stream is not one it makes, or it cannot start.
+    /// The registered hardware encoder for a video's progressive H.264 (M12.40) or HEVC (M12.44) in one pass; `None`
+    /// when there is none, the stream is not one it makes, or it cannot start.
     fn hardware(options: &HdOptions, pass: &HdPass) -> Option<Self> {
-        let factory = hardware_h264()?;
-        if options.codec != HdCodec::H264 || options.interlaced || !matches!(pass, HdPass::Single) {
+        let factory = hardware_encoder()?;
+        let codec = match options.codec {
+            HdCodec::H264 if !options.interlaced => HardwareCodec::H264,
+            // HEVC only with the `hevc` feature (M12.45).
+            HdCodec::Hevc if cfg!(feature = "hevc") => HardwareCodec::HevcMain10,
+            HdCodec::H264 | HdCodec::Hevc | HdCodec::Mpeg2 => return None,
+        };
+        if !matches!(pass, HdPass::Single) {
             return None;
         }
-        let encoder = factory(&hardware_config(options)).ok()?;
+        let encoder = factory(&hardware_config(options, codec)).ok()?;
         let frame = i64::from(options.fps_den)
             .checked_mul(10_000_000)?
             .checked_div(i64::from(options.fps_num))?;
         Some(Self::Hardware(HardwareState {
             encoder,
+            codec,
             frame: frame.max(1),
             given: 0,
             last_pts: None,
+            sets: Vec::new(),
         }))
     }
 
     /// An encoder for `pass` of a two-pass encode; `fields`: of pictures whose two fields were taken at different
-    /// moments ([`keeps_fields`]), which MPEG-2 codes with its field tools (M12.36). H.264 codes the interlaced
-    /// formats' frames as interlaced frames either way.
-    fn with_pass(options: &HdOptions, pass: HdPass, fields: bool) -> Result<Self, TranscodeError> {
+    /// moments, the top one first or not ([`kept_fields`]), which MPEG-2 codes with its field tools (M12.36) and both
+    /// codecs mark in that order (M12.42: a source whose bottom field comes first stays so). H.264 codes the
+    /// interlaced formats' frames as interlaced frames either way.
+    fn with_pass(
+        options: &HdOptions,
+        pass: HdPass,
+        fields: Option<bool>,
+    ) -> Result<Self, TranscodeError> {
         match options.codec {
             HdCodec::H264 => {
                 let mut config = encoder_config(options);
+                if fields == Some(false) {
+                    config.interlaced = Some(craft_video::h264::FieldOrder::BottomFirst);
+                }
                 config.pass = match pass {
                     HdPass::Single | HdPass::Second(HdStats::Mpeg2(_)) => Pass::Single,
                     HdPass::First => Pass::First,
@@ -438,12 +489,13 @@ impl HdEncoder {
                     .map(|encoder| Self::H264(Box::new(encoder)))
                     .map_err(|error| TranscodeError::Encode(error.to_string()))
             }
+            HdCodec::Hevc => hevc_encoder(options),
             HdCodec::Mpeg2 => {
                 let mut encoder = mpeg2_encoder(options)?;
                 encoder.set_quality(options.quality);
                 encoder.set_b_frames(crate::picture::B_FRAMES);
-                if fields {
-                    encoder.set_interlaced(true);
+                if let Some(top_first) = fields {
+                    encoder.set_interlaced(top_first);
                 }
                 if let HdPass::Second(HdStats::Mpeg2(first)) = &pass {
                     encoder.plan_second_pass(first);
@@ -458,6 +510,8 @@ impl HdEncoder {
         match self {
             Self::H264(encoder) => encoder.pass_stats().map(HdStats::H264),
             Self::Hardware(_) => None,
+            #[cfg(feature = "hevc")]
+            Self::Hevc(..) => None,
             Self::Mpeg2(_, pictures) => Some(HdStats::Mpeg2(pictures.clone())),
         }
     }
@@ -476,16 +530,39 @@ impl HdEncoder {
                 .into_iter()
                 .map(Coded::from)
                 .collect()),
+            #[cfg(feature = "hevc")]
+            Self::Hevc(encoder, sets) => {
+                let (y, u, v) = (ten_bit(&planes.y), ten_bit(&planes.u), ten_bit(&planes.v));
+                let packet = encoder
+                    .encode(&craft_video::hevc::Frame {
+                        y: &y,
+                        u: &u,
+                        v: &v,
+                        y_stride: planes.y_stride,
+                        uv_stride: planes.uv_stride,
+                    })
+                    .map_err(|error| TranscodeError::Encode(error.to_string()))?;
+                let data = hevc_annex_b(&packet.data, packet.keyframe.then_some(sets.as_slice()))?;
+                Ok(vec![Coded {
+                    data,
+                    pts: index,
+                    dts: index,
+                    keyframe: packet.keyframe,
+                }])
+            }
             Self::Hardware(state) => {
                 let size = (
                     usize::try_from(options.width).unwrap_or(0),
                     usize::try_from(options.height).unwrap_or(0),
                 );
-                let nv12 = nv12_of(planes, size)?;
+                let picture = match state.codec {
+                    HardwareCodec::H264 => nv12_of(planes, size)?,
+                    HardwareCodec::HevcMain10 => p010_of(&nv12_of(planes, size)?),
+                };
                 let pts = index.saturating_mul(state.frame);
                 let packets = state
                     .encoder
-                    .encode(&nv12, pts)
+                    .encode(&picture, pts)
                     .map_err(TranscodeError::Encode)?;
                 state.coded(packets)
             }
@@ -506,6 +583,9 @@ impl HdEncoder {
     fn flush(&mut self) -> Result<Vec<Coded>, TranscodeError> {
         match self {
             Self::H264(encoder) => Ok(encoder.flush().into_iter().map(Coded::from).collect()),
+            // No pictures are held back.
+            #[cfg(feature = "hevc")]
+            Self::Hevc(..) => Ok(Vec::new()),
             Self::Hardware(state) => {
                 let packets = state.encoder.finish().map_err(TranscodeError::Encode)?;
                 state.coded(packets)
@@ -547,6 +627,152 @@ fn mpeg2_coded(
             }
         })
         .collect()
+}
+
+/// The HEVC encoder (M12.43) of a transcode, with its parameter sets as Annex B.
+#[cfg(feature = "hevc")]
+fn hevc_encoder(options: &HdOptions) -> Result<HdEncoder, TranscodeError> {
+    let mut config = craft_video::hevc::EncoderConfig::new(
+        options.width,
+        options.height,
+        options.fps_num,
+        options.fps_den,
+    );
+    config.profile = craft_video::hevc::Profile::Main10;
+    config.rate = craft_video::hevc::RateControl::Bitrate {
+        kbps: options.target_kbps,
+    };
+    config.keyint = keyint(options);
+    let encoder = craft_video::hevc::Encoder::new(config)
+        .map_err(|error| TranscodeError::Encode(error.to_string()))?;
+    let mut sets = Vec::new();
+    for set in encoder.parameter_sets() {
+        sets.extend_from_slice(&[0, 0, 0, 1]);
+        sets.extend_from_slice(&set);
+    }
+    Ok(HdEncoder::Hevc(Box::new(encoder), sets))
+}
+
+/// Without the `hevc` feature (M12.45: HEVC is left out of the published programs until the patent check of
+/// AGENTS.md rule 6) an HEVC transcode is refused.
+#[cfg(not(feature = "hevc"))]
+fn hevc_encoder(_options: &HdOptions) -> Result<HdEncoder, TranscodeError> {
+    Err(TranscodeError::Encode(
+        "HEVC is not in this build of DiscCraft".to_string(),
+    ))
+}
+
+/// 8-bit samples as 10-bit ones (M12.43: the pictures are made at 8 bits; Main 10 carries them shifted up).
+#[cfg(feature = "hevc")]
+fn ten_bit(samples: &[u8]) -> Vec<u16> {
+    samples
+        .iter()
+        .map(|sample| u16::from(*sample) << 2)
+        .collect()
+}
+
+/// An HEVC access unit as Annex B (M12.43): an access unit delimiter (H.265 7.3.2.5, pic_type 2: any slice type),
+/// `parameter_sets` (already Annex B) before an IDR picture, then each NAL unit of `coded` (each prefixed by a 4-byte
+/// length, ISO/IEC 14496-15) after a start code.
+#[cfg(feature = "hevc")]
+fn hevc_annex_b(coded: &[u8], parameter_sets: Option<&[u8]>) -> Result<Vec<u8>, TranscodeError> {
+    let broken = || TranscodeError::Encode("a malformed HEVC access unit".to_string());
+    let mut out = Vec::with_capacity(coded.len().saturating_add(64));
+    // nal_unit_type 35 (AUD), layer 0, temporal id 1; pic_type 2 and the RBSP stop bit.
+    out.extend_from_slice(&[0, 0, 0, 1, 0x46, 0x01, 0x50]);
+    if let Some(sets) = parameter_sets {
+        out.extend_from_slice(sets);
+    }
+    let mut at = 0usize;
+    while at < coded.len() {
+        let length: [u8; 4] = coded
+            .get(at..at.checked_add(4).ok_or_else(broken)?)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(broken)?;
+        let start = at.checked_add(4).ok_or_else(broken)?;
+        let end = start
+            .checked_add(usize::try_from(u32::from_be_bytes(length)).map_err(|_| broken())?)
+            .ok_or_else(broken)?;
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(coded.get(start..end).ok_or_else(broken)?);
+        at = end;
+    }
+    Ok(out)
+}
+
+/// An NV12 picture as P010 (M12.44): each 8-bit sample carried at 10 bits (shifted up by 2, as the CPU's HEVC
+/// takes them), in the top 10 bits of a little-endian 16-bit word.
+fn p010_of(nv12: &[u8]) -> Vec<u8> {
+    nv12.iter().flat_map(|sample| [0, *sample]).collect()
+}
+
+/// The NAL units of an Annex B access unit (each without its start code).
+fn annex_b_units(data: &[u8]) -> Vec<&[u8]> {
+    let mut starts = Vec::new();
+    let mut at = 0usize;
+    while let Some(window) = data.get(at..at.saturating_add(3)) {
+        if window == [0, 0, 1] {
+            starts.push(at.saturating_add(3));
+            at = at.saturating_add(3);
+        } else {
+            at = at.saturating_add(1);
+        }
+    }
+    starts
+        .iter()
+        .enumerate()
+        .filter_map(|(place, start)| {
+            let mut end = starts
+                .get(place.saturating_add(1))
+                .map_or(data.len(), |next| next.saturating_sub(3));
+            // A four-byte start code leaves a zero byte before the next one.
+            while end > *start && data.get(end.saturating_sub(1)) == Some(&0) {
+                end = end.saturating_sub(1);
+            }
+            data.get(*start..end).filter(|unit| !unit.is_empty())
+        })
+        .collect()
+}
+
+/// A hardware encoder's HEVC access unit as the Blu-ray's (M12.44, as [`hevc_annex_b`]): an access unit delimiter
+/// first, then on an IDR picture (`key`) the parameter sets (VPS, SPS, PPS: the picture's own, or else the last ones
+/// `sets` keeps), then the rest of its NAL units in their order, each after a four-byte start code.
+fn hevc_hardware_unit(
+    data: &[u8],
+    key: bool,
+    sets: &mut Vec<u8>,
+) -> Result<Vec<u8>, TranscodeError> {
+    let units = annex_b_units(data);
+    if units.is_empty() {
+        return Err(TranscodeError::Encode(
+            "an empty HEVC access unit from the hardware encoder".to_string(),
+        ));
+    }
+    let kind = |unit: &[u8]| unit.first().map_or(0, |byte| (byte >> 1) & 0x3F);
+    let mut own = Vec::new();
+    for unit in units.iter().filter(|unit| (32..=34).contains(&kind(unit))) {
+        own.extend_from_slice(&[0, 0, 0, 1]);
+        own.extend_from_slice(unit);
+    }
+    if !own.is_empty() {
+        sets.clone_from(&own);
+    }
+    if key && sets.is_empty() {
+        return Err(TranscodeError::Encode(
+            "an HEVC IDR picture without parameter sets from the hardware encoder".to_string(),
+        ));
+    }
+    let mut out = Vec::with_capacity(data.len().saturating_add(sets.len()).saturating_add(8));
+    // nal_unit_type 35 (AUD), layer 0, temporal id 1; pic_type 2 and the RBSP stop bit.
+    out.extend_from_slice(&[0, 0, 0, 1, 0x46, 0x01, 0x50]);
+    if key || !own.is_empty() {
+        out.extend_from_slice(sets);
+    }
+    for unit in units.iter().filter(|unit| !(32..=35).contains(&kind(unit))) {
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(unit);
+    }
+    Ok(out)
 }
 
 /// One access unit of the elementary stream.
@@ -716,11 +942,12 @@ pub fn transcode_h264_range(
     let source = Source::open(input)?;
     let (range_start, range_length) = source_range(source.info().duration, range);
     let frames = frame_count(range_length, options)?;
-    let fields = keeps_fields(&source, options);
+    let kept = kept_fields(&source, options);
+    let fields = kept.is_some();
 
-    // M12.40: the registered hardware encoder first, for the streams it makes; a failure (but a stop) encodes the
-    // video again on the CPU.
-    if options.mode != crate::RateMode::Vbr2Pass
+    // M12.40: the registered hardware encoder first, for the streams it makes (H.264 in one pass; HEVC, M12.44, is
+    // always one); a failure (but a stop) encodes the video again on the CPU.
+    if (options.mode != crate::RateMode::Vbr2Pass || options.codec == HdCodec::Hevc)
         && let Some(mut encoder) = HdEncoder::hardware(options, &HdPass::Single)
     {
         let made = (|| -> Result<(), TranscodeError> {
@@ -748,10 +975,11 @@ pub fn transcode_h264_range(
     }
 
     // VBR 2 pass (M6.328): the video is gone through once to measure it, writing nothing, then encoded by what
-    // was measured; the progress runs once over both passes.
-    let two_pass = options.mode == crate::RateMode::Vbr2Pass && frames > 1;
+    // was measured; the progress runs once over both passes. HEVC is encoded in one (M12.43).
+    let two_pass =
+        options.mode == crate::RateMode::Vbr2Pass && frames > 1 && options.codec != HdCodec::Hevc;
     let pass = if two_pass {
-        let mut first = HdEncoder::with_pass(options, HdPass::First, fields)?;
+        let mut first = HdEncoder::with_pass(options, HdPass::First, kept)?;
         let mut nowhere = std::io::sink();
         let mut discarded = PacketWriter::new(&mut nowhere, es_out);
         encode_range(
@@ -772,7 +1000,7 @@ pub fn transcode_h264_range(
 
     let file = File::create(es_out).map_err(|error| io_error(es_out, error))?;
     let mut writer = BufWriter::new(file);
-    let mut encoder = HdEncoder::with_pass(options, pass, fields)?;
+    let mut encoder = HdEncoder::with_pass(options, pass, kept)?;
     let mut packets = PacketWriter::new(&mut writer, es_out);
     encode_range(
         (&source, range_start, frames),
@@ -787,27 +1015,36 @@ pub fn transcode_h264_range(
     Ok(frames)
 }
 
-/// Whether an HD stream keeps the two fields of an interlaced source apart (M12.37, as a DVD's since M12.26): the
-/// output is interlaced (MPEG-2 at 29.97 or 25 frames a second, or H.264 coded as interlaced frames) and the source
-/// is interlaced at the output's frame rate, the top field first (the order the interlaced outputs are made in).
-fn keeps_fields(source: &Source, options: &HdOptions) -> bool {
+/// Whether an HD stream keeps the two fields of an interlaced source apart (M12.37, as a DVD's since M12.26), and
+/// then whether the top field comes first: the output is interlaced (MPEG-2 at 29.97 or 25 frames a second, or H.264
+/// coded as interlaced frames) and the source is interlaced at the output's frame rate. M12.42: a source whose bottom
+/// field comes first (DV, some camcorders) too, the stream then marked so (each field is scaled from the lines of
+/// its own parity, whichever comes first); `None`: the frames are scaled whole.
+fn kept_fields(source: &Source, options: &HdOptions) -> Option<bool> {
     let interlaced = match options.codec {
         HdCodec::Mpeg2 => matches!(mpeg2_config(options), Ok((_, None))),
         HdCodec::H264 => options.interlaced,
+        HdCodec::Hevc => false,
     };
     let rate = source.info().video.as_ref().map(|video| video.frame_rate);
-    interlaced
-        && crate::field_type::field_type(source.path()) == Some(crate::FieldType::UpperFirst)
-        && rate.is_some_and(|rate| {
-            rate.den != 0
-                && i128::from(rate.num) * i128::from(options.fps_den)
-                    == i128::from(options.fps_num) * i128::from(rate.den)
-        })
+    let same_rate = rate.is_some_and(|rate| {
+        rate.den != 0
+            && i128::from(rate.num) * i128::from(options.fps_den)
+                == i128::from(options.fps_num) * i128::from(rate.den)
+    });
+    if !interlaced || !same_rate {
+        return None;
+    }
+    match crate::field_type::field_type(source.path())? {
+        crate::FieldType::UpperFirst => Some(true),
+        crate::FieldType::LowerFirst => Some(false),
+        crate::FieldType::Progressive => None,
+    }
 }
 
 /// One pass over `frames` pictures of `source` from `range_start`: each decoded, scaled and converted on a thread of
 /// its own, a few ahead of `encoder`, whose packets go to `packets` (the encoder flushed at the end). `fields`: each
-/// field of an interlaced source scaled and its colour subsampled on its own ([`keeps_fields`]).
+/// field of an interlaced source scaled and its colour subsampled on its own ([`kept_fields`]).
 fn encode_range<W: Write>(
     (source, range_start, frames): (&Source, Tick, u64),
     (options, fields): (&HdOptions, bool),
@@ -1341,7 +1578,7 @@ fn render_rgb_frame(frame: &VideoFrame, options: &HdOptions) -> Result<Vec<u8>, 
     rendered.ok_or_else(|| TranscodeError::Unsupported("failed to render frame".to_string()))
 }
 
-/// [`render_rgb_frame`] for an interlaced source whose fields stay apart ([`keeps_fields`]): each output line made of
+/// [`render_rgb_frame`] for an interlaced source whose fields stay apart ([`kept_fields`]): each output line made of
 /// the source lines of its own field ([`render_rgb_fields_at`]). "Use Maximum Render Quality" does not change it,
 /// as on a DVD.
 fn render_rgb_fields_frame(
@@ -1991,8 +2228,168 @@ fn rgb_to_yuv_as(
     })
 }
 
-/// Fill the luma plane.
+/// Rows of a picture each thread of the colour conversion takes at least (M12.41): the conversion runs on the thread
+/// that feeds the encoder, so a hardware encoder waits on it unless it uses the other cores too.
+const CONVERT_ROWS_PER_WORKER: usize = 64;
+
+/// How many threads convert a picture of `rows` rows.
+fn convert_workers(rows: usize) -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .clamp(1, (rows / CONVERT_ROWS_PER_WORKER).max(1))
+}
+
+/// Fill the luma plane (BT.709, [`luma_u8`]), the rows shared out among threads.
 fn fill_luma(y: &mut [u8], rgb: &[u8], width: usize, height: usize) -> Option<()> {
+    fill_luma_on(y, rgb, (width, height), convert_workers(height))
+}
+
+/// [`fill_luma`] on `workers` threads. Each luma value depends on its own pixel only, so the plane is the same
+/// however the rows are shared out.
+fn fill_luma_on(
+    y: &mut [u8],
+    rgb: &[u8],
+    (width, height): (usize, usize),
+    workers: usize,
+) -> Option<()> {
+    let row_bytes = width.checked_mul(3)?;
+    let rgb = rgb.get(..row_bytes.checked_mul(height)?)?;
+    let y = y.get_mut(..width.checked_mul(height)?)?;
+    if width == 0 || height == 0 {
+        return Some(());
+    }
+    let convert = |out: &mut [u8], input: &[u8]| {
+        for (out_row, in_row) in out
+            .chunks_exact_mut(width)
+            .zip(input.chunks_exact(row_bytes))
+        {
+            for (value, &[r, g, b]) in out_row.iter_mut().zip(in_row.as_chunks::<3>().0) {
+                *value = luma_u8([r, g, b]);
+            }
+        }
+    };
+    let per_worker = height.div_ceil(workers.max(1)).max(1);
+    if per_worker >= height {
+        convert(y, rgb);
+        return Some(());
+    }
+    std::thread::scope(|scope| {
+        for (out, input) in y
+            .chunks_mut(per_worker.saturating_mul(width))
+            .zip(rgb.chunks(per_worker.saturating_mul(row_bytes)))
+        {
+            let convert = &convert;
+            let _ = scope.spawn(move || convert(out, input));
+        }
+    });
+    Some(())
+}
+
+/// Fill the chroma planes by averaging 2x2 blocks: two lines next to each other, or (`fields`) the two lines of
+/// one field (chroma line `cy` of field `cy % 2`: its lines `4 (cy / 2) + cy % 2` and two below). The chroma rows
+/// are shared out among threads.
+fn fill_chroma(
+    u: &mut [u8],
+    v: &mut [u8],
+    rgb: &[u8],
+    (width, height): (usize, usize),
+    fields: bool,
+) -> Option<()> {
+    fill_chroma_on(
+        (u, v),
+        rgb,
+        (width, height),
+        fields,
+        convert_workers(height / 2),
+    )
+}
+
+/// [`fill_chroma`] on `workers` threads (each chroma value depends on its own four pixels only).
+fn fill_chroma_on(
+    (u, v): (&mut [u8], &mut [u8]),
+    rgb: &[u8],
+    (width, height): (usize, usize),
+    fields: bool,
+    workers: usize,
+) -> Option<()> {
+    let chroma_width = width / 2;
+    let chroma_height = height / 2;
+    let row_bytes = width.checked_mul(3)?;
+    let rgb = rgb.get(..row_bytes.checked_mul(height)?)?;
+    let size = chroma_width.checked_mul(chroma_height)?;
+    let (u, v) = (u.get_mut(..size)?, v.get_mut(..size)?);
+    if chroma_width == 0 || chroma_height == 0 {
+        return Some(());
+    }
+    // The two picture lines chroma line `cy` is made from.
+    let lines = |cy: usize| -> Option<(&[u8], &[u8])> {
+        let (y0, y1) = if fields {
+            let first = (cy / 2).checked_mul(4)?.checked_add(cy % 2)?;
+            let second = first.checked_add(2)?;
+            (first, if second < height { second } else { first })
+        } else {
+            let first = cy.checked_mul(2)?;
+            (first, first.checked_add(1)?)
+        };
+        let line = |y: usize| {
+            rgb.get(y.checked_mul(row_bytes)?..y.checked_add(1)?.checked_mul(row_bytes)?)
+        };
+        Some((line(y0)?, line(y1)?))
+    };
+    // Chroma rows from `first_row` on, into `u` / `v` (whole rows).
+    let convert = |first_row: usize, u: &mut [u8], v: &mut [u8]| -> Option<()> {
+        for (index, (u_row, v_row)) in u
+            .chunks_exact_mut(chroma_width)
+            .zip(v.chunks_exact_mut(chroma_width))
+            .enumerate()
+        {
+            let (top, bottom) = lines(first_row.checked_add(index)?)?;
+            let pairs = top.as_chunks::<6>().0.iter().zip(bottom.as_chunks::<6>().0);
+            for (
+                (cb_out, cr_out),
+                (&[r00, g00, b00, r01, g01, b01], &[r10, g10, b10, r11, g11, b11]),
+            ) in u_row.iter_mut().zip(v_row.iter_mut()).zip(pairs)
+            {
+                let avg = average_rgb(
+                    [r00, g00, b00],
+                    [r01, g01, b01],
+                    [r10, g10, b10],
+                    [r11, g11, b11],
+                );
+                let (cb, cr) = chroma_u8(avg);
+                *cb_out = cb;
+                *cr_out = cr;
+            }
+        }
+        Some(())
+    };
+    let per_worker = chroma_height.div_ceil(workers.max(1)).max(1);
+    if per_worker >= chroma_height {
+        return convert(0, u, v);
+    }
+    let block = per_worker.saturating_mul(chroma_width);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = u
+            .chunks_mut(block)
+            .zip(v.chunks_mut(block))
+            .enumerate()
+            .map(|(index, (u, v))| {
+                let convert = &convert;
+                scope.spawn(move || convert(index.saturating_mul(per_worker), u, v))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().ok().flatten())
+            .collect::<Option<Vec<()>>>()
+            .map(|_| ())
+    })
+}
+
+/// The luma plane as it was filled before M12.41, one pixel at a time (the reference the faster one is checked
+/// against).
+#[cfg(test)]
+fn fill_luma_reference(y: &mut [u8], rgb: &[u8], width: usize, height: usize) -> Option<()> {
     for row in 0..height {
         for col in 0..width {
             let pixel = get_rgb(rgb, width, col, row)?;
@@ -2004,9 +2401,10 @@ fn fill_luma(y: &mut [u8], rgb: &[u8], width: usize, height: usize) -> Option<()
     Some(())
 }
 
-/// Fill the chroma planes by averaging 2x2 blocks: two lines next to each other, or (`fields`) the two lines of
+/// The chroma planes as they were filled before M12.41 (the reference), averaging 2x2 blocks: two lines next to each other, or (`fields`) the two lines of
 /// one field (chroma line `cy` of field `cy % 2`: its lines `4 (cy / 2) + cy % 2` and two below).
-fn fill_chroma(
+#[cfg(test)]
+fn fill_chroma_reference(
     u: &mut [u8],
     v: &mut [u8],
     rgb: &[u8],
@@ -2041,6 +2439,7 @@ fn fill_chroma(
 }
 
 /// Read one RGB pixel.
+#[cfg(test)]
 fn get_rgb(rgb: &[u8], width: usize, x: usize, y: usize) -> Option<[u8; 3]> {
     let index = y.checked_mul(width)?.checked_add(x)?.checked_mul(3)?;
     let end = index.checked_add(3)?;
@@ -2222,9 +2621,49 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
     use super::{
-        AccessUnit, HdOptions, chroma_u8, frame_count, read_h264_index, rgb_to_yuv, rgb_to_yuv_as,
+        AccessUnit, HdOptions, chroma_u8, fill_chroma_on, fill_chroma_reference, fill_luma_on,
+        fill_luma_reference, frame_count, read_h264_index, rgb_to_yuv, rgb_to_yuv_as,
         target_geometry, write_h264_index,
     };
+
+    /// M12.41: the colour conversion shared out among threads makes the same planes as the one that went one pixel
+    /// at a time, for any number of threads, odd sizes and both chroma line orders (frame and fields).
+    #[test]
+    fn the_parallel_colour_conversion_matches_the_reference() {
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 24) as u8
+        };
+        for (width, height) in [(1, 1), (2, 2), (3, 5), (17, 9), (64, 130), (321, 241)] {
+            let rgb: Vec<u8> = (0..width * height * 3).map(|_| next()).collect();
+            let mut expected = vec![0; width * height];
+            fill_luma_reference(&mut expected, &rgb, width, height).unwrap();
+            let size = (width / 2) * (height / 2);
+            for workers in [1, 2, 3, 7, 64] {
+                let mut luma = vec![0; width * height];
+                fill_luma_on(&mut luma, &rgb, (width, height), workers).unwrap();
+                assert_eq!(luma, expected, "{width}x{height} on {workers}");
+                for fields in [false, true] {
+                    let (mut u, mut v) = (vec![0; size], vec![0; size]);
+                    fill_chroma_reference(&mut u, &mut v, &rgb, (width, height), fields).unwrap();
+                    let (mut cb, mut cr) = (vec![0; size], vec![0; size]);
+                    fill_chroma_on((&mut cb, &mut cr), &rgb, (width, height), fields, workers)
+                        .unwrap();
+                    assert_eq!(
+                        (cb, cr),
+                        (u, v),
+                        "{width}x{height} fields {fields} on {workers}"
+                    );
+                }
+            }
+        }
+        // A picture shorter than its size says is refused, as before.
+        let mut luma = vec![0; 4];
+        assert!(fill_luma_on(&mut luma, &[0; 9], (2, 2), 2).is_none());
+    }
     use crate::TICKS_PER_SECOND;
     use craft_video::h264::{
         Encoder, EncoderConfig, PacketFormat, Preset, Profile, RateControl, YuvFrame,

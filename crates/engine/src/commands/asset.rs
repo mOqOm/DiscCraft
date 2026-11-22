@@ -39,6 +39,27 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: false,
     },
     CommandSpec {
+        id: "asset.getMetadata",
+        label: "アセットのメタデータ",
+        menu: &["アセット"],
+        shortcut: None,
+        params: r#"{"asset": id}"#,
+        enabled: always_enabled,
+        run: run_get_metadata,
+        journal: false,
+    },
+    CommandSpec {
+        id: "asset.setMetadata",
+        label: "アセットのメタデータを書き込む",
+        menu: &["アセット"],
+        shortcut: None,
+        params: r#"{"asset": id, "fields": {"dc:title"?: string, "dc:creator"?: "名前; 名前", "xmp:Rating"?: "-1".."5", "xmpRights:Marked"?: "True" | "False", …: メタデータパネルで編集できる項目（接頭辞:名前）。空の文字列は消す}}"#,
+        enabled: always_enabled,
+        run: run_set_metadata,
+        // The media file (or its sidecar) changes, not the project.
+        journal: false,
+    },
+    CommandSpec {
         id: "asset.compositions",
         label: "EffectCraft のプロジェクトのコンポジション",
         menu: &["アセット"],
@@ -538,6 +559,73 @@ fn kind_name(kind: AssetKind) -> &'static str {
 }
 
 /// Imports an asset file into the project.
+/// The media file of asset `params.asset`.
+fn asset_media_file(session: &Session, params: &Value) -> Result<std::path::PathBuf, String> {
+    let id = AssetId(req_u64(params, "asset")?);
+    session
+        .project
+        .assets
+        .get(&id)
+        .map(|asset| asset.media_file().into_owned())
+        .ok_or_else(|| format!("asset {} does not exist", id.0))
+}
+
+/// M6.396: the editable XMP metadata of an asset's file (`{"fields": {"dc:title": …}}`: each property it has).
+fn run_get_metadata(session: &mut Session, params: &Value) -> CommandResult {
+    let path = asset_media_file(session, params)?;
+    let mut fields = Map::new();
+    for (field, value) in crate::metadata_edit::editable_values(&path) {
+        let _ = fields.insert(field.key().to_owned(), Value::String(value));
+    }
+    Ok(object(&[("fields", Value::Object(fields))]))
+}
+
+/// M6.396 (Encore's Metadata panel): writes the fields given into the XMP metadata of an asset's file (or its
+/// sidecar, [`crate::metadata_edit::write_metadata`]); an empty string removes one. Says where it went.
+fn run_set_metadata(session: &mut Session, params: &Value) -> CommandResult {
+    let path = asset_media_file(session, params)?;
+    let Some(Value::Object(given)) = params.get("fields") else {
+        return Err("parameter \"fields\" must be an object".to_string());
+    };
+    let mut edits = Vec::with_capacity(given.len());
+    for (key, value) in given {
+        let field = crate::metadata_edit::EditableProperty::from_key(key)
+            .ok_or_else(|| format!("unknown or read-only metadata property \"{key}\""))?;
+        let text = match value {
+            Value::String(text) => text.clone(),
+            Value::Number(number) => number.to_string(),
+            Value::Null => String::new(),
+            _ => return Err(format!("field \"{key}\" must be a string")),
+        };
+        let kind = field.property.kind;
+        if kind == crate::xmp_schemas::PropertyKind::Rating
+            && !text.trim().is_empty()
+            && !matches!(text.trim().parse::<i8>(), Ok(-1..=5))
+        {
+            return Err(format!("\"{key}\" must be -1 to 5"));
+        }
+        if kind == crate::xmp_schemas::PropertyKind::Boolean
+            && !text.trim().is_empty()
+            && !["true", "false"].contains(&text.trim().to_ascii_lowercase().as_str())
+        {
+            return Err(format!("\"{key}\" must be True or False"));
+        }
+        edits.push((field, text));
+    }
+    if edits.is_empty() {
+        return Err("no field to write".to_string());
+    }
+    let written = crate::metadata_edit::write_metadata(&path, &edits)?;
+    let (place, file) = match written {
+        crate::metadata_edit::Written::File => ("file", path),
+        crate::metadata_edit::Written::Sidecar(sidecar) => ("sidecar", sidecar),
+    };
+    Ok(object(&[
+        ("written", Value::String(place.to_owned())),
+        ("path", Value::String(file.to_string_lossy().into_owned())),
+    ]))
+}
+
 fn run_import(session: &mut Session, params: &Value) -> CommandResult {
     let path = req_str(params, "path")?;
     let file_path = Path::new(&path);
@@ -1578,6 +1666,7 @@ mod tests {
             transcode_quality: disccraft_project::BEST_QUALITY,
             max_render_quality: false,
             frame_blend: false,
+            menu_file: false,
         };
         let _ = session.project.assets.insert(AssetId(5), video);
         let setting = |session: &Session| {
@@ -1836,6 +1925,7 @@ mod tests {
             transcode_quality: disccraft_project::BEST_QUALITY,
             max_render_quality: false,
             frame_blend: false,
+            menu_file: false,
         };
         let _ = session.project.assets.insert(AssetId(99), video);
         assert!(
@@ -1877,6 +1967,7 @@ mod tests {
             transcode_quality: disccraft_project::BEST_QUALITY,
             max_render_quality: false,
             frame_blend: false,
+            menu_file: false,
         };
         let _ = session.project.assets.insert(AssetId(7), asset);
 

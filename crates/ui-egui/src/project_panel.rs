@@ -1251,6 +1251,9 @@ impl DiscCraftApp {
             .project
             .assets
             .iter()
+            // A menu's own file (a PSD imported as a menu or saved from an image editor) is part of its menu, as
+            // in Encore (M6.399).
+            .filter(|(_, asset)| !asset.menu_file)
             .map(|(id, asset)| {
                 (
                     *id,

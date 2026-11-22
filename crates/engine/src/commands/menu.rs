@@ -1913,6 +1913,8 @@ fn run_apply_psd(session: &mut Session, params: &Value) -> CommandResult {
             menu.background = MenuBackground::Image { asset };
         }
     }
+    // The file the menu followed before, when it was one of its own, goes (M6.399).
+    session.project.drop_unused_menu_files();
     Ok(object(&[
         ("asset", Value::from(asset.0)),
         ("buttons", Value::from(count)),
@@ -1953,7 +1955,10 @@ fn apply_psd_page(
     menu.background = MenuBackground::Image { asset };
     menu.subpicture_colors = groups.first;
     menu.second_subpicture_colors = groups.second;
+    // The texts and graphics were written into the PSD, which now shows them (M6.399: the graphics were drawn
+    // twice).
     menu.texts.clear();
+    menu.graphics.clear();
     // The new order: each group's button (a new one added for a group without), then the buttons without a group.
     let mut order = Vec::with_capacity(found.len().max(names.len()));
     for (index, button) in found.iter().enumerate() {
@@ -2328,7 +2333,13 @@ fn psd_buttons(
         None => session
             .project
             .add_asset(std::path::Path::new(path))
-            .map_err(|error| error.to_string())?,
+            .map_err(|error| error.to_string())
+            .inspect(|id| {
+                // Part of its menu, not listed among the assets (Encore, M6.399).
+                if let Some(added) = session.project.assets.get_mut(id) {
+                    added.menu_file = true;
+                }
+            })?,
     };
     Ok((pages, asset))
 }
@@ -2411,6 +2422,8 @@ fn run_replace(session: &mut Session, params: &Value) -> CommandResult {
         .project
         .replace_menu(menu_id, design)
         .map_err(|error| error.to_string())?;
+    // The menu's own file it followed before goes (M6.399).
+    session.project.drop_unused_menu_files();
     Ok(empty_object())
 }
 
@@ -3308,6 +3321,99 @@ mod tests {
         assert_eq!(current(&session), None);
         session.undo()?;
         assert_eq!(current(&session), Some(Link::Stop));
+        Ok(())
+    }
+
+    /// M6.399 (GitHub issue #13: a menu made in DiscCraft, edited in PhotoCraft and written out again, came out
+    /// flat, and its PSD was listed among the assets): once the menu follows its PSD, writing it out keeps the
+    /// PSD's layers, with a text, a new button and a button's new text added over them; the PSD is the menu's own
+    /// file, not listed, and goes with the menu.
+    #[test]
+    fn a_menu_following_its_psd_keeps_the_layers_when_written_out() -> Result<(), Box<dyn Error>> {
+        let dir = std::env::temp_dir().join(format!("disccraft-psd-over-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let mut session = Session::new();
+        let created = session.execute(
+            "library.newMenu",
+            &serde_json::json!({ "preset": "menu.bottom-bar" }),
+        )?;
+        let menu_id = value_u64(&created, "menu")?;
+        session.execute(
+            "menu.addText",
+            &serde_json::json!({"menu": menu_id, "text": "Title", "x": 60, "y": 40}),
+        )?;
+        session.execute(
+            "menu.addShape",
+            &serde_json::json!({"menu": menu_id, "shape": "rectangle"}),
+        )?;
+        // Edited in an image editor: the menu as a PSD, saved as it is and taken back.
+        let first = dir.join("first.psd");
+        let menu = session.project.menu(MenuId(menu_id)).ok_or("menu")?.clone();
+        disccraft_menu::export_menu_psd(&session.project, &menu, None, &first)?;
+        session.execute(
+            "menu.applyPsd",
+            &serde_json::json!({"menu": menu_id, "path": first.to_string_lossy()}),
+        )?;
+        let menu = session.project.menu(MenuId(menu_id)).ok_or("menu")?;
+        let disccraft_project::MenuBackground::Image { asset } = menu.background else {
+            return Err("the PSD is not the background".into());
+        };
+        // The texts and the shape are in the PSD now, not drawn again over it.
+        assert!(menu.texts.is_empty() && menu.graphics.is_empty());
+        assert!(session.project.assets.get(&asset).ok_or("asset")?.menu_file);
+
+        // Added in DiscCraft since: a text, a button, and a text for the first button.
+        session.execute(
+            "menu.addText",
+            &serde_json::json!({"menu": menu_id, "text": "Added", "x": 60, "y": 200}),
+        )?;
+        session.execute(
+            "menu.addButton",
+            &serde_json::json!({"menu": menu_id, "label": "New",
+                "rect": {"x": 60, "y": 300, "w": 120, "h": 40}}),
+        )?;
+        session.execute(
+            "button.setLabel",
+            &serde_json::json!({"menu": menu_id, "button": 0, "label": "Again"}),
+        )?;
+        let second = dir.join("second.psd");
+        let menu = session.project.menu(MenuId(menu_id)).ok_or("menu")?.clone();
+        disccraft_menu::export_menu_psd(&session.project, &menu, None, &second)?;
+        let tree = disccraft_photo::psd_layer_tree(&second)?;
+        let names: Vec<&str> = tree.iter().map(|node| node.name.as_str()).collect();
+        // The PSD's own layers are all there, the additions over them (the top first).
+        assert_eq!(
+            names,
+            [
+                "(+) New",
+                "Added",
+                "(+) Extras",
+                "(+) Chapters",
+                "(+) Play",
+                "Title",
+                "Rectangle",
+                "背景"
+            ]
+        );
+        let play = tree
+            .iter()
+            .find(|node| node.name == "(+) Play")
+            .ok_or("no Play set")?;
+        let inside: Vec<&str> = play
+            .children
+            .iter()
+            .map(|node| node.name.as_str())
+            .collect();
+        // The button's new text (its name follows it) over the set's own layers.
+        assert_eq!(inside, ["Again", "(=1) ハイライト", "Play"]);
+
+        // The PSD goes with its menu.
+        session.execute(
+            "project.remove",
+            &serde_json::json!({"kind": "menu", "id": menu_id}),
+        )?;
+        assert!(!session.project.assets.contains_key(&asset));
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 

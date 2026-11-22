@@ -1,6 +1,6 @@
-//! Encode a file to HD H.264 (Blu-ray settings) and print the access-unit index summary.
+//! Encode a file to HD H.264 (Blu-ray settings), or HEVC (M12.43), and print the access-unit index summary.
 //!
-//! `cargo run --release -p disccraft-transcode --example hd -- <input> <out.h264> <out.idx>`
+//! `cargo run --release -p disccraft-transcode --example hd -- <input> <out.h264> <out.idx> [h264|hevc] [width height]`
 
 use std::error::Error;
 use std::path::Path;
@@ -12,14 +12,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (Some(input), Some(es), Some(index)) = (args.get(1), args.get(2), args.get(3)) else {
         return Err("usage: hd <input> <out.h264> <out.idx>".into());
     };
+    let hevc = args.get(4).is_some_and(|codec| codec == "hevc");
+    let size =
+        |at: usize, default: u32| args.get(at).and_then(|n| n.parse().ok()).unwrap_or(default);
     let options = HdOptions {
-        width: 1920,
-        height: 1080,
+        width: size(5, 1920),
+        height: size(6, 1080),
         fps_num: 24000,
         fps_den: 1001,
         target_kbps: 12_000,
         max_kbps: 30_000,
-        codec: disccraft_transcode::hd::HdCodec::H264,
+        codec: if hevc {
+            disccraft_transcode::hd::HdCodec::Hevc
+        } else {
+            disccraft_transcode::hd::HdCodec::H264
+        },
         quality: disccraft_transcode::BEST_QUALITY,
         rendering: disccraft_transcode::Rendering::default(),
         mode: disccraft_transcode::RateMode::Vbr,

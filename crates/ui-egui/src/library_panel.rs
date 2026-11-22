@@ -368,7 +368,7 @@ impl DiscCraftApp {
         }
         if self.library_shows(LibraryGroup::Images) {
             for asset in self.session.project.assets.values() {
-                if asset.kind == AssetKind::Image {
+                if asset.kind == AssetKind::Image && !asset.menu_file {
                     rows.push(LibraryRow {
                         pick: LibraryPick::Image(asset.id),
                         name: asset.name.clone(),

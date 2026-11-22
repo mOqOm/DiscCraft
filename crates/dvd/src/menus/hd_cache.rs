@@ -121,6 +121,8 @@ fn transport_stream(codec: HdCodec, data: &[u8], units: &[AccessUnit]) -> Option
         kind: match codec {
             HdCodec::H264 => StreamKind::H264Video,
             HdCodec::Mpeg2 => StreamKind::Mpeg2Video,
+            // A menu's video is H.264 or MPEG-2 (M12.43: HEVC is a title's, for Ultra HD).
+            HdCodec::Hevc => return None,
         },
         units: es,
     };

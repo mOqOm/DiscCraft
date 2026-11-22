@@ -762,6 +762,15 @@ fn a_chapter_with_a_parental_alternative_makes_a_parental_block() -> Result<(), 
         assert_eq!(model.title_variant(1, 5, japan), Some(0));
         assert_eq!(model.title_variant(1, 4, japan), Some(1));
         assert_eq!(model.title_variant(1, 15, japan), Some(0));
+        // M13.19: the Project Preview's model (no build) chooses the same version at every level.
+        let preview = disccraft_dvd::preview_model(&project)?;
+        for level in [1, 2, 4, 5, 6, 8, 15] {
+            assert_eq!(
+                preview.title_variant(1, level, japan),
+                model.title_variant(1, level, japan),
+                "level {level}"
+            );
+        }
 
         let vob = video_ts.join("VTS_01_1.VOB");
         let decoded = Command::new(&ffmpeg)

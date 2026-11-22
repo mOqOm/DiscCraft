@@ -98,7 +98,24 @@ impl Project {
             self.clear_links(Target::Menu(page));
             let _ = self.placements.remove(&page.0);
         }
+        self.drop_unused_menu_files();
         Ok(())
+    }
+
+    /// Remove the files menus were made from or edited in ([`crate::Asset::menu_file`]) that nothing uses any more:
+    /// they go with their menu, as in Encore (M6.399).
+    pub fn drop_unused_menu_files(&mut self) {
+        let unused: Vec<AssetId> = self
+            .assets
+            .values()
+            .filter(|asset| asset.menu_file)
+            .map(|asset| asset.id)
+            .filter(|id| self.asset_user(*id).is_none())
+            .collect();
+        for id in unused {
+            let _ = self.assets.remove(&id);
+            let _ = self.placements.remove(&id.0);
+        }
     }
 
     /// Remove a slideshow and clear links to it.
