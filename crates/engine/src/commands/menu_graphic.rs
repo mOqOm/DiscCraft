@@ -33,6 +33,16 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "menu.placePsdButton",
+        label: "PSD のボタンを配置（ライブラリのボタン）",
+        menu: &["メニュー"],
+        shortcut: None,
+        params: r#"{"menu": id, "path": "button.psd", "x"?: n, "y"?: n (PSD の左上をそこに。省略で中央)} → {"graphic": index, "button": index}"#,
+        enabled: always_enabled,
+        run: run_place_psd_button,
+        journal: true,
+    },
+    CommandSpec {
         id: "menu.addShape",
         label: "シェイプを配置",
         menu: &["メニュー"],
@@ -207,6 +217,200 @@ fn add_graphic(session: &mut Session, params: &Value, kind: GraphicKind) -> Comm
         .map_err(|error| error.to_string())?;
     let index = u64::try_from(index).map_err(|_| "graphic index is too large".to_string())?;
     Ok(object(&[("index", Value::from(index))]))
+}
+
+/// How a PSD of the Library goes onto the frame (M6.405): at its own size when it fits in it, else stretched into it
+/// as a menu's PSD of another size is.
+#[derive(Clone, Copy, Debug)]
+struct CanvasFit {
+    canvas: (u32, u32),
+    frame: (u16, u16),
+    fits: bool,
+}
+
+impl CanvasFit {
+    fn new(canvas: (u32, u32), frame: (u16, u16)) -> Self {
+        let canvas = (canvas.0.max(1), canvas.1.max(1));
+        let fits = canvas.0 <= u32::from(frame.0) && canvas.1 <= u32::from(frame.1);
+        Self {
+            canvas,
+            frame,
+            fits,
+        }
+    }
+
+    fn scale(&self, value: u32, canvas: u32, frame: u16) -> u16 {
+        let scaled = if self.fits {
+            u64::from(value)
+        } else {
+            u64::from(value) * u64::from(frame) / u64::from(canvas)
+        };
+        u16::try_from(scaled).unwrap_or(u16::MAX)
+    }
+
+    /// A length across the canvas, in the frame.
+    fn x(&self, value: u32) -> u16 {
+        self.scale(value, self.canvas.0, self.frame.0)
+    }
+
+    /// A length down the canvas, in the frame.
+    fn y(&self, value: u32) -> u16 {
+        self.scale(value, self.canvas.1, self.frame.1)
+    }
+}
+
+/// A button of the Library placed in a menu (M6.405, Encore's Library ▸ Place of a button PSD; docs/encore-behavior.md
+/// 9.18): the PSD as the button's picture (an image layer, its highlight layers left out) and a button over its set,
+/// as a PSD menu's button is made: the set's place, its `(=1)` to `(=3)` layers the button's subpicture, its `(%)`
+/// layer its video thumbnail. The PSD at its own size (one larger than the frame stretched into it, as a menu's PSD
+/// is: the subpicture is then left to the button's frame), its top left corner at `x`, `y` (kept in the frame) or
+/// centred.
+fn run_place_psd_button(session: &mut Session, params: &Value) -> CommandResult {
+    let menu = MenuId(req_u64(params, "menu")?);
+    let path = req_str(params, "path")?;
+    if session.project.menu(menu).is_none() {
+        return Err(format!("menu {} does not exist", menu.0));
+    }
+    let psd = disccraft_photo::load_psd_menu(std::path::Path::new(&path))
+        .map_err(|error| format!("{path}: {error}"))?;
+    let button = psd
+        .buttons
+        .first()
+        .ok_or_else(|| format!("{path} has no button set"))?;
+    let frame = frame_size(&session.project.settings);
+    let fit = CanvasFit::new((psd.width, psd.height), frame);
+    let (w, h) = (
+        fit.x(psd.width).clamp(1, frame.0.max(1)),
+        fit.y(psd.height).clamp(1, frame.1.max(1)),
+    );
+    let place = |name: &str, extent: u16, frame: u16| -> Result<u16, String> {
+        let most = frame.saturating_sub(extent);
+        Ok(match opt_u64(params, name)? {
+            Some(value) => u16::try_from(value).unwrap_or(u16::MAX).min(most),
+            None => most / 2,
+        })
+    };
+    let (x, y) = (place("x", w, frame.0)?, place("y", h, frame.1)?);
+    let before = session.project.clone();
+    let placed = place_psd_button(session, menu, (&path, button), Rect { x, y, w, h }, fit);
+    if placed.is_err() {
+        session.project = before;
+    }
+    let (graphic, index) = placed?;
+    Ok(object(&[
+        (
+            "graphic",
+            Value::from(u64::try_from(graphic).unwrap_or(u64::MAX)),
+        ),
+        (
+            "button",
+            Value::from(u64::try_from(index).unwrap_or(u64::MAX)),
+        ),
+    ]))
+}
+
+/// The picture (the PSD at `path` over `rect`) and the button of [`run_place_psd_button`]: their numbers.
+fn place_psd_button(
+    session: &mut Session,
+    menu: MenuId,
+    (path, button): (&str, &disccraft_photo::PsdButton),
+    rect: Rect,
+    fit: CanvasFit,
+) -> Result<(usize, usize), String> {
+    let (frame_w, frame_h) = fit.frame;
+    let asset = match session
+        .project
+        .assets
+        .values()
+        .find(|asset| std::path::Path::new(&asset.path) == std::path::Path::new(path))
+    {
+        Some(asset) => asset.id,
+        None => session
+            .project
+            .add_asset(std::path::Path::new(path))
+            .map_err(|error| error.to_string())?,
+    };
+    let graphic = session
+        .project
+        .add_menu_graphic(
+            menu,
+            MenuGraphic {
+                rect,
+                kind: GraphicKind::Image { asset },
+                opacity: FULL_OPACITY,
+                shadow: None,
+                orientation: Default::default(),
+                hidden: false,
+                locked: false,
+                replacement: false,
+                effects: Default::default(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    // The set's place in the frame.
+    let left = rect
+        .x
+        .saturating_add(fit.x(button.x))
+        .min(frame_w.saturating_sub(1));
+    let top = rect
+        .y
+        .saturating_add(fit.y(button.y))
+        .min(frame_h.saturating_sub(1));
+    let set = Rect {
+        x: left,
+        y: top,
+        w: fit.x(button.width).max(1).min(frame_w.saturating_sub(left)),
+        h: fit.y(button.height).max(1).min(frame_h.saturating_sub(top)),
+    };
+    let index = session
+        .project
+        .add_button(menu, String::new(), Some(set), Link::NotSet)
+        .map_err(|error| error.to_string())?;
+    // Its own highlight layers, at their own size only.
+    let subpicture = button
+        .subpicture
+        .as_ref()
+        .filter(|_| fit.fits)
+        .and_then(|sub| {
+            let (width, height) = (
+                u16::try_from(sub.width).ok()?,
+                u16::try_from(sub.height).ok()?,
+            );
+            let mut made = disccraft_project::Subpicture::from_values(width, height, &sub.values)?;
+            made.color_layers = sub.layers.each_ref().map(|layer| {
+                layer
+                    .as_deref()
+                    .and_then(|rgba| disccraft_project::ColorLayer::from_rgba(width, height, rgba))
+            });
+            Some(made)
+        });
+    let thumbnail = button.thumbnail.and_then(|[tx, ty, tw, th]| {
+        let area = Rect {
+            x: rect.x.saturating_add(fit.x(tx)),
+            y: rect.y.saturating_add(fit.y(ty)),
+            w: fit.x(tw).max(1),
+            h: fit.y(th).max(1),
+        };
+        disccraft_project::ThumbnailArea::within(set, area)
+    });
+    if let Some(made) = session
+        .project
+        .menu_mut(menu)
+        .and_then(|found| found.buttons.get_mut(index))
+    {
+        made.name.clone_from(&button.name);
+        made.kind = match button.kind {
+            disccraft_photo::PsdButtonKind::Normal => disccraft_project::ButtonKind::Normal,
+            disccraft_photo::PsdButtonKind::Chapter => disccraft_project::ButtonKind::Chapter,
+            disccraft_photo::PsdButtonKind::Next => disccraft_project::ButtonKind::Next,
+            disccraft_photo::PsdButtonKind::Previous => disccraft_project::ButtonKind::Previous,
+        };
+        // The highlight is the set's own layers (or the button's frame), not a text's.
+        made.text_subpicture = false;
+        made.subpicture = subpicture;
+        made.thumbnail = thumbnail;
+    }
+    Ok((graphic, index))
 }
 
 /// Encore's Library layer set or replacement layer placed in a menu (M6.331): its graphics on top of the menu's
@@ -575,6 +779,138 @@ mod tests {
     use disccraft_project::{GraphicKind, ShapeKind};
     use serde_json::{Value, json};
     use std::error::Error;
+
+    /// M6.405 (Encore's Library ▸ Place of a button, docs/encore-behavior.md 9.18): a button PSD goes in as its
+    /// picture with a button over its set: the set's place, its `(=1)` layer the subpicture, its name; centred, or
+    /// with its corner where asked; a PSD larger than the frame is stretched into it and leaves the highlight to the
+    /// button's frame.
+    #[test]
+    fn a_library_button_psd_is_placed_with_its_highlight() -> Result<(), Box<dyn Error>> {
+        use disccraft_photo::PsdLayer;
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-place-button-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        // A 400x120 button: art at (20, 20, 360, 80), a highlight line under it.
+        let write = |path: &std::path::Path, (w, h): (u32, u32)| -> Result<(), Box<dyn Error>> {
+            let fill = |x0: u32, y0: u32, x1: u32, y1: u32| {
+                let mut rgba = vec![0u8; (w * h * 4) as usize];
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let i = ((y * w + x) * 4) as usize;
+                        if let Some(pixel) = rgba.get_mut(i..i + 4) {
+                            pixel.copy_from_slice(&[200, 80, 120, 255]);
+                        }
+                    }
+                }
+                rgba
+            };
+            disccraft_photo::write_layered_psd(
+                path,
+                w,
+                h,
+                &[PsdLayer::Group {
+                    name: "(+) Btn".to_owned(),
+                    id: None,
+                    children: vec![
+                        PsdLayer::Raster {
+                            name: "art".to_owned(),
+                            rgba: fill(20, 20, 380, 100),
+                            visible: true,
+                        },
+                        PsdLayer::Raster {
+                            name: "(=1) hl".to_owned(),
+                            rgba: fill(20, 94, 380, 100),
+                            visible: false,
+                        },
+                    ],
+                }],
+            )?;
+            Ok(())
+        };
+        let small = dir.join("button.psd");
+        write(&small, (400, 120))?;
+        let mut session = Session::new();
+        let menu = session.project.add_menu(None)?;
+        let placed = session.execute(
+            "menu.placePsdButton",
+            &json!({ "menu": menu.0, "path": small.to_string_lossy() }),
+        )?;
+        let found = session.project.menu(menu).ok_or("menu")?.clone();
+        let graphic = found.graphics.last().ok_or("graphic")?;
+        // Centred in the 720x480 frame.
+        assert_eq!(
+            (
+                graphic.rect.x,
+                graphic.rect.y,
+                graphic.rect.w,
+                graphic.rect.h
+            ),
+            (160, 180, 400, 120)
+        );
+        let index = placed
+            .get("button")
+            .and_then(Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())
+            .ok_or("button")?;
+        let button = found.buttons.get(index).ok_or("button")?;
+        assert_eq!(
+            (button.rect.x, button.rect.y, button.rect.w, button.rect.h),
+            (180, 200, 360, 80)
+        );
+        assert_eq!(button.name, "Btn");
+        assert!(!button.text_subpicture);
+        let sub = button.subpicture.as_ref().ok_or("subpicture")?;
+        assert_eq!((sub.width, sub.height), (360, 80));
+
+        // With its corner where asked.
+        let placed = session.execute(
+            "menu.placePsdButton",
+            &json!({ "menu": menu.0, "path": small.to_string_lossy(), "x": 10, "y": 20 }),
+        )?;
+        let index = placed
+            .get("button")
+            .and_then(Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())
+            .ok_or("button")?;
+        let button = session
+            .project
+            .menu(menu)
+            .and_then(|menu| menu.buttons.get(index))
+            .ok_or("button")?;
+        assert_eq!((button.rect.x, button.rect.y), (30, 40));
+
+        // Larger than the frame: stretched into it, no subpicture of its own.
+        let large = dir.join("large.psd");
+        write(&large, (1440, 960))?;
+        let placed = session.execute(
+            "menu.placePsdButton",
+            &json!({ "menu": menu.0, "path": large.to_string_lossy() }),
+        )?;
+        let index = placed
+            .get("button")
+            .and_then(Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())
+            .ok_or("button")?;
+        let found = session.project.menu(menu).ok_or("menu")?;
+        let graphic = found.graphics.last().ok_or("graphic")?;
+        assert_eq!(
+            (
+                graphic.rect.x,
+                graphic.rect.y,
+                graphic.rect.w,
+                graphic.rect.h
+            ),
+            (0, 0, 720, 480)
+        );
+        let button = found.buttons.get(index).ok_or("button")?;
+        assert_eq!(
+            (button.rect.x, button.rect.y, button.rect.w, button.rect.h),
+            (10, 10, 180, 40)
+        );
+        assert!(button.subpicture.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
 
     /// M6.331: a Library layer set is placed in one step, its layers on top in their order, moved with their
     /// corner where asked and kept inside the frame; a replacement layer stays one; a bad one places nothing.

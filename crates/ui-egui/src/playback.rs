@@ -194,6 +194,10 @@ impl DiscCraftApp {
                 )
             })
             .unwrap_or_default();
+        // The track's sound stream of its file (M6.418).
+        let stream = heard_track
+            .as_ref()
+            .map_or(0, |track| track.stream as usize);
         let track = heard_track.map(|track| track.asset);
         let Some(path) = self
             .session
@@ -231,6 +235,7 @@ impl DiscCraftApp {
         };
         let player_audio = match (&device, audio_path) {
             (Some(device), Some(audio)) => Some(PlayerAudio {
+                stream,
                 parts,
                 path: audio,
                 rate: device.rate(),

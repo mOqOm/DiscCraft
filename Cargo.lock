@@ -2793,6 +2793,10 @@ name = "disccraft-ddp"
 version = "0.1.0"
 
 [[package]]
+name = "disccraft-dv"
+version = "0.1.0"
+
+[[package]]
 name = "disccraft-dvd"
 version = "0.1.0"
 dependencies = [
@@ -2919,6 +2923,7 @@ version = "0.1.0"
 dependencies = [
  "disccraft-transcode",
  "windows",
+ "windows-core",
 ]
 
 [[package]]
@@ -2959,6 +2964,7 @@ dependencies = [
  "craft-audio 0.1.0 (git+https://github.com/storytold/craft-libs?rev=c42c34bfa127b095fb0a8d5ccaba0c168c254062)",
  "craft-media",
  "craft-video",
+ "disccraft-dv",
  "disccraft-m2tsmux",
  "disccraft-motion",
  "disccraft-mpeg2venc",
@@ -2966,6 +2972,7 @@ dependencies = [
  "disccraft-psmux",
  "disccraft-sound",
  "filmcraft-codecs 0.20.1 (git+https://github.com/storytold/filmcraft?rev=a378140d8e665674fd0a037784ed5112cc9fe98d)",
+ "filmcraft-color 0.20.1 (git+https://github.com/storytold/filmcraft?rev=a378140d8e665674fd0a037784ed5112cc9fe98d)",
  "filmcraft-frame 0.20.1 (git+https://github.com/storytold/filmcraft?rev=a378140d8e665674fd0a037784ed5112cc9fe98d)",
  "filmcraft-media 0.20.1 (git+https://github.com/storytold/filmcraft?rev=a378140d8e665674fd0a037784ed5112cc9fe98d)",
  "filmcraft-time 0.20.1 (git+https://github.com/storytold/filmcraft?rev=a378140d8e665674fd0a037784ed5112cc9fe98d)",
@@ -2986,6 +2993,7 @@ dependencies = [
  "disccraft-build",
  "disccraft-engine",
  "disccraft-menu",
+ "disccraft-photo",
  "disccraft-platform",
  "disccraft-project",
  "disccraft-vm",

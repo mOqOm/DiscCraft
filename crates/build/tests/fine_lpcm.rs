@@ -57,6 +57,7 @@ fn a_96_khz_24_bit_wav_is_lpcm_on_a_dvd() {
     project.timeline_mut(t).unwrap().audio.push(AudioTrack {
         more: Vec::new(),
         asset: a,
+        stream: 0,
         language: String::new(),
         start: 0,
         trim_start: 0,

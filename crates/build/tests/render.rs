@@ -69,6 +69,7 @@ fn rendered_menus_and_slideshows_are_taken_by_the_build() {
     project.menu_mut(menu).unwrap().background = MenuBackground::Video {
         asset: v,
         seconds: 2,
+        layers: None,
     };
     let show = project.add_slideshow(Some("Slides".to_string())).unwrap();
     project
@@ -210,6 +211,7 @@ fn an_hd_blu_ray_motion_menu_is_rendered_before_the_build() {
     project.menu_mut(menu).unwrap().background = MenuBackground::Video {
         asset: v,
         seconds: 1,
+        layers: None,
     };
     project.settings.first_play = Link::Menu {
         id: menu,

@@ -240,14 +240,34 @@ impl DiscCraftApp {
         }
     }
 
-    /// The PSD a menu already follows (its background, after an earlier edit), to open as it is.
+    /// The PSD a menu already follows (its background, after an earlier edit), to open as it is: when nothing was
+    /// added to it since. A menu of pages (M6.401) needs every page on a page of the PSD and no button text (its
+    /// texts stay in DiscCraft).
     fn menu_psd(&self, menu: &Menu) -> Option<PathBuf> {
-        let MenuBackground::Image { asset } = &menu.background else {
-            return None;
+        let project = &self.session.project;
+        // The PSD, also under a motion video (M6.402).
+        let asset = project
+            .menu(project.menu_root(menu.id))?
+            .background
+            .document()?;
+        let path = PathBuf::from(&project.assets.get(&asset)?.path);
+        let pages: Vec<&Menu> = project
+            .menu_pages(menu.id)
+            .into_iter()
+            .filter_map(|id| project.menu(id))
+            .collect();
+        let no_labels = pages
+            .iter()
+            .all(|page| page.buttons.iter().all(|button| button.label.is_empty()));
+        let plain = if pages.len() > 1 {
+            no_labels
+                && pages.iter().all(|page| {
+                    page.psd_page
+                        .is_some_and(|number| number != disccraft_project::NO_PSD_PAGE)
+                })
+        } else {
+            no_labels && menu.texts.is_empty()
         };
-        let path = PathBuf::from(&self.session.project.assets.get(asset)?.path);
-        let plain =
-            menu.texts.is_empty() && menu.buttons.iter().all(|button| button.label.is_empty());
         (is_psd_path(&path) && plain && path.is_file()).then_some(path)
     }
 
@@ -264,7 +284,7 @@ impl DiscCraftApp {
 
     /// The folder for the files made for other apps: `<project>.menus` next to the project (a temporary folder
     /// before the project is saved).
-    fn craft_folder(&self) -> Result<PathBuf, String> {
+    pub(crate) fn craft_folder(&self) -> Result<PathBuf, String> {
         let folder = match self.session.path.as_deref() {
             Some(project) => {
                 let stem = project
@@ -293,8 +313,12 @@ impl DiscCraftApp {
 
     /// Writes the menu as a layered PSD at `path` (a motion menu over its video's first frame).
     pub(crate) fn export_menu_psd_to(&mut self, menu: &Menu, path: &Path) -> Result<(), String> {
+        let wide = crate::menu_editor::menu_aspect(
+            menu,
+            disccraft_project::frame_size(&self.session.project.settings),
+        ) > 1.5;
         let picture = match &menu.background {
-            MenuBackground::Video { asset, .. } => self.first_video_frame_pub(*asset),
+            MenuBackground::Video { asset, .. } => self.first_video_frame_pub(*asset, wide),
             _ => None,
         };
         disccraft_menu::export_menu_psd(
@@ -370,7 +394,8 @@ impl DiscCraftApp {
         if let Some(asset) = asset {
             let _ = self.thumbnails.remove(&asset.0);
             let _ = self.last_frames.remove(&asset.0);
-            let _ = self.first_frames.remove(&asset.0);
+            let _ = self.first_frames.remove(&(asset.0, false));
+            let _ = self.first_frames.remove(&(asset.0, true));
             let _ = self.durations.remove(&asset.0);
         }
     }

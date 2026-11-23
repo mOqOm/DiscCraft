@@ -387,6 +387,12 @@ impl DiscCraftApp {
     }
 
     pub(crate) fn default_build_path(&self) -> PathBuf {
+        self.default_build_path_for(self.build_output)
+    }
+
+    /// Where a build of `output` goes when Location is empty: beside the saved project (else in the home folder),
+    /// named after it.
+    pub(crate) fn default_build_path_for(&self, output: OutputKind) -> PathBuf {
         let saved = self.session.path.as_deref();
         let stem = saved
             .and_then(Path::file_stem)
@@ -409,7 +415,7 @@ impl DiscCraftApp {
             disccraft_project::DiscKind::Dvd => "DVD",
             disccraft_project::DiscKind::BluRay => "BD",
         };
-        match self.build_output {
+        match output {
             OutputKind::Folder => folder.join(format!("{stem}_{kind}")),
             OutputKind::Iso => folder.join(format!("{stem}.iso")),
             OutputKind::Ddp => folder.join(format!("{stem}_DDP")),
@@ -429,6 +435,15 @@ impl DiscCraftApp {
 
     /// The status bar while a build runs: the step, how far and how long so far.
     pub(crate) fn build_status_text(&self) -> Option<String> {
+        if let Some((what, fraction, seconds)) = self.writing_step() {
+            return Some(tlf!(
+                "{step} {percent}% ({time})",
+                step = what,
+                // `as` saturates; the fraction is within 0..=1.
+                percent = (fraction * 100.0).round() as u32,
+                time = elapsed_text(seconds)
+            ));
+        }
         if !self.build_job.is_running() {
             return None;
         }
@@ -500,20 +515,34 @@ impl DiscCraftApp {
     }
 
     pub(crate) fn start_build(&mut self) {
-        // An empty Location builds next to the project (Encore always has a location; a build never silently
-        // does nothing).
-        if self.build_path.trim().is_empty() {
-            self.build_path = self.default_build_path().to_string_lossy().into_owned();
-        }
-        let path = self.build_path.trim().to_owned();
-        let Some(target) = build_target(
-            self.build_output,
-            Path::new(&path),
-            &self.session.project.settings.name,
-        ) else {
-            // Encore: an image needs a file to write, not a folder.
-            self.status = tl!("The destination path is not valid.").to_string();
-            return;
+        // A disc (M9.35): the image is built beside the project, then written to the disc in the recorder.
+        let target = if self.disc.chosen {
+            if self.disc.recorder.is_none() {
+                self.status = tl!("No recorder").to_owned();
+                return;
+            }
+            self.build_output = OutputKind::Iso;
+            let image = self.disc_image_path();
+            self.disc.image = Some(image.clone());
+            self.disc.building = true;
+            image
+        } else {
+            // An empty Location builds next to the project (Encore always has a location; a build never silently
+            // does nothing).
+            if self.build_path.trim().is_empty() {
+                self.build_path = self.default_build_path().to_string_lossy().into_owned();
+            }
+            let path = self.build_path.trim().to_owned();
+            let Some(target) = build_target(
+                self.build_output,
+                Path::new(&path),
+                &self.session.project.settings.name,
+            ) else {
+                // Encore: an image needs a file to write, not a folder.
+                self.status = tl!("The destination path is not valid.").to_string();
+                return;
+            };
+            target
         };
         // Encore saves the project when a build starts.
         if self.session.path.is_some() && self.session.dirty {

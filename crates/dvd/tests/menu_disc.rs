@@ -253,6 +253,7 @@ fn build_project(video: &Path, audio: &Path) -> Result<Project, Box<dyn Error>> 
     tl.audio.push(AudioTrack {
         more: Vec::new(),
         asset: a,
+        stream: 0,
         language: "ja".to_string(),
         start: 0,
         trim_start: 0,

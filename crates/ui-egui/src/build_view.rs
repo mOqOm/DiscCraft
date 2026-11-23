@@ -26,6 +26,11 @@ pub(crate) fn output_label(kind: DiscKind, output: OutputKind) -> String {
     }
 }
 
+/// The Output list's disc, e.g. "Blu-ray Disc" (M9.35, Encore's first output).
+pub(crate) fn disc_label(kind: DiscKind) -> String {
+    tlf!("{kind} Disc", kind = kind_label(kind))
+}
+
 /// Region checkbox label.
 pub(crate) fn region_label(region: u8) -> &'static str {
     match region {
@@ -171,7 +176,8 @@ impl DiscCraftApp {
     /// Draws the format and output row with the Build button at the right (Encore's layout). In a narrow panel the
     /// Build button gets a row of its own above them, so it is never cut off.
     fn build_top_row(&mut self, ui: &mut Ui) {
-        let narrow = ui.available_width() < 420.0;
+        // M9.37: the format and output lists with their labels take about 400 points, the Build button 120 more.
+        let narrow = ui.available_width() < 540.0;
         if narrow {
             self.build_button(ui);
         }
@@ -192,9 +198,11 @@ impl DiscCraftApp {
 
     /// The Build button: usable whenever no build runs (an empty Location builds next to the project).
     fn build_button(&mut self, ui: &mut Ui) {
+        // A disc needs a recorder (Encore's Build is unavailable with "Not found").
+        let ready = !self.disc.chosen || self.disc.recorder.is_some();
         if ui
             .add_enabled(
-                !self.build_job.is_running(),
+                !self.build_job.is_running() && !self.disc.is_busy() && ready,
                 egui::Button::new(tl!("Build")).min_size(BUTTON_SIZE),
             )
             .clicked()
@@ -205,6 +213,7 @@ impl DiscCraftApp {
 
     /// While a build runs: what it is doing, a progress bar and the time so far (Encore's build progress).
     fn build_progress_section(&mut self, ui: &mut Ui) {
+        self.writing_progress_section(ui);
         if !self.build_job.is_running() {
             return;
         }
@@ -223,19 +232,51 @@ impl DiscCraftApp {
 
     /// Draws the output description with the Check Project button at the right (Encore's layout).
     fn build_description_row(&mut self, ui: &mut Ui) {
-        let description = output_description(self.build_output);
-        ui.horizontal(|ui| {
-            ui.label(description);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add(egui::Button::new(tl!("Check Project")).min_size(BUTTON_SIZE))
-                    .clicked()
-                {
-                    self.check_window.open = true;
-                    self.check_project();
-                }
+        let description = if self.disc.chosen {
+            tlf!(
+                "Creates a disc to play in a {kind} player, a computer or a game console.",
+                kind = kind_label(self.session.project.settings.kind)
+            )
+        } else {
+            output_description(self.build_output).to_owned()
+        };
+        // M9.37: when the description and the button do not fit side by side, the description goes on its own
+        // (wrapped) lines and the button under it, instead of under the button.
+        let text_width = ui
+            .painter()
+            .layout_no_wrap(
+                description.clone(),
+                egui::TextStyle::Body.resolve(ui.style()),
+                egui::Color32::WHITE,
+            )
+            .size()
+            .x;
+        let fits = text_width + BUTTON_SIZE.x + 24.0 <= ui.available_width();
+        let mut check = false;
+        if fits {
+            ui.horizontal(|ui| {
+                ui.label(description);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    check = ui
+                        .add(egui::Button::new(tl!("Check Project")).min_size(BUTTON_SIZE))
+                        .clicked();
+                });
             });
-        });
+        } else {
+            ui.add(egui::Label::new(description).wrap());
+            // A row of its own (a right-to-left layout straight in the panel would take all its height).
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    check = ui
+                        .add(egui::Button::new(tl!("Check Project")).min_size(BUTTON_SIZE))
+                        .clicked();
+                });
+            });
+        }
+        if check {
+            self.check_window.open = true;
+            self.check_project();
+        }
     }
 
     /// Draws the disc format combo.
@@ -269,15 +310,26 @@ impl DiscCraftApp {
     /// Draws the output kind combo.
     fn output_combo(&mut self, ui: &mut Ui) {
         let kind = self.session.project.settings.kind;
+        let disc = self.disc.chosen;
         let current = self.build_output;
         let mut selected = None;
+        let mut disc_chosen = false;
 
         egui::ComboBox::from_id_salt("build_output")
-            .selected_text(output_label(kind, current))
+            .selected_text(if disc {
+                disc_label(kind)
+            } else {
+                output_label(kind, current)
+            })
             .show_ui(ui, |ui| {
+                // Encore's list starts with the disc (M9.35).
+                if ui.selectable_label(disc, disc_label(kind)).clicked() {
+                    disc_chosen = true;
+                }
+                let current = if disc { None } else { Some(current) };
                 if ui
                     .selectable_label(
-                        current == OutputKind::Folder,
+                        current == Some(OutputKind::Folder),
                         output_label(kind, OutputKind::Folder),
                     )
                     .clicked()
@@ -287,7 +339,7 @@ impl DiscCraftApp {
 
                 if ui
                     .selectable_label(
-                        current == OutputKind::Iso,
+                        current == Some(OutputKind::Iso),
                         output_label(kind, OutputKind::Iso),
                     )
                     .clicked()
@@ -298,7 +350,7 @@ impl DiscCraftApp {
                 if kind == DiscKind::Dvd
                     && ui
                         .selectable_label(
-                            current == OutputKind::Ddp,
+                            current == Some(OutputKind::Ddp),
                             output_label(kind, OutputKind::Ddp),
                         )
                         .clicked()
@@ -307,7 +359,11 @@ impl DiscCraftApp {
                 }
             });
 
-        if let Some(output) = selected {
+        if disc_chosen && !self.disc.is_busy() {
+            self.disc.chosen = true;
+            self.build_output = OutputKind::Iso;
+        } else if let Some(output) = selected.filter(|_| !self.disc.is_busy()) {
+            self.disc.chosen = false;
             self.build_output = output;
         }
     }
@@ -344,6 +400,10 @@ impl DiscCraftApp {
 
     /// Draws the destination section.
     fn destination_section(&mut self, ui: &mut Ui) {
+        if self.disc.chosen {
+            self.disc_destination_section(ui);
+            return;
+        }
         crate::theme::group_box(ui, "build_destination", tl!("Destination"), |ui| {
             egui::Grid::new("build_destination_grid")
                 .num_columns(2)

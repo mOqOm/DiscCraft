@@ -1,4 +1,4 @@
-use crate::params::{opt_str, req_link, req_str, req_u64, req_usize, time_param};
+use crate::params::{opt_str, opt_u64, req_link, req_str, req_u64, req_usize, time_param};
 use crate::{CommandResult, CommandSpec, Session};
 use disccraft_project::{
     AssetId, AssetKind, AudioTrack, ClipTrim, DiscKind, Link, SubtitleColor, SubtitleColorSet,
@@ -196,7 +196,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "オーディオトラックを追加",
         menu: &["タイムライン"],
         shortcut: None,
-        params: r#"{"timeline": id, "asset": id, "language"?: string}"#,
+        params: r#"{"timeline": id, "asset": id, "language"?: string, "stream"?: number (the file's sound stream, 0 = its first)}"#,
         enabled: always_enabled,
         run: run_add_audio_track,
         journal: true,
@@ -372,6 +372,16 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "timeline.setAudioStream",
+        label: "オーディオトラックのストリームを設定",
+        menu: &["タイムライン"],
+        shortcut: None,
+        params: r#"{"timeline": id, "track": index, "stream": number (the file's sound stream, 0 = its first)}"#,
+        enabled: always_enabled,
+        run: run_set_audio_stream,
+        journal: true,
+    },
+    CommandSpec {
         id: "timeline.setTrackLanguage",
         label: "トラックの言語を設定",
         menu: &["タイムライン"],
@@ -501,23 +511,35 @@ fn take_source_streams(session: &mut Session, timeline: TimelineId) {
         .timelines
         .get(&timeline)
         .map(|timeline| timeline.video);
-    let probe = video
+    let video_path = video
         .and_then(|video| session.project.assets.get(&video))
         .filter(|asset| asset.kind == AssetKind::Video)
-        .and_then(|asset| disccraft_transcode::probe_video(&asset.media_file()).ok());
+        .map(|asset| asset.media_file().into_owned());
+    let probe = video_path
+        .as_deref()
+        .and_then(|path| disccraft_transcode::probe_video(path).ok());
     if let (Some(probe), Some(video), Some(timeline)) =
         (probe, video, session.project.timelines.get_mut(&timeline))
     {
         timeline.widescreen = Some(probe.wide);
         if probe.has_audio && timeline.audio.is_empty() {
-            timeline.audio.push(disccraft_project::AudioTrack {
-                more: Vec::new(),
-                asset: video,
-                language: String::new(),
-                start: 0,
-                trim_start: 0,
-                trim_end: None,
-            });
+            // Each sound stream of the file a track of its own (M6.418: an MKV's languages, a camcorder's second
+            // stereo pair), as many as a disc takes.
+            let streams = video_path
+                .as_deref()
+                .map_or(1, disccraft_transcode::audio_stream_count)
+                .clamp(1, DVD_MAX_AUDIO_TRACKS);
+            for stream in 0..streams {
+                timeline.audio.push(disccraft_project::AudioTrack {
+                    more: Vec::new(),
+                    asset: video,
+                    stream: u32::try_from(stream).unwrap_or(0),
+                    language: String::new(),
+                    start: 0,
+                    trim_start: 0,
+                    trim_end: None,
+                });
+            }
         }
     }
 }
@@ -572,15 +594,7 @@ fn clip_spans(
             .get(&video)
             .map(|asset| asset.media_file().into_owned())
             .ok_or_else(|| format!("asset {} does not exist", video.0))?;
-        let length = match session.gops.starts(&path) {
-            Some(gops) => gops.pictures,
-            None => {
-                let probe = disccraft_transcode::probe_video(&path)
-                    .map_err(|error| format!("{}: {error}", path.display()))?;
-                // `as` saturates; a clip's length is far inside the range.
-                (probe.seconds * rate.as_f64()).round() as i64
-            }
-        };
+        let length = file_frames(session, video, &path)?;
         // The trimmed part of the clip.
         let end = trim.end.map_or(length, |end| i64::from(end).min(length));
         let length = end.saturating_sub(i64::from(trim.start));
@@ -674,6 +688,7 @@ fn place_own_sound(
         let track = AudioTrack {
             more: clips.get(1..).unwrap_or(&[]).to_vec(),
             asset: first.asset,
+            stream: 0,
             language: String::new(),
             start: first.start,
             trim_start: first.trim_start,
@@ -943,8 +958,8 @@ fn run_move_video(session: &mut Session, params: &Value) -> CommandResult {
 /// stay butted: what follows the trimmed part moves up, the chapters in it go, and the chapter at the clip's head
 /// stays. Video that is used as it is is cut where it can be: an MPEG-2 elementary stream at its GOPs, and
 /// (M10.21) H.264 that goes on an HD Blu-ray as it is with its in point on an IDR picture and its out point on a
-/// key picture. Other video of an HD Blu-ray is encoded clip by clip, so it is trimmed to the frame asked for; on
-/// a DVD (and an SD Blu-ray) video that is transcoded cannot be trimmed.
+/// key picture. Other video of an HD Blu-ray is encoded clip by clip, so it is trimmed to the frame asked for, and so
+/// is video transcoded for a DVD (or an SD Blu-ray, M6.409): its transcode starts a GOP on the trim's frames.
 ///
 /// Encore leaves a gap where a clip's head was and, on a head trim, also shortens the clip's end; neither is
 /// copied (a gap cannot be built, and the end did not ask to move).
@@ -976,15 +991,25 @@ fn run_trim_video(session: &mut Session, params: &Value) -> CommandResult {
     let rate = session.project.settings.frame_rate();
     // Where the clip can be cut, how long its file is, and (H.264) which of the points a clip can start on.
     let mut any_frame = false;
-    let (starts, pictures, h264) = match session.gops.starts(&path) {
+    // Video transcoded for a DVD (or an SD Blu-ray) is cut on any frame too (M6.409): the build starts a GOP there.
+    let transcoded = transcoded_for_sd(session, asset);
+    let gops = if transcoded {
+        None
+    } else {
+        session.gops.starts(&path)
+    };
+    let (starts, pictures, h264) = match gops {
         Some(gops) => (gops.starts.clone(), gops.pictures, None),
+        None if transcoded => {
+            any_frame = true;
+            (Vec::new(), file_frames(session, asset, &path)?, None)
+        }
         None => {
             if disccraft_dvd::BdVideoFormat::of(&session.project).is_none() {
-                return Err(
-                    "only video that needs no transcode can be trimmed on this disc: an MPEG-2 video \
-                     stream"
-                        .to_string(),
-                );
+                return Err(format!(
+                    "{}: the video's GOPs cannot be read, so it cannot be trimmed",
+                    path.display()
+                ));
             }
             let cut = disccraft_dvd::bd_cut_points(&session.project, &path, &cut_index_dir())
                 .map_err(|error| error.to_string())?;
@@ -1110,6 +1135,31 @@ fn run_trim_video(session: &mut Session, params: &Value) -> CommandResult {
 
 /// The most key pictures near an in point that are read to find an IDR picture.
 const MAX_IDR_TRIES: usize = 64;
+
+/// Whether the video of `asset` is transcoded for the project's disc, a DVD or an SD Blu-ray (its MPEG-2 is made by
+/// the build, so it is cut on any frame, and the GOPs of the file say nothing of it).
+fn transcoded_for_sd(session: &Session, asset: AssetId) -> bool {
+    disccraft_dvd::BdVideoFormat::of(&session.project).is_none()
+        && !disccraft_dvd::asset_goes_as_is(&session.project, asset)
+}
+
+/// How many frames the video of `asset` at `path` plays: the pictures of an MPEG-2 stream that goes on the disc as
+/// it is, else its length at the disc's rate.
+fn file_frames(
+    session: &mut Session,
+    asset: AssetId,
+    path: &std::path::Path,
+) -> Result<i64, String> {
+    if !transcoded_for_sd(session, asset)
+        && let Some(gops) = session.gops.starts(path)
+    {
+        return Ok(gops.pictures);
+    }
+    let probe = disccraft_transcode::probe_video(path)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    // `as` saturates; a clip's length is far inside the range.
+    Ok((probe.seconds * session.project.settings.frame_rate().as_f64()).round() as i64)
+}
 
 /// Where the small indexes of files asked for their cut points are kept (a build keeps its own in its cache).
 fn cut_index_dir() -> std::path::PathBuf {
@@ -1887,6 +1937,7 @@ fn run_add_audio_track(session: &mut Session, params: &Value) -> CommandResult {
     let timeline = TimelineId(req_u64(params, "timeline")?);
     let asset = AssetId(req_u64(params, "asset")?);
     let language = opt_str(params, "language")?.unwrap_or_default();
+    let stream = opt_u64(params, "stream")?.unwrap_or(0);
 
     let (asset_id, asset_kind, path) = match session.project.assets.get(&asset) {
         Some(asset) => (asset.id, asset.kind, asset.path.clone()),
@@ -1906,6 +1957,7 @@ fn run_add_audio_track(session: &mut Session, params: &Value) -> CommandResult {
         _ => return Err(format!("asset {} is not an audio asset", asset_id.0)),
     }
 
+    let stream = checked_stream(session, asset_id, stream)?;
     let is_dvd = session.project.settings.kind == DiscKind::Dvd;
     let Some(timeline) = session.project.timeline_mut(timeline) else {
         return Err(format!("timeline {} does not exist", timeline.0));
@@ -1918,6 +1970,7 @@ fn run_add_audio_track(session: &mut Session, params: &Value) -> CommandResult {
     timeline.audio.push(AudioTrack {
         more: Vec::new(),
         asset: asset_id,
+        stream,
         language,
         start: 0,
         trim_start: 0,
@@ -2289,6 +2342,52 @@ fn run_trim_audio(session: &mut Session, params: &Value) -> CommandResult {
     ]))
 }
 
+/// `stream` when asset `asset`'s file has that sound stream (M6.418): 0 always (a file whose streams cannot be
+/// counted, a raw AC-3, plays its one).
+fn checked_stream(session: &Session, asset: AssetId, stream: u64) -> Result<u32, String> {
+    if stream == 0 {
+        return Ok(0);
+    }
+    let path = session
+        .project
+        .assets
+        .get(&asset)
+        .map(|asset| asset.media_file().into_owned())
+        .ok_or_else(|| format!("asset {} does not exist", asset.0))?;
+    let count = disccraft_transcode::audio_stream_count(&path);
+    if usize::try_from(stream).map_or(true, |stream| stream >= count) {
+        return Err(format!(
+            "asset {} has {count} sound stream(s): there is no stream {stream} (0 is the first)",
+            asset.0
+        ));
+    }
+    u32::try_from(stream).map_err(|_| "stream number too large".to_string())
+}
+
+/// Which sound stream of its file an audio track plays (M6.418).
+fn run_set_audio_stream(session: &mut Session, params: &Value) -> CommandResult {
+    let timeline = TimelineId(req_u64(params, "timeline")?);
+    let track = req_usize(params, "track")?;
+    let stream = req_u64(params, "stream")?;
+    let asset = session
+        .project
+        .timeline(timeline)
+        .ok_or_else(|| format!("timeline {} does not exist", timeline.0))?
+        .audio
+        .get(track)
+        .ok_or_else(|| format!("audio track {track} does not exist"))?
+        .asset;
+    let stream = checked_stream(session, asset, stream)?;
+    if let Some(slot) = session
+        .project
+        .timeline_mut(timeline)
+        .and_then(|timeline| timeline.audio.get_mut(track))
+    {
+        slot.stream = stream;
+    }
+    Ok(empty_object())
+}
+
 fn run_set_track_language(session: &mut Session, params: &Value) -> CommandResult {
     let timeline = TimelineId(req_u64(params, "timeline")?);
     let kind = req_str(params, "kind")?;
@@ -2417,8 +2516,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("disccraft-engine-gop-{}", std::process::id()));
         fs::create_dir_all(&dir)?;
         let video = dir.join("clip.m2v");
-        // A sequence header, then ten GOPs of 13 pictures (start codes only).
-        let mut bytes = vec![0_u8, 0, 1, 0xB3, 0x2D, 0x01, 0xE0];
+        // A sequence header (of a stream that goes on an NTSC DVD as it is: 720 x 480, 4:3, 29.97, 8 Mbit/s), then
+        // ten GOPs of 13 pictures (start codes only).
+        let mut bytes = vec![0_u8, 0, 1, 0xB3, 0x2D, 0x01, 0xE0, 0x24, 0x13, 0x88, 0x20];
         for _ in 0..10 {
             bytes.extend_from_slice(&[0, 0, 1, 0xB8, 0, 8]);
             for _ in 0..13 {
@@ -2578,7 +2678,9 @@ mod tests {
             std::env::temp_dir().join(format!("disccraft-engine-trim-{}", std::process::id()));
         fs::create_dir_all(&dir)?;
         let video = dir.join("clip.m2v");
-        let mut bytes = vec![0_u8, 0, 1, 0xB3, 0x2D, 0x01, 0xE0];
+        // The sequence header of a stream that goes on an NTSC DVD as it is (720 x 480, 4:3, 29.97, 8 Mbit/s): its
+        // GOPs are where it is cut (a stream the build transcodes is cut on any frame, M6.409).
+        let mut bytes = vec![0_u8, 0, 1, 0xB3, 0x2D, 0x01, 0xE0, 0x24, 0x13, 0x88, 0x20];
         for _ in 0..10 {
             bytes.extend_from_slice(&[0, 0, 1, 0xB8, 0, 8]);
             for _ in 0..13 {
@@ -2589,6 +2691,7 @@ mod tests {
         let mut session = Session::new();
         let asset = session.project.add_asset(&video)?;
         let timeline = session.project.add_timeline(asset, None)?;
+        assert!(disccraft_dvd::asset_goes_as_is(&session.project, asset));
         session.execute(
             "timeline.appendVideo",
             &serde_json::json!({ "timeline": timeline.0, "asset": asset.0 }),
@@ -2654,7 +2757,7 @@ mod tests {
 
     /// M10.21: H.264 that goes on an HD Blu-ray as it is is trimmed at its key pictures (the fixture, made by the
     /// Blu-ray tests with ffmpeg, has an IDR picture every 30 frames of its 90); on a DVD, where it is
-    /// transcoded, it cannot be trimmed.
+    /// transcoded, on the frame asked for (M6.409: it could not be trimmed).
     #[test]
     fn h264_kept_as_it_is_is_trimmed_at_its_key_pictures() -> Result<(), Box<dyn Error>> {
         let video =
@@ -2672,8 +2775,11 @@ mod tests {
                 &serde_json::json!({ "timeline": timeline.0, "clip": 0, "edge": edge, "time": rate_tick(frame) }),
             )
         };
-        // A DVD project: the file would be transcoded.
-        assert!(trim(&mut session, "in", 40).is_err());
+        // A DVD project: the file is transcoded, and cut on the frame asked for (taken back for the next disc).
+        let trimmed = trim(&mut session, "in", 40)?;
+        assert_eq!(trimmed.get("start").and_then(Value::as_u64), Some(40));
+        let trimmed = trim(&mut session, "in", -40)?;
+        assert_eq!(trimmed.get("start").and_then(Value::as_u64), Some(0));
         // An HD Blu-ray of another format: the clip is encoded for it, and cut on the frame asked for.
         session.project.settings.kind = disccraft_project::DiscKind::BluRay;
         session.project.settings.bd_video = disccraft_project::BdVideo::Hd720p59;
@@ -3009,8 +3115,9 @@ mod tests {
     fn a_clip_moves_and_leaves_a_gap() -> Result<(), Box<dyn Error>> {
         let dir = temp_dir("move-clip")?;
         let video = dir.join("clip.m2v");
-        // A sequence header, then ten GOPs of 13 pictures (start codes only): 130 frames.
-        let mut bytes = vec![0_u8, 0, 1, 0xB3, 0x2D, 0x01, 0xE0];
+        // A sequence header (of a stream that goes on an NTSC DVD as it is: 720 x 480, 4:3, 29.97, 8 Mbit/s), then
+        // ten GOPs of 13 pictures (start codes only): 130 frames.
+        let mut bytes = vec![0_u8, 0, 1, 0xB3, 0x2D, 0x01, 0xE0, 0x24, 0x13, 0x88, 0x20];
         for _ in 0..10 {
             bytes.extend_from_slice(&[0, 0, 1, 0xB8, 0, 8]);
             for _ in 0..13 {
@@ -3216,8 +3323,9 @@ mod tests {
         use filmcraft_project::{MarkerKind, Project, SequenceSettings};
         let dir = temp_dir("filmcraft-markers")?;
         let video = dir.join("clip.m2v");
-        // A sequence header, then ten GOPs of 13 pictures (start codes only): 130 frames.
-        let mut bytes = vec![0_u8, 0, 1, 0xB3, 0x2D, 0x01, 0xE0];
+        // A sequence header (of a stream that goes on an NTSC DVD as it is: 720 x 480, 4:3, 29.97, 8 Mbit/s), then
+        // ten GOPs of 13 pictures (start codes only): 130 frames.
+        let mut bytes = vec![0_u8, 0, 1, 0xB3, 0x2D, 0x01, 0xE0, 0x24, 0x13, 0x88, 0x20];
         for _ in 0..10 {
             bytes.extend_from_slice(&[0, 0, 1, 0xB8, 0, 8]);
             for _ in 0..13 {

@@ -153,6 +153,18 @@ pub(crate) fn to_frame_point(
     (round_clamped(raw_x), round_clamped(raw_y))
 }
 
+/// 透明を表す市松模様のますの大きさ（ピクセル。Encore のメニュービューアーと同じ）。
+pub(crate) const CHECK_CELL: usize = 16;
+
+/// 透明を表す市松模様（白と薄い灰色の `cell` ピクセルのます）の RGB。
+fn transparency_checks(width: usize, height: usize, cell: usize) -> Vec<u8> {
+    let cell = cell.max(1);
+    (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x / cell + y / cell) % 2))
+        .flat_map(|odd| [if odd == 1 { 204 } else { 255 }; 3])
+        .collect()
+}
+
 /// ディスク座標は u16 なので、0 から 65535 の間に収める。
 fn round_clamped(value: f32) -> i32 {
     if !value.is_finite() {
@@ -250,15 +262,12 @@ impl DiscCraftApp {
     }
 
     fn menu_preview(&mut self, ui: &mut Ui, menu: &Menu) {
-        // Encore のメニュービューアと同じく、操作は下の 1 段のツールバー。
+        // Encore のメニュービューアと同じく、操作は下のツールバー。狭いビューアでは 2 段以上に折り返す（右の
+        // ページの矢印や「ボタンを追加」が隠れない。M9.37）。
         let _ = egui::Panel::bottom("menu_viewer_bar")
             .resizable(false)
             .show(ui, |ui| {
-                egui::ScrollArea::horizontal()
-                    .id_salt("menu_viewer_bar_scroll")
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| self.canvas_controls(ui, menu.id))
-                    });
+                ui.horizontal_wrapped(|ui| self.canvas_controls(ui, menu.id));
             });
         let _ = egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::both()
@@ -1174,11 +1183,21 @@ impl DiscCraftApp {
     }
 
     /// メニューの絵。背景がビデオなら、Encore と同じくビデオの最初のフレームの上に描く（取り出せなければ黒）。
-    /// Blu-ray のポップアップで背景タイムラインがあれば、そのタイムラインの背景フレームの上に描く。
+    /// Blu-ray のポップアップは、背景タイムラインがあればそのタイムラインの背景フレームの上に、なければ透明（市松）の上に描く。
     /// ビデオサムネールのボタンには、リンク先のチャプターのポスターフレームを入れる。
     pub(crate) fn render_menu_picture(
         &mut self,
         menu: &Menu,
+    ) -> Result<disccraft_menu::RenderedMenu, disccraft_menu::MenuError> {
+        self.render_menu_picture_checked(menu, CHECK_CELL)
+    }
+
+    /// [`Self::render_menu_picture`] with the checkerboard's cells `cell` pixels wide (a thumbnail's larger, so they
+    /// are still seen once it is made small, as in Encore's flowchart).
+    pub(crate) fn render_menu_picture_checked(
+        &mut self,
+        menu: &Menu,
+        cell: usize,
     ) -> Result<disccraft_menu::RenderedMenu, disccraft_menu::MenuError> {
         let frames: Vec<(usize, std::sync::Arc<Vec<u8>>, usize, usize)> = self
             .session
@@ -1226,8 +1245,28 @@ impl DiscCraftApp {
         } else {
             None
         };
+        // Blu-ray のポップアップの背景はディスクに出ない（下にタイトルが流れる）。背景タイムラインがなければ、Encore と
+        // 同じく透明（市松）の上に描く（M6.407）。
+        let popup_picture = popup_picture.or_else(|| {
+            (menu.popup
+                && self.session.project.settings.kind == disccraft_project::DiscKind::BluRay)
+                .then(|| {
+                    let (width, height) =
+                        disccraft_project::frame_size(&self.session.project.settings);
+                    let (width, height) = (usize::from(width), usize::from(height));
+                    (
+                        std::sync::Arc::new(transparency_checks(width, height, cell)),
+                        width,
+                        height,
+                    )
+                })
+        });
+        let wide = menu_aspect(
+            menu,
+            disccraft_project::frame_size(&self.session.project.settings),
+        ) > 1.5;
         let video_picture = match &menu.background {
-            MenuBackground::Video { asset, .. } => self.first_video_frame(*asset),
+            MenuBackground::Video { asset, .. } => self.first_video_frame(*asset, wide),
             _ => None,
         };
         for (rgb, width, height) in popup_picture.iter().chain(video_picture.iter()) {
@@ -1273,8 +1312,9 @@ impl DiscCraftApp {
     pub(crate) fn first_video_frame_pub(
         &mut self,
         asset: disccraft_project::AssetId,
+        wide: bool,
     ) -> Option<(std::sync::Arc<Vec<u8>>, usize, usize)> {
-        self.first_video_frame(asset)
+        self.first_video_frame(asset, wide)
     }
 
     /// ビデオのアセットの `time` のフレーム（`asset.frame`。アセットと時刻ごとに 1 回だけ取り出して覚える）。
@@ -1329,18 +1369,22 @@ impl DiscCraftApp {
         frame
     }
 
-    /// ビデオのアセットの最初のフレーム（`asset.frame`。アセットごとに 1 回だけ取り出して覚える）。
+    /// ビデオのアセットの最初のフレーム（`asset.frame`。アセットごとに 1 回だけ取り出して覚える）。`wide`: 16:9 のメニューの
+    /// 背景として、16:9 の画面に合わせて帯を付ける（M6.406: いつも 4:3 の画面の帯だった）。
     fn first_video_frame(
         &mut self,
         asset: disccraft_project::AssetId,
+        wide: bool,
     ) -> Option<(std::sync::Arc<Vec<u8>>, usize, usize)> {
-        if let Some(cached) = self.first_frames.get(&asset.0) {
+        if let Some(cached) = self.first_frames.get(&(asset.0, wide)) {
             return cached.clone();
         }
-        let value = self.run_query_quiet(
-            "asset.frame",
-            serde_json::json!({ "asset": asset.0, "seconds": 0.0, "wait": false }),
-        );
+        let params = if wide {
+            serde_json::json!({ "asset": asset.0, "seconds": 0.0, "width": 960, "height": 540, "wait": false })
+        } else {
+            serde_json::json!({ "asset": asset.0, "seconds": 0.0, "wait": false })
+        };
+        let value = self.run_query_quiet("asset.frame", params);
         if crate::project_panel::is_pending(value.as_ref()) {
             self.media_pending = true;
             return None;
@@ -1356,7 +1400,7 @@ impl DiscCraftApp {
                 .collect::<Option<Vec<u8>>>()?;
             Some((std::sync::Arc::new(rgb), width, height))
         });
-        let _ = self.first_frames.insert(asset.0, frame.clone());
+        let _ = self.first_frames.insert((asset.0, wide), frame.clone());
         frame
     }
 

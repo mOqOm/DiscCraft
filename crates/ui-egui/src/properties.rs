@@ -1116,11 +1116,17 @@ impl DiscCraftApp {
                 };
                 self.set_background_video(menu.id, asset, seconds);
             }
-            // なし: 動かない背景（色）に戻す。
-            Some(None) => self.set_background_color(menu.id),
+            // なし: 動かない背景に戻す。PSD から作ったメニューは PSD に（M6.402）、ほかは色に。
+            Some(None) => match menu.background {
+                MenuBackground::Video {
+                    layers: Some(document),
+                    ..
+                } => self.set_background_image(menu.id, document),
+                _ => self.set_background_color(menu.id),
+            },
             _ => {}
         }
-        if let MenuBackground::Video { asset, seconds } = menu.background {
+        if let MenuBackground::Video { asset, seconds, .. } = menu.background {
             self.loop_row(ui, menu.id, asset, seconds);
         }
         self.menu_audio_row(ui, menu);

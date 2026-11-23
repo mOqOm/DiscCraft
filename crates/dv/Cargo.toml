@@ -1,0 +1,13 @@
+[package]
+name = "disccraft-dv"
+description = "DV（IEC 61834 / SMPTE 314M、25 Mb/s）のデコーダー"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -2,7 +2,7 @@
 
 English | [日本語](open-issues.ja.md)
 
-What DiscCraft does not do yet, what is planned, and where help with testing is wanted. As of 2026-11-22 (0.1.0
+What DiscCraft does not do yet, what is planned, and where help with testing is wanted. As of 2026-11-23 (0.1.0
 alpha). Reports of what works and what does not are welcome.
 
 What the status words mean:
@@ -20,15 +20,14 @@ What the status words mean:
 
 ## 1. Writing to disc
 
-DiscCraft writes VIDEO_TS / BDMV folders and ISO images. Burning them to a disc is left to other software for now.
+DiscCraft writes VIDEO_TS / BDMV folders and ISO images, and on Windows also writes them to a disc through the Build panel's "Disc" output (M9.35).
 
 | Status | Item |
 |---|---|
-| Large | Burn a build to a DVD or Blu-ray on Windows (the operating system's disc writing service): choice of drive, speed and number of copies, as the Build panel's "Disc" output |
 | Large | Dual-layer discs (DVD-9, BD-50): check that the layer change falls where the image marks it |
 | Large | Burning on macOS and Linux |
 | Out of scope | Double-sided discs (the Side setting of Encore's Build panel) |
-| Needs hardware | All of the above needs testing with a writer drive and blank discs |
+| Needs hardware | Test the Windows writing (M9.35) on the other kinds of blank disc (DVD+R, DVD-RW, DVD+RW, BD-R, BD-RE). A DVD-R was written, read back the same as its image, and played in PowerDVD from the drive (M9.38, 2026-11-23) |
 
 ## 2. Blu-ray and HD
 
@@ -57,6 +56,10 @@ DiscCraft writes VIDEO_TS / BDMV folders and ISO images. Burning them to a disc 
 
 | Status | Item |
 |---|---|
+| Planned | DV (read since M6.410; the sound in the frames, 12-bit 32 kHz included, since M6.411; DVCPRO50 since M6.415; a camcorder's sound 2 and DVCPRO50's CH3 / CH4 as a second sound stream since M6.418): DVCPRO HD is not read |
+| Dependency | DV in an MXF file (a P2 card's) shows no picture: FilmCraft's MXF reader turns DV down before it asks for a decoder, so the DV decoder DiscCraft gives it (used for DV in a `.mov` since M6.413) is not reached. DV in an AVI, a `.mov`, a `.mkv` (M6.416) or a raw `.dv` file is read |
+| Dependency | MPEG-4 Part 2 (DivX / Xvid) video is imported but shows no picture. DiscCraft cannot write a decoder of its own for it as it did for DV (M6.410): its specification (ISO/IEC 14496-2) is not published free of charge (it is not on ISO's list of freely available standards; checked on 2026-11-23), and DiscCraft is written from public specifications only, without reading other implementations' source. It will be read when the media reader (craft-libs) gets a decoder |
+| Dependency | Other older video codecs: an AVI / MOV / MKV of WMV, H.263, HuffYUV, UT Video, FFV1, QuickTime Animation or PNG frames is imported but shows no picture (the media reader has no decoder for it). HEVC (10-bit too), ProRes, DNxHD, VP9, AV1 and Motion JPEG are read |
 | Out of scope | Decoding a source in parts side by side: measured, splitting the work into more threads made the conversion slower (the encoder already uses several cores) |
 | Large | The rest of conversion on the GPU: on Windows, HD H.264 (1080p / 720p in one pass) and HEVC (in a build with the `hevc` feature) can be encoded on the hardware encoder (Preferences; off by default; 1080p H.264 at 245 frames a second on NVIDIA, at a quality as good as the processor's or better, with the BT.709 colour description written). The colour conversion runs on every core, which made a build on the hardware about twice as fast. Left: faster decoding and scaling so the hardware's speed shows, interlaced formats (1080i, SD), two passes, macOS and Linux (VideoToolbox / VA-API), and trying the discs on hardware players |
 | Awaiting merge | A large MKV's frame index is kept in the media cache, so it is read through once only (before, 15 to 25 seconds for 18 GB at every start). It works through the fork; sent to craft-libs as [issue #2534](https://github.com/storytold/craft-libs/issues/2534) and [pull request #2536](https://github.com/storytold/craft-libs/pull/2536). MP4 files open quickly anyway |
@@ -67,7 +70,7 @@ DiscCraft writes VIDEO_TS / BDMV folders and ISO images. Burning them to a disc 
 | Status | Item |
 |---|---|
 | Needs a decision | Threading text from a frame's overset "+" into another frame. Encore's documentation only has the text reflow inside its box when the box is made bigger with a text tool; no threading into another frame was found. Whether to add what Encore does not have |
-| Planned | The rest of the automatic routing differences. Routing follows the rules measured in Encore CS6 (since M10.51 also where routes go between a full-width bar and the tiles above it), and of the 696 arrow-key links of the menu of [#13](https://github.com/mOqOm/DiscCraft/issues/13) and the test layouts, 680 match Encore. The rest: which tile Down from a full-width bar looks round to (no rule found yet that fits every measured layout), and some pages of the #13 menu (Encore's two builds of it disagree) |
+| Planned | The rest of the automatic routing differences. Routing follows the rules measured in Encore CS6 (since M10.51 also where routes go between a full-width bar and the tiles above it), and of the 696 arrow-key links of the menu of [#13](https://github.com/mOqOm/DiscCraft/issues/13) and the test layouts, all 696 match Encore (M10.60) (counted again with the two pages of the same rectangles paired right; the leftmost button of a page without a previous button, and a button hidden behind the one straight ahead, fixed). Since M10.53 Down from a full-width bar also looks round to the tiles above it as Encore does (1426 of the 1428 links of that measurement match). Since M10.57 a row of tiles above a bar is told as Encore does too, and since M10.58 Down and Right from a bar look round to the same tile as in Encore (all 248 links of the latest measurement, with bars of other sizes, match). Since M10.59 rows and columns also depend on the buttons' order as in Encore (the same layout routes differently), and looking round picks the button beside, ahead or behind as Encore does (219 of the 220 links of the latest measurement match). The rest: a layout where up from a thin strip takes the farther, clockwise button; the column beside a row kept by the buttons' order; and one far layout of the measurement (all of them test layouts) |
 
 ## 6. Releases and packages
 

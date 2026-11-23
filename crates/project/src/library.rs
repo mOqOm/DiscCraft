@@ -38,12 +38,17 @@ fn is_normal(kind: &crate::menu::ButtonKind) -> bool {
 }
 
 /// The kind of a preset button, by its label: "Chapter" and "Chapter N" are chapter buttons and "Main Menu" goes back
-/// to the main menu, so the chapter presets work as chapter index templates (Encore's チャプターインデックスを作成).
+/// to the main menu, so the chapter presets work as chapter index templates (Encore's チャプターインデックスを作成);
+/// "Previous" and "Next" go to the page before and after (M6.404, 複数ページのチャプターインデックスを作成).
 fn preset_kind(label: &str) -> crate::menu::ButtonKind {
     if label == "Chapter" || label.starts_with("Chapter ") {
         crate::menu::ButtonKind::Chapter
     } else if label == "Main Menu" {
         crate::menu::ButtonKind::Main
+    } else if label == "Previous" {
+        crate::menu::ButtonKind::Previous
+    } else if label == "Next" {
+        crate::menu::ButtonKind::Next
     } else {
         crate::menu::ButtonKind::Normal
     }
@@ -372,6 +377,173 @@ pub const LIBRARY: &[LibraryItem] = &[
                 w: 240,
                 h: 160,
                 thumbnail: UPPER_THUMBNAIL,
+            },
+        ],
+    },
+    // M6.404 (GitHub issue #13: "we have no multipage menus in the library"): chapter index templates of pages,
+    // with Previous / Next / Main Menu buttons, for Menu ▸ Create Multi-page Chapter Index. The layout is in the
+    // 720x480 frame and scaled to the disc's, so each serves SD (4:3 or 16:9) and HD alike.
+    LibraryItem {
+        id: "menu.chapter-pages",
+        name: "Chapter Pages",
+        kind: LibraryKind::Menu,
+        background: [28, 36, 52],
+        text: [236, 232, 220],
+        highlight: [242, 176, 64],
+        buttons: &[
+            PresetButton {
+                label: "Chapter 1",
+                x: 96,
+                y: 96,
+                w: 252,
+                h: 44,
+                thumbnail: None,
+            },
+            PresetButton {
+                label: "Chapter 2",
+                x: 372,
+                y: 96,
+                w: 252,
+                h: 44,
+                thumbnail: None,
+            },
+            PresetButton {
+                label: "Chapter 3",
+                x: 96,
+                y: 160,
+                w: 252,
+                h: 44,
+                thumbnail: None,
+            },
+            PresetButton {
+                label: "Chapter 4",
+                x: 372,
+                y: 160,
+                w: 252,
+                h: 44,
+                thumbnail: None,
+            },
+            PresetButton {
+                label: "Chapter 5",
+                x: 96,
+                y: 224,
+                w: 252,
+                h: 44,
+                thumbnail: None,
+            },
+            PresetButton {
+                label: "Chapter 6",
+                x: 372,
+                y: 224,
+                w: 252,
+                h: 44,
+                thumbnail: None,
+            },
+            PresetButton {
+                label: "Previous",
+                x: 96,
+                y: 352,
+                w: 150,
+                h: 40,
+                thumbnail: None,
+            },
+            PresetButton {
+                label: "Main Menu",
+                x: 285,
+                y: 352,
+                w: 150,
+                h: 40,
+                thumbnail: None,
+            },
+            PresetButton {
+                label: "Next",
+                x: 474,
+                y: 352,
+                w: 150,
+                h: 40,
+                thumbnail: None,
+            },
+        ],
+    },
+    LibraryItem {
+        id: "menu.scene-pages",
+        name: "Scene Pages",
+        kind: LibraryKind::Menu,
+        background: [16, 20, 28],
+        text: [240, 240, 240],
+        highlight: [96, 200, 255],
+        buttons: &[
+            PresetButton {
+                label: "Chapter 1",
+                x: 96,
+                y: 64,
+                w: 168,
+                h: 140,
+                thumbnail: UPPER_THUMBNAIL,
+            },
+            PresetButton {
+                label: "Chapter 2",
+                x: 276,
+                y: 64,
+                w: 168,
+                h: 140,
+                thumbnail: UPPER_THUMBNAIL,
+            },
+            PresetButton {
+                label: "Chapter 3",
+                x: 456,
+                y: 64,
+                w: 168,
+                h: 140,
+                thumbnail: UPPER_THUMBNAIL,
+            },
+            PresetButton {
+                label: "Chapter 4",
+                x: 96,
+                y: 216,
+                w: 168,
+                h: 140,
+                thumbnail: UPPER_THUMBNAIL,
+            },
+            PresetButton {
+                label: "Chapter 5",
+                x: 276,
+                y: 216,
+                w: 168,
+                h: 140,
+                thumbnail: UPPER_THUMBNAIL,
+            },
+            PresetButton {
+                label: "Chapter 6",
+                x: 456,
+                y: 216,
+                w: 168,
+                h: 140,
+                thumbnail: UPPER_THUMBNAIL,
+            },
+            PresetButton {
+                label: "Previous",
+                x: 96,
+                y: 380,
+                w: 150,
+                h: 36,
+                thumbnail: None,
+            },
+            PresetButton {
+                label: "Main Menu",
+                x: 285,
+                y: 380,
+                w: 150,
+                h: 36,
+                thumbnail: None,
+            },
+            PresetButton {
+                label: "Next",
+                x: 474,
+                y: 380,
+                w: 150,
+                h: 36,
+                thumbnail: None,
             },
         ],
     },

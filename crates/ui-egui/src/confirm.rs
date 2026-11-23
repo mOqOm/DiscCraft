@@ -123,6 +123,16 @@ impl DiscCraftApp {
             return;
         }
 
+        // A disc half written cannot be used (M9.35): the window stays until the writing ends or is stopped.
+        if self.disc.is_writing() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.status = crate::i18n::tl!(
+                "A disc is being written. Stop it or wait for it to finish first."
+            )
+            .to_owned();
+            return;
+        }
+
         if self.session.dirty {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.pending_action = Some(PendingAction::Exit);

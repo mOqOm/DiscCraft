@@ -77,6 +77,7 @@ impl Project {
                     let trim = timeline.video_trims.first().copied().unwrap_or_default();
                     timeline.audio.push(AudioTrack {
                         asset: sound,
+                        stream: 0,
                         language: language.clone(),
                         start: 0,
                         trim_start: trim.start,
@@ -125,6 +126,7 @@ mod tests {
             .audio
             .push(crate::AudioTrack {
                 asset: music,
+                stream: 0,
                 language: "en".to_owned(),
                 start: 0,
                 trim_start: 0,

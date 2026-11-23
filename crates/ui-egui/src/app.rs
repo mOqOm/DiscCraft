@@ -106,6 +106,11 @@ pub struct DiscCraftApp {
     pub(crate) clip_selection: Option<(TimelineId, crate::timeline_view::ClipPick)>,
     /// The Library's New Set / Rename Set dialog while it is open.
     pub(crate) library_set_dialog: Option<crate::library_panel::SetNameDraft>,
+    /// Files being taken into the Library (M6.403: Add Items from Files… / Import Folder…), and the set the files
+    /// chosen one by one go into.
+    pub(crate) library_import: Option<(crate::library_files::LibraryImport, String)>,
+    /// The previews of the Library's own files, by file (`None`: it could not be drawn).
+    pub(crate) library_previews: std::collections::HashMap<String, Option<egui::TextureHandle>>,
     /// 「一定間隔でチャプターポイントを追加」ダイアログ。
     pub(crate) chapter_interval: Option<crate::context_menus::ChapterInterval>,
     /// モニターに映しているタイムラインのフレーム（アセット ID、フレーム番号、テクスチャ）。
@@ -247,8 +252,9 @@ pub struct DiscCraftApp {
     pub(crate) correct_pixel_aspect: bool,
     /// 表ごとの並べ替え（表の id → 列と向き）。
     pub(crate) table_sorts: std::collections::HashMap<&'static str, crate::theme::TableSort>,
+    /// The first frame of each motion menu's video (asset, for a 16:9 menu: M6.406).
     pub(crate) first_frames:
-        std::collections::HashMap<u64, Option<(std::sync::Arc<Vec<u8>>, usize, usize)>>,
+        std::collections::HashMap<(u64, bool), Option<(std::sync::Arc<Vec<u8>>, usize, usize)>>,
     /// Frames of videos at a time (asset, ticks, for a video thumbnail: whether the first bright frame from there),
     /// for a pop-up menu's background and the video thumbnails in the editor.
     pub(crate) timed_frames: std::collections::HashMap<
@@ -383,6 +389,8 @@ pub struct DiscCraftApp {
     /// トランスコードステータスを問い合わせたときのビルドの出力先。変わったら問い合わせ直す。
     pub(crate) transcode_for: Option<(String, OutputKind)>,
     pub(crate) transcode_dirty: bool,
+    /// The Build panel's disc output and the writing of discs (M9.35).
+    pub(crate) disc: crate::disc_writer::DiscWriter,
 }
 
 impl DiscCraftApp {
@@ -447,6 +455,8 @@ impl DiscCraftApp {
             clip_selection: None,
             next_text: serde_json::Map::new(),
             library_set_dialog: None,
+            library_import: None,
+            library_previews: std::collections::HashMap::new(),
             chapter_interval: None,
             monitor_frame: None,
             monitor_loader: disccraft_engine::FrameLoader::new(),
@@ -594,6 +604,7 @@ impl DiscCraftApp {
             transcode_fits: BTreeMap::new(),
             transcode_for: None,
             transcode_dirty: true,
+            disc: crate::disc_writer::DiscWriter::default(),
             check_dirty: true,
         }
     }
@@ -618,6 +629,7 @@ impl DiscCraftApp {
         if let Some(result) = self.build_job.poll() {
             self.handle_build_result(result);
         }
+        self.poll_writing(ui.ctx());
 
         if self.build_job.is_running() {
             ui.ctx().request_repaint();
@@ -681,6 +693,7 @@ impl DiscCraftApp {
         self.show_welcome(ui);
         self.show_confirm(ui.ctx());
         self.show_build_prompt(ui.ctx());
+        self.show_writer_prompt(ui.ctx());
         self.show_film_marker_dialog(ui.ctx());
         self.poll_film_export(ui.ctx());
         self.intercept_close(ui.ctx());
@@ -1345,6 +1358,23 @@ impl DiscCraftApp {
     }
 
     fn handle_build_result(&mut self, result: Result<BuildReport, String>) {
+        // The image of a disc to write (M9.35): written now, once for each copy.
+        if self.disc.building {
+            self.disc.building = false;
+            match result {
+                Ok(_) => {
+                    self.disc.copy = 1;
+                    self.refresh_media();
+                    self.start_writing();
+                }
+                Err(error) => self.end_writing(if disccraft_build::was_stopped(&error) {
+                    tl!("Build stopped").to_owned()
+                } else {
+                    error
+                }),
+            }
+            return;
+        }
         match result {
             Ok(report) => {
                 self.status = tlf!("Build finished: {path}", path = report.output.display());
@@ -1388,7 +1418,7 @@ impl DiscCraftApp {
                 tl!("Video files"),
                 &[
                     "mp4", "mov", "m4v", "avi", "mkv", "mxf", "m2v", "m1v", "mpg", "mpeg", "vob",
-                    "m2ts", "ts",
+                    "m2ts", "ts", "dv", "dif",
                 ],
             )
             .pick_files()

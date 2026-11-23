@@ -195,7 +195,9 @@ impl DiscCraftApp {
             ui.set_width(380.0);
             ui.heading(tl!("Layer Effects"));
             ui.add_space(4.0);
-            effect_fields(ui, &mut state);
+            crate::theme::dialog_body(ui, "effects_dialog_body", 130.0, |ui| {
+                effect_fields(ui, &mut state);
+            });
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button(tl!("OK")).clicked() {

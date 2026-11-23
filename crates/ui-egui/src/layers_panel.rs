@@ -581,14 +581,12 @@ enum PsdClick {
 }
 
 impl DiscCraftApp {
-    /// The layer tree of the PSD menu `root` is made from (its background), read again when the file changes; `None`
-    /// for a menu not made from a PSD.
+    /// The layer tree of the PSD menu `root` is made from (its background, or the layers over its motion video), read
+    /// again when the file changes; `None` for a menu not made from a PSD.
     fn psd_tree_of(&mut self, root: MenuId) -> Option<(String, std::sync::Arc<Vec<PsdTreeNode>>)> {
         let menu = self.session.project.menu(root)?;
-        let disccraft_project::MenuBackground::Image { asset } = &menu.background else {
-            return None;
-        };
-        let path = self.session.project.assets.get(asset)?.path.clone();
+        let asset = menu.background.document()?;
+        let path = self.session.project.assets.get(&asset)?.path.clone();
         if !path.to_ascii_lowercase().ends_with(".psd") {
             return None;
         }

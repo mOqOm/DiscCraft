@@ -9,10 +9,10 @@ use disccraft_project::AssetId;
 use std::path::{Path, PathBuf};
 
 /// The file types DiscCraft imports as assets (the File ▸ Import ▸ Asset dialog's list).
-pub(crate) const MEDIA_EXTENSIONS: [&str; 46] = [
+pub(crate) const MEDIA_EXTENSIONS: [&str; 48] = [
     "mp4", "mov", "m4v", "avi", "mkv", "webm", "mxf", "m2v", "m1v", "mpg", "mpeg", "vob", "m2ts",
-    "mts", "m2t", "ts", "wav", "ac3", "dts", "mp3", "aac", "m4a", "mka", "mp2", "ogg", "oga",
-    "opus", "flac", "aif", "aiff", "png", "jpg", "jpeg", "bmp", "tif", "tiff", "psd", "psb",
+    "mts", "m2t", "ts", "dv", "dif", "wav", "ac3", "dts", "mp3", "aac", "m4a", "mka", "mp2", "ogg",
+    "oga", "opus", "flac", "aif", "aiff", "png", "jpg", "jpeg", "bmp", "tif", "tiff", "psd", "psb",
     "pcraft", "svg", "srt", "vtt", "idx", "sup", "ecproj", "scraft",
 ];
 

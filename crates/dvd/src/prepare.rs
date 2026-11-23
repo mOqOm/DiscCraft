@@ -656,8 +656,30 @@ fn rewrite_display_aspect(from: &Path, to: &Path, aspect: u8) -> Result<(), DvdE
     output.flush().map_err(|err| crate::io_error(to, err))
 }
 
-/// [`prepare_title`] as the video is made: transcoded, joined or taken as it is.
+/// [`prepare_title`] as the video is made: transcoded, joined or taken as it is. The audio tracks are made on a
+/// thread of their own beside the video (M6.414): they share nothing with it, and a minute of sound takes seconds
+/// to make into AC-3.
 fn prepare_title_as_made(
+    project: &Project,
+    timeline: &Timeline,
+    cache_dir: &Path,
+    budget: &Budget,
+    progress: &mut dyn FnMut(&str, f32),
+) -> Result<PreparedTitle, DvdError> {
+    std::thread::scope(|scope| {
+        let tracks = scope.spawn(|| prepare_audio_tracks(project, timeline, cache_dir));
+        let video = prepare_title_video(project, timeline, cache_dir, budget, progress);
+        let audio_tracks = tracks
+            .join()
+            .map_err(|_| DvdError::Unsupported("the audio tracks' thread failed".to_string()))??;
+        let mut prepared = video?;
+        prepared.audio_tracks = audio_tracks;
+        Ok(prepared)
+    })
+}
+
+/// [`prepare_title_as_made`]'s video (and the video's own sound), without the audio tracks.
+fn prepare_title_video(
     project: &Project,
     timeline: &Timeline,
     cache_dir: &Path,
@@ -678,8 +700,8 @@ fn prepare_title_as_made(
     };
     let media = asset.media_file();
     let input: &Path = &media;
-
-    let audio_tracks = prepare_audio_tracks(project, timeline, cache_dir)?;
+    // Made beside this by `prepare_title_as_made`.
+    let audio_tracks = Vec::new();
 
     if !timeline.more_video.is_empty()
         || !timeline.video_trims.is_empty()
@@ -751,9 +773,12 @@ fn prepare_title_as_made(
     let video_out = cache_dir.join(format!("{key}.m2v"));
     let marker = cache_dir.join(format!("{key}.ok"));
 
+    // The video's own sound is the title's only when the timeline has no audio track of its own
+    // (`source::load_title`): it is not made into AC-3 otherwise (M6.414).
+    let own_sound = timeline.audio.is_empty();
     if marker.is_file() && video_out.is_file() {
         let audio_out = cache_dir.join(format!("{key}.wav"));
-        let transcoded_audio = match audio_out.is_file() {
+        let transcoded_audio = match audio_out.is_file() && own_sound {
             true => Some(soundtrack_of(project, timeline.video, &audio_out)?),
             false => None,
         };
@@ -786,6 +811,7 @@ fn prepare_title_as_made(
         progress,
     )?;
     let transcoded_audio = transcoded_audio
+        .filter(|_| own_sound)
         .map(|wav| soundtrack_of(project, timeline.video, &wav))
         .transpose()?;
 
@@ -1020,7 +1046,7 @@ pub(crate) fn prepare_title_sound(
     }
     if trimmed && has_sound() {
         let key = format!("{}-soundtrack", audio_cache_key(input)?);
-        let wav = transcode_audio_to_cache(input, cache_dir, &key)?;
+        let wav = transcode_audio_to_cache(input, cache_dir, (&key, 0))?;
         let cut = trimmed_wav(&wav, cache_dir, &key, part.0, part.1)?;
         return Ok(PreparedTitle {
             video_path: input.to_path_buf(),
@@ -1047,7 +1073,7 @@ pub(crate) fn prepare_title_sound(
                 Some(soundtrack_of(
                     project,
                     timeline.video,
-                    &transcode_audio_to_cache(input, cache_dir, &key)?,
+                    &transcode_audio_to_cache(input, cache_dir, (&key, 0))?,
                 )?),
                 0,
             )
@@ -1342,7 +1368,7 @@ fn scan_passthrough(
 ) -> Result<(), DvdError> {
     let video_path = asset_path(project, timeline.video)?;
     let video_path: &Path = &video_path;
-    for video in timeline.videos() {
+    for (index, video) in timeline.videos().into_iter().enumerate() {
         let path = asset_path(project, video)?;
         let path: &Path = &path;
         if passes_through(project, path) {
@@ -1353,8 +1379,13 @@ fn scan_passthrough(
             };
             scan.passthrough_bits = add_bits(scan.passthrough_bits, video_bytes)?;
         } else {
-            // A clip of a joined timeline that needs a transcode: its picture takes part of the bitrate budget.
-            scan.transcode_seconds += positive_seconds(probe(path)?)?;
+            // A clip of a joined timeline that needs a transcode: its picture takes part of the bitrate budget (the
+            // part it is trimmed to: the rest of the transcode is not on the disc, M6.409).
+            scan.transcode_seconds += trimmed_seconds(
+                positive_seconds(probe(path)?)?,
+                timeline.video_trim(index),
+                project.settings.standard,
+            );
             scan.transcode_count = scan
                 .transcode_count
                 .checked_add(1)
@@ -1394,6 +1425,20 @@ fn scan_passthrough(
     }
 
     Ok(())
+}
+
+/// How long the part of a clip `seconds` long that `trim` keeps plays (its frames at the disc's rate).
+fn trimmed_seconds(
+    seconds: f64,
+    trim: disccraft_project::ClipTrim,
+    standard: VideoStandard,
+) -> f64 {
+    let frame = frame_ticks(standard) as f64 / 254_016_000_000.0;
+    let start = f64::from(trim.start) * frame;
+    let end = trim
+        .end
+        .map_or(seconds, |end| (f64::from(end) * frame).min(seconds));
+    (end - start).max(0.0)
 }
 
 /// Add transcode duration and audio bitrate to the scan.
@@ -1648,24 +1693,29 @@ fn joined_clips(
     for (index, video) in timeline.videos().into_iter().enumerate() {
         let source = asset_path(project, video)?;
         let source: &Path = &source;
-        let trim = timeline.video_trim(index);
+        let mut trim = timeline.video_trim(index);
         // A clip that needs a transcode is transcoded on its own (as a timeline of that one video would be), and
-        // its result is joined. Only a stream that is used as it is can be trimmed: its GOPs are known.
+        // its result is joined. Its whole file is transcoded, with closed GOPs starting on the trim's frames
+        // ([`asset_gop_starts`]), and the trim is cut out of it as out of a stream used as it is (M6.409).
         let path: PathBuf = if passes_through(project, source) {
             passthrough_video(source, cache_dir)?
         } else {
-            if trim != disccraft_project::ClipTrim::default() {
-                return Err(DvdError::Unsupported(format!(
-                    "timeline \"{}\": only an MPEG-2 video stream that needs no transcode can be trimmed \
-                     ({} is not)",
-                    timeline.name,
-                    source.display()
-                )));
-            }
+            // The clip alone, without the timeline's gaps (M6.409: kept, they made it a joined timeline again, which
+            // came back here until the stack ran out).
             let mut one = timeline.clone();
             one.video = video;
             one.more_video.clear();
             one.video_trims.clear();
+            one.video_gaps.clear();
+            // The trim in the transcode's pictures (a film transcode's are 23.976 a second).
+            let picture = |frame: u32| {
+                u32::try_from(transcode_picture(project, source, u64::from(frame)))
+                    .unwrap_or(u32::MAX)
+            };
+            trim = disccraft_project::ClipTrim {
+                start: picture(trim.start),
+                end: trim.end.map(picture),
+            };
             prepare_title(project, &one, cache_dir, budget, progress)?.video_path
         };
         let metadata = fs::metadata(&path).map_err(|err| crate::io_error(&path, err))?;
@@ -1941,11 +1991,19 @@ fn prepare_audio_tracks(
         let media = asset.media_file();
         let path: &Path = &media;
 
+        // Another sound stream of the file than its first (M6.418): decoded from that stream, cut, and made Dolby
+        // Digital (or PCM, as its asset asks), whatever the file's first stream could go on the disc as.
+        if track.stream > 0 && track.more.is_empty() {
+            out.push(other_stream(project, track, path, cache_dir)?);
+            continue;
+        }
         // Several clips on the track (M6.269): each is decoded and cut, and they are written one after the
         // other with silence between, as one Dolby Digital stream.
         if !track.more.is_empty() {
             // Clips that are all Dolby Digital of one form are joined by their frames, not decoded (M6.309).
-            if let Some(ac3) = ac3_clip_sequence(project, track, cache_dir)? {
+            if track.stream == 0
+                && let Some(ac3) = ac3_clip_sequence(project, track, cache_dir)?
+            {
                 out.push(PreparedAudio::Ac3(ac3));
                 continue;
             }
@@ -2029,7 +2087,7 @@ fn prepare_audio_tracks(
                     )));
                 }
                 AudioKind::Wav | AudioKind::Transcode => {
-                    let mut wav = transcode_audio_to_cache(path, cache_dir, &key)?;
+                    let mut wav = transcode_audio_to_cache(path, cache_dir, (&key, 0))?;
                     if track.is_trimmed() {
                         wav = trimmed_wav(&wav, cache_dir, &key, part.0, part.1)?;
                     }
@@ -2066,7 +2124,7 @@ fn prepare_audio_tracks(
                 }
                 None => {
                     let key = audio_cache_key(path)?;
-                    let wav = transcode_audio_to_cache(path, cache_dir, &key)?;
+                    let wav = transcode_audio_to_cache(path, cache_dir, (&key, 0))?;
                     converted_sound(project, track.asset, wav)?
                 }
             },
@@ -2076,6 +2134,52 @@ fn prepare_audio_tracks(
     }
 
     Ok(out)
+}
+
+/// `key` for sound stream `stream` of the file: the first stream's is the key itself (as before M6.418).
+fn stream_key(key: String, stream: usize) -> String {
+    if stream == 0 {
+        key
+    } else {
+        format!("{key}.s{stream}")
+    }
+}
+
+/// A one-clip track of sound stream `track.stream` (not the first) of the file at `path`: decoded, trimmed, with
+/// its silence in front, and made Dolby Digital or PCM (M6.418).
+fn other_stream(
+    project: &Project,
+    track: &disccraft_project::AudioTrack,
+    path: &Path,
+    cache_dir: &Path,
+) -> Result<PreparedAudio, DvdError> {
+    let stream = track.stream as usize;
+    let key = stream_key(audio_cache_key(path)?, stream);
+    let mut wav = transcode_audio_to_cache(path, cache_dir, (&key, stream))?;
+    let frame = if project.settings.standard == VideoStandard::Ntsc {
+        1001.0 / 30_000.0
+    } else {
+        1.0 / 25.0
+    };
+    if track.is_trimmed() {
+        wav = trimmed_wav(
+            &wav,
+            cache_dir,
+            &key,
+            f64::from(track.trim_start) * frame,
+            track.trim_end.map(|end| f64::from(end) * frame),
+        )?;
+    }
+    if track.start > 0 {
+        let part_key = match (track.is_trimmed(), track.trim_end) {
+            (false, _) => key.clone(),
+            (true, Some(end)) => format!("{key}.t{}-{end}", track.trim_start),
+            (true, None) => format!("{key}.t{}-", track.trim_start),
+        };
+        let samples = delay_samples(track.start, project.settings.standard);
+        wav = delayed_wav(&wav, cache_dir, &part_key, samples)?;
+    }
+    converted_sound(project, track.asset, wav)
 }
 
 /// The clips of `track` as one WAV file in `cache_dir`: each clip's part of its file where the clip is on the
@@ -2108,8 +2212,14 @@ fn audio_clip_sequence(
                 path.display()
             )));
         }
-        let key = audio_cache_key(path)?;
-        let mut wav = transcode_audio_to_cache(path, cache_dir, &key)?;
+        // The track's sound stream of its own file (M6.418); another file's clips play their first.
+        let stream = if clip.asset == track.asset {
+            track.stream as usize
+        } else {
+            0
+        };
+        let key = stream_key(audio_cache_key(path)?, stream);
+        let mut wav = transcode_audio_to_cache(path, cache_dir, (&key, stream))?;
         let trimmed = clip.trim_start > 0 || clip.trim_end.is_some();
         if trimmed {
             wav = trimmed_wav(
@@ -3073,6 +3183,16 @@ pub(crate) fn transcode_forced(project: &Project, path: &Path) -> bool {
     })
 }
 
+/// Whether the video of asset `asset` goes on the project's disc as it is ([`passes_through`]: it fits and no preset
+/// of its own transcodes it all the same); `false` for an asset that is not there.
+#[must_use]
+pub fn asset_goes_as_is(project: &Project, asset: AssetId) -> bool {
+    project
+        .assets
+        .get(&asset)
+        .is_some_and(|found| passes_through(project, &found.media_file()))
+}
+
 /// Whether video asset `asset` fits the project's disc as it is (so its setting may be "Don't Transcode", or a
 /// preset that transcodes it all the same): an SD stream, or on an HD Blu-ray video of the disc's format.
 #[must_use]
@@ -3240,39 +3360,74 @@ pub(crate) fn layer_break_time(project: &Project, timeline: &Timeline) -> Option
 }
 
 /// The output frames where the transcode of video `path` must start a GOP: every chapter past the start of every
-/// timeline that plays it, so each chapter's cell begins exactly at its frame (the GOPs otherwise fall every 15 or 12
-/// frames, and a cell would start at the nearest of them).
+/// timeline that plays it as its first clip, so each chapter's cell begins exactly at its frame (the GOPs otherwise
+/// fall every 15 or 12 frames, and a cell would start at the nearest of them), and the in and out points of every
+/// trimmed clip of it (M6.409: the clip is cut out of the transcode there).
 fn asset_gop_starts(project: &Project, path: &Path) -> Vec<u64> {
+    let frame = frame_ticks(project.settings.standard);
     // A film transcode's pictures are 23.976 a second.
     let per_frame = if film_of(project, path) {
         FILM_FRAME_TICKS
     } else {
-        frame_ticks(project.settings.standard)
+        frame
     };
-    let mut frames: Vec<u64> = project
-        .timelines
-        .values()
-        .filter(|timeline| {
-            project
-                .assets
-                .get(&timeline.video)
-                .is_some_and(|asset| asset.media_file().as_ref() == path)
-        })
-        .flat_map(|timeline| {
-            // The manual layer break of a dual-layer DVD gets its own cell, so its own GOP.
+    let ticks_of =
+        |frames: u32| i64::from(frames).saturating_mul(i64::try_from(frame).unwrap_or(i64::MAX));
+    let plays = |video: &AssetId| {
+        project
+            .assets
+            .get(video)
+            .is_some_and(|asset| asset.media_file().as_ref() == path)
+    };
+    let mut frames: Vec<u64> = Vec::new();
+    for timeline in project.timelines.values() {
+        for (index, video) in timeline.videos().iter().enumerate() {
+            if !plays(video) {
+                continue;
+            }
+            let trim = timeline.video_trim(index);
+            frames.extend(
+                [Some(trim.start), trim.end]
+                    .into_iter()
+                    .flatten()
+                    .map(|cut| nearest_frame(ticks_of(cut), per_frame)),
+            );
+            if index > 0 {
+                continue;
+            }
+            // The first clip's chapters, and the manual layer break of a dual-layer DVD (it gets its own cell, so
+            // its own GOP): a time on the timeline is in the file the trimmed frames later, after the gap.
             let layer_break = layer_break_time(project, timeline);
-            timeline
-                .chapters
-                .iter()
-                .map(|chapter| chapter.time)
-                .chain(layer_break)
-        })
-        .map(|time| nearest_frame(time.0, per_frame))
-        .filter(|frame| *frame > 0)
-        .collect();
+            let gap = ticks_of(timeline.video_gap(0));
+            let (start, end) = (ticks_of(trim.start), trim.end.map(ticks_of));
+            frames.extend(
+                timeline
+                    .chapters
+                    .iter()
+                    .map(|chapter| chapter.time)
+                    .chain(layer_break)
+                    .filter(|time| time.0 >= gap)
+                    .map(|time| time.0.saturating_sub(gap).saturating_add(start))
+                    .filter(|in_file| end.is_none_or(|end| *in_file < end))
+                    .map(|in_file| nearest_frame(in_file, per_frame)),
+            );
+        }
+    }
+    frames.retain(|frame| *frame > 0);
     frames.sort_unstable();
     frames.dedup();
     frames
+}
+
+/// The picture of the transcode of `path` that frame `frame` (at the disc's rate) of the file is: the frame itself,
+/// or for a film transcode the 23.976 picture nearest its time.
+fn transcode_picture(project: &Project, path: &Path, frame: u64) -> u64 {
+    if film_of(project, path) {
+        let ticks = frame.saturating_mul(frame_ticks(project.settings.standard));
+        nearest_frame(i64::try_from(ticks).unwrap_or(i64::MAX), FILM_FRAME_TICKS)
+    } else {
+        frame
+    }
 }
 
 /// The aspect a video asset is transcoded with: the first timeline that plays it (else the disc's).
@@ -3761,11 +3916,12 @@ pub(crate) fn effective_slide_durations(
 /// Ticks per second of [`Tick`], as a float for scaling.
 const TICKS_PER_SECOND_F64: f64 = 254_016_000_000.0;
 
-/// Transcode one audio asset into cache part files and publish it atomically.
+/// Transcode sound stream `stream` (0: the first) of one audio asset into cache part files and publish it
+/// atomically.
 fn transcode_audio_to_cache(
     input: &Path,
     cache_dir: &Path,
-    key: &str,
+    (key, stream): (&str, usize),
 ) -> Result<PathBuf, DvdError> {
     fs::create_dir_all(cache_dir).map_err(|err| crate::io_error(cache_dir, err))?;
 
@@ -3778,7 +3934,7 @@ fn transcode_audio_to_cache(
 
     let part = cache_dir.join(format!("{key}.{}.wav.part", part_number()));
 
-    if let Err(err) = transcode_audio(input, &part, None) {
+    if let Err(err) = disccraft_transcode::transcode_audio_stream(input, stream, &part, None) {
         fs::remove_file(&part).unwrap_or(());
         return Err(DvdError::Unsupported(format!(
             "transcode audio {}: {err}",
@@ -4873,14 +5029,18 @@ pub fn estimate(project: &Project) -> Result<Estimate, DvdError> {
 /// The project as a build plays it (M6.378): a title of several clips (or with an empty stretch before a clip) and
 /// no audio tracks gets an audio track of its clips' own sounds, each where its clip is on the timeline and cut as
 /// its clip is, as the preview plays it. Clips without sound leave silence. A title of one clip keeps playing its
-/// file's own sound as before (trimmed with it, M10.21). Titles whose files cannot be read are left as they are.
+/// file's own sound as before (on an HD Blu-ray trimmed with it, M10.21); on a DVD or an SD Blu-ray a trimmed one
+/// gets the track (M6.409: its video is cut out as a joined title's, which brings no sound of its own). Titles whose
+/// files cannot be read are left as they are.
 #[must_use]
 pub fn with_clip_sounds(project: &Project) -> Project {
     let mut out = project.clone();
     let rate = project.settings.frame_rate();
+    let sd = crate::BdVideoFormat::of(project).is_none();
     for timeline in out.timelines.values_mut() {
+        let trimmed = timeline.video_trim(0) != disccraft_project::ClipTrim::default();
         if !timeline.audio.is_empty()
-            || (timeline.more_video.is_empty() && !timeline.has_video_gaps())
+            || (timeline.more_video.is_empty() && !timeline.has_video_gaps() && !(sd && trimmed))
         {
             continue;
         }
@@ -4920,6 +5080,7 @@ pub fn with_clip_sounds(project: &Project) -> Project {
             timeline.audio.push(disccraft_project::AudioTrack {
                 more: clips.get(1..).unwrap_or(&[]).to_vec(),
                 asset: first.asset,
+                stream: 0,
                 language: String::new(),
                 start: first.start,
                 trim_start: first.trim_start,

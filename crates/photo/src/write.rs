@@ -217,18 +217,23 @@ pub fn write_layered_psd(
     save(&doc, path)
 }
 
-/// What is laid over a menu's own PSD when the menu is written out again (M6.399): the PSD keeps its layers, and
-/// what was added to the menu since goes over them.
+/// What is laid over one page of a menu's own PSD when the menu is written out again (M6.399): the PSD keeps its
+/// layers, and what was added to the page since goes over them.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PsdAdditions {
-    /// The `(#)` page group the additions go into (1 for the lowest); `None`: the document's top level.
-    pub page: Option<usize>,
-    /// Leave the page groups out (a page added to a menu shown by page shows only the layers its pages share).
-    pub shared_only: bool,
+    /// The page: 0 the document's top level (the first page), n the n-th `(#)` group (1 for the lowest). A page the
+    /// document has no group for (M6.401: a page added to the menu since) becomes a new `(#)` group over the others.
+    pub page: usize,
     /// Layers laid over the page, bottom to top.
     pub layers: Vec<PsdLayer>,
-    /// The menu's buttons, bottom to top.
+    /// The page's buttons, bottom to top.
     pub buttons: Vec<PsdButtonAddition>,
+}
+
+/// The name [`write_psd_over`] and a menu's PSD give the `(#)` group of page `number` (1 for the second page), as
+/// Encore names the pages it adds.
+pub fn page_group_name(number: usize) -> String {
+    format!("(#) ページ {number}")
 }
 
 /// A button of [`PsdAdditions`]: when the PSD has its button set (by its layer id, else its name), `into` goes into
@@ -245,78 +250,275 @@ pub struct PsdButtonAddition {
     pub set: PsdLayer,
 }
 
-/// Write the PSD (or PhotoCraft document) at `source` to `path` as a PSD with all its own layers, and `additions`
-/// (drawn on a `width` x `height` canvas) laid over them (M6.399: a menu made from a PSD, or edited in an image
-/// editor, is no longer flattened into one picture when it is written out). `Ok(false)`, writing nothing, when the
-/// document's canvas is another size.
+/// Write the PSD (or PhotoCraft document) at `source` to `path` as a PSD with all its own layers, and each page's
+/// `additions` (drawn on a `width` x `height` canvas, the menu's frame) laid over them (M6.399: a menu made from a
+/// PSD, or edited in an image editor, is no longer flattened into one picture when it is written out; M6.401: every
+/// page of the menu). A document of another size keeps its size (M6.401: it was flattened into the frame): the
+/// additions are scaled to it.
 ///
 /// # Errors
 ///
-/// When the document cannot be read, an added layer's bytes do not match the canvas, or the file cannot be written.
+/// When the document cannot be read, an added layer's bytes do not match the frame, or the file cannot be written.
 pub fn write_psd_over(
     source: &Path,
     path: &Path,
     (width, height): (u32, u32),
-    additions: &PsdAdditions,
-) -> Result<bool, PhotoError> {
+    additions: &[PsdAdditions],
+) -> Result<(), PhotoError> {
     let (mut doc, canvas) = crate::load_document(source)?;
-    if crate::rect_width_u32(canvas) != Some(width)
-        || crate::rect_height_u32(canvas) != Some(height)
-    {
-        return Ok(false);
-    }
+    let size = crate::rect_width_u32(canvas)
+        .zip(crate::rect_height_u32(canvas))
+        .ok_or_else(|| PhotoError::Invalid("invalid canvas size".to_string()))?;
     let format = doc.pixel_format();
-    let expected = usize::try_from(width)
+    let expected = canvas_bytes(width, height)?;
+    let target_bytes = canvas_bytes(size.0, size.1)?;
+    // The additions in the document's own size.
+    let fit = |layer: &PsdLayer| -> Result<Layer, PhotoError> {
+        if size == (width, height) {
+            build_layer(layer, format, canvas, expected)
+        } else {
+            let scaled = scale_layer(layer, (width, height), size, expected)?;
+            build_layer(&scaled, format, canvas, target_bytes)
+        }
+    };
+    let existing = doc
+        .layers
+        .iter()
+        .filter(|layer| crate::is_page_group(layer))
+        .count();
+    let mut pages: Vec<&PsdAdditions> = additions.iter().collect();
+    pages.sort_by_key(|page| page.page);
+    for page in pages {
+        let mut top: Vec<Layer> = page.layers.iter().map(fit).collect::<Result<_, _>>()?;
+        let mut buttons = Vec::with_capacity(page.buttons.len());
+        for button in &page.buttons {
+            buttons.push((
+                button.id,
+                button.name.trim().to_owned(),
+                button.into.iter().map(fit).collect::<Result<Vec<_>, _>>()?,
+                fit(&button.set)?,
+            ));
+        }
+        if page.page > existing {
+            // A page the document has no group for: a new group over the others, with the page's sets.
+            let mut children = Vec::new();
+            lay_over(&mut children, &mut top, buttons);
+            doc.layers
+                .push(Layer::group(page_group_name(page.page), children));
+            continue;
+        }
+        // The page group the additions go into, by its place among the top level's layers.
+        let group = (page.page >= 1)
+            .then(|| {
+                doc.layers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, layer)| crate::is_page_group(layer))
+                    .nth(page.page - 1)
+                    .map(|(index, _)| index)
+            })
+            .flatten();
+        let target: &mut Vec<Layer> = &mut doc.layers;
+        match group.and_then(|index| target.get_mut(index)) {
+            Some(Layer {
+                content: LayerContent::Group(group),
+                ..
+            }) => lay_over(&mut group.children, &mut top, buttons),
+            _ => lay_over(target, &mut top, buttons),
+        }
+    }
+    save(&doc, path)
+}
+
+/// The bytes of a `width` x `height` RGBA canvas.
+fn canvas_bytes(width: u32, height: u32) -> Result<usize, PhotoError> {
+    usize::try_from(width)
         .ok()
         .zip(usize::try_from(height).ok())
         .and_then(|(w, h)| w.checked_mul(h))
         .and_then(|area| area.checked_mul(4))
-        .ok_or_else(|| PhotoError::Invalid("canvas too large".to_string()))?;
-    let build = |layer: &PsdLayer| build_layer(layer, format, canvas, expected);
-    let mut top: Vec<Layer> = additions
-        .layers
-        .iter()
-        .map(build)
-        .collect::<Result<_, _>>()?;
-    let mut buttons = Vec::with_capacity(additions.buttons.len());
-    for button in &additions.buttons {
-        buttons.push((
-            button.id,
-            button.name.trim().to_owned(),
-            button
-                .into
+        .ok_or_else(|| PhotoError::Invalid("canvas too large".to_string()))
+}
+
+/// `layer`, drawn on a `from` canvas (`bytes` long), scaled to a `to` canvas: its pixels resampled, a type layer's
+/// text placed by its transform scaled too.
+fn scale_layer(
+    layer: &PsdLayer,
+    from: (u32, u32),
+    to: (u32, u32),
+    bytes: usize,
+) -> Result<PsdLayer, PhotoError> {
+    let pixels = |name: &str, rgba: &[u8]| -> Result<Vec<u8>, PhotoError> {
+        if rgba.len() != bytes {
+            return Err(PhotoError::Invalid(format!(
+                "layer {name}: {} bytes for a {bytes}-byte canvas",
+                rgba.len()
+            )));
+        }
+        Ok(resample_rgba(rgba, from, to))
+    };
+    Ok(match layer {
+        PsdLayer::Raster {
+            name,
+            rgba,
+            visible,
+        } => PsdLayer::Raster {
+            name: name.clone(),
+            rgba: pixels(name, rgba)?,
+            visible: *visible,
+        },
+        PsdLayer::Text {
+            name,
+            rgba,
+            visible,
+            text,
+        } => {
+            let (sx, sy) = (
+                f64::from(to.0) / f64::from(from.0.max(1)),
+                f64::from(to.1) / f64::from(from.1.max(1)),
+            );
+            let [a, b, c, d, e, f] = text.transform;
+            PsdLayer::Text {
+                name: name.clone(),
+                rgba: pixels(name, rgba)?,
+                visible: *visible,
+                text: Box::new(PsdText {
+                    transform: [a * sx, b * sy, c * sx, d * sy, e * sx, f * sy],
+                    ..(**text).clone()
+                }),
+            }
+        }
+        PsdLayer::Group { name, id, children } => PsdLayer::Group {
+            name: name.clone(),
+            id: *id,
+            children: children
                 .iter()
-                .map(build)
-                .collect::<Result<Vec<_>, _>>()?,
-            build(&button.set)?,
-        ));
+                .map(|child| scale_layer(child, from, to, bytes))
+                .collect::<Result<_, _>>()?,
+        },
+    })
+}
+
+/// Straight-alpha RGBA of a `from` canvas resampled to a `to` canvas: each target pixel averages the source pixels
+/// its area covers (bilinear between them when it covers less than one), weighted by their alpha. A pixel that
+/// covers something faint keeps at least alpha 1, so a button set's faint corner marks stay.
+fn resample_rgba(rgba: &[u8], (fw, fh): (u32, u32), (tw, th): (u32, u32)) -> Vec<u8> {
+    let source = Premultiplied {
+        rgba,
+        width: fw as usize,
+        height: fh as usize,
+    };
+    let (tw, th) = (tw as usize, th as usize);
+    let mut out = vec![0u8; tw.saturating_mul(th).saturating_mul(4)];
+    if source.width == 0 || source.height == 0 || tw == 0 || th == 0 {
+        return out;
+    }
+    let scale = (
+        source.width as f32 / tw as f32,
+        source.height as f32 / th as f32,
+    );
+    let shrink = scale.0 > 1.0 || scale.1 > 1.0;
+    for (index, target) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (tx, ty) = ((index % tw) as f32, (index / tw) as f32);
+        // The source area the target pixel covers.
+        let area = (
+            tx * scale.0,
+            ty * scale.1,
+            (tx + 1.0) * scale.0,
+            (ty + 1.0) * scale.1,
+        );
+        let (sum, faint) = if shrink {
+            source.average(area)
+        } else {
+            source.bilinear(area)
+        };
+        let alpha = sum[3];
+        if alpha > 0.0 {
+            for (channel, value) in target.iter_mut().zip(&sum[..3]) {
+                *channel = (value / alpha).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+        let a = (alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+        if let Some(slot) = target.get_mut(3) {
+            *slot = if a == 0 && faint { 1 } else { a };
+        }
+    }
+    out
+}
+
+/// Straight-alpha RGBA pixels read premultiplied, for [`resample_rgba`].
+struct Premultiplied<'a> {
+    rgba: &'a [u8],
+    width: usize,
+    height: usize,
+}
+
+impl Premultiplied<'_> {
+    /// The pixel at (x, y) (clamped to the canvas), premultiplied, alpha 0 to 1.
+    fn at(&self, x: usize, y: usize) -> [f32; 4] {
+        let i = (y.min(self.height.saturating_sub(1)) * self.width
+            + x.min(self.width.saturating_sub(1)))
+            * 4;
+        match self.rgba.get(i..i + 4) {
+            Some(&[r, g, b, a]) => {
+                let alpha = f32::from(a) / 255.0;
+                [
+                    f32::from(r) * alpha,
+                    f32::from(g) * alpha,
+                    f32::from(b) * alpha,
+                    alpha,
+                ]
+            }
+            _ => [0.0; 4],
+        }
     }
 
-    if additions.shared_only {
-        doc.layers.retain(|layer| !crate::is_page_group(layer));
+    /// The average over the area (x0, y0, x1, y1), and whether anything in it is drawn at all.
+    fn average(&self, (x0, y0, x1, y1): (f32, f32, f32, f32)) -> ([f32; 4], bool) {
+        let mut sum = [0.0_f32; 4];
+        let mut weight = 0.0_f32;
+        let mut faint = false;
+        let rows = (y0.floor() as usize)..(y1.ceil() as usize).max(1).min(self.height);
+        for y in rows {
+            let wy = (y1.min(y as f32 + 1.0) - y0.max(y as f32)).max(0.0);
+            for x in (x0.floor() as usize)..(x1.ceil() as usize).max(1).min(self.width) {
+                let w = (x1.min(x as f32 + 1.0) - x0.max(x as f32)).max(0.0) * wy;
+                let p = self.at(x, y);
+                faint |= p[3] > 0.0;
+                for (s, v) in sum.iter_mut().zip(p) {
+                    *s += v * w;
+                }
+                weight += w;
+            }
+        }
+        if weight > 0.0 {
+            for s in &mut sum {
+                *s /= weight;
+            }
+        }
+        (sum, faint)
     }
-    // The page group the additions go into, by its place among the top level's layers.
-    let page = additions
-        .page
-        .filter(|page| *page >= 1 && !additions.shared_only)
-        .and_then(|page| {
-            doc.layers
-                .iter()
-                .enumerate()
-                .filter(|(_, layer)| crate::is_page_group(layer))
-                .nth(page - 1)
-                .map(|(index, _)| index)
-        });
-    let target: &mut Vec<Layer> = &mut doc.layers;
-    match page.and_then(|index| target.get_mut(index)) {
-        Some(Layer {
-            content: LayerContent::Group(group),
-            ..
-        }) => lay_over(&mut group.children, &mut top, buttons),
-        _ => lay_over(target, &mut top, buttons),
+
+    /// Bilinear between the four source pixels around the area's centre, and whether the nearest is drawn.
+    fn bilinear(&self, (x0, y0, x1, y1): (f32, f32, f32, f32)) -> ([f32; 4], bool) {
+        let cx = ((x0 + x1) / 2.0 - 0.5).max(0.0);
+        let cy = ((y0 + y1) / 2.0 - 0.5).max(0.0);
+        let (xa, ya) = (cx.floor() as usize, cy.floor() as usize);
+        let (fx, fy) = (cx - xa as f32, cy - ya as f32);
+        let mut sum = [0.0_f32; 4];
+        for (x, y, w) in [
+            (xa, ya, (1.0 - fx) * (1.0 - fy)),
+            (xa + 1, ya, fx * (1.0 - fy)),
+            (xa, ya + 1, (1.0 - fx) * fy),
+            (xa + 1, ya + 1, fx * fy),
+        ] {
+            for (s, v) in sum.iter_mut().zip(self.at(x, y)) {
+                *s += v * w;
+            }
+        }
+        let faint = self.at(cx.round() as usize, cy.round() as usize)[3] > 0.0;
+        (sum, faint)
     }
-    save(&doc, path)?;
-    Ok(true)
 }
 
 /// Lays `buttons` (id, name, layers for its set, the whole set) into their sets in `layers` (a page's), the sets
@@ -887,6 +1089,192 @@ mod tests {
         Ok(())
     }
 
+    /// M6.402 (Encore, docs/encore-behavior.md 9.18): over a motion video, a menu PSD's shared picture leaves out its
+    /// bottom layer, whatever its name or size (the video takes its place); the layers over it and the pages stay.
+    #[test]
+    fn over_a_video_the_bottom_layer_is_left_out() -> Result<(), Box<dyn Error>> {
+        use crate::{load_menu_pages, load_menu_pages_over_video};
+        let dir = std::env::temp_dir().join(format!("disccraft-psd-video-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("menu.psd");
+        let (w, h) = (8_usize, 4_usize);
+        // A layer of `colour` over columns x0..x1.
+        let columns = |name: &str, x0: usize, x1: usize, colour: [u8; 4]| {
+            let mut rgba = vec![0u8; w * h * 4];
+            for (index, pixel) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                if (x0..x1).contains(&(index % w)) {
+                    *pixel = colour;
+                }
+            }
+            PsdLayer::Raster {
+                name: name.to_owned(),
+                rgba,
+                visible: true,
+            }
+        };
+        write_layered_psd(
+            &path,
+            8,
+            4,
+            &[
+                // A bottom layer that is not called Background and covers part of the canvas.
+                columns("Dot", 0, 2, [255, 0, 0, 255]),
+                columns("Sky", 2, 5, [0, 0, 255, 255]),
+                PsdLayer::Group {
+                    name: "(+) Play".to_owned(),
+                    id: None,
+                    children: vec![columns("art", 6, 8, [255, 255, 255, 255])],
+                },
+            ],
+        )?;
+        let alpha = |image: &crate::Image8, x: usize| image.rgba.get(x * 4 + 3).copied();
+        let still = load_menu_pages(&path)?;
+        assert_eq!(
+            (alpha(&still.shared, 0), alpha(&still.shared, 3)),
+            (Some(255), Some(255))
+        );
+        let moving = load_menu_pages_over_video(&path)?;
+        assert_eq!(
+            (alpha(&moving.shared, 0), alpha(&moving.shared, 3)),
+            (Some(0), Some(255))
+        );
+        assert_eq!(moving.pages, still.pages);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M6.405: a layer set's layers come out one by one, each cropped to what it draws and where it is; a hidden one
+    /// and one that draws nothing stay out.
+    #[test]
+    fn a_layer_sets_layers_come_out_one_by_one() -> Result<(), Box<dyn Error>> {
+        use crate::psd_pieces;
+        let dir = std::env::temp_dir().join(format!("disccraft-psd-pieces-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let (w, h) = (16_usize, 12_usize);
+        let block = |x0: usize, y0: usize, x1: usize, y1: usize, visible: bool, name: &str| {
+            let mut rgba = vec![0u8; w * h * 4];
+            for (index, pixel) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let (x, y) = (index % w, index / w);
+                if (x0..x1).contains(&x) && (y0..y1).contains(&y) {
+                    *pixel = [10, 200, 30, 255];
+                }
+            }
+            PsdLayer::Raster {
+                name: name.to_owned(),
+                rgba,
+                visible,
+            }
+        };
+        let path = dir.join("set.psd");
+        write_layered_psd(
+            &path,
+            16,
+            12,
+            &[PsdLayer::Group {
+                name: "Deco".to_owned(),
+                id: None,
+                children: vec![
+                    block(0, 8, 16, 10, true, "bar"),
+                    block(2, 2, 5, 5, true, "dot"),
+                    block(8, 2, 10, 4, false, "hidden"),
+                    block(0, 0, 0, 0, true, "empty"),
+                ],
+            }],
+        )?;
+        let (size, pieces) = psd_pieces(&path)?;
+        assert_eq!(size, (16, 12));
+        let found: Vec<(&str, u32, u32, u32, u32)> = pieces
+            .iter()
+            .map(|piece| {
+                (
+                    piece.name.as_str(),
+                    piece.x,
+                    piece.y,
+                    piece.image.width,
+                    piece.image.height,
+                )
+            })
+            .collect();
+        assert_eq!(found, [("bar", 0, 8, 16, 2), ("dot", 2, 2, 3, 3)]);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M6.403 (Encore's Library ▸ Add Item…, docs/encore-behavior.md 9.18): a file's Library kind by its contents.
+    #[test]
+    fn a_files_library_kind_is_told_by_its_contents() -> Result<(), Box<dyn Error>> {
+        use crate::{LibraryFileKind, library_file_kind};
+        let dir = std::env::temp_dir().join(format!("disccraft-psd-kinds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let raster = |name: &str| PsdLayer::Raster {
+            name: name.to_owned(),
+            rgba: solid(16, 12, [200, 100, 50, 255]),
+            visible: true,
+        };
+        let group = |name: &str, children: Vec<PsdLayer>| PsdLayer::Group {
+            name: name.to_owned(),
+            id: None,
+            children,
+        };
+        let button = |name: &str| group(&format!("(+) {name}"), vec![raster("art")]);
+        let cases: Vec<(&str, Vec<PsdLayer>, LibraryFileKind)> = vec![
+            (
+                "pages",
+                vec![
+                    raster("Background"),
+                    button("Play"),
+                    group("(#) Page 1", vec![button("Back")]),
+                ],
+                LibraryFileKind::Menu,
+            ),
+            (
+                "two",
+                vec![raster("Background"), button("One"), button("Two")],
+                LibraryFileKind::Menu,
+            ),
+            // A background and one button: a menu, whatever its size.
+            (
+                "one",
+                vec![raster("Background"), button("Only")],
+                LibraryFileKind::Menu,
+            ),
+            ("button", vec![button("Btn")], LibraryFileKind::Button),
+            ("plain", vec![raster("Layer 1")], LibraryFileKind::Image),
+            (
+                "decorated",
+                vec![raster("Background"), group("Deco", vec![raster("bar")])],
+                LibraryFileKind::Image,
+            ),
+            (
+                "set",
+                vec![group("Deco", vec![raster("bar"), raster("dot")])],
+                LibraryFileKind::LayerSet,
+            ),
+            (
+                "replacement",
+                vec![raster("(!) Photo")],
+                LibraryFileKind::Replacement,
+            ),
+            (
+                "two layers",
+                vec![raster("a"), raster("b")],
+                LibraryFileKind::Image,
+            ),
+        ];
+        for (name, layers, kind) in cases {
+            let path = dir.join(format!("{name}.psd"));
+            write_layered_psd(&path, 16, 12, &layers)?;
+            assert_eq!(library_file_kind(&path)?, kind, "{name}");
+        }
+        // Any other file is a picture (it is not read).
+        assert_eq!(
+            library_file_kind(&dir.join("photo.png"))?,
+            LibraryFileKind::Image
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
     /// M10.49: a button set's PSD layer id is written and read back, so a menu knows the set again after the PSD is
     /// edited (Photoshop keeps the id while the set is moved or renamed).
     #[test]
@@ -1038,8 +1426,9 @@ mod tests {
     }
 
     /// M6.399: written over a PSD with pages, the additions go into the page's `(#)` group (a button's new text
-    /// into its set there, a button without one as a new set) and every layer of the PSD stays; a page that shows
-    /// only the shared layers leaves the page groups out; a canvas of another size writes nothing.
+    /// into its set there, a button without one as a new set) and every layer of the PSD stays. M6.401: a page the
+    /// PSD has no group for becomes a new `(#)` group over the others; a canvas of another size keeps its size and
+    /// layers, the additions scaled to it (it was flattened into the frame).
     #[test]
     fn additions_go_over_their_page_of_the_psd() -> Result<(), Box<dyn Error>> {
         use super::{PsdAdditions, PsdButtonAddition, write_psd_over};
@@ -1078,8 +1467,7 @@ mod tests {
             ],
         )?;
         let additions = PsdAdditions {
-            page: Some(2),
-            shared_only: false,
+            page: 2,
             layers: vec![raster("added text")],
             buttons: vec![
                 PsdButtonAddition {
@@ -1097,7 +1485,7 @@ mod tests {
             ],
         };
         let out = dir.join("out.psd");
-        assert!(write_psd_over(&source, &out, (32, 24), &additions)?);
+        write_psd_over(&source, &out, (32, 24), std::slice::from_ref(&additions))?;
         let tree = psd_layer_tree(&out)?;
         let names = |nodes: &[crate::PsdTreeNode]| -> Vec<String> {
             nodes.iter().map(|node| node.name.clone()).collect()
@@ -1111,23 +1499,96 @@ mod tests {
         let back = two.children.last().ok_or("Back set")?;
         assert_eq!(names(&back.children), ["Back again", "Back"]);
 
-        // A page added later: the shared layers only, the additions at the top level.
-        let shared = PsdAdditions {
-            page: None,
-            shared_only: true,
-            layers: vec![raster("added text")],
+        // A page added later (the PSD has two page groups): a new group over them, with its sets.
+        let added = PsdAdditions {
+            page: 3,
+            layers: Vec::new(),
+            buttons: vec![PsdButtonAddition {
+                id: None,
+                name: "More".to_owned(),
+                into: Vec::new(),
+                set: set("More"),
+            }],
+        };
+        write_psd_over(&source, &out, (32, 24), &[additions.clone(), added])?;
+        let tree = psd_layer_tree(&out)?;
+        assert_eq!(
+            names(&tree),
+            ["(#) ページ 3", "(#) Two", "(#) One", "(+) Play", "背景"]
+        );
+        assert_eq!(tree.first().map(|page| page.page), Some(Some(3)));
+        assert_eq!(
+            tree.first().map(|page| names(&page.children)),
+            Some(vec!["(+) More".to_owned()])
+        );
+
+        // Drawn on a frame of another size (a 1920x1080 PSD in a 720x576 project): the PSD keeps its size and
+        // layers, the additions scaled to it.
+        let half = PsdAdditions {
+            page: 0,
+            layers: vec![PsdLayer::Raster {
+                name: "added".to_owned(),
+                rgba: {
+                    // A 16x12 frame, its left half drawn.
+                    let mut rgba = vec![0u8; 16 * 12 * 4];
+                    for (index, pixel) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                        if index % 16 < 8 {
+                            pixel.copy_from_slice(&[255, 0, 0, 255]);
+                        }
+                    }
+                    rgba
+                },
+                visible: true,
+            }],
             buttons: Vec::new(),
         };
-        assert!(write_psd_over(&source, &out, (32, 24), &shared)?);
-        assert_eq!(
-            names(&psd_layer_tree(&out)?),
-            ["added text", "(+) Play", "背景"]
-        );
-        // Another canvas size: nothing written.
         let other = dir.join("other.psd");
-        assert!(!write_psd_over(&source, &other, (64, 48), &shared)?);
-        assert!(!other.exists());
+        write_psd_over(&source, &other, (16, 12), &[half])?;
+        let tree = psd_layer_tree(&other)?;
+        assert_eq!(
+            names(&tree),
+            ["added", "(#) Two", "(#) One", "(+) Play", "背景"]
+        );
+        // Red over the white layers on the left half of the 32x24 canvas.
+        let image = load_image(&other)?;
+        assert_eq!((image.width, image.height), (32, 24));
+        let at = |x: usize, y: usize| {
+            let i = (y * w + x) * 4;
+            image.rgba.get(i..i + 3).map(<[u8]>::to_vec)
+        };
+        assert_eq!(
+            (at(2, 5), at(12, 20)),
+            (Some(vec![255, 0, 0]), Some(vec![255, 0, 0]))
+        );
+        assert_eq!(
+            (at(17, 5), at(30, 20)),
+            (Some(vec![255, 255, 255]), Some(vec![255, 255, 255]))
+        );
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
+    }
+
+    /// M6.401: scaled up, a layer keeps its faint corner marks (alpha 1); scaled down, an area of faint pixels
+    /// keeps alpha 1 at least.
+    #[test]
+    fn scaled_layers_keep_their_faint_marks() {
+        // A 4x4 canvas with one faint pixel at the top left.
+        let mut rgba = vec![0u8; 4 * 4 * 4];
+        if let Some(alpha) = rgba.get_mut(3) {
+            *alpha = 1;
+        }
+        let grown = super::resample_rgba(&rgba, (4, 4), (8, 8));
+        assert_eq!(grown.get(3), Some(&1));
+        assert!(
+            grown
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .skip(2)
+                .all(|pixel| pixel[3] <= 1)
+        );
+        let shrunk = super::resample_rgba(&rgba, (4, 4), (2, 2));
+        assert_eq!(shrunk.get(3), Some(&1));
+        assert_eq!(shrunk.get(7), Some(&0));
     }
 }

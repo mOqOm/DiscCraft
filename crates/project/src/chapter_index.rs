@@ -704,6 +704,69 @@ mod tests {
         Ok(())
     }
 
+    /// M6.404 (GitHub issue #13): the Library's multi-page presets are chapter index templates of pages: six chapter
+    /// buttons, Previous, Main Menu and Next; eight chapters make two pages linked to each other.
+    #[test]
+    fn the_multi_page_presets_make_chapter_index_pages() -> Result<(), Box<dyn Error>> {
+        use crate::menu::ButtonKind;
+        for preset in ["menu.chapter-pages", "menu.scene-pages"] {
+            let (mut project, timeline) = project_with_chapters(8)?;
+            let menu = project.add_menu_from_preset(preset, None, &[])?;
+            if let Some(first) = project
+                .menu_mut(menu)
+                .and_then(|menu| menu.buttons.first_mut())
+            {
+                first.link = Link::Timeline {
+                    id: timeline,
+                    chapter: 0,
+                };
+            }
+            let pages = project
+                .fill_chapter_index_pages(menu)
+                .map_err(|error| format!("{preset}: {error:?}"))?;
+            assert_eq!(pages.len(), 2, "{preset}");
+            let shape = |page: MenuId| -> Vec<(ButtonKind, Link)> {
+                project
+                    .menu(page)
+                    .map(|menu| {
+                        menu.buttons
+                            .iter()
+                            .map(|button| (button.kind, button.link.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let chapter = |chapter: u32| {
+                (
+                    ButtonKind::Chapter,
+                    Link::Timeline {
+                        id: timeline,
+                        chapter,
+                    },
+                )
+            };
+            let page = |index: usize| Link::Menu {
+                id: pages[index],
+                button: None,
+            };
+            let mut first: Vec<(ButtonKind, Link)> = (0..6).map(chapter).collect();
+            first.push((ButtonKind::Main, Link::NotSet));
+            first.push((ButtonKind::Next, page(1)));
+            assert_eq!(shape(pages[0]), first, "{preset}");
+            assert_eq!(
+                shape(pages[1]),
+                vec![
+                    chapter(6),
+                    chapter(7),
+                    (ButtonKind::Previous, page(0)),
+                    (ButtonKind::Main, Link::NotSet),
+                ],
+                "{preset}"
+            );
+        }
+        Ok(())
+    }
+
     /// M6.255: a template menu with fewer chapter buttons than chapters becomes pages, as Encore's Create
     /// Multi-Page Chapter Index makes them.
     #[test]

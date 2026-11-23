@@ -165,6 +165,34 @@ impl Project {
 
     /// The name of the first object that uses asset `id`, if any.
     pub fn asset_user(&self, id: AssetId) -> Option<String> {
+        self.asset_use(id, true)
+    }
+
+    /// Mark as a menu's own file ([`crate::Asset::menu_file`], M6.399) every layered document (PSD, PSB, PhotoCraft)
+    /// that menus use as their background and nothing else uses: a menu imported from a PSD or edited in an image
+    /// editor before M6.399 had it listed among the assets (M6.400). A project opened from its file gets this.
+    pub fn mark_menu_files(&mut self) {
+        let documents: Vec<AssetId> = self
+            .assets
+            .values()
+            .filter(|asset| !asset.menu_file && is_layered_document(&asset.path))
+            .map(|asset| asset.id)
+            .filter(|id| {
+                self.menus
+                    .values()
+                    .any(|menu| menu.background.document() == Some(*id))
+                    && self.asset_use(*id, false).is_none()
+            })
+            .collect();
+        for id in documents {
+            if let Some(asset) = self.assets.get_mut(&id) {
+                asset.menu_file = true;
+            }
+        }
+    }
+
+    /// [`Project::asset_user`]; `backgrounds`: also as a menu's still background.
+    fn asset_use(&self, id: AssetId, backgrounds: bool) -> Option<String> {
         for timeline in self.timelines.values() {
             let uses = timeline.videos().contains(&id)
                 || timeline
@@ -179,8 +207,10 @@ impl Project {
         for menu in self.menus.values() {
             let uses = menu.audio == Some(id)
                 || match &menu.background {
-                    MenuBackground::Image { asset } | MenuBackground::Video { asset, .. } => {
-                        *asset == id
+                    MenuBackground::Image { asset } => backgrounds && *asset == id,
+                    // The layers over the video count as the background (M6.402).
+                    MenuBackground::Video { asset, layers, .. } => {
+                        *asset == id || (backgrounds && *layers == Some(id))
                     }
                     MenuBackground::Color { .. } => false,
                 }
@@ -252,6 +282,18 @@ impl Project {
             }
         }
     }
+}
+
+/// Whether `path` names a layered document a menu can be made from (a PSD, PSB or PhotoCraft file).
+fn is_layered_document(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            ["psd", "psb", "pcraft"]
+                .iter()
+                .any(|known| ext.eq_ignore_ascii_case(known))
+        })
 }
 
 #[cfg(test)]
@@ -360,5 +402,58 @@ mod tests {
         assert!(project.remove_timeline(TimelineId(9)).is_err());
         assert!(project.remove_slideshow(9).is_err());
         assert!(project.remove_playlist(9).is_err());
+    }
+
+    /// M6.400: a project from before M6.399 listed a menu's PSD among its assets; opened from its file, the PSDs
+    /// that only menus' backgrounds use are marked as the menus' own files (not listed), and a PSD something else
+    /// uses, a picture that is no layered document and an unused PSD stay as they were.
+    #[test]
+    fn opening_an_old_project_marks_its_menus_psds() -> Result<(), Box<dyn Error>> {
+        use crate::graphic::{GraphicKind, MenuGraphic};
+        use crate::menu::{MenuBackground, Rect};
+        let dir = std::env::temp_dir().join(format!("disccraft-menu-files-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let mut project = Project::default();
+        let menu_psd = project.add_asset(&dir.join("Main.psd"))?;
+        let shared_psd = project.add_asset(&dir.join("Shared.PSD"))?;
+        let png = project.add_asset(&dir.join("Back.png"))?;
+        let unused = project.add_asset(&dir.join("Unused.psd"))?;
+        for (asset, graphic) in [
+            (menu_psd, None),
+            (shared_psd, Some(shared_psd)),
+            (png, None),
+        ] {
+            let id = project.add_menu(None)?;
+            let menu = project.menu_mut(id).ok_or("menu")?;
+            menu.background = MenuBackground::Image { asset };
+            if let Some(asset) = graphic {
+                menu.graphics.push(MenuGraphic {
+                    rect: Rect {
+                        x: 0,
+                        y: 0,
+                        w: 10,
+                        h: 10,
+                    },
+                    kind: GraphicKind::Image { asset },
+                    opacity: 100,
+                    shadow: None,
+                    orientation: Default::default(),
+                    hidden: false,
+                    locked: false,
+                    replacement: false,
+                    effects: Default::default(),
+                });
+            }
+        }
+        let path = dir.join("old.dcproj");
+        crate::io::save(&project, &path)?;
+        let opened = crate::io::load(&path)?;
+        let _ = std::fs::remove_dir_all(&dir);
+        let marked = |id| opened.assets.get(&id).map(|asset| asset.menu_file);
+        assert_eq!(marked(menu_psd), Some(true));
+        assert_eq!(marked(shared_psd), Some(false));
+        assert_eq!(marked(png), Some(false));
+        assert_eq!(marked(unused), Some(false));
+        Ok(())
     }
 }

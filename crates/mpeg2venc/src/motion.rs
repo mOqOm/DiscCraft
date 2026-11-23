@@ -87,6 +87,11 @@ fn sad_rows(
     dx: i32,
     dy: i32,
 ) -> u32 {
+    // The usual case (a search window keeps the displaced block inside the picture): rows compared as slices, which
+    // the compiler turns into vector instructions. Edges clamp their samples, sample by sample.
+    if let Some(sum) = sad_inside(cur, reference, (mbx, mby, rows), dx, dy) {
+        return sum;
+    }
     let mut sum = 0u32;
 
     for row in 0..rows {
@@ -108,6 +113,39 @@ fn sad_rows(
     }
 
     sum
+}
+
+/// [`sad_rows`] when the block and its displaced place both lie inside their pictures; `None` otherwise.
+fn sad_inside(
+    cur: &Frame420,
+    reference: &Frame420,
+    (mbx, mby, rows): (usize, usize, usize),
+    dx: i32,
+    dy: i32,
+) -> Option<u32> {
+    let (width, ref_width) = (usize::from(cur.width), usize::from(reference.width));
+    let ref_x = usize::try_from(i64::try_from(mbx).ok()?.checked_add(i64::from(dx))?).ok()?;
+    let ref_y = usize::try_from(i64::try_from(mby).ok()?.checked_add(i64::from(dy))?).ok()?;
+    if mbx + 16 > width
+        || mby + rows > usize::from(cur.height)
+        || ref_x + 16 > ref_width
+        || ref_y + rows > usize::from(reference.height)
+    {
+        return None;
+    }
+    let mut sum = 0u32;
+    for row in 0..rows {
+        let at = (mby + row) * width + mbx;
+        let ref_at = (ref_y + row) * ref_width + ref_x;
+        let a: &[u8; 16] = cur.y.get(at..at + 16)?.try_into().ok()?;
+        let b: &[u8; 16] = reference.y.get(ref_at..ref_at + 16)?.try_into().ok()?;
+        sum += a
+            .iter()
+            .zip(b)
+            .map(|(x, y)| u32::from(x.abs_diff(*y)))
+            .sum::<u32>();
+    }
+    Some(sum)
 }
 
 /// Search window for one macroblock, clipped to the reference frame.
@@ -617,6 +655,29 @@ pub(crate) fn predict_field(
 
 /// Intra cost of a 16x16 luma block: sum of absolute deviations from the block mean.
 pub(crate) fn intra_cost(cur: &Frame420, mbx: usize, mby: usize) -> u32 {
+    // A macroblock inside the picture (always, for the encoder's frames): its rows as slices.
+    let width = usize::from(cur.width);
+    if mbx + 16 <= width && mby + 16 <= usize::from(cur.height) {
+        let rows: Option<Vec<&[u8]>> = (0..16)
+            .map(|row| {
+                let at = (mby + row) * width + mbx;
+                cur.y.get(at..at + 16)
+            })
+            .collect();
+        if let Some(rows) = rows {
+            let sum: u32 = rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .map(|&v| u32::from(v))
+                .sum();
+            let mean = sum / 256;
+            return rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .map(|&v| u32::from(v).abs_diff(mean))
+                .sum();
+        }
+    }
     let mut sum = 0u32;
 
     for row in 0..16 {
@@ -660,6 +721,52 @@ mod tests {
             y: vec![0u8; w * h],
             cb: vec![0u8; cw * ch],
             cr: vec![0u8; cw * ch],
+        }
+    }
+
+    /// A picture of varied samples (a fixed pseudo-random pattern).
+    fn varied_frame(width: u16, height: u16, seed: u32) -> Frame420 {
+        let mut frame = blank_frame(width, height);
+        let mut state = seed;
+        for sample in &mut frame.y {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            *sample = (state >> 16) as u8;
+        }
+        frame
+    }
+
+    #[test]
+    fn the_sad_of_rows_inside_the_picture_is_the_sad_sample_by_sample() {
+        // M6.414: rows inside both pictures are compared as slices; the answer is the clamped one's, for blocks of
+        // 16 and 8 rows, inside the pictures, at their edges and past them.
+        let (cur, reference) = (varied_frame(64, 48, 1), varied_frame(64, 48, 2));
+        for rows in [16usize, 8] {
+            for (mbx, mby) in [(0usize, 0usize), (16, 16), (48, 48 - rows), (32, 8)] {
+                for dy in -20..=20 {
+                    for dx in -20..=20 {
+                        let mut slow = 0u32;
+                        for row in 0..rows {
+                            for col in 0..16 {
+                                let (x, y) = ((mbx + col) as i32, (mby + row) as i32);
+                                let a = super::sample_y(&cur, x, y);
+                                let b = super::sample_y(&reference, x + dx, y + dy);
+                                slow += u32::from(a.abs_diff(b));
+                            }
+                        }
+                        let fast = super::sad_rows(&cur, &reference, (mbx, mby, rows), dx, dy);
+                        assert_eq!(fast, slow, "({mbx}, {mby}) {rows} rows by ({dx}, {dy})");
+                    }
+                }
+            }
+            let intra_slow = {
+                let samples: Vec<u32> = (0..16)
+                    .flat_map(|row| (0..16).map(move |col| (row, col)))
+                    .map(|(row, col)| u32::from(super::sample_y(&cur, 16 + col, 16 + row)))
+                    .collect();
+                let mean = samples.iter().sum::<u32>() / 256;
+                samples.iter().map(|v| v.abs_diff(mean)).sum::<u32>()
+            };
+            assert_eq!(super::intra_cost(&cur, 16, 16), intra_slow);
         }
     }
 

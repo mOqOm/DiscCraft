@@ -72,6 +72,7 @@ fn project(video: &Path, audio: &Path) -> Project {
     p.timeline_mut(t).unwrap().audio.push(AudioTrack {
         more: Vec::new(),
         asset: a,
+        stream: 0,
         language: "ja".to_string(),
         start: 0,
         trim_start: 0,
@@ -338,6 +339,7 @@ fn a_motion_menu_becomes_a_clip_that_loops_with_its_sound() {
     m.background = MenuBackground::Video {
         asset: v,
         seconds: 2,
+        layers: None,
     };
     m.audio = Some(song);
     m.loop_point = Some(Tick(TICKS_PER_SECOND));

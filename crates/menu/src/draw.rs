@@ -99,6 +99,33 @@ pub(crate) fn draw_psd_page(
     Ok(())
 }
 
+/// Draws a pop-up menu made from a PSD without pages over the picture it is given in place of its background
+/// (M6.407): the top level's button sets, as the PSD's page 0. On a Blu-ray disc the title plays under a pop-up, and
+/// Encore shows of a pop-up only its button sets and its pages' groups, never the layers outside them, the
+/// Background among them (docs/encore-behavior.md 9.20). A pop-up shown by page is [`draw_psd_page`]'s; nothing for
+/// any other menu.
+pub(crate) fn draw_popup_buttons(
+    project: &Project,
+    menu: &Menu,
+    width: u16,
+    height: u16,
+    rgb: &mut [u8],
+) -> Result<(), MenuError> {
+    if !menu.popup
+        || menu.psd_page.is_some()
+        || !matches!(menu.background, MenuBackground::Image { .. })
+    {
+        return Ok(());
+    }
+    let Some(pages) = document_pages(project, menu)? else {
+        return Ok(());
+    };
+    if let Some(buttons) = pages.pages.first() {
+        blend_scaled(&rgba_source(buttons.clone())?, width, height, rgb);
+    }
+    Ok(())
+}
+
 /// Where the menu's page of its PSD background draws (M10.27), in the frame: the bounds of what the page's own
 /// layers cover, as [`draw_psd_page`] stretches them; `None` when it draws nothing.
 pub(crate) fn psd_page_rect(
@@ -146,36 +173,80 @@ pub(crate) fn psd_page_rect(
     })
 }
 
-/// The pictures by page of the menu's PSD background (M10.27), when the menu names a page and its background is a
-/// Whether `menu` is made from a layered document (its background a PSD or PhotoCraft document): its buttons are
-/// pictures of that document, highlighted only by their own subpicture layers.
+/// Whether `menu` is made from a layered document (its background a PSD or PhotoCraft document, or the layers over
+/// its motion video, M6.402): its buttons are pictures of that document, highlighted only by their own subpicture
+/// layers.
 pub(crate) fn is_document_menu(project: &Project, menu: &Menu) -> bool {
-    let MenuBackground::Image { asset } = &menu.background else {
+    let Some(asset) = menu.background.document() else {
         return false;
     };
     project
         .assets
-        .get(asset)
+        .get(&asset)
         .is_some_and(|asset| disccraft_photo::is_document(Path::new(&asset.path)))
 }
 
-/// layered document; kept for the last few files (a menu is drawn again and again as it is edited).
+/// Draws over a motion menu's video frame the layers of the PSD it was made from (M6.402): the PSD without its
+/// bottom layer, which the video takes the place of, as Encore draws it; by page, the layers the pages share (the
+/// page's own are [`draw_psd_page`]'s). Nothing for a menu without such layers.
+pub(crate) fn draw_motion_layers(
+    project: &Project,
+    menu: &Menu,
+    width: u16,
+    height: u16,
+    rgb: &mut [u8],
+) -> Result<(), MenuError> {
+    if !matches!(
+        menu.background,
+        MenuBackground::Video {
+            layers: Some(_),
+            ..
+        }
+    ) {
+        return Ok(());
+    }
+    let Some(pages) = document_pages(project, menu)? else {
+        return Ok(());
+    };
+    blend_scaled(&rgba_source(pages.shared.clone())?, width, height, rgb);
+    // Shown whole: its buttons too.
+    if menu.psd_page.is_none()
+        && let Some(first) = pages.pages.first()
+    {
+        blend_scaled(&rgba_source(first.clone())?, width, height, rgb);
+    }
+    Ok(())
+}
+
+/// The pictures by page of the menu's PSD background (M10.27), when the menu names a page and its background is a
+/// layered document.
 fn psd_pages(
     project: &Project,
     menu: &Menu,
 ) -> Result<Option<Arc<disccraft_photo::PsdPages>>, MenuError> {
-    type Kept = Vec<(
-        (std::path::PathBuf, u64, Option<std::time::SystemTime>),
-        Arc<disccraft_photo::PsdPages>,
-    )>;
-    static KEPT: std::sync::Mutex<Kept> = std::sync::Mutex::new(Vec::new());
     if menu.psd_page.is_none() {
         return Ok(None);
     }
-    let MenuBackground::Image { asset } = &menu.background else {
+    document_pages(project, menu)
+}
+
+/// The pictures by page of the menu's layered document (a PSD background, or the layers over a motion video without
+/// their bottom layer, M6.402); kept for the last few files (a menu is drawn again and again as it is edited, and a
+/// motion menu frame by frame).
+fn document_pages(
+    project: &Project,
+    menu: &Menu,
+) -> Result<Option<Arc<disccraft_photo::PsdPages>>, MenuError> {
+    type Kept = Vec<(
+        (std::path::PathBuf, u64, Option<std::time::SystemTime>, bool),
+        Arc<disccraft_photo::PsdPages>,
+    )>;
+    static KEPT: std::sync::Mutex<Kept> = std::sync::Mutex::new(Vec::new());
+    let Some(asset) = menu.background.document() else {
         return Ok(None);
     };
-    let Some(asset) = project.assets.get(asset) else {
+    let over_video = matches!(menu.background, MenuBackground::Video { .. });
+    let Some(asset) = project.assets.get(&asset) else {
         return Ok(None);
     };
     let path = Path::new(&asset.path);
@@ -187,18 +258,21 @@ fn psd_pages(
         path.to_path_buf(),
         metadata.as_ref().map_or(0, std::fs::Metadata::len),
         metadata.and_then(|metadata| metadata.modified().ok()),
+        over_video,
     );
     if let Ok(kept) = KEPT.lock()
         && let Some((_, pages)) = kept.iter().find(|(known, _)| *known == key)
     {
         return Ok(Some(Arc::clone(pages)));
     }
-    let pages = Arc::new(
+    let loaded = if over_video {
+        disccraft_photo::load_menu_pages_over_video(path)
+    } else {
         disccraft_photo::load_menu_pages(path)
-            .map_err(|error| MenuError::Invalid(error.to_string()))?,
-    );
+    };
+    let pages = Arc::new(loaded.map_err(|error| MenuError::Invalid(error.to_string()))?);
     if let Ok(mut kept) = KEPT.lock() {
-        kept.retain(|(known, _)| known.0 != key.0);
+        kept.retain(|(known, _)| known.0 != key.0 || known.3 != key.3);
         kept.push((key, Arc::clone(&pages)));
         if kept.len() > 4 {
             let _ = kept.remove(0);

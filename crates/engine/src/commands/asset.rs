@@ -1,4 +1,4 @@
-use crate::params::{opt_str, req_str, req_u64};
+use crate::params::{opt_str, opt_u64, req_str, req_u64};
 use crate::{CommandResult, CommandSpec, Session};
 use disccraft_project::{AssetId, AssetKind};
 use serde_json::{Map, Number, Value};
@@ -204,7 +204,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "アセットのフレームを取り出す",
         menu: &["アセット"],
         shortcut: None,
-        params: r#"{"asset": id, "seconds": f64, "bright"?: bool, "bars"?: bool, "wait"?: bool (既定 true。false: まだ開いていなければ裏で開き {"pending": true} を返す)}"#,
+        params: r#"{"asset": id, "seconds": f64, "bright"?: bool, "bars"?: bool, "width"?: n, "height"?: n (帯を付ける枠), "wait"?: bool (既定 true。false: まだ開いていなければ裏で開き {"pending": true} を返す)}"#,
         enabled: always_enabled,
         run: run_frame,
         journal: false,
@@ -303,10 +303,17 @@ fn run_frame(session: &mut Session, params: &Value) -> CommandResult {
     } else {
         seconds
     };
-    let (width, height, rgb) = if bars {
-        reader.frame(seconds)
-    } else {
-        reader.picture(seconds)
+    // "width" and "height": the box the picture is letterboxed or pillarboxed into (M6.406: a 16:9 menu's
+    // background); else the 720 x 480 frame of a 4:3 screen.
+    let boxed = opt_u64(params, "width")?.zip(opt_u64(params, "height")?);
+    let (width, height, rgb) = match (bars, boxed) {
+        (true, Some((width, height))) => reader.frame_sized(
+            seconds,
+            u32::try_from(width).unwrap_or(u32::MAX),
+            u32::try_from(height).unwrap_or(u32::MAX),
+        ),
+        (true, None) => reader.frame(seconds),
+        (false, _) => reader.picture(seconds),
     }
     .map_err(|error| error.to_string())?;
     let (width, height, rgb) = downscale_rgb(width, height, &rgb, 3, FRAME_EDGE)
@@ -1129,6 +1136,12 @@ fn run_probe(session: &mut Session, params: &Value) -> CommandResult {
                 let _ = fields.insert("height".to_string(), Value::from(probe.height));
                 let _ = fields.insert("wide".to_string(), Value::from(probe.wide));
                 let _ = fields.insert("audio".to_string(), Value::from(probe.has_audio));
+                // How many sound streams the file has (M6.418: a track can play any of them).
+                if probe.has_audio {
+                    let streams =
+                        disccraft_transcode::audio_stream_count(&asset.media_file()).max(1);
+                    let _ = fields.insert("audioStreams".to_string(), Value::from(streams));
+                }
                 if let Some(fps) = Number::from_f64(probe.fps).filter(|_| probe.fps > 0.0) {
                     let _ = fields.insert("fps".to_string(), Value::Number(fps));
                 }

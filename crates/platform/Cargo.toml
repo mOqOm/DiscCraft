@@ -11,15 +11,20 @@ publish.workspace = true
 disccraft-transcode.workspace = true
 
 # M12.39: the hardware H.264 encoders through Media Foundation (Microsoft's own bindings, MIT OR Apache-2.0; the
-# workspace already has the crate through other dependencies).
+# workspace already has the crate through other dependencies). M9.35: disc writing through IMAPI2.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Media_MediaFoundation",
+    "Win32_Storage_Imapi",
     "Win32_System_Com",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
     "Win32_System_Ole",
     "Win32_System_Variant",
 ] }
+# M9.35: `windows::core::implement` (the image as an IStream for IMAPI2) names this crate directly.
+windows-core = "0.62"
 
 # The workspace's lints, but `unsafe_code` denied instead of forbidden: this crate alone calls foreign functions
 # (AGENTS.md rule 1), in modules that allow it, each `unsafe` with its `// SAFETY:`.

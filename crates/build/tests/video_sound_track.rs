@@ -94,6 +94,7 @@ fn the_videos_own_sound_as_audio_1_builds_like_the_implicit_soundtrack() {
             project.timeline_mut(t).unwrap().audio.push(AudioTrack {
                 more: Vec::new(),
                 asset: v,
+                stream: 0,
                 language: String::new(),
                 start: 0,
                 trim_start: 0,

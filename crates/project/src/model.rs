@@ -485,6 +485,8 @@ impl AssetKind {
             Some("mp4") | Some("mov") | Some("mkv") | Some("mxf") | Some("m2v") | Some("mpg")
             | Some("mpeg") | Some("vob") | Some("m2ts") | Some("ts") | Some("avi") | Some("m4v")
             | Some("webm") | Some("mts") | Some("m2t") | Some("m1v") | Some("mpv")
+            // Raw DV (M6.410).
+            | Some("dv") | Some("dif")
             // EffectCraft compositions are rendered to video.
             | Some("ecproj") => {
                 AssetKind::Video
@@ -900,6 +902,10 @@ pub struct AudioTrack {
     /// Language code.
     #[serde(default)]
     pub language: String,
+    /// Which sound stream of the file the track plays (M6.418): 0 the first; a file with several (the languages of
+    /// an MKV, a camcorder's second stereo pair) can give one track each.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub stream: u32,
     /// Where the sound starts on the timeline, in frames of the disc's standard rate (Encore: an audio clip moved
     /// along its track). The track is silent before it.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
@@ -946,6 +952,7 @@ impl AudioTrack {
         Self {
             asset,
             language: String::new(),
+            stream: 0,
             start: 0,
             trim_start: 0,
             trim_end: None,
