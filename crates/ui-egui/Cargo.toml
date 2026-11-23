@@ -13,6 +13,7 @@ disccraft-engine.workspace = true
 disccraft-platform.workspace = true
 disccraft-build.workspace = true
 disccraft-menu.workspace = true
+disccraft-photo.workspace = true
 disccraft-vm.workspace = true
 egui.workspace = true
 craft-ui.workspace = true

@@ -17,6 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tl.audio.push(AudioTrack {
             more: Vec::new(),
             asset: audio,
+            stream: 0,
             language: "ja".to_string(),
             start: 0,
             trim_start: 0,

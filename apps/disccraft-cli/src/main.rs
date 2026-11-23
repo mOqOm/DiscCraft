@@ -72,6 +72,31 @@ enum Sub {
         #[arg(long)]
         audio_language: Option<String>,
     },
+    /// List the disc recorders and the discs in them (M9.35)
+    Recorders,
+    /// Write a disc image (a DVD or Blu-ray ISO that `build --iso` makes) to the disc in a recorder (M9.35)
+    Burn {
+        image: PathBuf,
+        /// The recorder: its id or drive letter as `recorders` lists them (default: the first)
+        #[arg(long)]
+        recorder: Option<String>,
+        /// Write speed as a multiple of 1x (default: the fastest)
+        #[arg(long)]
+        speed: Option<f64>,
+        /// Erase (or write over) a rewritable disc with data on it
+        #[arg(long)]
+        erase: bool,
+        /// Do not read the disc back to compare it with the image after writing (M9.38)
+        #[arg(long)]
+        no_verify: bool,
+    },
+    /// Read the disc in a recorder back and compare it with a disc image, sector by sector (M9.38)
+    Verify {
+        image: PathBuf,
+        /// The recorder: its id or drive letter as `recorders` lists them (default: the first)
+        #[arg(long)]
+        recorder: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -125,7 +150,162 @@ fn run(cli: Cli) -> Result<(), String> {
                 (cache.as_deref(), audio_language.as_deref()),
             )
         }
+        Sub::Recorders => list_recorders(),
+        Sub::Burn {
+            image,
+            recorder,
+            speed,
+            erase,
+            no_verify,
+        } => burn_image(&image, recorder.as_deref(), speed, (erase, !no_verify)),
+        Sub::Verify { image, recorder } => verify_disc(&image, recorder.as_deref()),
     }
+}
+
+/// The recorder chosen by id or drive letter, else the first.
+fn find_recorder(wanted: Option<&str>) -> Result<disccraft_platform::burn::Recorder, String> {
+    use disccraft_platform::burn;
+    let recorders = burn::recorders().map_err(|error| error.to_string())?;
+    match wanted {
+        None => recorders.first(),
+        Some(wanted) => recorders.iter().find(|recorder| {
+            recorder.id == wanted
+                || recorder.drives.iter().any(|drive| {
+                    drive
+                        .trim_end_matches(['\\', ':'])
+                        .eq_ignore_ascii_case(wanted.trim_end_matches(['\\', ':']))
+                })
+        }),
+    }
+    .cloned()
+    .ok_or_else(|| "no such recorder (see `disccraft-cli recorders`)".to_string())
+}
+
+/// Reads the disc in the recorder back and compares it with `image` (M9.38), with the progress on standard error.
+fn verify_disc(image: &Path, wanted: Option<&str>) -> Result<(), String> {
+    use disccraft_platform::burn;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    let recorder = find_recorder(wanted)?;
+    let progress: Arc<dyn Fn(f32) + Send + Sync> = Arc::new(|fraction| {
+        use std::io::Write;
+        // `as` saturates; the fraction is within 0..=1.
+        let _ = write!(
+            std::io::stderr(),
+            "\rverifying {:3}%",
+            (fraction * 100.0).round() as u32
+        );
+    });
+    let result = burn::verify(
+        &recorder.id,
+        image,
+        progress,
+        Arc::new(AtomicBool::new(false)),
+    );
+    eprintln!();
+    result.map_err(|error| error.to_string())?;
+    println!("the disc in {} is the same as the image", recorder.label());
+    Ok(())
+}
+
+/// Prints each recorder (id, drive and name) and the disc in it.
+fn list_recorders() -> Result<(), String> {
+    use disccraft_platform::burn;
+    let recorders = burn::recorders().map_err(|error| error.to_string())?;
+    if recorders.is_empty() {
+        println!("no recorder found");
+    }
+    for recorder in &recorders {
+        println!("{}\t{}", recorder.id, recorder.label());
+        match burn::media(&recorder.id) {
+            Ok(None) => println!("\tno disc"),
+            Ok(Some(media)) => {
+                let speeds: Vec<String> = media
+                    .write_speeds
+                    .iter()
+                    .map(|speed| format!("{}x", media.kind.speed_factor(*speed)))
+                    .collect();
+                println!(
+                    "\t{}{}{}, {} of {} bytes free, speeds {}",
+                    media.kind.name(),
+                    if media.supported {
+                        ""
+                    } else {
+                        " (cannot be written)"
+                    },
+                    if media.blank { ", blank" } else { "" },
+                    media.free_bytes,
+                    media.total_bytes,
+                    speeds.join(" ")
+                );
+            }
+            Err(error) => println!("\t{error}"),
+        }
+    }
+    Ok(())
+}
+
+/// Writes `image` to the disc in the recorder chosen by id or drive letter (else the first), with the progress on
+/// standard error.
+fn burn_image(
+    image: &Path,
+    wanted: Option<&str>,
+    speed: Option<f64>,
+    (erase, verify): (bool, bool),
+) -> Result<(), String> {
+    use disccraft_platform::burn::{self, BurnRequest, BurnStep};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    let recorder = find_recorder(wanted)?;
+    // The speed asked for, as the nearest the disc offers.
+    let speed = match speed {
+        None => None,
+        Some(factor) => {
+            let media = burn::media(&recorder.id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "there is no disc in the recorder".to_string())?;
+            media.write_speeds.iter().copied().min_by(|a, b| {
+                let off = |speed: u32| (media.kind.speed_factor(speed) - factor).abs();
+                off(*a).total_cmp(&off(*b))
+            })
+        }
+    };
+    let request = BurnRequest {
+        image: image.to_path_buf(),
+        recorder: recorder.id.clone(),
+        speed,
+        erase_rewritable: erase,
+        eject: true,
+        verify,
+    };
+    let progress: Arc<dyn Fn(BurnStep, f32) + Send + Sync> = Arc::new(|step, fraction| {
+        use std::io::Write;
+        let what = match step {
+            BurnStep::Erasing => "erasing",
+            BurnStep::Writing => "writing",
+            BurnStep::Closing => "closing",
+            BurnStep::Verifying => "verifying",
+        };
+        // `as` saturates; the fraction is within 0..=1.
+        let _ = write!(
+            std::io::stderr(),
+            "\r{what} {:3}%",
+            (fraction * 100.0).round() as u32
+        );
+    });
+    burn::burn(&request, progress, Arc::new(AtomicBool::new(false)))
+        .map_err(|error| error.to_string())?;
+    eprintln!();
+    println!(
+        "written to {}{}",
+        recorder.label(),
+        if verify {
+            "; verified: the disc is the same as the image"
+        } else {
+            ""
+        }
+    );
+    Ok(())
 }
 
 fn list_commands(json: bool) -> Result<(), String> {

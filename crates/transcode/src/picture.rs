@@ -733,18 +733,22 @@ pub(crate) fn rgb_picture_at(
     Ok((geometry.width, geometry.height, picture))
 }
 
+/// Each of the first `frames` frames of `source` as the 720-wide frame of `standard`, letterboxed or pillarboxed for
+/// a 16:9 screen when `wide` (an anamorphic widescreen menu, M6.406: it was always for a 4:3 one) or a 4:3 one.
 pub(crate) fn for_each_rgb_frame(
     source: &Source,
     standard: Standard,
     frames: u64,
+    wide: bool,
     f: &mut dyn FnMut(u64, &[u8]) -> Result<(), String>,
 ) -> Result<(), TranscodeError> {
     let output_height = output_height(standard);
     let rate = frame_rate(standard);
+    let target = if wide { SIXTEEN_NINE } else { FOUR_THREE };
     for index in 0..frames {
         let time = rate.tick_of(frame_index_to_i64(index)?);
         let frame = source.video_frame(time)?;
-        let rgb = render_source_frame(&frame, output_height, FOUR_THREE)?;
+        let rgb = render_source_frame(&frame, output_height, target)?;
         f(index, &rgb).map_err(TranscodeError::Encode)?;
     }
     Ok(())

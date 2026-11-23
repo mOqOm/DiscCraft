@@ -50,6 +50,18 @@ fn transcodes_h264_aac_fixture() -> Result<(), Box<dyn Error>> {
     let (width, height, _) = reader.frame_sized(0.0, 100_000, 1)?;
     assert_eq!((width, height), (disccraft_transcode::MAX_FRAME_WIDTH, 16));
 
+    // M6.406: a motion menu's frames for a widescreen menu fill the anamorphic 720 x 480 frame (its first row is
+    // picture); for a 4:3 menu they are letterboxed (a black first row).
+    for (wide, filled) in [(true, true), (false, false)] {
+        let mut first = Vec::new();
+        disccraft_transcode::for_each_frame(&input, Standard::Ntsc, 1, wide, &mut |_, rgb| {
+            first = rgb.to_vec();
+            Ok(())
+        })?;
+        assert_eq!(first.len(), 720 * 480 * 3);
+        assert_eq!(first[..720 * 3].iter().any(|value| *value > 16), filled);
+    }
+
     let result = run_transcode(&input, &dir);
     let _ = fs::remove_dir_all(&dir);
     result

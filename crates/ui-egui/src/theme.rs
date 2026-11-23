@@ -418,6 +418,21 @@ impl TableFill {
     }
 }
 
+/// ダイアログの本体: ウィンドウの高さから `reserved`（見出しとボタンの行の分）を引いた高さまで。それより高い中身は
+/// スクロールする（低い解像度や大きな表示倍率の画面でも、ボタンが画面の外に出ない。M9.37）。
+pub(crate) fn dialog_body(
+    ui: &mut egui::Ui,
+    id: &str,
+    reserved: f32,
+    add: impl FnOnce(&mut egui::Ui),
+) {
+    let room = (ui.ctx().content_rect().height() - reserved).max(160.0);
+    let _ = egui::ScrollArea::vertical()
+        .id_salt(id)
+        .max_height(room)
+        .show(ui, add);
+}
+
 /// 枠で囲んだグループ（Encore のビルドパネルの「ソース」「保存先」などと同じ）。見出しを押すと中身をたたむ。
 /// 枠は横幅いっぱいに広げ、グループの間を少し空ける。
 pub(crate) fn group_box(

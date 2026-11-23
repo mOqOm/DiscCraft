@@ -1394,34 +1394,53 @@ impl DiscCraftApp {
         }
     }
 
-    /// メニューの絵のサムネール（メニューが変わったときだけ描き直す）。ボタンのないメニューは `None`。
-    fn menu_thumbnail(&mut self, ctx: &egui::Context, id: MenuId) -> Option<egui::TextureHandle> {
+    /// メニューの絵のサムネール（メニューが変わったときだけ描き直す）。描けないメニューは `None`。
+    /// プロジェクトパネルとフローチャートのノードに出す。表示の縦横比（DVD の 720x480 は 4:3）の小さな絵に縮めて覚える
+    /// （メニューの多いプロジェクトでも、メニューの大きさの絵を何枚も持たない。M6.408）。
+    pub(crate) fn menu_thumbnail(
+        &mut self,
+        ctx: &egui::Context,
+        id: MenuId,
+    ) -> Option<egui::TextureHandle> {
+        if let Some(kept) = self.kept_menu_thumbnail(id) {
+            return kept;
+        }
         let menu = self.session.project.menu(id)?.clone();
         let hash = self.picture_hash(&menu);
-        if let Some((cached_hash, texture)) = self.menu_thumbnails.get(&id.0)
-            && *cached_hash == hash
-        {
-            return texture.clone();
-        }
+        // A pop-up's checkerboard with cells of 8 thumbnail pixels: the editor's 16-pixel ones became a flat grey that
+        // looked like a white background once made small.
+        let (_, frame_height) = disccraft_project::frame_size(&self.session.project.settings);
+        let cell = usize::from(frame_height) * 8 / MENU_THUMBNAIL_HEIGHT;
         let texture = self
-            .render_menu_picture(&menu)
+            .render_menu_picture_checked(&menu, cell)
             .ok()
-            .filter(|rendered| {
-                rendered.rgb.len() == usize::from(rendered.width) * usize::from(rendered.height) * 3
-            })
-            .map(|rendered| {
-                let image = egui::ColorImage::from_rgb(
-                    [usize::from(rendered.width), usize::from(rendered.height)],
+            .and_then(|rendered| {
+                let frame = (rendered.width, rendered.height);
+                let to = menu_thumbnail_size(crate::menu_editor::menu_aspect(&menu, frame));
+                let small = shrink_rgb(
                     &rendered.rgb,
-                );
-                ctx.load_texture(
+                    (usize::from(frame.0), usize::from(frame.1)),
+                    to,
+                )?;
+                Some(ctx.load_texture(
                     format!("menu_thumbnail_{}", id.0),
-                    image,
+                    egui::ColorImage::from_rgb([to.0, to.1], &small),
                     egui::TextureOptions::LINEAR,
-                )
+                ))
             });
         let _ = self.menu_thumbnails.insert(id.0, (hash, texture.clone()));
         texture
+    }
+
+    /// The menu's thumbnail when it is drawn already and the menu has not changed since (`Some(None)`: it cannot be
+    /// drawn); `None` when [`Self::menu_thumbnail`] is to draw it.
+    pub(crate) fn kept_menu_thumbnail(&self, id: MenuId) -> Option<Option<egui::TextureHandle>> {
+        let menu = self.session.project.menu(id)?;
+        let hash = self.picture_hash(menu);
+        self.menu_thumbnails
+            .get(&id.0)
+            .filter(|(kept, _)| *kept == hash)
+            .map(|(_, texture)| texture.clone())
     }
 
     /// アセットのサムネール（`asset.thumbnail` の結果をテクスチャにして覚えておく）。
@@ -2076,6 +2095,62 @@ pub(crate) fn draw_fitted(
     );
 }
 
+/// Height of a menu's thumbnail picture (pixels; twice the Project panel's, so it stays sharp on a large display).
+const MENU_THUMBNAIL_HEIGHT: usize = 108;
+
+/// The size of a menu's thumbnail picture for a menu shown at `aspect` (width over height).
+fn menu_thumbnail_size(aspect: f32) -> (usize, usize) {
+    let width = (MENU_THUMBNAIL_HEIGHT as f32 * aspect).round();
+    let width = if width.is_finite() {
+        width.clamp(1.0, 1024.0) as usize
+    } else {
+        MENU_THUMBNAIL_HEIGHT
+    };
+    (width, MENU_THUMBNAIL_HEIGHT)
+}
+
+/// `rgb` (`size`, 3 bytes a pixel) brought to `to` by averaging the pixels each new pixel covers, stretched to its
+/// shape (a DVD menu's 720x480 to 4:3). `None` when the bytes do not match the size or a size is empty.
+pub(crate) fn shrink_rgb(
+    rgb: &[u8],
+    (width, height): (usize, usize),
+    (to_width, to_height): (usize, usize),
+) -> Option<Vec<u8>> {
+    if width == 0
+        || height == 0
+        || to_width == 0
+        || to_height == 0
+        || rgb.len() != width.checked_mul(height)?.checked_mul(3)?
+    {
+        return None;
+    }
+    // The source rows / columns a new pixel covers: at least one.
+    let span = |index: usize, from: usize, to: usize| {
+        let start = index * from / to;
+        (start, ((index + 1) * from / to).clamp(start + 1, from))
+    };
+    let mut out = Vec::with_capacity(to_width.checked_mul(to_height)?.checked_mul(3)?);
+    for y in 0..to_height {
+        let (top, bottom) = span(y, height, to_height);
+        for x in 0..to_width {
+            let (left, right) = span(x, width, to_width);
+            let mut sum = [0_u64; 3];
+            let mut count = 0_u64;
+            for row in top..bottom {
+                let pixels = rgb.get((row * width + left) * 3..(row * width + right) * 3)?;
+                for pixel in pixels.as_chunks::<3>().0 {
+                    for (total, value) in sum.iter_mut().zip(pixel) {
+                        *total += u64::from(*value);
+                    }
+                    count += 1;
+                }
+            }
+            out.extend(sum.map(|total| u8::try_from(total / count.max(1)).unwrap_or(u8::MAX)));
+        }
+    }
+    Some(out)
+}
+
 /// The average bitrate of a row's file, bits a second: its size over its length (`None` for what has no file or
 /// no length: stills, menus, timelines).
 fn row_bitrate(row: &ProjectRow) -> Option<f64> {
@@ -2370,7 +2445,41 @@ pub(crate) fn asset_kind_label(kind: AssetKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::name_with_extension;
+    use super::{menu_thumbnail_size, name_with_extension, shrink_rgb};
+
+    /// A menu's thumbnail is its picture made small at the shape it is shown at (M6.408): each new pixel the average
+    /// of the ones it covers, a DVD menu's 720x480 stretched to 4:3.
+    #[test]
+    fn a_menu_thumbnail_is_its_picture_made_small() {
+        // 4x2: a white and a black half, each 2x2.
+        let white_black: Vec<u8> = [255, 255, 0, 0]
+            .repeat(2)
+            .into_iter()
+            .flat_map(|value| [value; 3])
+            .collect();
+        assert_eq!(
+            shrink_rgb(&white_black, (4, 2), (2, 1)),
+            Some(vec![255, 255, 255, 0, 0, 0])
+        );
+        // Every pixel to one: grey.
+        assert_eq!(
+            shrink_rgb(&white_black, (4, 2), (1, 1)),
+            Some(vec![127, 127, 127])
+        );
+        // Made larger, each pixel is repeated.
+        assert_eq!(
+            shrink_rgb(&[10, 20, 30], (1, 1), (2, 1)),
+            Some(vec![10, 20, 30, 10, 20, 30])
+        );
+        // Bytes that do not match the size, or an empty size: nothing.
+        assert_eq!(shrink_rgb(&white_black, (4, 3), (2, 1)), None);
+        assert_eq!(shrink_rgb(&[], (0, 0), (2, 1)), None);
+        assert_eq!(shrink_rgb(&white_black, (4, 2), (0, 1)), None);
+        // 4:3 and 16:9 at the thumbnail's height.
+        assert_eq!(menu_thumbnail_size(4.0 / 3.0), (144, 108));
+        assert_eq!(menu_thumbnail_size(16.0 / 9.0), (192, 108));
+        assert_eq!(menu_thumbnail_size(f32::NAN), (108, 108));
+    }
 
     #[test]
     fn asset_names_show_their_extension() {

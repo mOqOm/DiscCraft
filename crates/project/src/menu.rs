@@ -54,7 +54,39 @@ pub enum MenuBackground {
         asset: AssetId,
         /// Loop length in seconds (1..=30).
         seconds: u32,
+        /// The layered document (PSD) the menu was made from, drawn over the video (M6.402, as Encore draws a PSD
+        /// menu given a video: the video takes the place of the PSD's bottom layer, its background, and the other
+        /// layers stay over it; DiscCraft replaced the whole PSD with the video).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layers: Option<AssetId>,
     },
+}
+
+impl MenuBackground {
+    /// The layered document (PSD or PhotoCraft file) the menu is made from: its still background, or the layers over
+    /// its motion video (M6.402). Whether the asset is such a document is the caller's to check.
+    pub fn document(&self) -> Option<AssetId> {
+        match self {
+            MenuBackground::Image { asset } => Some(*asset),
+            MenuBackground::Video { layers, .. } => *layers,
+            MenuBackground::Color { .. } => None,
+        }
+    }
+
+    /// The background with `document` as the menu's layered document: over the motion video when there is one, else
+    /// the still background (M6.402: taking in an edited PSD keeps a motion menu's video).
+    pub fn with_document(&self, document: AssetId) -> MenuBackground {
+        match self {
+            MenuBackground::Video { asset, seconds, .. } => MenuBackground::Video {
+                asset: *asset,
+                seconds: *seconds,
+                layers: Some(document),
+            },
+            MenuBackground::Image { .. } | MenuBackground::Color { .. } => {
+                MenuBackground::Image { asset: document }
+            }
+        }
+    }
 }
 
 impl Default for MenuBackground {

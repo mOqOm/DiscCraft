@@ -47,7 +47,7 @@ pub fn clear_media_cache() -> usize {
 
 pub use player::{
     AudioFeed, FrameLoader, FrameRequest, FrameSource, Player, PlayerAudio, PlayerAudioPart,
-    PlayerFrame, PlayerStatus, audio_track_parts,
+    PlayerFrame, PlayerStatus, audio_stream_count, audio_track_parts,
 };
 pub use session::{Session, UNDO_LIMIT};
 

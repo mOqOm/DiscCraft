@@ -135,7 +135,10 @@ pub fn load(path: &Path) -> Result<Project, ProjectError> {
     if let Some(folder) = folder_of(path) {
         find_moved_assets(&mut value, &folder);
     }
-    from_value(value)
+    let mut project = from_value(value)?;
+    // A menu's PSD a project from before M6.399 lists among its assets is the menu's own file (M6.400).
+    project.mark_menu_files();
+    Ok(project)
 }
 
 /// Longest relative path accepted from a project file.

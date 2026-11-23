@@ -5,8 +5,7 @@ use crate::gui_params::with_target;
 use crate::i18n::{tl, tlf};
 use crate::menu_editor::link_label;
 use disccraft_project::{
-    AssetId, FLOWCHART_DISC, FLOWCHART_LIMIT, FlowPoint, Link, Menu, MenuBackground, MenuId,
-    Project, TimelineId,
+    AssetId, FLOWCHART_DISC, FLOWCHART_LIMIT, FlowPoint, Link, Menu, MenuId, Project, TimelineId,
 };
 use egui::{
     Align2, FontId, Id, Painter, Pos2, Rect, Response, ScrollArea, Sense, Stroke, StrokeKind,
@@ -115,6 +114,16 @@ pub(crate) fn port_accepts(port: &Port, node: NodeId) -> bool {
     }
 }
 
+/// What a node shows as its thumbnail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Media {
+    /// An asset's thumbnail (a timeline's video, a slideshow's first slide).
+    Asset(AssetId),
+    /// The menu's own picture, as the Project panel shows it (M6.408: Encore's flowchart shows a pop-up over the
+    /// checkerboard with only its buttons, a menu of a plain colour with its texts, not the background's file).
+    Menu(MenuId),
+}
+
 /// A flowchart node with its visible ports.
 #[derive(Clone, Debug)]
 pub(crate) struct Node {
@@ -124,9 +133,9 @@ pub(crate) struct Node {
     pub(crate) title: String,
     /// Ports with display text.
     pub(crate) ports: Vec<(Port, String)>,
-    /// Asset shown as a thumbnail under the header (a timeline's video, a slideshow's first slide, a menu's
-    /// background image or video).
-    pub(crate) media: Option<AssetId>,
+    /// What is shown as a thumbnail under the header (a timeline's video, a slideshow's first slide, a menu's
+    /// picture).
+    pub(crate) media: Option<Media>,
 }
 
 /// A navigation edge between a port and a target node.
@@ -206,7 +215,7 @@ pub(crate) fn build_graph(project: &Project) -> (Vec<Node>, Vec<Edge>) {
             &timeline.end_action,
             project,
         );
-        node.media = Some(timeline.video);
+        node.media = Some(Media::Asset(timeline.video));
         nodes.push(node);
     }
 
@@ -218,7 +227,10 @@ pub(crate) fn build_graph(project: &Project) -> (Vec<Node>, Vec<Edge>) {
             &slideshow.end_action,
             project,
         );
-        node.media = slideshow.slides.first().map(|slide| slide.asset);
+        node.media = slideshow
+            .slides
+            .first()
+            .map(|slide| Media::Asset(slide.asset));
         nodes.push(node);
     }
 
@@ -246,7 +258,7 @@ pub(crate) fn build_graph(project: &Project) -> (Vec<Node>, Vec<Edge>) {
         node.media = project
             .timelines
             .get(&playlist.timeline)
-            .map(|timeline| timeline.video);
+            .map(|timeline| Media::Asset(timeline.video));
         nodes.push(node);
     }
 
@@ -390,15 +402,7 @@ fn menu_node(project: &Project, menu: &Menu) -> Node {
             tlf!("Menu {id}", id = menu.id.0),
         ),
         ports,
-        media: menu_media(menu),
-    }
-}
-
-/// The asset a menu node shows as its thumbnail (the background image or motion video).
-fn menu_media(menu: &Menu) -> Option<AssetId> {
-    match &menu.background {
-        MenuBackground::Image { asset } | MenuBackground::Video { asset, .. } => Some(*asset),
-        MenuBackground::Color { .. } => None,
+        media: Some(Media::Menu(menu.id)),
     }
 }
 
@@ -650,7 +654,7 @@ fn draw_nodes(
     nodes: &[Node],
     rects: &[(NodeId, Rect)],
     selection: Selection,
-    thumbs: &BTreeMap<u64, TextureHandle>,
+    thumbs: &BTreeMap<Media, TextureHandle>,
 ) {
     let visuals = ui.visuals();
 
@@ -660,8 +664,8 @@ fn draw_nodes(
         };
         let selected = node_selected(selection, *id);
         draw_node(painter, visuals, node, *rect, selected);
-        if let Some(asset) = node.media {
-            draw_thumb(painter, visuals, *rect, thumbs.get(&asset.0));
+        if let Some(media) = node.media {
+            draw_thumb(painter, visuals, *rect, thumbs.get(&media));
         }
     }
 }
@@ -1446,16 +1450,33 @@ impl DiscCraftApp {
         node_context_menu(self, ui, &response, &rects);
     }
 
-    /// Thumbnails of the nodes' media (cached per asset by `asset_thumbnail`).
+    /// Thumbnails of the nodes' media: an asset's (kept per asset by `asset_thumbnail`), a menu's picture (kept per
+    /// menu by `menu_thumbnail`). One menu not drawn yet is drawn a frame, so a flowchart of many menus shows at once
+    /// and fills in.
     fn node_thumbnails(
         &mut self,
         ctx: &egui::Context,
         nodes: &[Node],
-    ) -> BTreeMap<u64, TextureHandle> {
+    ) -> BTreeMap<Media, TextureHandle> {
         let mut thumbs = BTreeMap::new();
-        for asset in nodes.iter().filter_map(|node| node.media) {
-            if let Some(texture) = self.asset_thumbnail(ctx, asset) {
-                let _ = thumbs.insert(asset.0, texture);
+        let mut drawn = false;
+        for media in nodes.iter().filter_map(|node| node.media) {
+            let texture = match media {
+                Media::Asset(asset) => self.asset_thumbnail(ctx, asset),
+                Media::Menu(menu) => match self.kept_menu_thumbnail(menu) {
+                    Some(kept) => kept,
+                    None if !drawn => {
+                        drawn = true;
+                        self.menu_thumbnail(ctx, menu)
+                    }
+                    None => {
+                        ctx.request_repaint();
+                        None
+                    }
+                },
+            };
+            if let Some(texture) = texture {
+                let _ = thumbs.insert(media, texture);
             }
         }
         thumbs
@@ -1477,8 +1498,9 @@ mod tests {
     //! Tests for the flowchart graph and layout.
 
     use super::{
-        Edge, Node, NodeId, Port, build_graph, column_of, command_for_port, dragged_min, edge_path,
-        entry_points, layout, layout_split, link_to, node_key, place_moved, port_accepts,
+        Edge, Media, Node, NodeId, Port, build_graph, column_of, command_for_port, dragged_min,
+        edge_path, entry_points, layout, layout_split, link_to, node_key, place_moved,
+        port_accepts,
     };
     use disccraft_project::{Link, MenuId, Project, TimelineId};
     use egui::Pos2;
@@ -1656,6 +1678,9 @@ mod tests {
             .find(|node| node.id == NodeId::Menu(menu))
             .ok_or_else(|| "missing menu node".to_owned())?;
         assert_eq!(menu_node.ports.len(), 2);
+        // A menu of a plain colour shows its own picture too, as in Encore's flowchart (M6.408: it had no thumbnail,
+        // and a menu on a file showed the file, a pop-up's whole PSD with its white Background among them).
+        assert_eq!(menu_node.media, Some(Media::Menu(menu)));
 
         let timeline_node = nodes
             .iter()

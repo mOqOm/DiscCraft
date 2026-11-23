@@ -34,7 +34,8 @@ pub fn auto_route(rects: &[Rect]) -> Vec<(u8, u8, u8, u8)> {
 /// buttons and the menu has either kind of button, Encore's routing for them (seen in Encore CS6, 2026-11-13 and
 /// 2026-11-21): the other buttons route among themselves (the next / previous buttons only break their rows and
 /// columns, see [`lines`]); the leftmost of them (by centre, the higher one on a tie) goes up / left to the previous
-/// button and the rightmost down / right to the next button, before anything else. A previous button goes down /
+/// button and the rightmost down / right to the next button, before anything else (without that button, as any
+/// other: M10.54, the reporter's chapter page with only a next button). A previous button goes down /
 /// right to that leftmost button, left to the next button and stays up; a next button goes up / left to the
 /// rightmost, right to the previous button and stays down.
 fn automatic_routes(menu: &Menu, rects: &[Rect], options: &RouteOptions) -> Vec<(u8, u8, u8, u8)> {
@@ -99,10 +100,14 @@ fn automatic_routes(menu: &Menu, rects: &[Rect], options: &RouteOptions) -> Vec<
             *slot = if !moves {
                 one_based(index)
             } else {
-                if index == first && matches!(direction, Direction::Up | Direction::Left) {
-                    or_own(previous, index)
-                } else if index == last && matches!(direction, Direction::Down | Direction::Right) {
-                    or_own(next, index)
+                let to_previous =
+                    index == first && matches!(direction, Direction::Up | Direction::Left);
+                let to_next =
+                    index == last && matches!(direction, Direction::Down | Direction::Right);
+                if let (true, Some(previous)) = (to_previous, previous) {
+                    one_based(previous)
+                } else if let (true, Some(next)) = (to_next, next) {
+                    one_based(next)
                 } else if let Some(near) = router.direct(sub, direction) {
                     to_menu(one_based(near))
                 } else {
@@ -179,6 +184,10 @@ pub fn auto_route_with(rects: &[Rect], options: &RouteOptions) -> Vec<(u8, u8, u
 /// Buttons whose left / top edges or centres are this close are lined up (Encore CS6: a button 9 px off its column
 /// still belongs to it, one 10 px off does not).
 const LINE_TOLERANCE: i64 = 9;
+/// How much two buttons may have in common and still count as not touching or overlapping for [`lines`] (M10.56,
+/// Encore CS6, 2026-11-22: a 15 px strip touching the bottom of a button in a row, or 1 px into it, left the row
+/// whole).
+const SLIGHT_OVERLAP: i64 = 1;
 /// A button that misses a line by more than [`LINE_TOLERANCE`] but no more than this breaks it (Encore CS6, 2026-11-21:
 /// 10 and 15 px off broke a row or column, 36 px off did not).
 const NEAR_MISS: i64 = 18;
@@ -189,9 +198,25 @@ const VERTICAL_CONE_COS: f64 = 0.3746;
 /// Up / down also go straight to a button this far to the side, or less, whatever the angle (Encore CS6, 2026-11-21:
 /// it took a bar 370 px to the side at 70°, and left one 617 px to the side at 76°).
 const VERTICAL_ASIDE: i64 = 400;
-/// With nothing in a direction, a button up to about 110° round from it is still taken (Encore CS6 took one at
-/// 107.6° and left one at 116.6°): the cosine of that angle.
-const WIDE_COS: f64 = -0.342;
+/// With nothing in a direction, [`Router::around`] looks round to a button behind that does not reach past the
+/// button (a tile above a bar, looked at from the bar going down) while the button's centre is no more than this
+/// many degrees off the direction, clockwise of it (M10.58, Encore CS6, 2026-11-22, docs/encore-behavior.md 9.16 and
+/// 9.19: a bar 106 px below the tiles' centres went down to the left tile at 127.4° and not at 129.5°).
+const BEHIND_ANGLE_CLOCKWISE: f64 = 128.5;
+/// [`BEHIND_ANGLE_CLOCKWISE`] the other way round (the right tile at 120.2°, not at 121.6°).
+const BEHIND_ANGLE_ANTICLOCKWISE: f64 = 121.0;
+/// How far behind the centre of the button routed (along the direction) the centre of a button looked round to as
+/// [`BEHIND_ANGLE_CLOCKWISE`] may be, clockwise of the direction (M10.58: a thin bar went down to a tile 172 px above
+/// its centre and to none 192 px above; a tall picture button does not reach the row under it).
+const BEHIND_DEPTH_CLOCKWISE: f64 = 182.0;
+/// [`BEHIND_DEPTH_CLOCKWISE`] the other way round (M10.58: a tile 106 px above the bar's centre was reached, tiles
+/// 156 px above at 104° and 113° were not).
+const BEHIND_DEPTH_ANTICLOCKWISE: f64 = 131.0;
+/// Looking round behind, the buttons within this many degrees of the direction come first, the nearest of them, and
+/// the others only when there are none (M10.58, Encore CS6, 2026-11-22: a bar went down to the nearer tile at 110.5°
+/// rather than to the one at 102.5°, but to the one at 103.4° rather than to the nearer one at 111.9°, and to a tile at
+/// 113.1° when nothing else was in reach).
+const LOOK_ROUND_FIRST: f64 = 111.2;
 /// Of the buttons ahead, one on the clockwise side of the direction no more than this many degrees further round
 /// than the best one (and scoring within [`SCORE_TIE`] of it) is taken instead (M10.51, Encore CS6, 2026-11-22: a
 /// bar went up to the right-hand one of two tiles 2.84° further round, and to the left-hand one when it was 3.11°
@@ -208,6 +233,59 @@ const REACH_ANTICLOCKWISE: f64 = 30.0;
 /// times the best, and left one 1.17 times it 0.4° round, the reporter's chapter page going down to Chapter 1).
 const SCORE_TIE: f64 = 1.16;
 
+/// Looking round ([`Router::around`]), a button level with the one routed counts this many times as far as one
+/// ahead, or one behind within [`LOOK_ROUND_FIRST`] that overlaps it across the direction (M10.59, Encore CS6,
+/// 2026-11-22, docs/encore-behavior.md 9.21: down from a tile went to a strip ahead 1.23 times as far as the tile
+/// beside it; up from a tile beside a bar went to the tile beside it 1.55 times as near as the bar behind it).
+const LEVEL_WEIGHT: f64 = 1.4;
+
+/// Where a button looked round to ([`Router::around`]) is from the one routed, along the direction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
+    /// Centres within [`LINE_TOLERANCE`] along the direction.
+    Level,
+    /// Further along the direction.
+    Ahead,
+    /// Back against the direction.
+    Behind,
+}
+
+/// A button within reach of [`Router::around`].
+#[derive(Clone, Copy, Debug)]
+struct Seen {
+    /// Where it is along the direction.
+    side: Side,
+    /// The gap between the rectangles.
+    gap: i64,
+    /// Whether it is clockwise of the direction.
+    clockwise: bool,
+    /// The squared distance between the centres.
+    squared: i128,
+    /// Whether it is wholly aside across the direction (no overlap across it, and not reaching past the button).
+    aside: bool,
+    /// Its centre's angle off the direction, in degrees (0 straight ahead, 180 straight behind).
+    angle: f64,
+    /// Whether it partly covers the button routed.
+    covers: bool,
+    /// Its index.
+    other: usize,
+}
+
+/// Keeps of `group` those `wanted`, when there are any.
+fn prefer(group: &mut Vec<Seen>, wanted: impl Fn(&Seen) -> bool) {
+    if group.iter().any(&wanted) {
+        group.retain(wanted);
+    }
+}
+
+/// The angle in degrees of `to` off `direction` seen from `from` (0 straight ahead, 180 straight behind).
+fn angle_off(from: &Centre, to: &Centre, direction: Direction) -> f64 {
+    let (step, squared) = direction.step(from, to);
+    // `as` is exact enough for pixel distances.
+    let aside = ((squared - step * step).max(0) as f64).sqrt();
+    aside.atan2(step as f64).to_degrees()
+}
+
 /// Encore CS6's automatic routing, as measured on its menus (docs/encore-behavior.md 9.2 and 9.5j):
 ///
 /// - Rows and columns are found as in [`lines`].
@@ -217,8 +295,8 @@ const SCORE_TIE: f64 = 1.16;
 /// - A button that contains others goes to them first: the nearest one ahead, or the nearest level with it.
 /// - Otherwise a direction without a line goes to the nearest button ahead: the smallest distance over the cosine
 ///   of the angle off the direction to the power 1.5, up / down only within [`VERTICAL_CONE_COS`], but a button
-///   on the clockwise side nearly as good wins ([`ANGLE_TIE`]). With nothing ahead, it looks round up to about
-///   110° (see [`Router::around`]).
+///   on the clockwise side nearly as good wins ([`ANGLE_TIE`]). With nothing ahead, it looks round as far as
+///   [`Router::within_reach`] allows (see [`Router::around`]).
 /// - A button in no row and no column that no route reaches is entered from one button only: the nearest one, in
 ///   the direction it lies.
 struct Router<'a> {
@@ -244,17 +322,35 @@ impl<'a> Router<'a> {
         let all_centres: Vec<Centre> = all.iter().copied().map(Centre::from_rect).collect();
         let column_candidates = candidates(&all_bounds, &all_centres, rects.len(), true);
         let row_candidates = candidates(&all_bounds, &all_centres, rects.len(), false);
+        // M10.59: each way once on its own, then again knowing the other way's lines (a column of a bar and the
+        // narrow tile at the left of a row stands when the row does).
+        let (_, first_columns) = lines(
+            &all_bounds,
+            &all_centres,
+            rects.len(),
+            (true, &column_candidates, &row_candidates),
+            &[],
+        );
+        let (_, first_rows) = lines(
+            &all_bounds,
+            &all_centres,
+            rects.len(),
+            (false, &row_candidates, &column_candidates),
+            &[],
+        );
         let (column_of, columns) = lines(
             &all_bounds,
             &all_centres,
             rects.len(),
             (true, &column_candidates, &row_candidates),
+            &first_rows,
         );
         let (row_of, rows) = lines(
             &all_bounds,
             &all_centres,
             rects.len(),
             (false, &row_candidates, &column_candidates),
+            &first_columns,
         );
         Self {
             bounds: all_bounds.into_iter().take(rects.len()).collect(),
@@ -323,6 +419,10 @@ impl<'a> Router<'a> {
             if wraps && self.line(index, !vertical).is_some() {
                 return index;
             }
+            // M10.60: a thin strip touching it, centred on it, as a button it holds.
+            if let Some(touching) = self.touching(index, direction) {
+                return touching;
+            }
             return self.around(index, direction).unwrap_or(index);
         };
         if let Some(next) = self.direct(index, direction) {
@@ -343,6 +443,31 @@ impl<'a> Router<'a> {
             target.last()
         };
         end.copied().unwrap_or(index)
+    }
+
+    /// For a button in no line this way: a thinner, shorter button touching one of its edges from outside (or
+    /// [`SLIGHT_OVERLAP`] off it), within its span along that edge and centred on it (within [`LINE_TOLERANCE`]),
+    /// ahead of it or level with it (within [`LINE_TOLERANCE`]): the nearest, as a button it holds (M10.60, Encore
+    /// CS6, 2026-11-22, docs/encore-behavior.md 9.22: left and right from a wide button went to the 15 px strip under
+    /// it, 0 to 9 px off its centre, touching or 1 px apart, as on the reporter's page).
+    fn touching(&self, index: usize, direction: Direction) -> Option<usize> {
+        let outer = self.bounds.get(index)?;
+        let from = self.centres.get(index)?;
+        self.centres
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .filter(|(other, _)| {
+                self.bounds
+                    .get(*other)
+                    .is_some_and(|inner| outer.holds_strip(inner))
+            })
+            .filter_map(|(other, centre)| {
+                let (step, squared) = direction.step(from, centre);
+                (step >= -i128::from(LINE_TOLERANCE)).then_some((squared, other))
+            })
+            .min()
+            .map(|(_, other)| other)
     }
 
     /// For a button that contains others (a bar behind a row of buttons): the contained button nearest ahead in
@@ -420,10 +545,33 @@ impl<'a> Router<'a> {
 
     /// The nearest button ahead of `index` in `direction`: the smallest distance over the cosine of the angle off
     /// the direction to the power 1.5 (Encore CS6 favours buttons straight ahead a little more than distance over
-    /// cosine), up / down only within [`VERTICAL_CONE_COS`]; the lower number on a tie. When that one is not on the
+    /// cosine), up / down only within [`VERTICAL_CONE_COS`], not one wholly beyond the first button the line
+    /// straight ahead from the centre meets (M10.55); the lower number on a tie. When that one is not on the
     /// clockwise side, the best on that side within [`ANGLE_TIE`] and [`SCORE_TIE`] of it is taken instead.
     fn ahead(&self, index: usize, direction: Direction) -> Option<usize> {
         let from = self.centres.get(index)?;
+        // M10.55: a button wholly beyond the first one the line straight ahead from the centre meets is hidden by
+        // it (Encore CS6, the reporter's menu: up from a bar under a row of wide buttons goes to the row, not to the
+        // bar at the top straight above it, which scores better).
+        let line_hit = |b: &Bounds| match direction {
+            Direction::Up | Direction::Down => b.left <= from.x && from.x < b.right,
+            Direction::Left | Direction::Right => b.top <= from.y && from.y < b.bottom,
+        };
+        // (near edge distance, far edge distance) along the direction from the centre.
+        let edges = |b: &Bounds| match direction {
+            Direction::Up => (from.y - b.bottom, from.y - b.top),
+            Direction::Down => (b.top - from.y, b.bottom - from.y),
+            Direction::Left => (from.x - b.right, from.x - b.left),
+            Direction::Right => (b.left - from.x, b.right - from.x),
+        };
+        let first_far = self
+            .bounds
+            .iter()
+            .enumerate()
+            .filter(|(other, b)| *other != index && line_hit(b) && edges(b).0 > 0)
+            .map(|(_, b)| edges(b))
+            .min_by_key(|(near, _)| *near)
+            .map(|(_, far)| far);
         // (score, angle off the direction in degrees, clockwise, button) of every button ahead.
         let mut found: Vec<(f64, f64, bool, usize)> = Vec::new();
         for (other, centre) in self.centres.iter().enumerate() {
@@ -432,6 +580,11 @@ impl<'a> Router<'a> {
             }
             let (step, squared) = direction.step(from, centre);
             if step <= 0 {
+                continue;
+            }
+            if let (Some(limit), Some(b)) = (first_far, self.bounds.get(other))
+                && edges(b).0 >= limit
+            {
                 continue;
             }
             // `as` is exact enough for pixel distances.
@@ -467,21 +620,21 @@ impl<'a> Router<'a> {
             .map(|(.., other)| other)
     }
 
-    /// [`Self::ahead`], or with nothing ahead a button no more than about 110° round from `direction` that is not
-    /// wholly behind `index` (unless it is level with it across the direction): one level with it (centres within
-    /// [`LINE_TOLERANCE`]) before one ahead (up / down: outside the cone) before one behind (M10.44, Encore CS6: a
-    /// narrow tile went down to the row beside it, not to the bar 15 px below); among those the closest by the gap
-    /// between the rectangles (gaps within [`LINE_TOLERANCE`] of it count the same), then the one clockwise of the
-    /// direction (up: right, right: down, down: left, left: up), then the closest by centre.
+    /// [`Self::ahead`], or with nothing ahead a button within reach ([`Self::within_reach`]), looked for on each side:
+    /// level with it (centres within [`LINE_TOLERANCE`] along the direction), ahead (up / down: outside the cone),
+    /// behind. On each side, the buttons that overlap it across the direction (or reach past it) before those wholly
+    /// aside (M10.59); behind, those within [`LOOK_ROUND_FIRST`] of the direction first (M10.58), and those that do not
+    /// partly cover it first (M10.59); then the closest by the gap between the rectangles (gaps within
+    /// [`LINE_TOLERANCE`] of it count the same), the clockwise side (up: right, right: down, down: left, left: up), the
+    /// closest by centre. Of the sides' best ones the nearest by centre, a level one counting [`LEVEL_WEIGHT`] times as
+    /// far, and the one behind only within [`LOOK_ROUND_FIRST`] and overlapping across; else the one behind (M10.59).
     fn around(&self, index: usize, direction: Direction) -> Option<usize> {
         if let Some(found) = self.ahead(index, direction) {
             return Some(found);
         }
         let from = self.centres.get(index)?;
         let source = self.bounds.get(index)?;
-        // (side, gap, clockwise, distance squared, button) of every button looked at; the side is 0 level with it
-        // (within [`LINE_TOLERANCE`]), 1 ahead (up / down: outside the cone), 2 behind.
-        let mut found: Vec<(u8, i64, bool, i128, usize)> = Vec::new();
+        let mut found: Vec<Seen> = Vec::new();
         for (other, centre) in self.centres.iter().enumerate() {
             if other == index {
                 continue;
@@ -499,35 +652,75 @@ impl<'a> Router<'a> {
             if !self.within_reach(source, target, (step, distance), clockwise, direction) {
                 continue;
             }
-            if !source.across_overlaps(target, direction) && !target.reaches_past(source, direction)
-            {
-                continue;
-            }
             let side = if step.abs() <= i128::from(LINE_TOLERANCE) {
-                0
+                Side::Level
             } else if step > 0 {
-                1
+                Side::Ahead
             } else {
-                2
+                Side::Behind
             };
-            found.push((side, source.gap(target), clockwise, squared, other));
+            found.push(Seen {
+                side,
+                gap: source.gap(target),
+                clockwise,
+                squared,
+                aside: !source.across_overlaps(target, direction)
+                    && !target.reaches_past(source, direction),
+                angle: angle_off(from, centre, direction),
+                covers: target.partly_overlaps(source),
+                other,
+            });
         }
-        // Level with it first, then ahead, then behind; then the smallest gap (gaps within [`LINE_TOLERANCE`] of it
-        // count the same), the clockwise side, the nearest centre.
-        let side = found.iter().map(|(side, ..)| *side).min()?;
-        found.retain(|(own, ..)| *own == side);
-        let least = found.iter().map(|(_, gap, ..)| *gap).min()?;
-        found
+        let best_of = |side: Side| -> Option<Seen> {
+            let mut group: Vec<Seen> = found
+                .iter()
+                .copied()
+                .filter(|seen| seen.side == side)
+                .collect();
+            prefer(&mut group, |seen| !seen.aside);
+            if side == Side::Behind {
+                prefer(&mut group, |seen| seen.angle <= LOOK_ROUND_FIRST);
+                prefer(&mut group, |seen| !seen.covers);
+            }
+            let least = group.iter().map(|seen| seen.gap).min()?;
+            group
+                .into_iter()
+                .filter(|seen| seen.gap <= least.saturating_add(LINE_TOLERANCE))
+                .min_by_key(|seen| (!seen.clockwise, seen.squared, seen.other))
+        };
+        let bests: Vec<Seen> = [Side::Level, Side::Ahead, Side::Behind]
             .into_iter()
-            .filter(|(_, gap, ..)| *gap <= least.saturating_add(LINE_TOLERANCE))
-            .min_by_key(|(_, _, clockwise, squared, other)| (!*clockwise, *squared, *other))
-            .map(|(.., other)| other)
+            .filter_map(best_of)
+            .collect();
+        // `as` is exact enough for pixel distances.
+        let weighed = |seen: &Seen| {
+            let distance = (seen.squared as f64).sqrt();
+            if seen.side == Side::Level {
+                distance * LEVEL_WEIGHT
+            } else {
+                distance
+            }
+        };
+        bests
+            .iter()
+            .filter(|seen| {
+                seen.side != Side::Behind || (seen.angle <= LOOK_ROUND_FIRST && !seen.aside)
+            })
+            .min_by(|a, b| {
+                weighed(a)
+                    .total_cmp(&weighed(b))
+                    .then(a.other.cmp(&b.other))
+            })
+            .or_else(|| bests.iter().find(|seen| seen.side == Side::Behind))
+            .map(|seen| seen.other)
     }
 
     /// Whether [`Self::around`] looks as far round as `target` (`step` ahead of `source`'s centre and `distance`
     /// from it; `clockwise` of the direction): a target that reaches past `source` in the direction (a bar under
     /// a tile) while its centre is no more than [`REACH_CLOCKWISE`] / [`REACH_ANTICLOCKWISE`] further away than
-    /// it is to the side; any other within about 110° ([`WIDE_COS`]).
+    /// it is to the side; any other (a tile above a bar, looked at from the bar going down) while its centre is
+    /// within [`BEHIND_ANGLE_CLOCKWISE`] / [`BEHIND_ANGLE_ANTICLOCKWISE`] of the direction and no more than
+    /// [`BEHIND_DEPTH_CLOCKWISE`] / [`BEHIND_DEPTH_ANTICLOCKWISE`] behind `source`'s centre (M10.58).
     fn within_reach(
         &self,
         source: &Bounds,
@@ -541,16 +734,21 @@ impl<'a> Router<'a> {
         if step >= 0.0 {
             return true;
         }
-        if !target.reaches_beyond(source, direction) {
-            return step >= WIDE_COS * distance;
-        }
         let aside = (distance * distance - step * step).max(0.0).sqrt();
-        let reach = if clockwise {
-            REACH_CLOCKWISE
+        if target.reaches_beyond(source, direction) {
+            let reach = if clockwise {
+                REACH_CLOCKWISE
+            } else {
+                REACH_ANTICLOCKWISE
+            };
+            return distance - aside <= reach;
+        }
+        let (most_angle, most_depth) = if clockwise {
+            (BEHIND_ANGLE_CLOCKWISE, BEHIND_DEPTH_CLOCKWISE)
         } else {
-            REACH_ANTICLOCKWISE
+            (BEHIND_ANGLE_ANTICLOCKWISE, BEHIND_DEPTH_ANTICLOCKWISE)
         };
-        distance - aside <= reach
+        aside.atan2(step).to_degrees() <= most_angle && -step <= most_depth
     }
 
     /// Every button's (up, down, left, right), zero-based.
@@ -625,15 +823,17 @@ enum Mark {
     End,
 }
 
+/// A candidate column or row: its buttons, and whether they line up by their left (top) edges (else by their
+/// centres).
+struct Candidate {
+    members: Vec<usize>,
+    by_edge: bool,
+}
+
 /// The candidate columns (`vertical`) or rows of the first `own` buttons of `bounds`: buttons that overlap across the
 /// line and whose left (top) edges, or else centres, are within [`LINE_TOLERANCE`] (a button that contains another
 /// is in none), before [`lines`] puts some out.
-fn candidates(
-    bounds: &[Bounds],
-    centres: &[Centre],
-    own: usize,
-    vertical: bool,
-) -> Vec<Vec<usize>> {
+fn candidates(bounds: &[Bounds], centres: &[Centre], own: usize, vertical: bool) -> Vec<Candidate> {
     let count = bounds.len();
     let own = own.min(count);
     let span = |index: usize| -> (i64, i64) {
@@ -663,7 +863,7 @@ fn candidates(
         .collect();
 
     // By left / top edge first, then by centre.
-    let mut candidates: Vec<Vec<usize>> = Vec::new();
+    let mut candidates: Vec<Candidate> = Vec::new();
     for which in [Mark::Start, Mark::Centre] {
         let mut group: Vec<usize> = (0..own).collect();
         for (place, &a) in members.iter().enumerate() {
@@ -688,8 +888,11 @@ fn candidates(
                 .copied()
                 .filter(|index| group.get(*index) == Some(&id))
                 .collect();
-            if line.len() >= 2 && !candidates.contains(&line) {
-                candidates.push(line);
+            if line.len() >= 2 && !candidates.iter().any(|known| known.members == line) {
+                candidates.push(Candidate {
+                    members: line,
+                    by_edge: matches!(which, Mark::Start),
+                });
             }
         }
     }
@@ -705,17 +908,25 @@ fn candidates(
 /// - Buttons that overlap across the line and whose left (top) edges, or else centres, are within
 ///   [`LINE_TOLERANCE`] are a line; right (bottom) edges alone do not make one.
 /// - A button that contains another button is in no line.
-/// - A button in two different such lines puts both out (a text bar and the column of pictures above it).
-/// - A line is out when a button touching or overlapping one of its members across the line misses one of the
+/// - A button in a line by centres and in a line by left (top) edges puts the one by centres out (M10.61: a wide
+///   button's column with a bar by their left edges stands, the strip centred under it is in no column; with
+///   neither standing for other reasons, a text bar and the column of pictures above it are in none).
+/// - A line is out when a button touching or overlapping one of its members across the line (by more than
+///   [`SLIGHT_OVERLAP`], M10.56) misses one of the
 ///   member's edges or centre by more than [`LINE_TOLERANCE`] but no more than [`NEAR_MISS`], when two of its
 ///   members miss each other that way, when a member partly overlaps another button, or (M10.44) when a member faces
 ///   a button outside the line that far apart (a bar 15 px below a row) — unless (M10.51) that button lines up the
-///   other way with one of the members (a tile whose centre is over the bar's).
+///   other way with one of the members (a tile whose centre is over the bar's) — or (M10.57) when a member's nearest
+///   button across the line is a thinner strip off its centre, however far ([`faces_strip_aside`]).
+/// - M10.59: neither of the last two puts a line out when that button makes a line of the other way with the line's
+///   first button (its lowest number: the same rectangles route differently by the buttons' order), or is in a line
+///   of the other way found in a first pass (`kept`) with one of its members.
 fn lines(
     bounds: &[Bounds],
     centres: &[Centre],
     own: usize,
-    (vertical, candidates, across): (bool, &[Vec<usize>], &[Vec<usize>]),
+    (vertical, candidates, across): (bool, &[Candidate], &[Candidate]),
+    kept: &[Vec<usize>],
 ) -> (Vec<Option<usize>>, Vec<Vec<usize>>) {
     let count = bounds.len();
     let own = own.min(count);
@@ -738,9 +949,11 @@ fn lines(
             .get(index)
             .map_or(0, |centre| if vertical { centre.y } else { centre.x })
     };
+    // Across the line, more than [`SLIGHT_OVERLAP`] in common (M10.56: a strip touching a button's bottom, or
+    // 1 px into it, does not count).
     let touch = |a: usize, b: usize| {
         let ((a0, a1), (b0, b1)) = (span(a), span(b));
-        a0 <= b1 && b0 <= a1
+        a1.min(b1) - a0.max(b0) > SLIGHT_OVERLAP
     };
     let near_miss = |a: usize, b: usize| {
         [Mark::Start, Mark::Centre, Mark::End]
@@ -761,27 +974,32 @@ fn lines(
         (centre(a) - centre(b)).abs() <= LINE_TOLERANCE
             && across
                 .iter()
-                .any(|line| line.contains(&a) && line.contains(&b))
+                .any(|line| line.members.contains(&a) && line.members.contains(&b))
     };
 
-    // A button in two different candidates puts both out.
-    let mut out = vec![false; candidates.len()];
-    for (a, first) in candidates.iter().enumerate() {
-        for (b, second) in candidates.iter().enumerate().skip(a.saturating_add(1)) {
-            if first.iter().any(|member| second.contains(member)) {
-                for slot in [a, b] {
-                    if let Some(flag) = out.get_mut(slot) {
-                        *flag = true;
-                    }
-                }
-            }
-        }
-    }
+    // M10.61: a button in a candidate by centres and in one by edges puts the one by centres out (Encore CS6,
+    // 2026-11-22, docs/encore-behavior.md 9.22: a wide button's column by its left edge with the bar under it stood,
+    // and the 15 px strip centred under the button, touching it, was in no column). Candidates of one kind share no
+    // button.
+    let out: Vec<bool> = candidates
+        .iter()
+        .map(|line| {
+            !line.by_edge
+                && candidates.iter().any(|other| {
+                    other.by_edge
+                        && line
+                            .members
+                            .iter()
+                            .any(|member| other.members.contains(member))
+                })
+        })
+        .collect();
 
     let mut found: Vec<Vec<usize>> = Vec::new();
     let mut placed = vec![false; own];
     for (line, _) in candidates.iter().zip(&out).filter(|(_, out)| !**out) {
         let line: Vec<usize> = line
+            .members
             .iter()
             .copied()
             .filter(|index| placed.get(*index) == Some(&false))
@@ -792,9 +1010,15 @@ fn lines(
         let members_miss = line
             .iter()
             .any(|a| line.iter().any(|b| a != b && near_miss(*a, *b)));
+        // A member partly covered by another button, by more than [`SLIGHT_OVERLAP`] each way.
         let partly_covered = line.iter().any(|member| {
-            (0..count)
-                .any(|other| other != *member && bound(*member).partly_overlaps(&bound(other)))
+            (0..count).any(|other| {
+                let (m, o) = (bound(*member), bound(other));
+                other != *member
+                    && m.partly_overlaps(&o)
+                    && m.right.min(o.right) - m.left.max(o.left) > SLIGHT_OVERLAP
+                    && m.bottom.min(o.bottom) - m.top.max(o.top) > SLIGHT_OVERLAP
+            })
         });
         let missed = (0..count)
             .filter(|other| !line.contains(other))
@@ -808,13 +1032,31 @@ fn lines(
             line.iter()
                 .all(|b| (mark(*a, Mark::Centre) - mark(*b, Mark::Centre)).abs() <= LINE_TOLERANCE)
         });
+        // M10.59: a button outside the line that makes a line of the other way with the line's first button (its
+        // lowest number, as Encore numbers them), or that is in a line of the other way found before with one of its
+        // members, does not put the line out.
+        let first = line.iter().copied().min().unwrap_or(0);
+        let excused = |other: usize| {
+            across
+                .iter()
+                .any(|line| line.members.contains(&first) && line.members.contains(&other))
+                || kept.iter().any(|found| {
+                    found.contains(&other) && line.iter().any(|member| found.contains(member))
+                })
+        };
         let crowded = line.iter().any(|member| {
             (0..count)
                 .filter(|other| !line.contains(other))
                 .filter(|other| !(centred && line.iter().any(|kept| lined_up(*kept, *other))))
+                .filter(|other| !excused(*other))
                 .any(|other| bound(*member).nearly_touches(&bound(other)))
         });
-        if members_miss || partly_covered || missed || crowded {
+        let faced = line.iter().any(|member| {
+            faces_strip_aside(bounds, (&line, *member), vertical, &|other| {
+                line.iter().any(|kept| lined_up(*kept, other)) || excused(other)
+            })
+        });
+        if members_miss || partly_covered || missed || crowded || faced {
             continue;
         }
         for member in &line {
@@ -835,6 +1077,65 @@ fn lines(
         }
     }
     (of, found)
+}
+
+/// Whether `member` of `line` (a column for `vertical`, else a row) faces a strip that puts the line out (M10.57,
+/// Encore CS6, 2026-11-22, docs/encore-behavior.md 9.19): the nearest button outside the line on either side across
+/// it (overlapping the member along the line; touching or [`SLIGHT_OVERLAP`] into it counts), however far, when it
+/// is thinner across the line than the member and its centre along the line is more than [`LINE_TOLERANCE`] off the
+/// member's, unless it lines up the other way with a member (`lined_up`). A bar under a row of tiles puts the row
+/// out at 4 to 94 px; a picture taller than the row touching it, and a strip centred under one member, do not.
+fn faces_strip_aside(
+    bounds: &[Bounds],
+    (line, member): (&[usize], usize),
+    vertical: bool,
+    lined_up: &dyn Fn(usize) -> bool,
+) -> bool {
+    let Some(m) = bounds.get(member).copied() else {
+        return false;
+    };
+    // Twice the centre along the line, and the extent across it.
+    let centre_along = |b: &Bounds| {
+        if vertical {
+            b.top + b.bottom
+        } else {
+            b.left + b.right
+        }
+    };
+    let overlaps_along = |o: &Bounds| {
+        if vertical {
+            o.top < m.bottom && m.top < o.bottom
+        } else {
+            o.left < m.right && m.left < o.right
+        }
+    };
+    let thickness = |b: &Bounds| {
+        let (start, end) = b.across(vertical);
+        end - start
+    };
+    let (m0, m1) = m.across(vertical);
+    [false, true].into_iter().any(|after| {
+        // The gap to a button on that side across the line.
+        let gap = |o: &Bounds| -> Option<i64> {
+            let (o0, o1) = o.across(vertical);
+            if after {
+                (o0 >= m1 - SLIGHT_OVERLAP).then_some(o0 - m1)
+            } else {
+                (o1 <= m0 + SLIGHT_OVERLAP).then_some(m0 - o1)
+            }
+        };
+        bounds
+            .iter()
+            .enumerate()
+            .filter(|(other, o)| *other != member && !line.contains(other) && overlaps_along(o))
+            .filter_map(|(other, o)| gap(o).map(|g| (g, other, o)))
+            .min_by_key(|(g, other, _)| (*g, *other))
+            .is_some_and(|(_, other, o)| {
+                thickness(o) < thickness(&m)
+                    && (centre_along(o) - centre_along(&m)).abs() > 2 * LINE_TOLERANCE
+                    && !lined_up(other)
+            })
+    })
 }
 
 /// A button's rectangle as signed edges (right and bottom exclusive).
@@ -864,6 +1165,29 @@ impl Bounds {
         } else {
             (self.top, self.bottom)
         }
+    }
+
+    /// Whether `strip` is a thinner, shorter button against one of its edges (touching, or [`SLIGHT_OVERLAP`] off
+    /// it), within its span along that edge and centred on it within [`LINE_TOLERANCE`] (M10.60).
+    fn holds_strip(&self, strip: &Self) -> bool {
+        let near = |a: i64, b: i64| (a - b).abs() <= SLIGHT_OVERLAP;
+        let centred =
+            |a0: i64, a1: i64, b0: i64, b1: i64| (a0 + a1 - b0 - b1).abs() <= 2 * LINE_TOLERANCE;
+        let (width, height) = (strip.right - strip.left, strip.bottom - strip.top);
+        let (own_width, own_height) = (self.right - self.left, self.bottom - self.top);
+        let under_or_over = strip.left >= self.left
+            && strip.right <= self.right
+            && width < own_width
+            && height < own_height
+            && centred(strip.left, strip.right, self.left, self.right)
+            && (near(strip.top, self.bottom) || near(strip.bottom, self.top));
+        let beside = strip.top >= self.top
+            && strip.bottom <= self.bottom
+            && height < own_height
+            && width < own_width
+            && centred(strip.top, strip.bottom, self.top, self.bottom)
+            && (near(strip.left, self.right) || near(strip.right, self.left));
+        under_or_over || beside
     }
 
     /// Whether `other` lies inside it (and is not the same rectangle).
@@ -1107,6 +1431,87 @@ mod tests {
             auto_route_with(&rects, &plain)
         );
         Ok(())
+    }
+
+    /// M10.54, Encore CS6 (GitHub issue #13: the reporter's chapter page with a next button and a plain button named
+    /// Previous): without a previous button the leftmost of the other buttons routes up and left as any other (Land
+    /// goes up to Doctor Top), and stays only where nothing is that way.
+    #[test]
+    fn without_a_previous_button_the_leftmost_routes_as_any_other()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use disccraft_project::{ButtonKind, Link, Project};
+        let rects = rects(&[
+            (76, 956, 341, 15),
+            (1465, 783, 227, 173),
+            (1196, 783, 269, 173),
+            (972, 783, 224, 173),
+            (715, 783, 257, 173),
+            (469, 783, 246, 173),
+            (211, 783, 258, 172),
+            (1692, 783, 228, 173),
+            (0, 783, 30, 173),
+            (30, 783, 181, 173),
+            (0, 971, 1920, 109),
+            (63, 511, 370, 272),
+            (0, 0, 1920, 206),
+        ]);
+        let mut project = Project::default();
+        let id = project.add_menu(None)?;
+        for rect in &rects {
+            project.add_button(id, "B".to_string(), Some(*rect), Link::Stop)?;
+        }
+        let mut menu = project.menu(id).ok_or("menu")?.clone();
+        if let Some(button) = menu.buttons.get_mut(7) {
+            button.kind = ButtonKind::Next;
+        }
+        let routes = super::button_routes(&menu, &RouteOptions::default());
+        // Land (9): up to Doctor Top (12), down to MAIN (1), left nowhere, right to Previous (10).
+        assert_eq!(routes.get(8), Some(&(12, 1, 9, 10)));
+        // The rightmost (Chapter 6) still goes down and right to the next button.
+        assert_eq!(routes.get(1).map(|route| (route.1, route.3)), Some((8, 8)));
+        Ok(())
+    }
+
+    /// M10.55, Encore CS6 (GitHub issue #13, the reporter's first page): up from the bottom bar goes to the row of
+    /// wide buttons just above it (to the clockwise one of the two at its centre), not to the bar at the top straight
+    /// above, which the row hides though it scores better.
+    #[test]
+    fn a_button_beyond_the_one_straight_ahead_is_hidden() {
+        let page = rects(&[
+            (76, 956, 341, 15),
+            (47, 515, 400, 358),
+            (0, 0, 1920, 206),
+            (0, 971, 1920, 109),
+            (964, 873, 482, 83),
+            (1446, 873, 474, 83),
+            (483, 873, 481, 83),
+            (0, 873, 483, 83),
+        ]);
+        let routes = auto_route_with(&page, &RouteOptions::default());
+        // Bottom (4): up to EPISODE 31 (5); EPISODE 31 still goes up to the top bar (3).
+        assert_eq!(routes.get(3).map(|route| route.0), Some(5));
+        assert_eq!(routes.get(4).map(|route| route.0), Some(3));
+    }
+
+    /// M10.56, Encore CS6, 2026-11-22 (docs/encore-behavior.md 9.17): a 15 px strip touching the bottom of the first
+    /// of two wide buttons in a row, or 1 px into it, leaves the row whole (left and right wrap between the two) and
+    /// makes a column with the button it lines up with.
+    #[test]
+    fn a_strip_just_touching_a_button_leaves_its_row_whole() {
+        for strip_top in [956, 955] {
+            let page = rects(&[
+                (0, 873, 483, 83),
+                (76, strip_top, 341, 15),
+                (483, 873, 481, 83),
+            ]);
+            let routes = auto_route_with(&page, &RouteOptions::default());
+            assert_eq!(routes.first(), Some(&(2, 2, 3, 3)), "{strip_top}");
+            assert_eq!(
+                routes.get(2).map(|r| (r.2, r.3)),
+                Some((1, 1)),
+                "{strip_top}"
+            );
+        }
     }
 
     #[test]
@@ -1559,12 +1964,128 @@ mod tests {
         assert_eq!(auto_route_with(&page, &on)[7].1, 7);
     }
 
+    /// M10.53, Encore CS6, 2026-11-22 (docs/encore-behavior.md 9.16): with nothing below, down from a bar looks round
+    /// to a tile above it, the tiles 106 px above the bar's centre: on the left (clockwise) up to about 128.5° off
+    /// straight down, on the right up to about 121° (M10.58 reads it so; M10.53 had measured from the bar's top edge).
+    /// On the reporter's chapter page the bar goes down to Chapter 1 (104°), not to Chapter 2 (113°) nearer it.
+    #[test]
+    fn a_bar_looks_round_to_the_tiles_above_as_far_as_their_angle() {
+        let on = RouteOptions::default();
+        // (join of the tiles, where down from the bar goes: 2 the left tile, 3 the right one, 1 nowhere).
+        for (join, down) in [
+            (890, 2),
+            (950, 2),
+            (960, 1),
+            (1020, 1),
+            (1030, 3),
+            (1070, 3),
+            (1080, 2),
+            (1100, 3),
+            (1120, 3),
+        ] {
+            assert_eq!(
+                auto_route_with(&bar_and_tiles(73, join), &on)[0].1,
+                down,
+                "{join}"
+            );
+        }
+        // The tiles 256 px above: too far round on either side.
+        for join in [890, 1000, 1120] {
+            assert_eq!(
+                auto_route_with(&bar_and_tiles(173 + 200, join), &on)[0].1,
+                1
+            );
+        }
+        let page = rects(&[
+            (0, 971, 1920, 109),
+            (1468, 783, 227, 173),
+            (1199, 783, 269, 173),
+            (975, 783, 224, 173),
+            (718, 783, 257, 173),
+            (472, 783, 246, 173),
+            (214, 783, 258, 172),
+            (0, 783, 33, 173),
+        ]);
+        assert_eq!(auto_route_with(&page, &on)[0].1, 7);
+    }
+
     /// M10.51, Encore CS6, 2026-11-22: two tiles and a bar in no row or column go to each other as the nearest
     /// buttons ahead; the bar, reached from both tiles already, does not take over the left tile's right.
     #[test]
     fn a_loose_button_already_reached_takes_no_route_over() {
         let routes = auto_route_with(&bar_and_tiles(73, 970), &RouteOptions::default());
         assert_eq!(routes, vec![(3, 1, 2, 3), (3, 1, 2, 3), (2, 1, 2, 3)]);
+    }
+
+    /// M10.58, Encore CS6, 2026-11-22 (docs/encore-behavior.md 9.19): down from a bar under two tiles goes to the
+    /// nearer tile while it is within about 111° of straight down, else to the other one; to a tile further round
+    /// (113°) only when nothing else is in reach; to none 192 px below the tiles' centres. Right from the bar does
+    /// not look round to a tile 126° round.
+    #[test]
+    fn a_bar_looks_round_to_the_tiles_above_it_as_encore_does() {
+        let on = RouteOptions::default();
+        let (ch1, ch2, ch3) = (
+            (214, 783, 258, 173),
+            (472, 783, 246, 173),
+            (718, 783, 257, 173),
+        );
+        // (bar, where down goes: 2 the left tile, 3 the right one, 1 the bar itself).
+        for (bar, down) in [
+            ((0, 971, 1920, 109), 2),
+            ((0, 971, 1920, 90), 2),
+            ((0, 971, 1920, 70), 3),
+            ((0, 971, 1920, 23), 3),
+            ((152, 993, 1616, 23), 3),
+            ((152, 960, 1616, 23), 3),
+            ((152, 1030, 1616, 23), 2),
+            ((152, 1050, 1616, 23), 1),
+        ] {
+            let routes = auto_route_with(&rects(&[bar, ch1, ch2]), &on);
+            assert_eq!(routes.first().map(|route| route.1), Some(down), "{bar:?}");
+        }
+        let routes = auto_route_with(&rects(&[(0, 971, 1920, 109), ch2, ch3]), &on);
+        assert_eq!(routes.first().map(|route| (route.1, route.3)), Some((2, 1)));
+    }
+
+    /// M10.60, Encore CS6, 2026-11-22 (docs/encore-behavior.md 9.22): a wide button in no row or column goes left and
+    /// right to the thin strip under it, centred on it within 9 px, touching or 1 px apart (the reporter's EPISODE 1
+    /// and its strip, 5 px off); with the row standing (the wide button first, the bar lining up with it), left and
+    /// right go along the row.
+    #[test]
+    fn a_wide_button_goes_aside_to_the_strip_under_it() {
+        let on = RouteOptions::default();
+        let (bar, ep1, ep2) = ((0, 971, 1920, 109), (0, 873, 483, 83), (483, 873, 481, 83));
+        // The strip (EP2 first: the row is out), then EP1's (left, right): 4 the strip, 2 EP2.
+        for (strip, want) in [
+            ((70, 956, 343, 15), (4, 4)),
+            ((76, 956, 341, 15), (4, 4)),
+            ((80, 956, 341, 15), (4, 4)),
+            ((76, 957, 341, 14), (4, 4)),
+        ] {
+            let routes = auto_route_with(&rects(&[bar, ep2, ep1, strip]), &on);
+            assert_eq!(
+                routes.get(2).map(|route| (route.2, route.3)),
+                Some(want),
+                "{strip:?}"
+            );
+        }
+        let routes = auto_route_with(&rects(&[bar, ep1, ep2, (76, 956, 341, 15)]), &on);
+        assert_eq!(routes.get(1).map(|route| (route.2, route.3)), Some((3, 3)));
+    }
+
+    /// M10.57, Encore CS6, 2026-11-22 (docs/encore-behavior.md 9.19): two touching tiles over a thin bar 37 px
+    /// below them, off both their centres, are no row: up from the left tile goes to the right one, and the right
+    /// tile goes down and right to the bar. (A picture taller than the row touching it keeps the row, as on the
+    /// reporter's chapter page below.)
+    #[test]
+    fn a_thin_bar_off_centre_below_puts_a_row_out() {
+        let page = rects(&[
+            (152, 993, 1616, 23),
+            (214, 783, 258, 173),
+            (472, 783, 246, 173),
+        ]);
+        let routes = auto_route_with(&page, &RouteOptions::default());
+        assert_eq!(routes.get(1..), Some(&[(3, 3, 2, 3), (2, 1, 2, 1)][..]));
     }
 
     /// Encore CS6, 2026-11-21: four bars the full width of the screen, one above the other, are a column.
@@ -1628,14 +2149,135 @@ mod tests {
             (10, 7, 8, 6),
             (2, 11, 2, 9),
         ];
+        // M10.59: the bar and the narrow tile, both at the left edge, are no column (the row's first button is the
+        // rightmost tile, which the bar does not line up with), as in Encore.
         for (index, (got, want)) in routes.iter().zip(encore).enumerate() {
-            match index {
-                // Not yet as in Encore: the bar and the narrow tile, both at the left edge, are still a column.
-                0 => assert_eq!((got.2, got.3), (want.2, want.3)),
-                7 => assert_eq!((got.0, got.2, got.3), (want.0, want.2, want.3)),
-                _ => assert_eq!(*got, want, "button {}", index + 1),
-            }
+            assert_eq!(*got, want, "button {}", index + 1);
         }
         Ok(())
+    }
+
+    /// M10.59, Encore CS6, 2026-11-22 (docs/encore-behavior.md 9.21): the same rectangles route differently by the
+    /// buttons' order. A row of tiles 15 px over a bar, with a narrow tile at the left edge the bar's left edge lines
+    /// up with: when the narrow tile is the row's first button, the row and the column of the bar and the narrow tile
+    /// stand; when the rightmost tile is, neither does.
+    #[test]
+    fn the_order_of_the_buttons_decides_a_row_over_a_bar() {
+        let on = RouteOptions::default();
+        let (bar, land) = ((0, 971, 1920, 109), (0, 783, 33, 173));
+        let tiles = [
+            (214, 783, 258, 172),
+            (472, 783, 246, 173),
+            (718, 783, 257, 173),
+            (975, 783, 224, 173),
+            (1199, 783, 269, 173),
+            (1468, 783, 227, 173),
+        ];
+        let land_first: Vec<_> = [bar, land].into_iter().chain(tiles).collect();
+        let encore = [
+            [1, 1, 0, 0],
+            [0, 0, 7, 2],
+            [2, 2, 1, 3],
+            [3, 3, 2, 4],
+            [4, 4, 3, 5],
+            [5, 5, 4, 6],
+            [6, 6, 5, 7],
+            [7, 7, 6, 1],
+        ];
+        let one_based = |routes: &[[u8; 4]]| -> Vec<(u8, u8, u8, u8)> {
+            routes
+                .iter()
+                .map(|[u, d, l, r]| (u + 1, d + 1, l + 1, r + 1))
+                .collect()
+        };
+        assert_eq!(
+            auto_route_with(&rects(&land_first), &on),
+            one_based(&encore)
+        );
+        let tile_first: Vec<_> = [bar]
+            .into_iter()
+            .chain(tiles.into_iter().rev())
+            .chain([land])
+            .collect();
+        let encore = [
+            [4, 6, 4, 3],
+            [2, 2, 2, 1],
+            [1, 0, 3, 1],
+            [2, 0, 4, 2],
+            [3, 0, 5, 3],
+            [4, 0, 6, 4],
+            [5, 5, 7, 5],
+            [6, 6, 7, 6],
+        ];
+        assert_eq!(
+            auto_route_with(&rects(&tile_first), &on),
+            one_based(&encore)
+        );
+    }
+
+    /// M10.61, Encore CS6, 2026-11-22 (docs/encore-behavior.md 9.22, S6 and S2): a wide button whose left edge lines up
+    /// with the bar under it, and the 15 px strip centred under it, touching it. With the wide button first, its row
+    /// stands, and so does its column with the bar (by their left edges): the strip's column by centres goes, and down
+    /// from the button goes to the strip it holds. With the button beside it first, neither line stands.
+    #[test]
+    fn a_column_by_edges_stands_against_a_strip_centred_under_its_button() {
+        let on = RouteOptions::default();
+        let (bar, wide, beside, strip) = (
+            (0, 971, 1920, 109),
+            (0, 873, 483, 83),
+            (483, 873, 481, 83),
+            (76, 956, 341, 15),
+        );
+        let one_based = |routes: &[[u8; 4]]| -> Vec<(u8, u8, u8, u8)> {
+            routes
+                .iter()
+                .map(|[u, d, l, r]| (u + 1, d + 1, l + 1, r + 1))
+                .collect()
+        };
+        // Bar, wide, beside, strip: the bar and the wide button go up and down to each other.
+        let encore = [[1, 1, 0, 0], [0, 3, 2, 2], [2, 2, 1, 1], [1, 0, 1, 2]];
+        assert_eq!(
+            auto_route_with(&rects(&[bar, wide, beside, strip]), &on),
+            one_based(&encore)
+        );
+        // Bar, beside, wide, strip: no row and no column.
+        let encore = [[1, 3, 1, 0], [2, 0, 2, 0], [1, 3, 3, 3], [2, 0, 2, 1]];
+        assert_eq!(
+            auto_route_with(&rects(&[bar, beside, wide, strip]), &on),
+            one_based(&encore)
+        );
+    }
+
+    /// M10.59, Encore CS6, 2026-11-22 (docs/encore-behavior.md 9.21): looking round, a strip ahead is taken before the
+    /// tile beside it 1.23 times as near; down from a strip under a tile goes back to that tile (120° round) before a
+    /// tile wholly aside (96° round), and to the tile wholly aside when the one over it is out of reach; up from a tile
+    /// goes to a strip behind it that it overlaps rather than to the tile beside it.
+    #[test]
+    fn looking_round_weighs_level_ahead_and_behind_as_encore_does() {
+        let on = RouteOptions::default();
+        let (e1, e2) = ((0, 873, 483, 83), (483, 873, 481, 83));
+        // (E1, E2, strip): down from E2, down from the strip, up from E1 (1 E1, 2 E2, 3 the strip).
+        for (tiles, strip, want) in [
+            (
+                ((200, 873, 283, 83), e2),
+                (86, 956, 341, 15),
+                (Some(3), Some(1), None),
+            ),
+            ((e1, e2), (86, 1057, 341, 15), (Some(3), None, None)),
+            ((e1, e2), (86, 956, 341, 15), (Some(3), Some(2), None)),
+            ((e1, e2), (300, 956, 341, 15), (None, None, Some(3))),
+        ] {
+            let routes = auto_route_with(&rects(&[tiles.0, tiles.1, strip]), &on);
+            let got = (
+                routes.get(1).map(|route| route.1),
+                routes.get(2).map(|route| route.1),
+                routes.first().map(|route| route.0),
+            );
+            for (got, want) in [(got.0, want.0), (got.1, want.1), (got.2, want.2)] {
+                if want.is_some() {
+                    assert_eq!(got, want, "{strip:?}");
+                }
+            }
+        }
     }
 }

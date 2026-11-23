@@ -277,8 +277,14 @@ impl DiscCraftApp {
         }
         ui.separator();
         for (index, path) in self.recent.iter().enumerate().take(4) {
-            let text = format!("{} {}", index.saturating_add(1), path.display());
-            if ui.button(text).clicked() {
+            // Encore と同じく途中を省いた形（1 C:\Users\...\名前.ncor）。全体はマウスを重ねると出る（M9.37: 長いパスで
+            // メニューが広く高くなり、低い画面で下の項目が外に出ていた）。
+            let text = format!("{} {}", index.saturating_add(1), short_path(path));
+            if ui
+                .button(text)
+                .on_hover_text(path.display().to_string())
+                .clicked()
+            {
                 ui.ctx().data_mut(|data| {
                     data.insert_temp(egui::Id::unique("open_recent_request"), path.clone());
                 });
@@ -1514,4 +1520,57 @@ fn labeled(ui: &mut Ui, label: &str, action: Action, enabled: bool) -> bool {
     let shortcut = action.shortcut_text(ui.ctx());
     ui.add_enabled(enabled, egui::Button::new(label).shortcut_text(shortcut))
         .clicked()
+}
+
+/// A recent project's path as Encore's File menu shows it: its first two parts, "...", and the file name
+/// (`C:\Users\...\DCSUBTEST.ncor`); a path of four parts or fewer as it is.
+pub(crate) fn short_path(path: &std::path::Path) -> String {
+    let parts: Vec<String> = path
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    if parts.len() <= 4 {
+        return path.display().to_string();
+    }
+    let separator = std::path::MAIN_SEPARATOR;
+    let clean = |part: &str| part.trim_end_matches(['\\', '/']).to_owned();
+    let first = parts.first().map_or_else(String::new, |part| clean(part));
+    let second = parts.get(1).map_or_else(String::new, |part| clean(part));
+    let name = parts.last().map_or("", String::as_str);
+    // A root ("\") has nothing left once cleaned: the drive and the root are one part to show.
+    if second.is_empty() {
+        let third = parts.get(2).map_or_else(String::new, |part| clean(part));
+        return format!("{first}{separator}{third}{separator}...{separator}{name}");
+    }
+    format!("{first}{separator}{second}{separator}...{separator}{name}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_path;
+    use std::path::Path;
+
+    /// Encore's File menu shows a recent project as `C:\Users\...\DCSUBTEST.ncor`; a short path as it is.
+    #[test]
+    fn a_recent_project_is_shown_as_encore_shows_it() {
+        if cfg!(windows) {
+            assert_eq!(
+                short_path(Path::new(r"C:\Users\me\Documents\Discs\Movie.dcproj")),
+                r"C:\Users\...\Movie.dcproj"
+            );
+            assert_eq!(
+                short_path(Path::new(r"C:\Discs\Movie.dcproj")),
+                r"C:\Discs\Movie.dcproj"
+            );
+        } else {
+            assert_eq!(
+                short_path(Path::new("/home/me/Discs/Movies/Movie.dcproj")),
+                "/home/.../Movie.dcproj"
+            );
+            assert_eq!(
+                short_path(Path::new("/home/Movie.dcproj")),
+                "/home/Movie.dcproj"
+            );
+        }
+    }
 }

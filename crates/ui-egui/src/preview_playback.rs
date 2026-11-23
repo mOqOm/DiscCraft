@@ -1000,16 +1000,20 @@ impl DiscCraftApp {
             }
         };
         // A track of several clips plays as parts, from where the playback starts.
-        let parts = self
+        let chosen = self
             .preview
             .audio
             .and_then(|stream| usize::from(stream).checked_sub(1))
             .and_then(|index| timeline.audio.get(index))
-            .or_else(|| timeline.audio.first())
+            .or_else(|| timeline.audio.first());
+        let parts = chosen
             .map(|track| disccraft_engine::audio_track_parts(project, track, frame_seconds, from))
             .unwrap_or_default();
+        // The track's sound stream of its file (M6.418).
+        let stream = chosen.map_or(0, |track| track.stream as usize);
         let player_audio = match (&device, audio_path) {
             (Some(device), Some(path)) => Some(PlayerAudio {
+                stream,
                 parts,
                 path,
                 rate: device.rate(),
@@ -1087,6 +1091,7 @@ impl DiscCraftApp {
         };
         // Its own sound, at the picture's place in its file.
         let player_audio = device.as_ref().map(|device| PlayerAudio {
+            stream: 0,
             parts: Vec::new(),
             path: video.clone(),
             rate: device.rate(),
@@ -1353,6 +1358,7 @@ impl DiscCraftApp {
             }
         };
         let audio = PlayerAudio {
+            stream: 0,
             parts: Vec::new(),
             path: path.clone(),
             rate: device.rate(),
@@ -1824,6 +1830,7 @@ mod tests {
             AudioTrack {
                 more: Vec::new(),
                 asset: AssetId(2),
+                stream: 0,
                 language: "ja".to_owned(),
                 start: 0,
                 trim_start: 0,
@@ -1832,6 +1839,7 @@ mod tests {
             AudioTrack {
                 more: Vec::new(),
                 asset: AssetId(3),
+                stream: 0,
                 language: "en".to_owned(),
                 start: 0,
                 trim_start: 0,

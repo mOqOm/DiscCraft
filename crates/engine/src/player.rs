@@ -44,6 +44,8 @@ pub struct PlayerAudio {
     /// The sound as parts played one after the other (an audio track of several clips, from where the playback
     /// starts). When there are any, they are what plays: `path`, `from` and `until` are not looked at.
     pub parts: Vec<PlayerAudioPart>,
+    /// Which sound stream of `path` plays (M6.418): 0 the first.
+    pub stream: usize,
 }
 
 /// One part of a playback's sound: a stretch of a file, with silence in front.
@@ -57,6 +59,19 @@ pub struct PlayerAudioPart {
     pub from: f64,
     /// Where in the file the part ends, seconds (`None`: the file's end).
     pub until: Option<f64>,
+    /// Which sound stream of the file plays (M6.418): 0 the first.
+    pub stream: usize,
+}
+
+/// How many sound streams the file of asset `asset` has (M6.418): what an audio track of it can play.
+#[must_use]
+pub fn audio_stream_count(
+    project: &disccraft_project::Project,
+    asset: disccraft_project::AssetId,
+) -> usize {
+    project.assets.get(&asset).map_or(0, |asset| {
+        disccraft_transcode::audio_stream_count(&asset.media_file())
+    })
 }
 
 /// The sound of an audio track of several clips from `from` seconds of the timeline on, as the parts a player
@@ -103,6 +118,12 @@ pub fn audio_track_parts(
             silence,
             from: file_from,
             until,
+            // The track's stream of its own file; another file's clips play their first.
+            stream: if clip.asset == track.asset {
+                track.stream as usize
+            } else {
+                0
+            },
         });
         match end {
             Some(end) => cursor = end,
@@ -662,6 +683,7 @@ fn decode_audio(
             silence: (-from).max(0.0),
             from: from.max(0.0),
             until: audio.until,
+            stream: audio.stream,
         }];
         &whole
     } else {
@@ -682,7 +704,8 @@ fn decode_audio_part(
     shared: &AudioShared,
     stop: &AtomicBool,
 ) -> Result<bool, String> {
-    let reader = AudioReader::open(&part.path).map_err(|error| error.to_string())?;
+    let reader =
+        AudioReader::open_stream(&part.path, part.stream).map_err(|error| error.to_string())?;
     let rate = f64::from(output_rate);
     let seconds = |value: f64| {
         if value.is_finite() {
@@ -972,6 +995,7 @@ mod tests {
         assert!(silent.no_picture().is_none());
 
         let audio = PlayerAudio {
+            stream: 0,
             parts: Vec::new(),
             path: video.clone(),
             rate: 48_000,
@@ -1165,18 +1189,21 @@ mod tests {
 
         // 0.1 s of the loud file from its 0.1 s on, 0.05 s of silence, then 0.05 s of the soft file.
         let audio = PlayerAudio {
+            stream: 0,
             path: loud.clone(),
             rate: 48_000,
             from: None,
             until: None,
             parts: vec![
                 PlayerAudioPart {
+                    stream: 0,
                     path: loud.clone(),
                     silence: 0.0,
                     from: 0.1,
                     until: Some(0.2),
                 },
                 PlayerAudioPart {
+                    stream: 0,
                     path: soft.clone(),
                     silence: 0.05,
                     from: 0.0,
@@ -1301,6 +1328,7 @@ mod tests {
         let mut player = Player::start_with_audio(
             video,
             Some(PlayerAudio {
+                stream: 0,
                 parts: Vec::new(),
                 path: audio,
                 rate: 44_100,
@@ -1343,6 +1371,7 @@ mod tests {
         let mut player = Player::start_with_audio(
             fixture.clone(),
             Some(PlayerAudio {
+                stream: 0,
                 parts: Vec::new(),
                 path: fixture,
                 rate: 48_000,
@@ -1369,6 +1398,7 @@ mod tests {
         let silent = Player::start_with_audio(
             PathBuf::from("no-such-video.m2v"),
             Some(PlayerAudio {
+                stream: 0,
                 parts: Vec::new(),
                 path: PathBuf::from("no-such-audio.wav"),
                 rate: 0,

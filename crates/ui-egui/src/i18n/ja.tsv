@@ -1,4 +1,4 @@
-﻿# Japanese (ja) catalog for DiscCraft. Format: context 	 source 	 translation. A string without
+# Japanese (ja) catalog for DiscCraft. Format: context 	 source 	 translation. A string without
 # an entry is shown in English, the language the strings in code are written in.
 #
 # Entries are written from the plain meaning of the English source. So that people who used Adobe
@@ -1294,6 +1294,8 @@
 	Add Audio Clip Here	ここにオーディオクリップを追加
 	(no audio assets)	（オーディオのアセットがありません）
 	Clear Audio Clip	オーディオクリップを消去
+	Sound Stream	サウンドストリーム
+	Stream {n}	ストリーム {n}
 	Select DVD-ROM Folder…	DVD-ROM フォルダーを選択…
 	Set Timeline User Operations…	タイムラインのユーザー操作を設定…
 	Save Frame as File…	フレームをファイルとして保存…
@@ -1721,3 +1723,67 @@ xmp:tiff	Model	画像入力機器のモデル名
 xmp:tiff	Software	使用ソフトウェア名
 xmp:tiff	Artist	作者名
 xmp:tiff	Copyright	撮影著作権者 / 編集著作権者
+	Add Items from Files…	ファイルから項目を追加…
+	Copy files into the set shown: each is a menu, a button, a picture, a layer set or a replacement layer by its contents	ファイルを表示中のセットにコピーする。中身によって、メニュー・ボタン・画像・レイヤーセット・置換レイヤーのどれかになる
+	Import Folder…	フォルダーを読み込み…
+	Make a set of the folder chosen and of each folder under it that has PSDs or pictures	選んだフォルダーと、その下の PSD や画像のあるフォルダーごとにセットを作る
+	Library Files	ライブラリファイル
+	No library files (PSDs or pictures) in that folder	そのフォルダーにはライブラリのファイル（PSD や画像）がありません
+	The library is still adding files	ライブラリはまだファイルを追加しています
+	The library has no folder (Preferences ▸ Media)	ライブラリのフォルダーがありません（環境設定 ▸ メディア）
+	Adding to the library: {done} of {total}	ライブラリに追加中: {total} 個のうち {done} 個
+	Could not add to the library: {error}	ライブラリに追加できませんでした: {error}
+	Added {n} items to the library	{n} 個の項目をライブラリに追加しました
+	Added {n} items to the library; {skipped} files could not be taken	{n} 個の項目をライブラリに追加しました（{skipped} 個のファイルは追加できませんでした）
+	The library's file is missing: {name}	ライブラリのファイルがありません: {name}
+	Chapter Pages	チャプターのページ（複数ページ）
+	Scene Pages	シーンのページ（複数ページ）
+	{kind} Disc	{kind} ディスク
+	Creates a disc to play in a {kind} player, a computer or a game console.	{kind} プレーヤー、コンピューターまたはテレビゲーム機で再生するためのディスクを作成します。
+	Recorder:	レコーダー:
+	Write Speed:	書き込み速度:
+	Copies:	コピー数:
+	Run test before writing	書き込み前にテストを実行
+	Windows' disc writing (IMAPI2) has no test mode: the disc is written at once	Windows のディスクの書き込み（IMAPI2）にはテストの書き込みがないため、すぐに書き込みます
+	Auto-erase rewritable discs	書き換え可能ディスクのデータを自動消去
+	Disc:	ディスク:
+	No recorder	レコーダーがありません
+	Maximum	最大
+	No disc	ディスクが入っていません
+	{kind}: cannot be written	{kind}: 書き込めません
+	{kind}, blank, {free} free	{kind}、空き、{free} 使用可能
+	{kind}, rewritable, with data on it	{kind}、書き換え可能、データあり
+	{kind}, not blank	{kind}、空きではありません
+	Writing discs is not available on this system yet.	この OS では、まだディスクに書き込めません。
+	The recorder is not available.	レコーダーが使えません。
+	There is no disc in the recorder.	レコーダーにディスクが入っていません。
+	The disc in the recorder ({kind}) cannot be written.	レコーダーのディスク（{kind}）には書き込めません。
+	The disc is not blank. Insert a blank disc (or turn on Auto-erase rewritable discs for a rewritable one).	ディスクが空きではありません。空きのディスクを入れてください（書き換え可能ディスクなら「書き換え可能ディスクのデータを自動消去」をオンに）。
+	The disc is too small: the project needs {needed}, the disc has {free}.	ディスクの容量が足りません: プロジェクトは {needed}、ディスクは {free} です。
+	The disc is write-protected.	ディスクは書き込み禁止です。
+	The recorder is busy. Wait a moment and try again.	レコーダーが使用中です。少し待ってからやり直してください。
+	Writing stopped	書き込みを停止しました
+	The disc image cannot be read: {message}	ディスクイメージを読めません: {message}
+	Writing the disc (copy {copy} of {copies})	ディスクに書き込み中（{copies} 枚中 {copy} 枚目）
+	Disc written. Insert the next blank disc.	ディスクに書き込みました。次の空きのディスクを入れてください。
+	{copies} discs written	{copies} 枚のディスクに書き込みました
+	Disc written	ディスクに書き込みました
+	Next Disc	次のディスク
+	Insert a blank disc for copy {copy} of {copies}.	{copies} 枚中 {copy} 枚目の空きのディスクを入れてください。
+	The disc could not be written	ディスクに書き込めませんでした
+	Write	書き込み
+	Try Again	やり直す
+	Erasing the disc	ディスクを消去中
+	Closing the disc	ディスクを閉じています
+	Verifying the disc	ディスクをベリファイしています
+	{kind}: cannot be written (a disc already written and closed, or a pressed one)	{kind}: 書き込めません（書き込み済みで閉じたディスクか、プレスしたディスク）
+	Verify the disc after writing	書き込み後にディスクをベリファイ
+	Reads the disc back and compares it with the image, sector by sector, before it comes out	書き込んだディスクを読み戻し、取り出す前にイメージとセクターごとに比べます
+	Verify failed: the disc differs from the image from sector {sector}. Write it again on another disc.	ベリファイに失敗しました: ディスクがセクター {sector} からイメージと違います。別のディスクに書き込み直してください。
+	Verify failed: the disc cannot be read back ({message}).	ベリファイに失敗しました: ディスクを読み戻せません（{message}）。
+	{copies} discs written and verified	{copies} 枚のディスクに書き込み、ベリファイしました
+	Disc written and verified	ディスクに書き込み、ベリファイしました
+	Writing…	書き込み中…
+	Stops writing; a write-once disc stopped part way cannot be used again	書き込みを止めます。途中で止めた 1 回だけ書き込めるディスクは、もう使えません
+	{step} {percent}% ({time})	{step} {percent}%（{time}）
+	A disc is being written. Stop it or wait for it to finish first.	ディスクに書き込み中です。先に停止するか、終わるまで待ってください。

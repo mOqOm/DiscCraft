@@ -229,6 +229,7 @@ fn a_dvd_compliant_program_stream_is_repackaged() -> Result<(), Box<dyn Error>> 
                 .push(disccraft_project::AudioTrack {
                     more: Vec::new(),
                     asset: video,
+                    stream: 0,
                     language: "en".to_string(),
                     start: 0,
                     trim_start: 0,
@@ -924,6 +925,7 @@ fn build_project(video: &Path, audio: &Path) -> Result<Project, Box<dyn Error>> 
     timeline.audio.push(AudioTrack {
         more: Vec::new(),
         asset: audio_asset,
+        stream: 0,
         language: "ja".to_string(),
         start: 0,
         trim_start: 0,

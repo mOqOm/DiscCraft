@@ -34,7 +34,7 @@ mod write;
 pub use svg::{is_svg, render_svg_fill, render_svg_fit};
 pub use write::{
     PsdAdditions, PsdAntialias, PsdButtonAddition, PsdCaps, PsdCharStyle, PsdLayer, PsdScript,
-    PsdShadow, PsdText, PsdTextAlign, write_layered_psd, write_psd_over,
+    PsdShadow, PsdText, PsdTextAlign, page_group_name, write_layered_psd, write_psd_over,
 };
 
 /// Errors returned by this crate.
@@ -347,6 +347,119 @@ pub fn psd_page_count(path: &Path) -> Result<usize, PhotoError> {
         .count())
 }
 
+/// The size (width, height) of the picture or layered document at `path`, as PhotoCraft reads it (M6.403: a Library
+/// file is placed at its own size).
+///
+/// # Errors
+///
+/// When the file cannot be read.
+pub fn picture_size(path: &Path) -> Result<(u32, u32), PhotoError> {
+    let (_, canvas) = load_document(path)?;
+    rect_width_u32(canvas)
+        .zip(rect_height_u32(canvas))
+        .ok_or_else(|| PhotoError::Invalid("invalid canvas size".to_string()))
+}
+
+/// One layer a Library layer set places (M6.405): its name, where it draws on the canvas and its picture cropped to
+/// that.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PsdPiece {
+    /// The layer's name.
+    pub name: String,
+    /// The left edge of what it draws, on the canvas.
+    pub x: u32,
+    /// The top edge of what it draws, on the canvas.
+    pub y: u32,
+    /// What it draws.
+    pub image: Image8,
+}
+
+/// The layers a Library layer set or replacement layer in the layered document at `path` places (M6.405, as Encore
+/// places a layer set: each layer of its group a layer of the menu; docs/encore-behavior.md 9.18): the layers of the
+/// document's one group, else of its top level, bottom to top, each cropped to what it draws (a group inside them
+/// is one piece). Hidden layers and layers that draw nothing are left out. With the canvas's size.
+///
+/// # Errors
+///
+/// When the file cannot be read.
+pub fn psd_pieces(path: &Path) -> Result<((u32, u32), Vec<PsdPiece>), PhotoError> {
+    let (doc, canvas) = load_document(path)?;
+    let size = rect_width_u32(canvas)
+        .zip(rect_height_u32(canvas))
+        .ok_or_else(|| PhotoError::Invalid("invalid canvas size".to_string()))?;
+    let layers: &[Layer] = match doc.layers.as_slice() {
+        [only] => match &only.content {
+            LayerContent::Group(group) => &group.children,
+            _ => &doc.layers,
+        },
+        all => all,
+    };
+    let mut pieces = Vec::new();
+    for layer in layers.iter().filter(|layer| layer.visible) {
+        let buffer = render_layer(layer, canvas);
+        let Some(bbox) = alpha_bbox(&buffer, canvas) else {
+            continue;
+        };
+        let Some(image) = crop_buffer_to_image(&buffer, bbox, canvas) else {
+            continue;
+        };
+        pieces.push(PsdPiece {
+            name: layer.name.clone(),
+            x: u32::try_from(bbox.x0).unwrap_or(0),
+            y: u32::try_from(bbox.y0).unwrap_or(0),
+            image,
+        });
+    }
+    Ok((size, pieces))
+}
+
+/// What a file is as an item of the Library (M6.403), as Encore's Library ▸ Add Item… tells by its contents
+/// (docs/encore-behavior.md 9.18).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibraryFileKind {
+    /// A menu: a layered document with button sets and other layers.
+    Menu,
+    /// A button: a layered document of one button set and nothing else.
+    Button,
+    /// A picture: an image file, or a layered document without button sets (but the two below).
+    Image,
+    /// A layer set: a layered document of one group (not a button set) and nothing else.
+    LayerSet,
+    /// A replacement layer: a layered document of one `(!)` layer and nothing else.
+    Replacement,
+}
+
+/// What the file at `path` is as a Library item (M6.403, Encore's kinds by contents): a layered document (PSD, PSB,
+/// PhotoCraft) with button sets is a menu, or a button when one button set is all it has; one without is a layer set
+/// when it is one group, a replacement layer when it is one `(!)` layer, else a picture; any other file is a picture.
+/// The size and the name of the file do not count.
+///
+/// # Errors
+///
+/// When a layered document cannot be read.
+pub fn library_file_kind(path: &Path) -> Result<LibraryFileKind, PhotoError> {
+    if !is_document(path) {
+        return Ok(LibraryFileKind::Image);
+    }
+    let (doc, _) = load_document(path)?;
+    let only = match doc.layers.as_slice() {
+        [only] => Some(only),
+        _ => None,
+    };
+    let group = |layer: &Layer| matches!(layer.content, LayerContent::Group(_));
+    if !collect_button_layers(&doc.layers, false).is_empty() {
+        return Ok(match only {
+            Some(layer) if group(layer) && is_button_name(&layer.name) => LibraryFileKind::Button,
+            _ => LibraryFileKind::Menu,
+        });
+    }
+    Ok(match only {
+        Some(layer) if group(layer) => LibraryFileKind::LayerSet,
+        Some(layer) if layer.name.trim_start().starts_with("(!)") => LibraryFileKind::Replacement,
+        _ => LibraryFileKind::Image,
+    })
+}
+
 /// The pictures of the menu PSD at `path` by page (M10.27, Encore's `(#)` groups): what every page shows and what
 /// each draws over it, at the canvas size.
 ///
@@ -355,6 +468,28 @@ pub fn psd_page_count(path: &Path) -> Result<usize, PhotoError> {
 /// As [`load_psd_menu`].
 pub fn load_menu_pages(path: &Path) -> Result<PsdPages, PhotoError> {
     let (doc, canvas) = load_document(path)?;
+    menu_pages(doc, canvas)
+}
+
+/// The pictures of the menu PSD at `path` by page as [`load_menu_pages`] gives them, over a motion video (M6.402):
+/// the shared picture without the PSD's bottom layer, which the video takes the place of as Encore draws a PSD menu
+/// given a video (it renames that layer Background and locks it; docs/encore-behavior.md 9.18). A bottom layer that
+/// is a group is kept.
+///
+/// # Errors
+///
+/// As [`load_psd_menu`].
+pub fn load_menu_pages_over_video(path: &Path) -> Result<PsdPages, PhotoError> {
+    let (mut doc, canvas) = load_document(path)?;
+    if let Some(bottom) = doc.layers.first_mut()
+        && !matches!(bottom.content, LayerContent::Group(_))
+    {
+        bottom.visible = false;
+    }
+    menu_pages(doc, canvas)
+}
+
+fn menu_pages(doc: Document, canvas: Rect) -> Result<PsdPages, PhotoError> {
     let render = |keep: &dyn Fn(usize, &Layer) -> bool| -> Result<Image8, PhotoError> {
         let mut doc = doc.clone();
         for (index, layer) in doc.layers.iter_mut().enumerate() {

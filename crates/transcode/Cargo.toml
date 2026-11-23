@@ -14,12 +14,15 @@ disccraft-sound.workspace = true
 disccraft-motion.workspace = true
 disccraft-psmux.workspace = true
 disccraft-m2tsmux.workspace = true
+# DV (M6.410): the media reader lists DV in an AVI but has no decoder for it.
+disccraft-dv.workspace = true
 # The AC-3 decoder: a raw .ac3 file is decoded for the monitor's sound and its waveform (never for the disc).
 craft-audio = { workspace = true, features = ["ac3-decode"] }
 craft-media.workspace = true
 filmcraft-media.workspace = true
 filmcraft-codecs.workspace = true
 filmcraft-frame.workspace = true
+filmcraft-color.workspace = true
 filmcraft-time.workspace = true
 craft-video = { workspace = true, features = ["h264-encode"] }
 thiserror.workspace = true

@@ -29,7 +29,7 @@ Non-goals:
 
 In development (0.1.0). What works now:
 
-- From MP4 / MOV and other source files you can build a DVD with menus (`VIDEO_TS` folder, ISO) and a Blu-ray (BDMV folder, ISO).
+- From MP4 / MOV, a camcorder's DV and other source files you can build a DVD with menus (`VIDEO_TS` folder, ISO) and a Blu-ray (BDMV folder, ISO).
   Sources that do not fit the spec are converted automatically during the build (in `disccraft-cache` next to the output by
   default; `build --cache <folder>` keeps them in a shared folder outside the output).
 - The GUI (`cargo run --release -p disccraft`) uses Encore's arrangement and menu bar: the Project / Menu / Timeline / Build tabs,
@@ -40,11 +40,12 @@ In development (0.1.0). What works now:
   and the length and size of an H.264 mkv are read from its header. The monitor's picture is decoded in the background, so the
   window does not stop while the playhead is dragged.
 - Menus: button placement (multi-select, align, distribute, arrange, copy and paste), links (pick whip), default buttons,
-  auto-activate, backgrounds (colour / image / video) and menu audio, end action and duration, chapter index, library presets,
-  image and shape layers (drop shadow, flip, rotate), guides, vertical text, creating a text subpicture.
+  auto-activate, backgrounds (colour / image / video) and menu audio, end action and duration, chapter index, library presets
+  (multi-page chapter templates too) and library items from PSD and picture files or folders, image and shape layers (drop
+  shadow, flip, rotate), guides, vertical text, creating a text subpicture.
 - Timeline: one title from several video clips butted together (a dropped clip goes after the clips so far with a chapter at the
-  join; trimming snaps to GOP starts, and sources that need converting and HD are joined at build time too, though on DVD a clip
-  that needs converting cannot be trimmed), chapter points, audio and subtitle tracks (a timeline's colour set picks the subtitle
+  join; MPEG-2 that goes on the disc as it is is trimmed at GOP starts, and sources that need converting and HD are joined at
+  build time too and trimmed to the frame), chapter points, audio and subtitle tracks (a timeline's colour set picks the subtitle
   colours), end actions, remote menu, playback (Space, with audio; the speaker in the track header picks which audio track the
   monitor plays. A video whose picture cannot be decoded still plays its sound, and the monitor says why).
 - Navigation: first play, title button, slideshows (a slide's name and description can become a subtitle), playlists, chapter
@@ -70,13 +71,16 @@ What works today:
   7.1 and 192 kHz, 24-bit), AC-3 or DTS
 - Menus: still menus, buttons and highlights, motion menus, timeouts (duration and end action), auto-activate, PSD import with
   button detection from layer names, layered PSD export with editable text, chapter index
-- Sources: video (MP4 / MOV / MKV / m2v and more), audio (WAV / AC-3 / MP3 / FLAC and more), images (PNG / JPEG / PSD / TIFF),
+- Sources: video (MP4 / MOV / MKV / m2v / DV and more), audio (WAV / AC-3 / MP3 / FLAC and more), images (PNG / JPEG / PSD / TIFF),
   vector graphics (SVG, drawn at the displayed size so they never blur), subtitles (SRT / WebVTT / timecode text;
   UTF-8 / UTF-16 / Shift_JIS)
 - Navigation: first play, title button, remote menu, links, flowchart, playlists, slideshows
+- Writing to disc (Windows): the Build panel's "DVD Disc / Blu-ray Disc" output writes to a recorder, with the write speed and the number of copies (erasing rewritable discs too); also `recorders` and `burn` on the command line
 - Transcode: automatic transcoding (audio to Dolby Digital (AC-3) at 192 kbps), bitrate allocation to fit the capacity, caching,
   several sources converted in parallel (the MPEG-2 encoder is multithreaded over macroblock rows, AC-3 is encoded in segments
-  on every core). Transcode Now in the Project panel's right-click menu converts media in the background ahead of the build
+  on every core). Transcode Now in the Project panel's right-click menu converts media in the background ahead of the build.
+  Encore's quality presets (VBR 1-pass / 2-pass, CBR) and presets of your own, transcode settings per asset and Revert to
+  Original, 3:2 pulldown for 23.976 sources, and on Windows HD H.264 on the hardware encoder (Preferences)
 - Output: DVD-5 / DVD-9, BD-25 / BD-50, BDXL (100 GB triple layer, 128 GB quad layer), capacity meter, DVD-ROM / BD-ROM content (files for a computer beside the video)
 - Verification: project checks (results grouped per item, in Encore's wording), the VM simulator and preview, read-back
   verification

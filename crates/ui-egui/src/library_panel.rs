@@ -8,7 +8,7 @@
 use crate::DiscCraftApp;
 use crate::app::Selection;
 use crate::i18n::{tl, tlf};
-use crate::user_library::{LayerItem, UserItem, UserItemKind};
+use crate::user_library::{FileItem, FileKind, LayerItem, UserItem, UserItemKind};
 use disccraft_project::{
     AssetId, AssetKind, GraphicKind, LAYER_PRESETS, LIBRARY, LibraryItem, LibraryKind, Link,
     MenuGraphic, MenuId, ShapeKind, layer_preset, library_item,
@@ -153,6 +153,12 @@ impl Default for LibraryState {
 /// プレビューの高さ。
 const PREVIEW_HEIGHT: f32 = 120.0;
 
+/// The preview's height in a panel of `ui`'s height: [`PREVIEW_HEIGHT`], or less in a short panel (a third of it,
+/// at least 48), so that the list under it stays in sight (M9.37: on a small screen it took the whole panel).
+fn preview_height(ui: &Ui) -> f32 {
+    PREVIEW_HEIGHT.min((ui.available_height() / 3.0).max(48.0))
+}
+
 /// 一覧の 1 行。
 #[derive(Clone, Debug)]
 struct LibraryRow {
@@ -164,8 +170,12 @@ struct LibraryRow {
 impl DiscCraftApp {
     /// ライブラリのタブ。
     pub(crate) fn library_tab(&mut self, ui: &mut Ui) {
+        self.poll_library_import(ui.ctx());
         let mut set_action = None;
         let mut add_layers = false;
+        let mut add_files = false;
+        let mut import_folder = false;
+        let importing = self.library_import.is_some();
         let has_menu = self.viewer_menu().is_some();
         ui.horizontal(|ui| {
             ui.label(tl!("Set:"));
@@ -208,6 +218,31 @@ impl DiscCraftApp {
                 _ => None,
             };
             let _ = ui.menu_button("≡", |ui| {
+                // M6.403: Encore's Library ▸ Add Item… (files), and DiscCraft's Import Folder….
+                if ui
+                    .add_enabled(
+                        !importing,
+                        egui::Button::new(tl!("Add Items from Files…")),
+                    )
+                    .on_hover_text(tl!(
+                        "Copy files into the set shown: each is a menu, a button, a picture, a layer set or a replacement layer by its contents"
+                    ))
+                    .clicked()
+                {
+                    add_files = true;
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(!importing, egui::Button::new(tl!("Import Folder…")))
+                    .on_hover_text(tl!(
+                        "Make a set of the folder chosen and of each folder under it that has PSDs or pictures"
+                    ))
+                    .clicked()
+                {
+                    import_folder = true;
+                    ui.close();
+                }
+                ui.separator();
                 if ui.button(tl!("New Set…")).clicked() {
                     set_action = Some(SetAction::New);
                     ui.close();
@@ -243,6 +278,12 @@ impl DiscCraftApp {
         });
         if add_layers {
             self.add_menu_layers_item();
+        }
+        if add_files {
+            self.library_add_files();
+        }
+        if import_folder {
+            self.library_import_folder();
         }
         match set_action {
             Some(SetAction::New) => {
@@ -282,7 +323,8 @@ impl DiscCraftApp {
         let selected = self.library.selected;
         self.library_preview(ui, selected);
 
-        ui.horizontal(|ui| {
+        // 狭いパネルでは折り返す（種類のボタンが右に切れて押せなくならない。M9.37）。
+        ui.horizontal_wrapped(|ui| {
             for group in LibraryGroup::ALL {
                 if let Some(show) = self.library.show.get_mut(group.index()) {
                     let _ = ui
@@ -307,7 +349,7 @@ impl DiscCraftApp {
     }
 
     /// The name of the set of one's own that `set` is (empty for "User"); `None` for "General".
-    fn own_set_name(&self, set: LibrarySet) -> Option<String> {
+    pub(crate) fn own_set_name(&self, set: LibrarySet) -> Option<String> {
         match set {
             LibrarySet::General => None,
             LibrarySet::User => Some(String::new()),
@@ -346,6 +388,17 @@ impl DiscCraftApp {
                         replacement: true, ..
                     }) => (LibraryGroup::Replacements, tl!("Replacement Layer")),
                     UserItemKind::Layers(_) => (LibraryGroup::LayerSets, tl!("Layer Set")),
+                    UserItemKind::File(ref file) => match file.kind {
+                        FileKind::Menu => (LibraryGroup::Menus, kind_label(LibraryKind::Menu)),
+                        FileKind::Button => {
+                            (LibraryGroup::Buttons, kind_label(LibraryKind::Button))
+                        }
+                        FileKind::Image => (LibraryGroup::Images, tl!("Image")),
+                        FileKind::LayerSet => (LibraryGroup::LayerSets, tl!("Layer Set")),
+                        FileKind::Replacement => {
+                            (LibraryGroup::Replacements, tl!("Replacement Layer"))
+                        }
+                    },
                 };
                 if self.library_shows(group) {
                     rows.push(LibraryRow {
@@ -463,7 +516,13 @@ impl DiscCraftApp {
                     .items
                     .get(index)
                     .map(|item| match item.kind {
-                        UserItemKind::Menu(_) => LibraryKind::Menu,
+                        UserItemKind::Menu(_)
+                        | UserItemKind::File(FileItem {
+                            kind: FileKind::Menu,
+                            ..
+                        }) => LibraryKind::Menu,
+                        // A file's picture, layer set, replacement layer or button is placed.
+                        UserItemKind::File(_) => LibraryKind::Button,
                         // A text item and layers are placed, as a button is.
                         UserItemKind::Button(_)
                         | UserItemKind::Text(_)
@@ -680,7 +739,7 @@ impl DiscCraftApp {
 
     /// Places Library layers in `menu` (their top left corner at `at`, frame pixels; else where they were) and
     /// selects the top one: an image's asset is the project's asset of that file, imported when there is none.
-    fn place_layers(&mut self, menu: MenuId, item: &LayerItem, at: Option<(u16, u16)>) {
+    pub(crate) fn place_layers(&mut self, menu: MenuId, item: &LayerItem, at: Option<(u16, u16)>) {
         let mut graphics = item.graphics.clone();
         for (graphic, image) in graphics.iter_mut().zip(&item.images) {
             let (GraphicKind::Image { asset }, Some(path)) = (&mut graphic.kind, image) else {
@@ -758,12 +817,11 @@ impl DiscCraftApp {
         }
     }
 
-    /// 削除: ユーザーの項目を外す。
+    /// 削除: ユーザーの項目を外す（ライブラリのファイルは、ほかの項目が使っていなければ一緒に消す。M6.403）。
     fn remove_user_item(&mut self, index: usize) {
-        if index >= self.user_library.items.len() {
+        if self.user_library.remove_item(index).is_none() {
             return;
         }
-        let _ = self.user_library.items.remove(index);
         if let Err(error) = self.user_library.save() {
             self.status = tlf!("Could not save the library: {error}", error = error);
         }
@@ -841,6 +899,24 @@ impl DiscCraftApp {
         };
         match (item.kind, action) {
             (_, LibraryAction::Remove) => self.remove_user_item(index),
+            // M6.403: a file of the library's own.
+            (UserItemKind::File(file), LibraryAction::NewMenu) if file.kind == FileKind::Menu => {
+                self.library_file_menu(&file, None);
+            }
+            (UserItemKind::File(file), LibraryAction::Replace) if file.kind == FileKind::Menu => {
+                let Some(menu) = self.viewer_menu() else {
+                    self.status = tl!("Open a menu first").to_owned();
+                    return;
+                };
+                self.library_file_menu(&file, Some(menu));
+            }
+            (UserItemKind::File(file), LibraryAction::Place) if file.kind != FileKind::Menu => {
+                let Some(menu) = self.viewer_menu() else {
+                    self.status = tl!("Open a menu first").to_owned();
+                    return;
+                };
+                self.place_library_file(menu, &file, None);
+            }
             (UserItemKind::Menu(spec), LibraryAction::NewMenu) => {
                 let created = self.run_command(
                     "library.newMenu",
@@ -1002,6 +1078,15 @@ impl DiscCraftApp {
                             self.place_layers(menu, &layers, Some(at));
                             return;
                         }
+                        // A file of the library's own (M6.403): its top left corner where it is dropped.
+                        Some(UserItem {
+                            kind: UserItemKind::File(file),
+                            ..
+                        }) => {
+                            let file = file.clone();
+                            self.place_library_file(menu, &file, Some(at));
+                            return;
+                        }
                         _ => return,
                     },
                     _ => return,
@@ -1138,11 +1223,12 @@ impl DiscCraftApp {
 
     /// プレビュー: プリセットは絵（下の関数）、画像はサムネール、シェイプは形。
     fn library_preview(&mut self, ui: &mut Ui, pick: Option<LibraryPick>) {
+        let preview = preview_height(ui);
         match pick {
             Some(LibraryPick::Image(asset)) => {
                 let texture = self.asset_thumbnail(ui.ctx(), asset);
                 let (outer, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), PREVIEW_HEIGHT),
+                    egui::vec2(ui.available_width(), preview),
                     egui::Sense::hover(),
                 );
                 let painter = ui.painter_at(outer);
@@ -1163,14 +1249,14 @@ impl DiscCraftApp {
             }
             Some(LibraryPick::Shape(shape)) => {
                 let (outer, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), PREVIEW_HEIGHT),
+                    egui::vec2(ui.available_width(), preview),
                     egui::Sense::hover(),
                 );
                 let painter = ui.painter_at(outer);
                 painter.rect_filled(outer, 2.0, ui.visuals().extreme_bg_color);
                 let rect = egui::Rect::from_center_size(
                     outer.center(),
-                    egui::vec2(PREVIEW_HEIGHT * 1.2, PREVIEW_HEIGHT * 0.6),
+                    egui::vec2(preview * 1.2, preview * 0.6),
                 );
                 match shape {
                     ShapeKind::Rectangle => {
@@ -1206,6 +1292,16 @@ impl DiscCraftApp {
                 if let Some(layers) = self.preset_layers(id) {
                     layers_preview(ui, &layers, frame);
                 }
+            }
+            // A file of the library's own: its picture (M6.403).
+            Some(LibraryPick::User(index))
+                if let Some(UserItem {
+                    kind: UserItemKind::File(file),
+                    ..
+                }) = self.user_library.items.get(index) =>
+            {
+                let file = file.clone();
+                self.library_file_preview(ui, &file, preview);
             }
             Some(LibraryPick::User(index))
                 if let Some(UserItem {
@@ -1290,8 +1386,8 @@ impl PreviewItem {
                 buttons: Vec::new(),
                 thumbnails: Vec::new(),
             },
-            // Layers are drawn by [`layers_preview`]; here an empty frame.
-            UserItemKind::Layers(_) => PreviewItem {
+            // Layers are drawn by [`layers_preview`], files by `library_file_preview`; here an empty frame.
+            UserItemKind::Layers(_) | UserItemKind::File(_) => PreviewItem {
                 kind: LibraryKind::Button,
                 background: [60, 60, 60],
                 text: [255, 255, 255],
@@ -1410,9 +1506,10 @@ enum LibraryAction {
 /// プリセットのプレビュー: メニューは背景とボタン（最初のボタンはハイライトの色の枠）、ボタンは画面の中央に 1 つ、
 /// 背景は色。
 fn preset_preview(ui: &mut Ui, item: Option<&PreviewItem>) {
-    let width = ui.available_width().min(PREVIEW_HEIGHT * 1.5);
+    let preview = preview_height(ui);
+    let width = ui.available_width().min(preview * 1.5);
     let (outer, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), PREVIEW_HEIGHT),
+        egui::vec2(ui.available_width(), preview),
         egui::Sense::hover(),
     );
     let frame =
@@ -1481,12 +1578,13 @@ fn preset_preview(ui: &mut Ui, item: Option<&PreviewItem>) {
 /// replacement layer with a cross, in a frame of `frame` pixels.
 fn layers_preview(ui: &mut Ui, item: &LayerItem, frame: (u16, u16)) {
     let (frame_w, frame_h) = (f32::from(frame.0.max(1)), f32::from(frame.1.max(1)));
-    let width = ui.available_width().min(PREVIEW_HEIGHT * 1.5);
+    let preview = preview_height(ui);
+    let width = ui.available_width().min(preview * 1.5);
     let (outer, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), PREVIEW_HEIGHT),
+        egui::vec2(ui.available_width(), preview),
         egui::Sense::hover(),
     );
-    let height = (width * frame_h / frame_w).min(PREVIEW_HEIGHT);
+    let height = (width * frame_h / frame_w).min(preview);
     let width = height * frame_w / frame_h;
     let area = egui::Rect::from_center_size(outer.center(), egui::vec2(width, height));
     let painter = ui.painter_at(outer);
@@ -1562,6 +1660,8 @@ pub(crate) fn item_name(id: &str) -> &'static str {
         "menu.bottom-bar" => tl!("Bottom Bar"),
         "menu.chapter-grid" => tl!("Chapter Grid"),
         "menu.thumbnail-grid" => tl!("Thumbnail Grid"),
+        "menu.chapter-pages" => tl!("Chapter Pages"),
+        "menu.scene-pages" => tl!("Scene Pages"),
         "menu.left-list" => tl!("Left List"),
         "button.wide" => tl!("Wide Button"),
         "button.small" => tl!("Small Button"),
@@ -1675,6 +1775,8 @@ fn label_text(label: &str) -> String {
         "Extras" => tl!("Extras"),
         "Setup" => tl!("Setup"),
         "Main Menu" => tl!("Main Menu"),
+        "Previous" => tl!("Previous"),
+        "Next" => tl!("Next"),
         "Scene Selection" => tl!("Scene Selection"),
         "Audio" => tl!("Audio"),
         "Subtitles" => tl!("Subtitles"),

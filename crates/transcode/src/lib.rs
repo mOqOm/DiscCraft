@@ -16,7 +16,11 @@
 mod field_type;
 pub use field_type::{FieldType, field_type};
 mod audio;
+mod avi;
+mod avi_mpeg;
 mod blend;
+mod dv_decoder;
+mod dv_source;
 mod file_chapters;
 pub use file_chapters::file_chapters;
 pub mod h264_sps;
@@ -240,7 +244,21 @@ pub fn transcode_audio(
     wav_out: &Path,
     seconds: Option<f64>,
 ) -> Result<f64, TranscodeError> {
-    let source = source::Source::open_audio_or_extracted(input)?;
+    transcode_audio_stream(input, 0, wav_out, seconds)
+}
+
+/// [`transcode_audio`] of sound stream `stream` of the file (M6.418: 0 the first).
+///
+/// # Errors
+///
+/// When the file cannot be read, has no such stream, or the WAV cannot be written.
+pub fn transcode_audio_stream(
+    input: &Path,
+    stream: usize,
+    wav_out: &Path,
+    seconds: Option<f64>,
+) -> Result<f64, TranscodeError> {
+    let source = source::Source::open_audio_or_extracted(input)?.with_stream(stream);
 
     let sample_frames = match seconds {
         Some(seconds) => audio::sample_frames_from_seconds(seconds).ok_or_else(|| {
@@ -450,7 +468,7 @@ pub fn build_tag() -> &'static str {
 pub fn first_frame(input: &Path) -> Result<(u32, u32, Vec<u8>), TranscodeError> {
     let source = source::Source::open(input)?;
     let mut rgb = Vec::new();
-    picture::for_each_rgb_frame(&source, Standard::Ntsc, 1, &mut |_, frame| {
+    picture::for_each_rgb_frame(&source, Standard::Ntsc, 1, false, &mut |_, frame| {
         rgb.extend_from_slice(frame);
         Ok(())
     })?;
@@ -507,9 +525,24 @@ impl AudioReader {
     ///
     /// When the file cannot be read or has no audio stream.
     pub fn open(input: &Path) -> Result<Self, TranscodeError> {
-        Ok(Self {
-            source: source::Source::open_audio_or_extracted(input)?,
-        })
+        Self::open_stream(input, 0)
+    }
+
+    /// Opens sound stream `stream` of a file (M6.418: 0 the first).
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be read or has no such stream.
+    pub fn open_stream(input: &Path, stream: usize) -> Result<Self, TranscodeError> {
+        let source = source::Source::open_audio_or_extracted(input)?.with_stream(stream);
+        if !source.has_audio() {
+            return Err(TranscodeError::Unsupported(format!(
+                "{}: no sound stream {}",
+                input.display(),
+                stream + 1
+            )));
+        }
+        Ok(Self { source })
     }
 
     /// The length of the file in seconds.
@@ -631,6 +664,15 @@ impl FrameReader {
     }
 }
 
+/// How many sound streams the file at `input` has (M6.418): an MKV's languages, a camcorder's two stereo pairs, …;
+/// 0 when it cannot be read as media (a raw AC-3 or DTS file, which has one, reads as 0 here too).
+#[must_use]
+pub fn audio_stream_count(input: &Path) -> usize {
+    source::Source::open(input)
+        .or_else(|_| source::Source::open_audio_or_extracted(input))
+        .map_or(0, |source| source.audio_streams())
+}
+
 /// Duration of an audio-only media file in seconds. A raw AC-3 elementary stream (which the openers do not
 /// read) is measured from its sync frames: 1536 samples each.
 pub fn probe_audio_seconds(input: &Path) -> Result<f64, TranscodeError> {
@@ -681,15 +723,17 @@ fn ac3_seconds(input: &Path) -> Option<f64> {
     Some(stream.frames.len() as f64 * 1536.0 / f64::from(stream.sample_rate))
 }
 
-/// Feeds the first `frames` frames of a video file (4:3 letterboxed RGB24 at the DVD frame size and rate) to `f` — motion menu backgrounds.
+/// Feeds the first `frames` frames of a video file (RGB24 at the DVD frame size and rate, letterboxed for a 16:9
+/// screen when `wide`, M6.406, else a 4:3 one) to `f` — motion menu backgrounds.
 pub fn for_each_frame(
     input: &Path,
     standard: Standard,
     frames: u64,
+    wide: bool,
     f: &mut dyn FnMut(u64, &[u8]) -> Result<(), String>,
 ) -> Result<(), TranscodeError> {
     let source = source::Source::open(input)?;
-    picture::for_each_rgb_frame(&source, standard, frames, f)
+    picture::for_each_rgb_frame(&source, standard, frames, wide, f)
 }
 
 #[cfg(test)]

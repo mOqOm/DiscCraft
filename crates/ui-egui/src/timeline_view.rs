@@ -1501,6 +1501,32 @@ impl DiscCraftApp {
                     );
                     ui.close();
                 }
+                // Which sound stream of its file the track plays (M6.418), when the file has several (an MKV's
+                // languages, a camcorder's second stereo pair).
+                let played = self
+                    .session
+                    .project
+                    .timeline(id)
+                    .and_then(|timeline| timeline.audio.get(track))
+                    .map(|track| (track.asset, track.stream as usize));
+                if let Some((asset, current)) = played {
+                    let streams =
+                        disccraft_engine::audio_stream_count(&self.session.project, asset);
+                    if streams > 1 {
+                        ui.menu_button(tl!("Sound Stream"), |ui| {
+                            for stream in 0..streams {
+                                let label = tlf!("Stream {n}", n = stream + 1);
+                                if ui.selectable_label(stream == current, label).clicked() {
+                                    let _ = self.run_command(
+                                        "timeline.setAudioStream",
+                                        json!({"timeline": id.0, "track": track, "stream": stream}),
+                                    );
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
+                }
                 let _ = ui.separator();
             }
             if clips > 1 {

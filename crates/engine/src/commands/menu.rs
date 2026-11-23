@@ -127,7 +127,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "背景を設定",
         menu: &["メニュー"],
         shortcut: None,
-        params: r##"{"menu": id, "color"?: "#RRGGBB", "asset"?: id}"##,
+        params: r##"{"menu": id, "color"?: "#RRGGBB", "asset"?: id, "video"?: id, "seconds"?: 1..30} (a menu made from a PSD keeps it over the video)"##,
         enabled: always_enabled,
         run: run_set_background,
         journal: true,
@@ -516,7 +516,17 @@ fn run_set_background(session: &mut Session, params: &Value) -> CommandResult {
     let menu_id = MenuId(req_u64(params, "menu")?);
     let color = opt_str(params, "color")?;
     let asset = opt_u64(params, "asset")?;
-    // A video asset makes a motion menu: {"menu", "video": id, "seconds"?: 1..=30 (default 10)}.
+    // A video asset makes a motion menu: {"menu", "video": id, "seconds"?: 1..=30 (default 10)}. A menu made from a
+    // PSD keeps it over the video, which takes the place of its bottom layer (M6.402, as Encore does).
+    let document = session
+        .project
+        .menu(menu_id)
+        .and_then(|menu| menu.background.document())
+        .filter(|asset| {
+            session.project.assets.get(asset).is_some_and(|asset| {
+                disccraft_photo::is_document(std::path::Path::new(&asset.path))
+            })
+        });
     let background = match opt_u64(params, "video")? {
         Some(video) if color.is_none() && asset.is_none() => {
             let seconds = u32::try_from(opt_u64(params, "seconds")?.unwrap_or(10))
@@ -524,6 +534,7 @@ fn run_set_background(session: &mut Session, params: &Value) -> CommandResult {
             MenuBackground::Video {
                 asset: AssetId(video),
                 seconds,
+                layers: document,
             }
         }
         Some(_) => {
@@ -532,11 +543,32 @@ fn run_set_background(session: &mut Session, params: &Value) -> CommandResult {
         None => select_background(color, asset)?,
     };
 
-    let Some(menu) = session.project.menu_mut(menu_id) else {
+    // Encore's pages are one menu with one background (M6.407: a motion video on a menu of PSD pages went under its
+    // first page only): the menu's pages that show the same background as this one change with it.
+    let Some(before) = session
+        .project
+        .menu(menu_id)
+        .map(|menu| menu.background.clone())
+    else {
         return Err(format!("menu {} does not exist", menu_id.0));
     };
-
-    menu.background = background;
+    let pages: Vec<MenuId> = session
+        .project
+        .menu_pages(menu_id)
+        .into_iter()
+        .filter(|page| {
+            *page == menu_id
+                || session
+                    .project
+                    .menu(*page)
+                    .is_some_and(|menu| menu.background == before)
+        })
+        .collect();
+    for page in pages {
+        if let Some(menu) = session.project.menu_mut(page) {
+            menu.background = background.clone();
+        }
+    }
     Ok(empty_object())
 }
 
@@ -678,9 +710,9 @@ fn run_create_subpicture(session: &mut Session, params: &Value) -> CommandResult
         .project
         .menu(menu_id)
         .ok_or_else(|| format!("menu {} does not exist", menu_id.0))?;
-    // The menu's PSD artwork, when it is made from one.
-    let art = match menu.background {
-        disccraft_project::MenuBackground::Image { asset } => session
+    // The menu's PSD artwork, when it is made from one (also under a motion video, M6.402).
+    let art = match menu.background.document() {
+        Some(asset) => session
             .project
             .assets
             .get(&asset)
@@ -692,7 +724,7 @@ fn run_create_subpicture(session: &mut Session, params: &Value) -> CommandResult
             .map(|path| disccraft_photo::psd_button_artwork(&path))
             .transpose()
             .map_err(|error| error.to_string())?,
-        _ => None,
+        None => None,
     };
     let (frame_w, frame_h) = disccraft_project::frame_size(&session.project.settings);
     // A set's place on the frame, as the import puts its button.
@@ -1882,35 +1914,52 @@ fn run_apply_psd(session: &mut Session, params: &Value) -> CommandResult {
         return Err(format!("menu {} does not exist", menu_id.0));
     };
     let (pages, asset) = psd_buttons(session, &path)?;
-    // The menus to update, each with its page of the PSD: every page of a menu shown by page (a page added in
-    // DiscCraft, which the PSD has no group for, takes only the new background); else this menu, from page 0.
-    let mut targets: Vec<(MenuId, Option<usize>)> = Vec::new();
-    match page {
-        Some(_) => {
-            for id in session.project.menu_pages(menu_id) {
-                let index = session
-                    .project
-                    .menu(id)
-                    .and_then(|menu| menu.psd_page)
-                    .map(usize::from)
-                    .filter(|index| *index < pages.len());
-                targets.push((id, index));
-            }
-        }
-        None => targets.push((menu_id, Some(0))),
+    let menus = session.project.menu_pages(menu_id);
+    // A menu of one page following a PSD of one page: from page 0, the PSD drawn whole.
+    if menus.len() == 1 && pages.len() <= 1 && page.is_none() {
+        let found: &[PsdMenuButton] = pages.first().map_or(&[], Vec::as_slice);
+        apply_psd_page(session, menu_id, found, asset, true)?;
+        session.project.drop_unused_menu_files();
+        return Ok(object(&[
+            ("asset", Value::from(asset.0)),
+            ("buttons", Value::from(found.len())),
+        ]));
     }
+    // Every page of the menu, each from its page of the PSD (M6.401: the pages made in DiscCraft too, which the menu's
+    // PSD has as `(#)` groups since); a page the PSD has no page for takes only the new background, and a PSD page
+    // no page takes (a group added in the editor) becomes a new page. The texts and graphics of a menu of pages are
+    // not in its PSD and stay; those of one page were written into it and go.
+    let (mut targets, left) = assign_psd_pages(session, &menus, pages.len());
+    let root = menus.first().copied().unwrap_or(menu_id);
+    let mut added = Vec::new();
+    for index in left..pages.len() {
+        let page = session
+            .project
+            .add_menu_page(root)
+            .map_err(|error| error.to_string())?;
+        added.push(Value::from(page.0));
+        targets.push((page, Some(index)));
+    }
+    let single = menus.len() == 1;
     let mut count = 0;
     for (id, index) in targets {
-        let found: &[PsdMenuButton] = index
-            .and_then(|index| pages.get(index))
-            .map_or(&[], Vec::as_slice);
-        if id == menu_id {
-            count = found.len();
-        }
-        if index.is_some() {
-            apply_psd_page(session, id, found, asset)?;
-        } else if let Some(menu) = session.project.menu_mut(id) {
-            menu.background = MenuBackground::Image { asset };
+        match index {
+            Some(index) => {
+                let found: &[PsdMenuButton] = pages.get(index).map_or(&[], Vec::as_slice);
+                if id == menu_id {
+                    count = found.len();
+                }
+                apply_psd_page(session, id, found, asset, single)?;
+                if let Some(menu) = session.project.menu_mut(id) {
+                    menu.psd_page = u16::try_from(index).ok();
+                }
+            }
+            None => {
+                if let Some(menu) = session.project.menu_mut(id) {
+                    menu.background = menu.background.with_document(asset);
+                    menu.psd_page = Some(disccraft_project::NO_PSD_PAGE);
+                }
+            }
         }
     }
     // The file the menu followed before, when it was one of its own, goes (M6.399).
@@ -1918,16 +1967,55 @@ fn run_apply_psd(session: &mut Session, params: &Value) -> CommandResult {
     Ok(object(&[
         ("asset", Value::from(asset.0)),
         ("buttons", Value::from(count)),
+        ("pages", Value::from(added)),
     ]))
 }
 
+/// The page of a PSD of `count` pages each page of a menu (`menus`, the first first) follows (M6.401), and the first
+/// PSD page left for no page: a page keeps the page it shows; the others (pages added in DiscCraft, which the PSD
+/// has as groups after its own since, or a menu that showed the PSD whole) take the pages after the last one kept,
+/// in order (from page 0 when no page is kept).
+fn assign_psd_pages(
+    session: &Session,
+    menus: &[MenuId],
+    count: usize,
+) -> (Vec<(MenuId, Option<usize>)>, usize) {
+    let own: Vec<Option<usize>> = menus
+        .iter()
+        .map(|id| {
+            session
+                .project
+                .menu(*id)
+                .and_then(|menu| menu.psd_page)
+                .map(usize::from)
+                .filter(|page| *page < count)
+        })
+        .collect();
+    let mut next = own.iter().flatten().max().map_or(0, |last| last + 1);
+    let targets = menus
+        .iter()
+        .zip(own)
+        .map(|(id, own)| match own {
+            Some(page) => (*id, Some(page)),
+            None if next < count => {
+                next += 1;
+                (*id, Some(next - 1))
+            }
+            None => (*id, None),
+        })
+        .collect();
+    (targets, next.max(1))
+}
+
 /// Make menu `id` follow its page of an edited PSD, `found` (bottom to top): the buttons matched to the groups
-/// ([`match_psd_buttons`]), in the PSD's order (M10.46, [`run_apply_psd`]).
+/// ([`match_psd_buttons`]), in the PSD's order (M10.46, [`run_apply_psd`]). `clear`: the menu's texts and graphics
+/// were written into the PSD, which shows them now.
 fn apply_psd_page(
     session: &mut Session,
     id: MenuId,
     found: &[PsdMenuButton],
     asset: AssetId,
+    clear: bool,
 ) -> Result<(), String> {
     let old: Vec<(String, Option<u32>, Rect)> = session
         .project
@@ -1952,13 +2040,16 @@ fn apply_psd_page(
     let Some(menu) = session.project.menu_mut(id) else {
         return Err(format!("menu {} does not exist", id.0));
     };
-    menu.background = MenuBackground::Image { asset };
+    // A motion menu keeps its video under the edited PSD (M6.402).
+    menu.background = menu.background.with_document(asset);
     menu.subpicture_colors = groups.first;
     menu.second_subpicture_colors = groups.second;
     // The texts and graphics were written into the PSD, which now shows them (M6.399: the graphics were drawn
     // twice).
-    menu.texts.clear();
-    menu.graphics.clear();
+    if clear {
+        menu.texts.clear();
+        menu.graphics.clear();
+    }
     // The new order: each group's button (a new one added for a group without), then the buttons without a group.
     let mut order = Vec::with_capacity(found.len().max(names.len()));
     for (index, button) in found.iter().enumerate() {
@@ -2455,7 +2546,12 @@ fn run_apply_motion(session: &mut Session, params: &Value) -> CommandResult {
     let Some(menu) = session.project.menu_mut(menu_id) else {
         return Err(format!("menu {} does not exist", menu_id.0));
     };
-    menu.background = MenuBackground::Video { asset, seconds };
+    // The movie shows the whole menu, its PSD's layers too.
+    menu.background = MenuBackground::Video {
+        asset,
+        seconds,
+        layers: None,
+    };
     menu.texts.clear();
     for button in &mut menu.buttons {
         button.label.clear();
@@ -3252,6 +3348,7 @@ mod tests {
             menu.background = disccraft_project::MenuBackground::Video {
                 asset: disccraft_project::AssetId(1),
                 seconds: 6,
+                layers: None,
             };
         }
         session.execute(
@@ -3413,6 +3510,531 @@ mod tests {
             &serde_json::json!({"kind": "menu", "id": menu_id}),
         )?;
         assert!(!session.project.assets.contains_key(&asset));
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M6.401 (GitHub issue #13): a menu of pages made in DiscCraft is written whole, from whichever page, its later
+    /// pages as `(#)` groups (only the page given was written); taken back, each page follows its group, its texts
+    /// staying in DiscCraft, and a group added in the editor becomes a new page.
+    #[test]
+    fn a_menu_of_pages_is_written_whole_and_taken_back_by_page() -> Result<(), Box<dyn Error>> {
+        use disccraft_photo::{PsdAdditions, PsdButtonAddition, PsdLayer};
+        let dir = std::env::temp_dir().join(format!("disccraft-psd-pages-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let mut session = Session::new();
+        let created = session.execute(
+            "library.newMenu",
+            &serde_json::json!({ "preset": "menu.bottom-bar" }),
+        )?;
+        let root = MenuId(value_u64(&created, "menu")?);
+        session.execute(
+            "menu.addText",
+            &serde_json::json!({"menu": root.0, "text": "Title", "x": 60, "y": 40}),
+        )?;
+        let page = MenuId(value_u64(
+            &session.execute("menu.addPage", &serde_json::json!({"menu": root.0}))?,
+            "menu",
+        )?);
+        session.execute(
+            "menu.addButton",
+            &serde_json::json!({"menu": page.0, "label": "Episode",
+                "rect": {"x": 60, "y": 300, "w": 160, "h": 40}}),
+        )?;
+        let names = |session: &Session, id: MenuId| -> Vec<String> {
+            session
+                .project
+                .menu(id)
+                .map(|menu| {
+                    menu.buttons
+                        .iter()
+                        .map(|button| button.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        // Written from the second page: the whole menu.
+        let written = dir.join("pages.psd");
+        let menu = session.project.menu(page).ok_or("page")?.clone();
+        disccraft_menu::export_menu_psd(&session.project, &menu, None, &written)?;
+        let tree = disccraft_photo::psd_layer_tree(&written)?;
+        let top: Vec<&str> = tree.iter().map(|node| node.name.as_str()).collect();
+        assert_eq!(
+            top,
+            [
+                "(#) ページ 1",
+                "(+) Extras",
+                "(+) Chapters",
+                "(+) Play",
+                "背景"
+            ]
+        );
+        let group = tree.first().ok_or("page group")?;
+        assert_eq!(group.page, Some(1));
+        let inside: Vec<&str> = group
+            .children
+            .iter()
+            .map(|node| node.name.as_str())
+            .collect();
+        assert_eq!(inside, ["(+) Episode"]);
+
+        // Taken back (saved from the page): each page from its group.
+        session.execute(
+            "menu.applyPsd",
+            &serde_json::json!({"menu": page.0, "path": written.to_string_lossy()}),
+        )?;
+        assert_eq!(session.project.menu_pages(root), [root, page]);
+        assert_eq!(names(&session, root), ["Play", "Chapters", "Extras"]);
+        assert_eq!(names(&session, page), ["Episode"]);
+        let psd_page =
+            |session: &Session, id: MenuId| session.project.menu(id).and_then(|menu| menu.psd_page);
+        assert_eq!(
+            (psd_page(&session, root), psd_page(&session, page)),
+            (Some(0), Some(1))
+        );
+        // The title stays a text of the first page (in the PSD it would be on every page).
+        assert_eq!(
+            session.project.menu(root).map(|menu| menu.texts.len()),
+            Some(1)
+        );
+
+        // A group added in the editor: a new page.
+        let (w, h) = disccraft_project::frame_size(&session.project.settings);
+        let mut rgba = vec![0u8; usize::from(w) * usize::from(h) * 4];
+        for y in 100..140 {
+            for x in 60..220 {
+                let i = (y * usize::from(w) + x) * 4;
+                if let Some(pixel) = rgba.get_mut(i..i + 4) {
+                    pixel.copy_from_slice(&[255, 255, 255, 255]);
+                }
+            }
+        }
+        let edited = dir.join("edited.psd");
+        disccraft_photo::write_psd_over(
+            &written,
+            &edited,
+            (u32::from(w), u32::from(h)),
+            &[PsdAdditions {
+                page: 2,
+                layers: Vec::new(),
+                buttons: vec![PsdButtonAddition {
+                    id: None,
+                    name: "More".to_owned(),
+                    into: Vec::new(),
+                    set: PsdLayer::Group {
+                        name: "(+) More".to_owned(),
+                        id: None,
+                        children: vec![PsdLayer::Raster {
+                            name: "More".to_owned(),
+                            rgba,
+                            visible: true,
+                        }],
+                    },
+                }],
+            }],
+        )?;
+        let applied = session.execute(
+            "menu.applyPsd",
+            &serde_json::json!({"menu": root.0, "path": edited.to_string_lossy()}),
+        )?;
+        let pages = session.project.menu_pages(root);
+        assert_eq!(pages.len(), 3);
+        let third = *pages.get(2).ok_or("third page")?;
+        assert_eq!(applied.get("pages"), Some(&serde_json::json!([third.0])));
+        assert_eq!(names(&session, third), ["More"]);
+        assert_eq!(psd_page(&session, third), Some(2));
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M6.402 (GitHub issue #13, Encore: docs/encore-behavior.md 9.18): a video given to a menu made from a PSD plays
+    /// under the PSD's layers, in the place of its bottom layer (the whole PSD was replaced by the video); writing
+    /// the menu out writes its PSD, taking an edited PSD in keeps the video, and no video goes back to the PSD.
+    #[test]
+    fn a_video_goes_under_a_psd_menus_layers() -> Result<(), Box<dyn Error>> {
+        use disccraft_photo::PsdLayer;
+        use disccraft_project::MenuBackground;
+        let dir = std::env::temp_dir().join(format!("disccraft-psd-motion-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let (w, h) = (720u32, 480u32);
+        let fill = |x0: u32, y0: u32, x1: u32, y1: u32, colour: [u8; 4]| {
+            let mut rgba = vec![0u8; (w * h * 4) as usize];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = ((y * w + x) * 4) as usize;
+                    if let Some(pixel) = rgba.get_mut(i..i + 4) {
+                        pixel.copy_from_slice(&colour);
+                    }
+                }
+            }
+            rgba
+        };
+        let raster = |name: &str, rgba: Vec<u8>| PsdLayer::Raster {
+            name: name.to_owned(),
+            rgba,
+            visible: true,
+        };
+        let path = dir.join("Paper.psd");
+        disccraft_photo::write_layered_psd(
+            &path,
+            w,
+            h,
+            &[
+                raster("Paper", fill(0, 0, w, h, [0, 120, 0, 255])),
+                raster("Deco", fill(100, 50, 200, 150, [255, 0, 0, 255])),
+                PsdLayer::Group {
+                    name: "(+) Play".to_owned(),
+                    id: None,
+                    children: vec![raster(
+                        "art",
+                        fill(300, 300, 500, 340, [255, 255, 255, 255]),
+                    )],
+                },
+            ],
+        )?;
+        let mut session = Session::new();
+        let imported = session.execute(
+            "menu.import",
+            &serde_json::json!({ "path": path.to_string_lossy() }),
+        )?;
+        let menu_id = value_u64(&imported, "menu")?;
+        let psd = disccraft_project::AssetId(value_u64(&imported, "asset")?);
+        let video = session.project.add_asset(&dir.join("loop.mp4"))?;
+        session.execute(
+            "menu.setBackground",
+            &serde_json::json!({"menu": menu_id, "video": video.0, "seconds": 5}),
+        )?;
+        let menu = session.project.menu(MenuId(menu_id)).ok_or("menu")?.clone();
+        assert_eq!(
+            menu.background,
+            MenuBackground::Video {
+                asset: video,
+                seconds: 5,
+                layers: Some(psd),
+            }
+        );
+
+        // A frame of the video (magenta) under the PSD's layers but its bottom one.
+        let frame: Vec<u8> = [255u8, 0, 255].repeat((w * h) as usize);
+        let drawn = disccraft_menu::render_menu_over_picture(
+            &session.project,
+            &menu,
+            &frame,
+            w as usize,
+            h as usize,
+        )?;
+        let at = |x: usize, y: usize| {
+            let i = (y * usize::from(drawn.width) + x) * 3;
+            drawn.rgb.get(i..i + 3).map(<[u8]>::to_vec)
+        };
+        assert_eq!(at(20, 20), Some(vec![255, 0, 255]), "the video");
+        assert_eq!(at(150, 100), Some(vec![255, 0, 0]), "the PSD's Deco");
+        assert_eq!(at(400, 320), Some(vec![255, 255, 255]), "the button's art");
+
+        // Written out: the PSD with its layers, not the video's frame.
+        let written = dir.join("written.psd");
+        disccraft_menu::export_menu_psd(&session.project, &menu, None, &written)?;
+        let tree = disccraft_photo::psd_layer_tree(&written)?;
+        let names: Vec<&str> = tree.iter().map(|node| node.name.as_str()).collect();
+        assert_eq!(names, ["(+) Play", "Deco", "Paper"]);
+
+        // Taken in again: the video stays under the edited PSD.
+        session.execute(
+            "menu.applyPsd",
+            &serde_json::json!({"menu": menu_id, "path": written.to_string_lossy()}),
+        )?;
+        let background = session
+            .project
+            .menu(MenuId(menu_id))
+            .ok_or("menu")?
+            .background
+            .clone();
+        let MenuBackground::Video {
+            asset,
+            layers: Some(layers),
+            ..
+        } = background
+        else {
+            return Err(format!("{background:?}").into());
+        };
+        assert_eq!(asset, video);
+        assert_ne!(layers, psd);
+
+        // No video (the Motion tab's None): the PSD again.
+        session.execute(
+            "menu.setBackground",
+            &serde_json::json!({"menu": menu_id, "asset": layers.0}),
+        )?;
+        assert_eq!(
+            session
+                .project
+                .menu(MenuId(menu_id))
+                .map(|menu| menu.background.clone()),
+            Some(MenuBackground::Image { asset: layers })
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// A 720x480 picture of `colour` in `x0..x1`, `y0..y1`, clear elsewhere.
+    fn psd_fill(x0: u32, y0: u32, x1: u32, y1: u32, colour: [u8; 4]) -> Vec<u8> {
+        let mut rgba = vec![0u8; 720 * 480 * 4];
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let i = ((y * 720 + x) * 4) as usize;
+                if let Some(pixel) = rgba.get_mut(i..i + 4) {
+                    pixel.copy_from_slice(&colour);
+                }
+            }
+        }
+        rgba
+    }
+
+    /// A raster layer of a test PSD.
+    fn psd_raster(name: &str, rgba: Vec<u8>) -> disccraft_photo::PsdLayer {
+        disccraft_photo::PsdLayer::Raster {
+            name: name.to_owned(),
+            rgba,
+            visible: true,
+        }
+    }
+
+    /// A group of a test PSD.
+    fn psd_group(
+        name: &str,
+        children: Vec<disccraft_photo::PsdLayer>,
+    ) -> disccraft_photo::PsdLayer {
+        disccraft_photo::PsdLayer::Group {
+            name: name.to_owned(),
+            id: None,
+            children,
+        }
+    }
+
+    /// M6.407 (GitHub issue #13), Encore CS6 2026-11-22 (docs/encore-behavior.md 9.20): a pop-up menu made from a
+    /// PSD without pages shows over the title its button sets (a gap between a button's pieces too stays clear), not
+    /// its white Background or the other layers outside the buttons. It showed nothing but the highlights.
+    #[test]
+    fn a_psd_pop_up_shows_only_its_buttons_over_the_title() -> Result<(), Box<dyn Error>> {
+        let dir = std::env::temp_dir().join(format!("disccraft-psd-popup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("Pop.psd");
+        disccraft_photo::write_layered_psd(
+            &path,
+            720,
+            480,
+            &[
+                psd_raster("Background", psd_fill(0, 0, 720, 480, [255, 255, 255, 255])),
+                psd_raster("Panel", psd_fill(0, 400, 720, 480, [255, 0, 0, 255])),
+                psd_group(
+                    "(+) Play",
+                    vec![
+                        psd_raster("left", psd_fill(300, 300, 340, 340, [0, 0, 255, 255])),
+                        psd_raster("right", psd_fill(460, 300, 500, 340, [0, 0, 255, 255])),
+                    ],
+                ),
+            ],
+        )?;
+        let mut session = Session::new();
+        let imported = session.execute(
+            "menu.import",
+            &serde_json::json!({ "path": path.to_string_lossy(), "popup": true }),
+        )?;
+        let menu_id = value_u64(&imported, "menu")?;
+        let menu = session.project.menu(MenuId(menu_id)).ok_or("menu")?.clone();
+        assert!(menu.popup);
+        // The title (magenta) under it.
+        let frame: Vec<u8> = [255u8, 0, 255].repeat(720 * 480);
+        let drawn =
+            disccraft_menu::render_menu_over_picture(&session.project, &menu, &frame, 720, 480)?;
+        let at = |x: usize, y: usize| {
+            let i = (y * usize::from(drawn.width) + x) * 3;
+            drawn.rgb.get(i..i + 3).map(<[u8]>::to_vec)
+        };
+        assert_eq!(at(20, 20), Some(vec![255, 0, 255]), "no Background");
+        assert_eq!(at(20, 440), Some(vec![255, 0, 255]), "no Panel");
+        assert_eq!(at(320, 320), Some(vec![0, 0, 255]), "the button's art");
+        assert_eq!(
+            at(400, 320),
+            Some(vec![255, 0, 255]),
+            "the gap in the button"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M6.407 (GitHub issue #13): a motion video on a menu of PSD pages goes under every page that shows the same
+    /// background (Encore's pages are one menu with one background); it went under the first page only. A page with
+    /// a background of its own keeps it.
+    #[test]
+    fn a_motion_video_goes_under_every_page_of_a_psd_menu() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::MenuBackground;
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-psd-pages-motion-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("Pages.psd");
+        let button = |name: &str, x: u32| {
+            psd_group(
+                name,
+                vec![psd_raster(
+                    "art",
+                    psd_fill(x, 300, x + 100, 340, [0, 0, 255, 255]),
+                )],
+            )
+        };
+        disccraft_photo::write_layered_psd(
+            &path,
+            720,
+            480,
+            &[
+                psd_raster("Background", psd_fill(0, 0, 720, 480, [255, 255, 255, 255])),
+                psd_group("(#) Two", vec![button("(+) B", 400)]),
+                psd_group("(#) One", vec![button("(+) A", 100)]),
+            ],
+        )?;
+        let mut session = Session::new();
+        let imported = session.execute(
+            "menu.import",
+            &serde_json::json!({ "path": path.to_string_lossy() }),
+        )?;
+        let first = MenuId(value_u64(&imported, "menu")?);
+        let psd = disccraft_project::AssetId(value_u64(&imported, "asset")?);
+        let pages = session.project.menu_pages(first);
+        assert_eq!(pages.len(), 2);
+        let video = session.project.add_asset(&dir.join("loop.mp4"))?;
+        // Set on the second page: the first follows.
+        let second = pages.get(1).copied().ok_or("page")?;
+        session.execute(
+            "menu.setBackground",
+            &serde_json::json!({"menu": second.0, "video": video.0, "seconds": 5}),
+        )?;
+        let motion = MenuBackground::Video {
+            asset: video,
+            seconds: 5,
+            layers: Some(psd),
+        };
+        for page in &pages {
+            assert_eq!(
+                session.project.menu(*page).map(|menu| &menu.background),
+                Some(&motion)
+            );
+        }
+        // A page with a background of its own keeps it.
+        if let Some(menu) = session.project.menu_mut(second) {
+            menu.background = MenuBackground::Color {
+                color: [16, 32, 48],
+            };
+        }
+        session.execute(
+            "menu.setBackground",
+            &serde_json::json!({"menu": first.0, "asset": psd.0}),
+        )?;
+        assert_eq!(
+            session.project.menu(first).map(|menu| &menu.background),
+            Some(&MenuBackground::Image { asset: psd })
+        );
+        assert!(matches!(
+            session.project.menu(second).map(|menu| &menu.background),
+            Some(MenuBackground::Color { .. })
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M6.401 (GitHub issue #13): a menu's PSD of another size than the frame (a 1920x1080 PSD in a PAL DVD
+    /// project) keeps its size, its layers and its pages when the menu is written out (it was flattened into the
+    /// frame); a button added since is scaled into it and comes back where it was.
+    #[test]
+    fn a_psd_of_another_size_keeps_its_size_and_layers() -> Result<(), Box<dyn Error>> {
+        use disccraft_photo::PsdLayer;
+        let dir = std::env::temp_dir().join(format!("disccraft-psd-size-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let (w, h) = (360u32, 240u32);
+        let fill = |x0: u32, y0: u32, x1: u32, y1: u32, colour: [u8; 4]| {
+            let mut rgba = vec![0u8; (w * h * 4) as usize];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = ((y * w + x) * 4) as usize;
+                    if let Some(pixel) = rgba.get_mut(i..i + 4) {
+                        pixel.copy_from_slice(&colour);
+                    }
+                }
+            }
+            rgba
+        };
+        let raster = |name: &str, rgba: Vec<u8>| PsdLayer::Raster {
+            name: name.to_owned(),
+            rgba,
+            visible: true,
+        };
+        let set = |name: &str, x: u32, y: u32| PsdLayer::Group {
+            name: format!("(+) {name}"),
+            id: None,
+            children: vec![raster(
+                "art",
+                fill(x, y, x + 100, y + 20, [255, 255, 255, 255]),
+            )],
+        };
+        let path = dir.join("Small.psd");
+        disccraft_photo::write_layered_psd(
+            &path,
+            w,
+            h,
+            &[
+                raster("背景", fill(0, 0, w, h, [0, 0, 120, 255])),
+                raster("layer copy", fill(10, 10, 60, 60, [200, 0, 0, 255])),
+                set("Play", 50, 150),
+                PsdLayer::Group {
+                    name: "(#) Two".to_owned(),
+                    id: None,
+                    children: vec![set("Back", 50, 200)],
+                },
+            ],
+        )?;
+        let mut session = Session::new();
+        let imported = session.execute(
+            "menu.import",
+            &serde_json::json!({ "path": path.to_string_lossy() }),
+        )?;
+        let root = MenuId(value_u64(&imported, "menu")?);
+        assert_eq!(session.project.menu_pages(root).len(), 2);
+        session.execute(
+            "menu.addButton",
+            &serde_json::json!({"menu": root.0, "label": "New",
+                "rect": {"x": 400, "y": 300, "w": 200, "h": 40}}),
+        )?;
+        let written = dir.join("written.psd");
+        let menu = session.project.menu(root).ok_or("menu")?.clone();
+        disccraft_menu::export_menu_psd(&session.project, &menu, None, &written)?;
+        let image = disccraft_photo::load_image(&written)?;
+        assert_eq!((image.width, image.height), (w, h));
+        let tree = disccraft_photo::psd_layer_tree(&written)?;
+        let names: Vec<&str> = tree.iter().map(|node| node.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["(+) New", "(#) Two", "(+) Play", "layer copy", "背景"]
+        );
+
+        session.execute(
+            "menu.applyPsd",
+            &serde_json::json!({"menu": root.0, "path": written.to_string_lossy()}),
+        )?;
+        let menu = session.project.menu(root).ok_or("menu")?;
+        let added = menu
+            .buttons
+            .iter()
+            .find(|button| button.name == "New")
+            .ok_or("the new button")?;
+        let near = |a: u16, b: u16| a.abs_diff(b) <= 4;
+        assert!(
+            near(added.rect.x, 400)
+                && near(added.rect.y, 300)
+                && near(added.rect.w, 200)
+                && near(added.rect.h, 40),
+            "{:?}",
+            added.rect
+        );
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

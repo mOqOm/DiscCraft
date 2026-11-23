@@ -48,7 +48,8 @@ What it does:
 
 What it does not do (for now):
 
-- Burning discs. It makes folders and ISO images; burning is left to other software
+- Burning discs on macOS and Linux. On Windows the Build panel's **Disc** output writes to a recorder's disc; elsewhere
+  DiscCraft makes folders and ISO images and burning is left to other software
 - Copy protection (CSS, AACS and the like). Only the region code flags
 - BD-J menus (Blu-ray is HDMV only), encoding DTS / Dolby TrueHD / DTS-HD (a DTS file can go on a disc as it is)
 - Editing video itself (edit in FilmCraft, make the disc in DiscCraft)
@@ -236,7 +237,8 @@ switches as well.
 - **File ▸ Import ▸ Slideshow…** (Shift+Ctrl+G): makes one slideshow with the chosen images as its slides
 - **File ▸ Import ▸ Menu… / Pop-up Menu… / Menu Page…** (Shift+Ctrl+I / Shift+Ctrl+K /
   Shift+Ctrl+U): makes a menu from a layered PSD (or a PhotoCraft `.pcraft`). As in Encore, the Project panel shows
-  the menu only: the PSD is part of the menu (it is not listed among the assets and goes when the menu is deleted)
+  the menu only: the PSD is part of the menu (it is not listed among the assets and goes when the menu is deleted).
+  A project made with an earlier version, which listed such PSDs, is put right when it is opened
 
 A large video hours long (an mkv or mp4 of tens of gigabytes) is opened in the background right after it is imported.
 The window does not stop meanwhile; the status bar says "Reading media…", and when the file is open its length, size and
@@ -308,7 +310,7 @@ holding the pointer over the asset's **Blu-ray Transcode Status** in the Propert
 
 | Kind | Extensions |
 |---|---|
-| Video | mp4, mov, m4v, avi, mkv, webm, mxf, m2v, m1v, mpg, mpeg, vob, m2ts, mts, m2t, ts |
+| Video | mp4, mov, m4v, avi, mkv, webm, mxf, m2v, m1v, mpg, mpeg, vob, m2ts, mts, m2t, ts, dv, dif |
 | Audio | wav, ac3, dts, mp3, aac, m4a, mka, mp2, ogg, oga, opus, flac, aif, aiff |
 | Images | png, jpg, jpeg, bmp, tif, tiff, psd, psb, pcraft, svg |
 | Subtitles | srt, vtt, txt, idx (VobSub), sup (PGS) |
@@ -326,7 +328,18 @@ channels that names none, is converted. The more the sound takes, the lower the 
 carries 48 Mbps).
 On a PAL DVD a 48 kHz MPEG-1 Layer II file (`.mp2`, `.mpa`) goes on the disc as it is too (on an NTSC DVD and on a
 Blu-ray it is converted: an NTSC player need not play MPEG audio).
-When a video file holds several audio streams, only the first is used.
+When a video file holds several sound streams (an MKV with two languages, say), a timeline made of it gets an audio
+track for each (up to 8); see 5.4 for choosing which stream a track plays.
+
+DV from a camcorder, as the AVI a computer captured (type 1 or type 2), as a raw `.dv` / `.dif` file, in a QuickTime
+movie (`.mov`, as iMovie and Final Cut wrote it) or in a Matroska file (`.mkv`), is read by DiscCraft's own decoder: NTSC (4:1:1), PAL (4:2:0) and DVCPRO's PAL (4:1:1), 4:3 and 16:9. It is converted for the disc
+with its fields kept in their order (the lower field first). A type 2 AVI's sound is its PCM stream. The sound inside the
+DV frames (a type 1 AVI, a raw DV file) is read whichever way the camera recorded it: 16-bit (48, 44.1 or 32 kHz) or
+12-bit 32 kHz. A camcorder's 12-bit sound 2 (the pair kept for audio dubbing), when it was recorded, is the file's second
+sound stream. DVCPRO50 (4:2:2, 50 Mb/s) is read too (its CH3 / CH4 are the second sound stream); DVCPRO HD is not.
+
+MPEG-1 and MPEG-2 video in an AVI (as some capture cards and converters wrote it) is read too, with the AVI's sound,
+and converted for the disc.
 
 SVG is drawn at the size it is shown, so it does not blur. Subtitle text is read as UTF-8 / UTF-16 / Shift_JIS.
 
@@ -493,11 +506,13 @@ the join (up to 99 clips in one title). As in Encore, the clip's sound goes besi
 clips' sounds (the sound of the clip before is cut at the join), or on a new Audio 1 when the timeline had no audio
 track. A title of several clips without any audio track plays each clip's own sound, in the preview and on the
 disc. A clip and its sound beside it are linked, as in Encore: trimming, moving or removing the clip does the same to
-its sound, and the sound of the clips after it moves with them. Drag a clip's edge to trim it; the cut snaps to the start of an MPEG-2 GOP.
+its sound, and the sound of the clips after it moves with them. Drag a clip's edge to trim it; on MPEG-2 that goes on
+the disc as it is, the cut snaps to the start of a GOP.
 
 - MPEG-2 clips that need no conversion pass through as trimmed
-- Clips that need a conversion (H.264 and the like) can be joined and built too, but on a DVD (and an SD Blu-ray)
-  they cannot be trimmed
+- Clips that need a conversion (H.264 and the like) can be joined and built too, and on a DVD (and an SD Blu-ray)
+  they are trimmed to the very frame: the conversion starts a GOP there. Moving a trim converts the file again at the
+  next build
 - On an HD Blu-ray, H.264 that goes on the disc as it is (5.1) is trimmed at its key pictures; any other clip is
   encoded to H.264 and joined at IDR pictures, so it is trimmed to the very frame
 - The first clip can be removed too (the second becomes the new first)
@@ -535,6 +550,10 @@ A DVD takes up to 99 chapters in a title. For a menu of scene buttons that show 
 **Remove Audio Track / Remove Subtitle Track** remove the bottom one. The **Disc** panel (the same as the properties
 with nothing selected) sets the audio track heard and the subtitle shown by default. In the Monitor, the speaker
 button in a track's header chooses the track you hear.
+
+When a track's file holds several sound streams (an MKV's languages, a camcorder's second stereo pair), right-click
+the track ▸ **Sound Stream** ▸ **Stream 1**, **Stream 2**, … chooses which one the track plays; the disc and the Monitor
+play that one. A timeline made of such a file starts with a track for each stream.
 
 An audio track's clip can be dragged left and right to move where it starts (by frames). The track is silent up to
 there. A Dolby Digital (AC-3) file only gets silence of its own form in front and is not re-encoded; a WAV stays PCM
@@ -614,6 +633,10 @@ order they are to play (so extras can be watched in any order).
   already linked (in this case at least one chapter button must be linked to a timeline)
 - Otherwise it makes a menu with a button for each chapter of the selected timeline (DiscCraft's own way)
 - **Create Multi-Page Chapter Index** splits them 6 buttons to a page and adds **Previous / Next** buttons
+- The Library's **Chapter Pages** (text buttons) and **Scene Pages** (video thumbnail buttons) are multi-page chapter
+  index templates (DiscCraft's own) with six chapter buttons and **Previous / Main Menu / Next** buttons. Make a new
+  menu of one, link its first chapter button to a timeline, and **Create Multi-Page Chapter Index** makes the pages.
+  The layout stretches to the disc's frame, so they serve SD (4:3 or 16:9) and HD alike
 - When the menu open in the viewer has chapter buttons, **Create Multi-Page Chapter Index** uses it as the template
   for every page: the menu is filled as above and gets more pages for the chapters its buttons do not reach (pages
   of the same menu, as Encore makes them: page 1, page 2, … after the menu itself, page 0), each page going on where
@@ -799,6 +822,22 @@ right, how to wrap, whether to leave out "Next" and "Previous" buttons) and the 
 - **Sets of your own**: the **≡** beside the Library's set list has **New Set…** (a name; it is then shown, and
   **Add Item** puts items in it), **Rename Set…** and **Delete Set** (its items move to the **User** set, so none
   are lost). The sets are kept in `library.json` with the items
+- **File items**: **Add Items from Files…** in the **≡** (Encore's Add Item…) adds PSD, PSB and .pcraft files and
+  pictures (PNG, JPEG, BMP, GIF, TIFF) to the set shown (the files are copied into `items/` in the library's
+  folder). As in Encore, a file's contents tell what it is: a PSD with button sets (`(+)`) and other layers is a
+  menu, a PSD of one button set only is a button, a PSD of one group only is a layer set, a PSD of one `(!)` layer
+  only is a replacement layer, and any other PSD or picture is a picture (the size and the name do not count). A
+  menu makes menus with **New Menu** and **Replace**, as **File ▸ Import ▸ Menu…** does (`(#)` pages included),
+  and a picture is placed as an image layer. A button is placed as the PSD's picture with a button over its set,
+  the set's `(=1)` to `(=3)` layers being the button's highlight (as in Encore). A layer set is placed as its
+  layers, each an image layer where it is in the set (a replacement layer as one replacement layer). Each keeps the
+  PSD's size (a PSD larger than the frame is shrunk into it) and goes where it is dropped, else in the middle.
+  The file is copied into `<project>.menus/` when it is used, so the project's menus and pictures stay when the
+  item is deleted from the Library
+- **Import Folder…** (DiscCraft's own): makes a set named after the folder chosen, and after each folder under it
+  that has PSDs or pictures, and adds their files (to a set of that name if there is one). Many files are copied
+  in the background, the status bar showing how far it is. A folder of menu and button PSDs you collected becomes
+  a library this way
 - **Object ▸ Drop Shadow…** (Shift+Ctrl+O), **Flip Horizontal / Flip Vertical** (Alt+Ctrl+H /
   Alt+Ctrl+V), **Rotate ▸** (180°, 90° clockwise / counter-clockwise). Any angle with the Rotate tool (R)
 - **Guides**: **View ▸ New Guide…** (Shift+Alt+Ctrl+:) sets one at a position you type; **Show Guides** (Ctrl+:),
@@ -820,6 +859,11 @@ For choosing the groups button by button, and for invisible highlights, see
 Set in the menu's sheet of the Properties panel (**Basic / Motion / Pop-up**).
 
 - The background is a colour / an image / a video asset (not a timeline). With video it becomes a motion menu
+- Given a video, a menu made from a PSD keeps its PSD, as in Encore: the video takes the place of the PSD's bottom
+  layer (its background), and the other layers (buttons, texts, decorations) stay over the video. Setting the
+  Motion tab's video back to **None** brings the PSD's background back. Editing in PhotoCraft and saving to a file
+  use the PSD as it is, and the video stays when it is read again. On a menu with pages, the video goes under every
+  page with the same background (Encore's pages are one menu with one background)
 - Loop count and loop point, duration (a menu is at most 254 seconds)
 - **End Action** (where to go when time runs out; Menu ▸ Set End Action… opens it too) and **Override**
 - The **Pop-up** sheet makes it a pop-up menu (with all its pages) and sets its background timeline / background frame (Blu-ray)
@@ -847,7 +891,13 @@ is the whole job, including the loop, the audio and what to hide afterwards.
 - A menu made from a PSD, or edited in PhotoCraft or another image editor, keeps its PSD's own layers in both
   commands' PSD (they are not flattened into one picture): what was added in DiscCraft since goes over them, a
   button's new text into its `(+)` set, and a new button as a new set. On a menu with `(#)` pages, the additions go
-  into the page's group
+  into the page's group. When the PSD is not the size of the disc's frame (a 1920x1080 PSD in a PAL DVD project,
+  for example), it is written at its own size with its layers, and what was added in DiscCraft is scaled to it
+- A menu with pages is written whole into one PSD, from whichever page: the first page at the top level, the later
+  pages as the groups `(#) ページ 1`, `(#) ページ 2`… (each with its buttons' sets). When it is read again, each page
+  follows its own group, and a `(#)` group added in the editor becomes a new page. The texts and shapes of a menu
+  with pages are not written into the PSD and stay in DiscCraft (in the PSD, the top level's art shows on every page,
+  and the art in a `(#)` group other than its buttons is not shown, as in Encore)
 - **Menu ▸ Replace Menu…**: replaces the open menu with a PSD's design, keeping the links by button number
 - **Menu ▸ Save Menu as Template…** (Ctrl+Alt+M): saves it in the Library's **User** set
 
@@ -1022,7 +1072,7 @@ DTS tracks are silent.
 
 | Field | Contents |
 |---|---|
-| Format / Output | DVD / Blu-ray, a folder (`VIDEO_TS` / `BDMV`), an ISO image, or for a DVD a **DDP Image** (for replication) |
+| Format / Output | DVD / Blu-ray, a **Disc** (written to the disc in a recorder), a folder (`VIDEO_TS` / `BDMV`), an ISO image, or for a DVD a **DDP Image** (for replication) |
 | Build | Starts the build. It saves the project and checks it first |
 | Source | The current project (the Build panel writes only the project that is open) |
 | Destination | When empty, the place shown in faint text (`<project name>_DVD` / `_BD` beside the project; `<project name>.iso` for an image; `<project name>_DDP` for a DDP image). For a folder or a DDP image, naming an existing folder makes a `<disc name>` folder inside it (a place that already has `VIDEO_TS` / `BDMV`, or a DDP image's `DDPID`, is built again in place). An image cannot be given a folder |
@@ -1046,7 +1096,22 @@ During a build a bar shows the progress and the time taken (also in the status b
   for the same image. The `VIDEO_TS` folder is built beside it (`<name>.files`). A dual-layer (DVD-9) disc's DDP
   image has a folder for each layer, as Encore writes it: `Layer 1` (layer 0's part of the image, `CONTROL.DAT`,
   `DDPID`) and `Layer 2` (the rest of the image and its own `DDPID`)
-- Nothing is burned to a disc. Use other software to burn
+- With the output set to **DVD Disc** / **Blu-ray Disc**, the destination becomes **Recorder** (the drives that
+  can write; **Refresh** looks again), **Write Speed** (the speeds the disc in it takes; **Maximum** is the
+  fastest), **Copies** (1 to 99) and **Auto-erase rewritable discs** (a DVD-RW and the like is erased first, a
+  DVD+RW or BD-RE written over; off, only a blank disc is written) and **Verify the disc after writing** (on at
+  first; DiscCraft's own: the disc is read back and compared with the image sector by sector before it comes out),
+  with the kind of disc in the recorder and its free space under them. **Build** makes an image beside the project,
+  writes it to the disc, closes the disc, verifies it and opens the tray. A disc that differs from the image is
+  reported with the first sector that differs. From the second copy on, insert a blank disc and press **Write**. When a disc could not be
+  written, **Try Again** writes the same image again. The image is removed at the end or on **Cancel**. While
+  writing, the Build panel shows the progress and **Stop** (a write-once disc stopped part way cannot be used),
+  and the window does not close. Windows' disc writing (IMAPI2) does the writing; a computer without a recorder
+  shows "Not found". Encore's **Run test before writing** is not available, as IMAPI2 has no test write. On the
+  command line, `disccraft-cli recorders` lists the recorders and their discs, and `disccraft-cli burn <image>`
+  (`--recorder E:`, `--speed 8`, `--erase`, `--no-verify`) writes an image and verifies it, and
+  `disccraft-cli verify <image>` (`--recorder E:`) compares a disc already written with its image. macOS and Linux
+  cannot write discs yet
 - How much of the disc is left, and what to do when it is not enough:
   [reading the disc's size as you work](#149-reading-the-discs-size-as-you-work)
 
@@ -1245,7 +1310,8 @@ order of how much trouble they are.
 1. Import the video as an asset (**File ▸ Import ▸ Asset…**, Ctrl+I). It is the video, not a timeline,
    that goes behind a menu.
 2. Select the menu, open the **Motion** tab of its sheet, and choose the video in **Background**. The
-   first frame appears behind the buttons; the buttons and the graphics stay as they were.
+   first frame appears behind the buttons; the buttons and the graphics stay as they were. On a menu made from
+   a PSD, the video takes the place of the PSD's bottom layer, and the other layers stay over it.
 3. Set **Loop** (how many seconds of the video the menu uses), **Loop #** (**None** for once only, a
    number, or **Infinite**) and, if the loop should not start at the beginning, **Loop Point**.
 4. Set **Duration** (a menu is at most 254 seconds) and the **End Action** for when the time runs out.
@@ -1343,12 +1409,14 @@ authoring mode, and the **Disc** panel also chooses the video's size, SD (MPEG-2
 - A **pop-up menu** is the Blu-ray's version of a remote menu: make it on the menu's **Pop-up** tab, and
   set the timeline's **Remote Menu** to it. The viewer can call it up in the middle of a title. It shows what the
   menu draws over the video — texts, pictures and the buttons as you designed them — without the menu's
-  background. A pop-up menu with pages (**Menu ▸ Add New Page**) pops up with all of them, on its first page: a
+  background. A pop-up menu made from a PSD shows, as in Encore, its button sets and those of its `(#)` pages only;
+  the other layers outside them (a white Background, say) do not show. The menu viewer, too, shows only what the
+  disc shows, over transparency (a checkerboard) unless a background timeline is set. A pop-up menu with pages (**Menu ▸ Add New Page**) pops up with all of them, on its first page: a
   button to another of its pages turns the page while the title plays on (up to 254 pages of up to 254 buttons;
   otherwise such a button leaves the title for that page's menu, as before)
 - HD (1080p, 720p) is H.264, and clips are joined at IDR pictures, so trims come out exactly where you
-  cut them — unlike a DVD, where a converted clip is cut at a GOP start.
-- A DTS file cannot go on a Blu-ray yet.
+  cut them (on a DVD a converted clip is too; MPEG-2 that goes on the disc as it is is cut at a GOP start).
+- A DTS file goes on a Blu-ray as it is (its core), as on a DVD.
 - Subtitles on an HD or PAL Blu-ray need 5 frames between one subtitle and the next on the same track; the
   check reports it (**Subtitle Spacing**).
 - Build it the same way (**File ▸ Build ▸ Folder… / Image…**); the folder is `BDMV` instead of `VIDEO_TS`.
@@ -1360,11 +1428,10 @@ So that you are not looking for it:
 
 | Encore has | DiscCraft |
 |---|---|
-| Burning to a disc | Not there. DiscCraft writes a folder, an ISO, or a DVD's DDP image |
+| Burning to a disc on macOS and Linux | Not there (Windows writes to a recorder's disc). DiscCraft writes a folder, an ISO, or a DVD's DDP image |
 | Copy protection (CSS, AACS) | Not there. Only the region code flags |
 | BD-J menus | Not there. Blu-ray is HDMV |
-| Highlight colour sets shared between projects as a file | Not there for menus (subtitle colour sets have `.dccolors`). Save the menu as a template instead |
-| GOP headers as marks on the ruler, and Alt-stepping between them | Not there. Chapter points and trims snap to GOP starts automatically |
+| GOP headers as marks on the ruler, and Alt-stepping between them | Not there. On MPEG-2 that goes on the disc as it is, chapter points and trims snap to GOP starts automatically (converted video is cut on any frame) |
 
 ## 15. Preferences
 
@@ -1516,7 +1583,8 @@ Other rules:
 
 - Button highlights do not overlap on the disc (they may overlap on the editing screen)
 - A timeline has a video as its first clip
-- On a DVD, video clips that need a conversion are not cut at the trimmed place (they are cut at GOP starts)
+- MPEG-2 that goes on the disc as it is is cut at GOP starts (a trim or a chapter snaps to the nearest); video that is
+  converted is cut on the frame
 - A 16:9 menu also uses the same 720×480 frame in SD and is shown stretched sideways (an HD Blu-ray uses a
   1920×1080 frame). The aspect ratio of a DVD's menus is the same for the whole disc
 - Converted audio is Dolby Digital (AC-3) 192 kbps. AC-3 and WAV media are used as they are, and so is DTS

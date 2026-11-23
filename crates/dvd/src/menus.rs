@@ -916,10 +916,12 @@ fn encode_motion_video(
         still_thumbnails(project, menu)
     };
 
+    // Letterboxed for the menu's screen (M6.406: a widescreen menu's video had a 4:3 screen's bars).
     for_each_frame(
         path,
         transcode_standard(standard),
         frames,
+        project.menus_wide(),
         &mut |index, rgb| {
             let now = moving
                 .as_ref()

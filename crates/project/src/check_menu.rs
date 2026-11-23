@@ -95,7 +95,7 @@ fn check_graphics(project: &Project, menu: &Menu, problems: &mut Vec<Problem>) {
 }
 
 fn check_background(project: &Project, menu: &Menu, problems: &mut Vec<Problem>) {
-    if let MenuBackground::Video { asset, seconds } = &menu.background {
+    if let MenuBackground::Video { asset, seconds, .. } = &menu.background {
         let valid = project
             .assets
             .get(asset)
@@ -110,7 +110,8 @@ fn check_background(project: &Project, menu: &Menu, problems: &mut Vec<Problem>)
             ));
         }
     }
-    if let MenuBackground::Image { asset } = &menu.background {
+    // A still background, or the PSD over a motion video (M6.402).
+    if let Some(asset) = &menu.background.document() {
         let valid = project
             .assets
             .get(asset)

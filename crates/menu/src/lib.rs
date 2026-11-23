@@ -254,8 +254,15 @@ fn render(
         }
         None => draw::draw_background(project, menu, width, height, &mut rgb)?,
     }
+    // A motion menu made from a PSD: the PSD's layers over the video, but its bottom one (M6.402).
+    draw::draw_motion_layers(project, menu, width, height, &mut rgb)?;
     // A PSD shown by page draws the page's own layers over the background (M10.27).
     draw::draw_psd_page(project, menu, width, height, &mut rgb)?;
+    // A pop-up over the picture it is given (the title it pops up over): its PSD's buttons, not its background
+    // (M6.407).
+    if pictures.background.is_some() {
+        draw::draw_popup_buttons(project, menu, width, height, &mut rgb)?;
+    }
     draw_graphics_rgb(project, menu, width, height, &mut rgb);
     draw::draw_texts(menu, width, height, &mut rgb);
     draw::draw_thumbnails(menu, width, height, &mut rgb, pictures.thumbnails);
@@ -632,7 +639,11 @@ fn mark_corners(rgba: &mut [u8], rect: Rect, (width, height): (u16, u16)) {
 /// The grey of a video thumbnail's placeholder layer in a written PSD.
 const THUMBNAIL_PLACEHOLDER: [u8; 4] = [128, 128, 128, 255];
 
-/// Write `menu` as a layered PSD (see [`menu_psd_layers`]) for editing in PhotoCraft or another PSD editor.
+/// Write `menu` as a layered PSD (see [`menu_psd_layers`]) for editing in PhotoCraft or another PSD editor. A menu
+/// of pages is written whole, whichever page `menu` is (M6.401: only the page given was written): the first page at
+/// the top level, each later page as a `(#)` group of its buttons, as Encore keeps a menu's pages. The texts and
+/// graphics of a menu of pages stay in DiscCraft: in the PSD the first page's would be shared by every page, and a
+/// later page's (in its group) not shown at all.
 ///
 /// # Errors
 ///
@@ -643,56 +654,132 @@ pub fn export_menu_psd(
     picture: Option<(&[u8], usize, usize)>,
     path: &std::path::Path,
 ) -> Result<(), MenuError> {
+    // The pages: `menu` as it is given, the others as the project has them.
+    let pages: Vec<&Menu> = project
+        .menu_pages(menu.id)
+        .into_iter()
+        .filter_map(|id| {
+            if id == menu.id {
+                Some(menu)
+            } else {
+                project.menu(id)
+            }
+        })
+        .collect();
+    let first = pages.first().copied().unwrap_or(menu);
+    let paged = pages.len() > 1;
+    let (width, height) = frame_size(&project.settings);
     // A menu whose background is a PSD (made from one, or edited in an image editor) keeps that PSD's layers, and
-    // what was added to it since goes over them (M6.399); a PSD of another size than the frame is drawn into it.
-    if picture.is_none()
-        && let Some(source) = menu_document(project, menu)
-    {
-        let (width, height) = frame_size(&project.settings);
-        let additions = menu_psd_additions(project, menu, (width, height));
-        if disccraft_photo::write_psd_over(
+    // what was added to it since goes over them (M6.399); a PSD of another size keeps its size (M6.401). A motion
+    // menu made from a PSD too: its PSD, not the video's frame (M6.402).
+    if let Some(source) = menu_document(project, first) {
+        let count = disccraft_photo::psd_page_count(&source)
+            .map_err(|error| MenuError::Invalid(error.to_string()))?;
+        let additions: Vec<disccraft_photo::PsdAdditions> = pages
+            .iter()
+            .zip(psd_page_numbers(&pages, count))
+            .map(|(page, number)| menu_psd_additions(project, page, number, paged, (width, height)))
+            .collect();
+        return disccraft_photo::write_psd_over(
             &source,
             path,
             (u32::from(width), u32::from(height)),
             &additions,
         )
-        .map_err(|error| MenuError::Invalid(error.to_string()))?
-        {
-            return Ok(());
-        }
+        .map_err(|error| MenuError::Invalid(error.to_string()));
     }
-    let (width, height, layers) = menu_psd_layers(project, menu, picture)?;
+    let (width, height, mut layers) = if paged {
+        let mut alone = first.clone();
+        alone.texts.clear();
+        alone.graphics.clear();
+        menu_psd_layers(project, &alone, picture)?
+    } else {
+        menu_psd_layers(project, first, picture)?
+    };
+    for (number, page) in pages.iter().enumerate().skip(1) {
+        layers.push(page_psd_group(project, page, number, (width, height)));
+    }
     disccraft_photo::write_layered_psd(path, u32::from(width), u32::from(height), &layers)
         .map_err(|error| MenuError::Invalid(error.to_string()))
 }
 
-/// The layered document (PSD or PhotoCraft file) a menu's background is, when it is one and the file is there.
+/// The page of its PSD each page of a menu (`pages`, the first first) is written into, for a PSD of `count` pages
+/// (M6.401): a page the PSD shows keeps its page (the first page the top level when it shows the PSD whole), a page
+/// added since takes a new `(#)` group after the PSD's.
+fn psd_page_numbers(pages: &[&Menu], count: usize) -> Vec<usize> {
+    let mut next = count.max(1);
+    pages
+        .iter()
+        .enumerate()
+        .map(|(index, page)| {
+            match page
+                .psd_page
+                .map(usize::from)
+                .filter(|number| *number < count)
+            {
+                Some(number) => number,
+                None if index == 0 => 0,
+                None => {
+                    next = next.saturating_add(1);
+                    next - 1
+                }
+            }
+        })
+        .collect()
+}
+
+/// A later page of a menu as the `(#)` group `number` of the menu's PSD (M6.401): its buttons' sets, bottom to top.
+fn page_psd_group(
+    project: &Project,
+    page: &Menu,
+    number: usize,
+    (width, height): (u16, u16),
+) -> disccraft_photo::PsdLayer {
+    let artwork = draw::is_document_menu(project, page);
+    disccraft_photo::PsdLayer::Group {
+        name: disccraft_photo::page_group_name(number),
+        id: None,
+        children: page
+            .buttons
+            .iter()
+            .enumerate()
+            .map(|button| button_psd_set(page, button, artwork, (width, height)))
+            .collect(),
+    }
+}
+
+/// The layered document (PSD or PhotoCraft file) a menu is made from (its background, or the layers over its motion
+/// video), when it is one and the file is there.
 fn menu_document(project: &Project, menu: &Menu) -> Option<std::path::PathBuf> {
-    let disccraft_project::MenuBackground::Image { asset } = &menu.background else {
-        return None;
-    };
-    let path = std::path::PathBuf::from(&project.assets.get(asset)?.path);
+    let asset = menu.background.document()?;
+    let path = std::path::PathBuf::from(&project.assets.get(&asset)?.path);
     (disccraft_photo::is_document(&path) && path.is_file()).then_some(path)
 }
 
-/// What a menu adds to its own PSD (M6.399): its graphics and texts over its page, and its buttons: the text of a
-/// button whose set the PSD has goes into that set, a button without one is a new set.
+/// What a page of a menu adds to its own PSD's page `page` (M6.399): its graphics and texts over the page (not for
+/// a menu of pages, `paged`: they stay in DiscCraft), and its buttons: the text of a button whose set the PSD has
+/// goes into that set, a button without one is a new set.
 fn menu_psd_additions(
     project: &Project,
     menu: &Menu,
+    page: usize,
+    paged: bool,
     (width, height): (u16, u16),
 ) -> disccraft_photo::PsdAdditions {
     let artwork = draw::is_document_menu(project, menu);
-    let mut layers: Vec<disccraft_photo::PsdLayer> = menu
-        .graphics
-        .iter()
-        .map(|graphic| graphic_psd_layer(project, graphic, width, height))
-        .collect();
-    layers.extend(
-        menu.texts
-            .iter()
-            .map(|text| text_psd_layer(menu, text, width, height)),
-    );
+    let mut layers: Vec<disccraft_photo::PsdLayer> = Vec::new();
+    if !paged {
+        layers.extend(
+            menu.graphics
+                .iter()
+                .map(|graphic| graphic_psd_layer(project, graphic, width, height)),
+        );
+        layers.extend(
+            menu.texts
+                .iter()
+                .map(|text| text_psd_layer(menu, text, width, height)),
+        );
+    }
     let buttons = menu
         .buttons
         .iter()
@@ -706,14 +793,8 @@ fn menu_psd_additions(
             set: button_psd_set(menu, (index, button), artwork, (width, height)),
         })
         .collect();
-    let (page, shared_only) = match menu.psd_page {
-        Some(disccraft_project::NO_PSD_PAGE) => (None, true),
-        Some(page) => ((page >= 1).then_some(usize::from(page)), false),
-        None => (None, false),
-    };
     disccraft_photo::PsdAdditions {
         page,
-        shared_only,
         layers,
         buttons,
     }

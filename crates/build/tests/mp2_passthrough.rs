@@ -70,6 +70,7 @@ fn an_mp2_file_is_passed_through_on_a_pal_dvd() {
     project.timeline_mut(t).unwrap().audio.push(AudioTrack {
         more: Vec::new(),
         asset: a,
+        stream: 0,
         language: String::new(),
         start: 0,
         trim_start: 0,

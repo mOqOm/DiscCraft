@@ -2,7 +2,7 @@
 //! even / lower field first), read from its headers without decoding it: an MPEG-2 stream's sequence extension and
 //! first picture coding extension (ISO/IEC 13818-2 6.2.2.3, 6.2.3.1), or an H.264 sequence parameter set's
 //! frame_mbs_only_flag (ITU-T H.264 7.3.2.1.1), found as Annex B or in an `avcC` record (an MP4's or a Matroska
-//! file's decoder configuration, ISO/IEC 14496-15 5.2.4.1).
+//! file's decoder configuration, ISO/IEC 14496-15 5.2.4.1). DV (M6.410) is interlaced, the lower field first.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -40,6 +40,11 @@ pub fn field_type(path: &Path) -> Option<FieldType> {
     let length = file.metadata().ok()?.len();
     let mut head = Vec::new();
     let _ = (&mut file).take(PART).read_to_end(&mut head).ok()?;
+    // DV before the others: its compressed bytes can hold anything, start codes too. In a MOV the sample
+    // description may be at the end (M6.413).
+    if crate::dv_source::is_dv(&head) || crate::dv_source::names_dv(&head) {
+        return Some(FieldType::LowerFirst);
+    }
     // MPEG first: its slice start codes (00 00 01 07, …) would pass for H.264 parameter sets.
     if let Some(found) = mpeg2(&head)
         .or_else(|| h264_annex_b(&head))
@@ -53,6 +58,9 @@ pub fn field_type(path: &Path) -> Option<FieldType> {
     let _ = file.seek(SeekFrom::Start(length - PART)).ok()?;
     let mut tail = Vec::new();
     let _ = file.take(PART).read_to_end(&mut tail).ok()?;
+    if crate::dv_source::names_dv(&tail) {
+        return Some(FieldType::LowerFirst);
+    }
     h264_avcc(&tail)
 }
 

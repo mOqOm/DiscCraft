@@ -153,7 +153,9 @@ impl DiscCraftApp {
                     if let Some(action) = action {
                         self.color_set_action(&mut state, action);
                     }
-                    ui.add_enabled_ui(state.own, |ui| color_set_fields(ui, &mut state.draft));
+                    crate::theme::dialog_body(ui, "color_set_dialog_body", 230.0, |ui| {
+                        ui.add_enabled_ui(state.own, |ui| color_set_fields(ui, &mut state.draft));
+                    });
                 });
                 ui.add_space(12.0);
                 ui.vertical(|ui| {

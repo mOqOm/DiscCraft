@@ -7,11 +7,11 @@ use disccraft_project::{ButtonSpec, MenuGraphic, MenuSpec, MenuText};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// The most items the user library holds.
-pub(crate) const MAX_USER_ITEMS: usize = 200;
+/// The most items the user library holds (M6.403: a folder of an Encore library has hundreds of files).
+pub(crate) const MAX_USER_ITEMS: usize = 5000;
 
-/// The most sets of one's own (Encore's Library ▸ New Set).
-pub(crate) const MAX_USER_SETS: usize = 50;
+/// The most sets of one's own (Encore's Library ▸ New Set; Import Folder… makes one per folder).
+pub(crate) const MAX_USER_SETS: usize = 500;
 
 /// The longest set name, in characters.
 pub(crate) const MAX_SET_NAME: usize = 40;
@@ -30,6 +30,53 @@ pub(crate) enum UserItemKind {
     Text(MenuText),
     /// Image and shape layers placed together (Encore's layer sets), or one replacement layer (M6.331).
     Layers(LayerItem),
+    /// A file of the library's own (M6.403, Encore's Library ▸ Add Item…).
+    File(FileItem),
+}
+
+/// A file of the library's own (M6.403): a copy in the library's folder, and what it is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FileItem {
+    /// The copy, relative to the library's folder (`items/<name>`).
+    pub(crate) file: String,
+    /// What it is in the Library.
+    pub(crate) kind: FileKind,
+}
+
+impl FileItem {
+    /// Where the copy is.
+    pub(crate) fn path(&self) -> Option<PathBuf> {
+        crate::workspace::library_dir().map(|dir| dir.join(&self.file))
+    }
+}
+
+/// What a file of the library is (Encore's kinds by the file's contents, docs/encore-behavior.md 9.18).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum FileKind {
+    /// A menu: New Menu and Replace make menus of it (as File ▸ Import ▸ Menu… does).
+    Menu,
+    /// A button: placed as a picture with a button over it.
+    Button,
+    /// A picture: placed as an image layer.
+    Image,
+    /// A layer set: placed as an image layer of its layers.
+    LayerSet,
+    /// A replacement layer: placed as a replacement layer.
+    Replacement,
+}
+
+impl From<disccraft_photo::LibraryFileKind> for FileKind {
+    fn from(kind: disccraft_photo::LibraryFileKind) -> Self {
+        match kind {
+            disccraft_photo::LibraryFileKind::Menu => FileKind::Menu,
+            disccraft_photo::LibraryFileKind::Button => FileKind::Button,
+            disccraft_photo::LibraryFileKind::Image => FileKind::Image,
+            disccraft_photo::LibraryFileKind::LayerSet => FileKind::LayerSet,
+            disccraft_photo::LibraryFileKind::Replacement => FileKind::Replacement,
+        }
+    }
 }
 
 /// A user item of layers: its graphics, bottom first, where they were in the menu they came from; for each image
@@ -150,6 +197,40 @@ impl UserLibrary {
         Ok(())
     }
 
+    /// The set of one's own named `name` (letter case not counted), made when there is none (M6.403, Import
+    /// Folder…): its name as kept. A built-in set's name, or a library with all its sets, gives the User set (empty).
+    pub(crate) fn set_for(&mut self, name: &str) -> String {
+        let wanted: String = name.trim().chars().take(MAX_SET_NAME).collect();
+        if let Some(found) = self
+            .sets
+            .iter()
+            .find(|set| set.to_lowercase() == wanted.to_lowercase())
+        {
+            return found.clone();
+        }
+        self.add_set(&wanted)
+            .ok()
+            .and_then(|index| self.sets.get(index).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Removes item `index`; a file of the library's own goes with it when no other item uses it (M6.403).
+    pub(crate) fn remove_item(&mut self, index: usize) -> Option<UserItem> {
+        if index >= self.items.len() {
+            return None;
+        }
+        let item = self.items.remove(index);
+        if let UserItemKind::File(file) = &item.kind {
+            let used = self.items.iter().any(
+                |other| matches!(&other.kind, UserItemKind::File(other) if other.file == file.file),
+            );
+            if !used && let Some(path) = file.path() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        Some(item)
+    }
+
     /// Removes set `index`: its items move to the "User" set (nothing is lost). How many moved.
     pub(crate) fn remove_set(&mut self, index: usize) -> usize {
         if index >= self.sets.len() {
@@ -255,9 +336,30 @@ mod tests {
             }),
             set: "Titles".to_owned(),
         })?;
+        // M6.403: a file of the library's own keeps its copy and its kind.
+        library.add(UserItem {
+            name: "Citylights".to_owned(),
+            kind: UserItemKind::File(super::FileItem {
+                file: "items/Citylights.psd".to_owned(),
+                kind: super::FileKind::Menu,
+            }),
+            set: "Menus".to_owned(),
+        })?;
         let text = serde_json::to_string(&library)?;
+        assert!(text.contains(r#""file":{"file":"items/Citylights.psd","kind":"menu"}"#));
         let back: UserLibrary = serde_json::from_str(&text)?;
         assert_eq!(back, library);
         Ok(())
+    }
+
+    /// M6.403: Import Folder… finds a set of one's own by its name (letter case not counted) or makes it; a built-in
+    /// set's name gives the User set.
+    #[test]
+    fn an_imported_folder_finds_or_makes_its_set() {
+        let mut library = UserLibrary::default();
+        assert_eq!(library.set_for("Menus"), "Menus");
+        assert_eq!(library.set_for(" menus "), "Menus");
+        assert_eq!(library.set_for("User"), "");
+        assert_eq!(library.sets, ["Menus"]);
     }
 }

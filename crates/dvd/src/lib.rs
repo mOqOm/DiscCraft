@@ -30,9 +30,9 @@ pub use demux::{
 pub use demux_mkv::H264Samples;
 pub use h264_cut::{CutPoints, TrimmedPassthrough, bd_cut_points};
 pub use prepare::{
-    Estimate, HdBudget, TimelineRate, TranscodeStatus, encode_hd_slideshow, estimate, hd_budget,
-    hd_default_kbps, timeline_rates, transcode_status, video_fits_as_is, video_fits_bluray_as,
-    video_fits_disc,
+    Estimate, HdBudget, TimelineRate, TranscodeStatus, asset_goes_as_is, encode_hd_slideshow,
+    estimate, hd_budget, hd_default_kbps, timeline_rates, transcode_status, video_fits_as_is,
+    video_fits_bluray_as, video_fits_disc,
 };
 pub use sup::PgSegment;
 

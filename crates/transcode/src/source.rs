@@ -21,6 +21,8 @@ pub(crate) struct Source {
     timing: Option<Arc<(Timeline, MediaInfo)>>,
     /// The file, to find the pixel aspect ratio the project chose for it (`crate::pixel_aspect`).
     path: Arc<std::path::PathBuf>,
+    /// The sound stream [`Source::audio`] reads (M6.418): 0 the file's first.
+    stream: usize,
 }
 
 /// A time this near (in 256ths of a frame) to a frame shows that frame alone when frames are blended.
@@ -79,9 +81,20 @@ impl Source {
         }
     }
 
-    /// Return whether the source advertises at least one audio stream.
+    /// Return whether the source has the audio stream it reads.
     pub(crate) fn has_audio(&self) -> bool {
-        !self.media.info().audio_streams.is_empty()
+        self.media.info().audio_streams.len() > self.stream
+    }
+
+    /// This source reading sound stream `stream` (0: the first) instead.
+    pub(crate) fn with_stream(mut self, stream: usize) -> Self {
+        self.stream = stream;
+        self
+    }
+
+    /// How many sound streams the file has.
+    pub(crate) fn audio_streams(&self) -> usize {
+        self.media.info().audio_streams.len()
     }
 
     /// Request one decoded video frame at `time`.
@@ -137,9 +150,13 @@ impl Source {
         frames: usize,
         sample_rate: u32,
     ) -> Result<AudioBuffer, TranscodeError> {
-        self.media
-            .audio(start, frames, sample_rate)
-            .map_err(|error| TranscodeError::Decode(error.to_string()))
+        if self.stream == 0 {
+            self.media.audio(start, frames, sample_rate)
+        } else {
+            self.media
+                .audio_stream(self.stream, start, frames, sample_rate)
+        }
+        .map_err(|error| TranscodeError::Decode(error.to_string()))
     }
 
     /// Opens `path`, or gives the source it was opened as before (the same file: path, size and time). A long
@@ -172,6 +189,8 @@ impl Source {
     }
 
     fn open_file(path: &Path) -> Result<Self, TranscodeError> {
+        // DV in a MOV or a Matroska file is decoded by the media reader with this decoder (M6.413).
+        crate::dv_decoder::register();
         let reader = FileReader::open(path).map_err(|error| io_error(path, error))?;
         let name = path
             .file_name()
@@ -183,24 +202,31 @@ impl Source {
             .map_err(|error| io_error(path, error))?;
 
         // MPEG program, transport and video elementary streams: opened as FilmCraft's reader opener does, keeping
-        // the source's own type for its timestamps.
-        let (media, timing): (Arc<dyn MediaSource>, _) = if filmcraft_codecs::mpeg::sniff(&head) {
-            let mpeg = MpegSource::open_reader(name, reader)
-                .map_err(|error| TranscodeError::Decode(error.to_string()))?;
-            let timing = mpeg_timing(&mpeg, path);
-            (Arc::new(mpeg), timing)
-        } else {
-            let reader_openers = reader_openers();
-            let extra = openers();
-            let media = open_reader(name, reader, &reader_openers, &extra)
-                .map_err(|error| TranscodeError::Decode(error.to_string()))?;
-            (media, None)
-        };
+        // the source's own type for its timestamps. DV (a raw DV file, or an AVI of DV) is decoded here (M6.410).
+        let (media, timing): (Arc<dyn MediaSource>, _) =
+            if let Some(dv) = crate::dv_source::open(name, path, &reader, &head)? {
+                (Arc::new(dv), None)
+            } else if let Some(mpeg) = crate::avi_mpeg::open(name, &reader, &head)? {
+                // MPEG video in an AVI (M6.417).
+                (mpeg, None)
+            } else if filmcraft_codecs::mpeg::sniff(&head) {
+                let mpeg = MpegSource::open_reader(name, reader)
+                    .map_err(|error| TranscodeError::Decode(error.to_string()))?;
+                let timing = mpeg_timing(&mpeg, path);
+                (Arc::new(mpeg), timing)
+            } else {
+                let reader_openers = reader_openers();
+                let extra = openers();
+                let media = open_reader(name, reader, &reader_openers, &extra)
+                    .map_err(|error| TranscodeError::Decode(error.to_string()))?;
+                (media, None)
+            };
 
         let source = Self {
             media,
             timing: timing.map(Arc::new),
             path: Arc::new(std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())),
+            stream: 0,
         };
         validate_duration(source.info().duration)?;
         Ok(source)
