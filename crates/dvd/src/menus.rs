@@ -14,7 +14,9 @@ use disccraft_mpeg2venc::{
     rgb_to_frame420,
 };
 use disccraft_nav::{CompiledNav, MenuNav};
-use disccraft_project::{MAX_MENU_AUDIO_SECONDS, MAX_MENU_SECONDS, Menu, MenuBackground, Project};
+use disccraft_project::{
+    LETTERBOX_MOST_BUTTONS, MAX_MENU_AUDIO_SECONDS, MAX_MENU_SECONDS, Menu, MenuBackground, Project,
+};
 use disccraft_psmux::es::{LpcmStream, parse_video, parse_wav};
 use disccraft_psmux::mux::hli::{Hli, HliButton};
 use disccraft_psmux::mux::menu::{MenuVobInput, mux_menu_vob};
@@ -176,8 +178,12 @@ fn build_still_menu_vob(
     ensure_sequence_end(&mut still);
 
     let video = parse_video(&still, START_DTS).map_err(|err| invalid(&err.to_string()))?;
+    let letterbox = has_letterbox(project, &rendered);
     let spu = encode_menu_spu(&rendered)?;
-    let hli = build_hli(menu, nav_menu, &rendered)?;
+    let letterbox_spu = letterbox
+        .then(|| encode_letterbox_spu(&rendered))
+        .transpose()?;
+    let hli = build_hli(menu, nav_menu, &rendered, letterbox)?;
 
     let first_sector =
         u32::try_from(sink.sectors.len()).map_err(|_| invalid("too many menu sectors"))?;
@@ -186,6 +192,7 @@ fn build_still_menu_vob(
         video: &video,
         video_data: &still,
         spu: &spu,
+        letterbox_spu: letterbox_spu.as_deref(),
         hli: &hli,
         vob_id,
         ntsc: standard == Standard::Ntsc,
@@ -217,6 +224,7 @@ fn build_still_menu_vob(
         playback_time,
         audio_streams: 0,
         subpicture_streams: 1,
+        letterbox_subpictures: letterbox,
         program_entry_cells: vec![1],
         cells: vec![cell],
         pre: vm_commands(&nav_menu.pre),
@@ -278,8 +286,21 @@ fn build_motion_menu_vob(
         .map(|p| p.pts)
         .min()
         .ok_or_else(|| invalid_menu(menu, "motion menu has no pictures"))?;
+    let letterbox = has_letterbox(context.project, &first);
     let spu = encode_menu_spu(&first).map_err(|err| invalid_menu(menu, err))?;
-    let hli = build_hli(menu, nav_menu, &first).map_err(|err| invalid_menu(menu, err))?;
+    let mut subpictures = vec![vec![SubpictureUnit {
+        pts: first_pts,
+        data: spu,
+    }]];
+    if letterbox {
+        let data = encode_letterbox_spu(&first).map_err(|err| invalid_menu(menu, err))?;
+        subpictures.push(vec![SubpictureUnit {
+            pts: first_pts,
+            data,
+        }]);
+    }
+    let hli =
+        build_hli(menu, nav_menu, &first, letterbox).map_err(|err| invalid_menu(menu, err))?;
 
     let base_sector = u32::try_from(sink.sectors.len())
         .map_err(|_| invalid_menu(menu, "too many menu sectors"))?;
@@ -292,10 +313,7 @@ fn build_motion_menu_vob(
         cell_starts: motion_cell_starts(menu),
         vob_id,
         ntsc: standard == Standard::Ntsc,
-        subpictures: vec![vec![SubpictureUnit {
-            pts: first_pts,
-            data: spu,
-        }]],
+        subpictures,
     };
 
     let extra = MuxExtra {
@@ -310,6 +328,7 @@ fn build_motion_menu_vob(
         standard,
         palette: first.palette,
         audio: audio.is_some(),
+        letterbox,
     };
     build_motion_pgc(menu, nav_menu, &pgc, &layout)
 }
@@ -1005,6 +1024,8 @@ struct MotionPgc {
     palette: [u32; 16],
     /// Whether the VOB carries the menu audio stream.
     audio: bool,
+    /// Whether it carries a letterbox subpicture stream ([`has_letterbox`]).
+    letterbox: bool,
 }
 
 /// Build the motion menu PGC and VMGM cell data.
@@ -1019,6 +1040,7 @@ fn build_motion_pgc(
         standard,
         palette,
         audio,
+        letterbox,
     } = *settings;
     if layout.cells.is_empty() {
         return Err(invalid_menu(menu, "missing motion cell layout"));
@@ -1093,6 +1115,7 @@ fn build_motion_pgc(
         playback_time,
         audio_streams: u8::from(audio),
         subpicture_streams: 1,
+        letterbox_subpictures: letterbox,
         program_entry_cells: programs,
         cells,
         pre,
@@ -1112,31 +1135,90 @@ fn build_motion_pgc(
     ))
 }
 
+/// Whether a menu also has highlights for its picture letterboxed on a 4:3 television (a second button group and
+/// subpicture stream): a 16:9 menu of 18 buttons or fewer, as Encore writes one. Encore turns a 16:9 menu's buttons
+/// past 18 into objects; DiscCraft keeps them in one group, and the project check warns.
+pub(crate) fn has_letterbox(project: &Project, rendered: &RenderedMenu) -> bool {
+    project.menus_wide() && (1..=LETTERBOX_MOST_BUTTONS).contains(&rendered.buttons.len())
+}
+
+/// Where line `line` of a 16:9 frame `height` lines tall lies on a 4:3 television's letterboxed picture: three
+/// quarters of the way down, under a bar an eighth of the height (60 lines NTSC, 72 PAL), to the nearest line
+/// (Encore's letterbox button group: 303 is 287, 322 is 302).
+pub(crate) fn letterbox_line(line: u16, height: u16) -> u16 {
+    let value = (u32::from(height) / 2 + 3 * u32::from(line) + 2) / 4;
+    u16::try_from(value).unwrap_or(u16::MAX)
+}
+
 /// Encode the highlight layer as a forced DVD subpicture unit.
 fn encode_menu_spu(rendered: &RenderedMenu) -> Result<Vec<u8>, DvdError> {
-    let pixels = rendered.highlight.pixels.clone();
-    let expected = usize::from(rendered.highlight.width)
-        .checked_mul(usize::from(rendered.highlight.height))
+    let layer = &rendered.highlight;
+    let bitmap = Bitmap {
+        width: layer.width,
+        height: layer.height,
+        pixels: layer.pixels.clone(),
+    };
+    encode_highlight(rendered, bitmap, layer.y)
+}
+
+/// Encode the highlight layer squeezed onto the letterboxed picture: each line goes where [`letterbox_line`] puts
+/// it, and two lines landing on one keep the highlight of either (a thin frame or underline is not lost).
+fn encode_letterbox_spu(rendered: &RenderedMenu) -> Result<Vec<u8>, DvdError> {
+    let layer = &rendered.highlight;
+    let width = usize::from(layer.width);
+    let top = letterbox_line(layer.y, rendered.height);
+    let last = layer
+        .y
+        .saturating_add(layer.height.saturating_sub(1))
+        .min(rendered.height.saturating_sub(1));
+    let height = letterbox_line(last, rendered.height)
+        .saturating_sub(top)
+        .saturating_add(1);
+    let mut pixels = vec![0u8; width.saturating_mul(usize::from(height))];
+    for (row, line) in layer.pixels.chunks_exact(width.max(1)).enumerate() {
+        let source = u16::try_from(row).map_or(u16::MAX, |row| layer.y.saturating_add(row));
+        if source > last {
+            break;
+        }
+        let at = usize::from(letterbox_line(source, rendered.height).saturating_sub(top));
+        let start = at.saturating_mul(width);
+        if let Some(target) = pixels.get_mut(start..start.saturating_add(width)) {
+            for (out, &value) in target.iter_mut().zip(line) {
+                *out = (*out).max(value);
+            }
+        }
+    }
+    let bitmap = Bitmap {
+        width: layer.width,
+        height,
+        pixels,
+    };
+    encode_highlight(rendered, bitmap, top)
+}
+
+/// Encode a highlight bitmap whose top line is `y` (its left edge is the layer's) as a forced subpicture unit.
+fn encode_highlight(
+    rendered: &RenderedMenu,
+    mut bitmap: Bitmap,
+    y: u16,
+) -> Result<Vec<u8>, DvdError> {
+    let expected = usize::from(bitmap.width)
+        .checked_mul(usize::from(bitmap.height))
         .ok_or_else(|| invalid("highlight size overflow"))?;
 
-    if pixels.len() != expected {
+    if bitmap.pixels.len() != expected {
         return Err(invalid("highlight pixel count mismatch"));
     }
 
-    let mut bitmap = Bitmap {
-        width: rendered.highlight.width,
-        height: rendered.highlight.height,
-        pixels,
-    };
     // A subpicture covers at most 478 lines (NTSC) / 573 (PAL).
-    crate::fit_subpicture(&mut bitmap, rendered.highlight.y, rendered.height);
+    crate::fit_subpicture(&mut bitmap, y, rendered.height);
 
     // Outside the selected / activated button, the frame shows in the normal colour (Encore's 標準グループ;
     // contrast 0 by default, so nothing is seen). The layer covers the buttons only, so it is shown where it
     // lies on the screen (the highlight rectangles of the HLI are screen positions).
     let params = SpuParams {
         x: rendered.highlight.x,
-        y: rendered.highlight.y,
+        y,
         colors: rendered.normal_entries,
         alpha: rendered.normal_contrasts,
         forced: true,
@@ -1146,8 +1228,14 @@ fn encode_menu_spu(rendered: &RenderedMenu) -> Result<Vec<u8>, DvdError> {
     encode_spu(&bitmap, &params).map_err(|err| invalid(&err.to_string()))
 }
 
-/// Build highlight information for one menu VOBU.
-fn build_hli(menu: &Menu, nav_menu: &MenuNav, rendered: &RenderedMenu) -> Result<Hli, DvdError> {
+/// Build highlight information for one menu VOBU; with `letterbox`, a second button group for the letterboxed
+/// picture (the same buttons, their lines where [`letterbox_line`] puts them).
+fn build_hli(
+    menu: &Menu,
+    nav_menu: &MenuNav,
+    rendered: &RenderedMenu,
+    letterbox: bool,
+) -> Result<Hli, DvdError> {
     if nav_menu.buttons.len() != rendered.buttons.len() {
         return Err(invalid("button command count mismatch"));
     }
@@ -1164,13 +1252,26 @@ fn build_hli(menu: &Menu, nav_menu: &MenuNav, rendered: &RenderedMenu) -> Result
             let own = u8::try_from(index.saturating_add(1)).unwrap_or(1);
             hli_button(*command, geometry, auto, group, own)
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let boxed = if letterbox {
+        buttons
+            .iter()
+            .map(|button| HliButton {
+                y1: letterbox_line(button.y1, rendered.height),
+                y2: letterbox_line(button.y2, rendered.height),
+                ..button.clone()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // No forced button: the menu's pre commands highlight its own button or the one a link asked for, and a motion
     // menu's later plays keep the viewer's (SPRM8).
     Ok(Hli {
         start_ptm: 0,
         buttons,
+        letterbox: boxed,
         default_button: 0,
         button_offset: menu.button_offset,
         color_sets: rendered.color_sets,
@@ -1263,7 +1364,7 @@ fn mux_menu_error(menu: &Menu, message: impl std::fmt::Display) -> DvdError {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_menu_spu, frame_count};
+    use super::{encode_letterbox_spu, encode_menu_spu, frame_count, letterbox_line};
     use crate::DvdError;
     use disccraft_ifo::Standard;
 
@@ -1318,6 +1419,58 @@ mod tests {
         let shown = disccraft_spu::decode_spu(&encode_menu_spu(&rendered)?)?;
         assert_eq!(shown.params.colors[1], disccraft_menu::NORMAL_PALETTE_ENTRY);
         assert_eq!(shown.params.alpha, [0, 9, 0, 0]);
+        Ok(())
+    }
+
+    /// Encore's letterbox button group (a 16:9 NTSC menu): lines 303 / 312 / 322 / 410 / 417 are 287 / 294 / 302 /
+    /// 368 / 373; a PAL frame's bar is 72 lines.
+    #[test]
+    fn letterbox_lines_are_encores() {
+        let lines = [303, 312, 322, 410, 417].map(|line| letterbox_line(line, 480));
+        assert_eq!(lines, [287, 294, 302, 368, 373]);
+        assert_eq!(letterbox_line(0, 576), 72);
+        assert_eq!(letterbox_line(575, 576), 503);
+    }
+
+    /// The letterbox subpicture is the highlight squeezed to three quarters of its height under the bar, and no
+    /// highlighted line of it is lost (two lines landing on one keep either's pixels).
+    #[test]
+    fn the_letterbox_highlight_is_squeezed_without_losing_lines()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = disccraft_project::Project::default();
+        let id = project.add_menu(None)?;
+        for _ in 0..3 {
+            project.add_button(id, "Play".to_owned(), None, disccraft_project::Link::Stop)?;
+        }
+        project.menu_mut(id).ok_or("menu")?.widescreen = true;
+        let menu = project.menu(id).ok_or("menu")?.clone();
+        let rendered = disccraft_menu::render_menu(&project, &menu)?;
+        let wide = disccraft_spu::decode_spu(&encode_menu_spu(&rendered)?)?;
+        let boxed = disccraft_spu::decode_spu(&encode_letterbox_spu(&rendered)?)?;
+        let layer = &rendered.highlight;
+        assert_eq!(boxed.params.x, wide.params.x);
+        assert_eq!(boxed.params.y, letterbox_line(layer.y, rendered.height));
+        let last = layer.y + layer.height - 1;
+        assert_eq!(
+            boxed.bitmap.height,
+            letterbox_line(last, rendered.height) - boxed.params.y + 1
+        );
+        // Every line of the highlight with a pixel on it has its pixels on its letterbox line.
+        let width = usize::from(layer.width);
+        for (row, line) in wide.bitmap.pixels.chunks_exact(width).enumerate() {
+            let source = layer.y + u16::try_from(row)?;
+            let at = usize::from(letterbox_line(source, rendered.height) - boxed.params.y);
+            let target = boxed
+                .bitmap
+                .pixels
+                .get(at * width..(at + 1) * width)
+                .ok_or("row")?;
+            for (x, &value) in line.iter().enumerate() {
+                if value != 0 {
+                    assert_ne!(target.get(x), Some(&0), "line {source} x {x}");
+                }
+            }
+        }
         Ok(())
     }
 }

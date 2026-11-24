@@ -799,8 +799,9 @@ impl DiscCraftApp {
         if overset {
             ui.horizontal(|ui| {
                 crate::properties::prop_label(ui, "");
-                ui.colored_label(
-                    egui::Color32::from_rgb(230, 80, 60),
+                crate::theme::status_label(
+                    ui,
+                    crate::theme::Status::Warning,
                     tl!("Some of the text does not fit in the box"),
                 );
             });
@@ -1392,22 +1393,25 @@ impl DiscCraftApp {
             if response.clicked() {
                 self.tool = tool;
             }
+            // Encore (M6.476): the chosen tool sunk into the bar, the one under the pointer in a raised box with
+            // its icon gold.
             let selected = self.tool == tool;
-            let visuals = ui.style().interact_selectable(&response, selected);
-            if selected || response.hovered() {
-                ui.painter().rect(
-                    rect,
-                    2.0,
-                    visuals.weak_bg_fill,
-                    visuals.bg_stroke,
-                    egui::StrokeKind::Inside,
-                );
+            let hovered = response.hovered();
+            if selected {
+                crate::theme::sunken_box(ui.painter(), rect);
+            } else if hovered {
+                crate::theme::hover_box(ui.painter(), rect);
             }
+            let color = if hovered {
+                crate::theme::HOVER_ICON.get()
+            } else {
+                crate::theme::TEXT.get()
+            };
             let side = rect.height() - 6.0;
             tool.paint_icon(
                 ui.painter(),
                 egui::Rect::from_center_size(rect.center(), egui::vec2(side, side)),
-                visuals.fg_stroke.color,
+                color,
             );
         }
         ui.separator();

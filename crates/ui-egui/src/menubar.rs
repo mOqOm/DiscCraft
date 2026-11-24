@@ -131,6 +131,7 @@ impl DiscCraftApp {
                 self.viewer_menu().is_some(),
             );
             push(clicked, ui, Action::ImportTimeline, true);
+            push(clicked, ui, Action::ImportBluray, true);
             push(clicked, ui, Action::ImportSlideshow, true);
         });
         // Encore: アセットを置き換え… / アセットを検索…（選んだアセットに。検索はファイルが見つからないときだけ）。
@@ -621,6 +622,9 @@ impl DiscCraftApp {
                 }
                 push(clicked, ui, Action::ImportFabImageScript, true);
                 push(clicked, ui, Action::ImportImageScript, true);
+                // M6.422（DiscCraft だけ）: タイムラインの動画（mkv）の中の字幕を字幕トラックに。
+                ui.separator();
+                push(clicked, ui, Action::ImportSourceSubtitles, true);
             });
         });
         self.export_subtitles_menu(ui);
@@ -646,6 +650,19 @@ impl DiscCraftApp {
         push(clicked, ui, Action::SetTimelineUserOps, timeline);
         push(clicked, ui, Action::SaveFrameAsFile, timeline);
         push(clicked, ui, Action::Play, self.viewer_timeline().is_some());
+        push(
+            clicked,
+            ui,
+            Action::PlayFaster,
+            self.viewer_timeline().is_some(),
+        );
+        push(
+            clicked,
+            ui,
+            Action::PlaySlower,
+            self.viewer_timeline().is_some(),
+        );
+        push(clicked, ui, Action::StopPlayback, self.is_playing());
     }
 
     /// タイムライン ▸ 字幕を書き出し ▸ 字幕トラックの一覧。選ぶとメニューを閉じてから保存先を聞く。
@@ -692,7 +709,7 @@ impl DiscCraftApp {
             (Action::ShowActivated, HighlightPreview::Activated),
         ];
         for (action, state) in states {
-            if menu_check(ui, action, self.highlight_preview == state) {
+            if menu_check(ui, action, self.highlight_preview == Some(state)) {
                 clicked.push(action);
             }
         }
@@ -837,6 +854,7 @@ impl DiscCraftApp {
             | Action::ImportPopupMenu
             | Action::ImportMenuPage
             | Action::ImportTimeline
+            | Action::ImportBluray
             | Action::ImportSlideshow
             | Action::Exit => self.run_file_action(ui, action),
             Action::NewMenu
@@ -852,6 +870,9 @@ impl DiscCraftApp {
             }
             Action::AddChapterPointsAtInterval => self.open_chapter_interval(),
             Action::Play => self.toggle_playback(ui.ctx()),
+            Action::PlayFaster => self.play_faster(ui.ctx()),
+            Action::PlaySlower => self.play_slower(ui.ctx()),
+            Action::StopPlayback => self.stop_playback(),
             Action::AddAudioTrack => self.open_track_dialog(TrackKind::Audio),
             Action::AddSubtitleTrack => self.open_track_dialog(TrackKind::Subtitle),
             Action::RemoveAudioTrack => self.remove_last_track(TrackKind::Audio),
@@ -860,6 +881,25 @@ impl DiscCraftApp {
             Action::ImportFabImageScript => self.import_image_script(ui.ctx(), true),
             Action::ImportImageScript => self.import_image_script(ui.ctx(), false),
             Action::ImportFilmCraftMarkers => self.import_filmcraft_markers(),
+            Action::ImportSourceSubtitles => {
+                if let Some(timeline) = self.viewer_timeline() {
+                    let result = self.run_command(
+                        "timeline.importSourceSubtitles",
+                        serde_json::json!({ "timeline": timeline.0 }),
+                    );
+                    if let Some(added) = result
+                        .as_ref()
+                        .and_then(|value| value.get("added"))
+                        .and_then(serde_json::Value::as_u64)
+                    {
+                        self.status = if added == 0 {
+                            tl!("The video has no subtitles to take").to_string()
+                        } else {
+                            tlf!("Added {n} subtitle tracks from the video", n = added)
+                        };
+                    }
+                }
+            }
             Action::ImportSourceChapters => {
                 if let Some(timeline) = self.viewer_timeline() {
                     let result = self.run_command(
@@ -1122,6 +1162,7 @@ impl DiscCraftApp {
                 }
             }
             Action::ImportTimeline => self.import_timeline_files(),
+            Action::ImportBluray => self.import_bluray(),
             Action::ImportSlideshow => self.import_slideshow_files(),
             Action::Exit => self.confirm_or_run(ui.ctx(), crate::confirm::PendingAction::Exit),
             _ => {}
@@ -1361,15 +1402,15 @@ impl DiscCraftApp {
 
     fn run_overlay_action(&mut self, action: Action) {
         match action {
-            Action::ShowNormal => self.highlight_preview = HighlightPreview::Normal,
-            Action::ShowSelected => self.highlight_preview = HighlightPreview::Selected,
-            Action::ShowActivated => self.highlight_preview = HighlightPreview::Activated,
+            Action::ShowNormal => self.toggle_highlight_preview(HighlightPreview::Normal),
+            Action::ShowSelected => self.toggle_highlight_preview(HighlightPreview::Selected),
+            Action::ShowActivated => self.toggle_highlight_preview(HighlightPreview::Activated),
             Action::ShowSafeAreas => self.show_safe_areas = !self.show_safe_areas,
             Action::ShowRouting => self.show_routing = !self.show_routing,
             Action::ShowGuides => self.show_guides = !self.show_guides,
             Action::SnapToGuides => self.snap_to_guides = !self.snap_to_guides,
             Action::LockGuides => self.lock_guides = !self.lock_guides,
-            Action::ShowAllThumbnails => self.flow_thumbnails = !self.flow_thumbnails,
+            Action::ShowAllThumbnails => self.toggle_flow_thumbnails(),
             Action::ShowChapterNames => self.show_chapter_names = !self.show_chapter_names,
             _ => {}
         }

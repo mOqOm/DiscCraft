@@ -416,6 +416,7 @@ impl Project {
         }
 
         let frame = frame_size(&self.settings);
+        let words = self.words;
         let buttons: Vec<Button> = buttons
             .into_iter()
             .enumerate()
@@ -426,7 +427,7 @@ impl Project {
                     Link::NotSet
                 };
                 Button {
-                    name: format!("Button {}", start.saturating_add(offset).saturating_add(1)),
+                    name: words.button(start.saturating_add(offset).saturating_add(1)),
                     rect: keep_in_frame(button.rect, frame),
                     link,
                     ..button

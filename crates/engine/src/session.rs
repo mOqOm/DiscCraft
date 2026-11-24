@@ -31,6 +31,9 @@ pub struct Session {
     undo_labels: Vec<&'static str>,
     /// The label of the command behind each redo snapshot (same order as `redo`).
     redo_labels: Vec<&'static str>,
+    /// The language of the words DiscCraft makes up for the project (M6.433), kept on every project the session
+    /// holds (an undo brings back a snapshot taken before the language changed).
+    words: disccraft_project::Words,
 }
 
 impl Session {
@@ -52,7 +55,14 @@ impl Session {
             redo: Vec::new(),
             undo_labels: Vec::new(),
             redo_labels: Vec::new(),
+            words: disccraft_project::Words::default(),
         })
+    }
+
+    /// Makes up the project's words (default names, a menu's PSD layers) in `words`: the display language.
+    pub fn set_words(&mut self, words: disccraft_project::Words) {
+        self.words = words;
+        self.project.words = words;
     }
 
     /// Saves the project to the given path, or to the current path.
@@ -94,6 +104,7 @@ impl Session {
             return Err(format!("unknown command: {id}"));
         };
         self.sync_compositions();
+        self.project.words = self.words;
 
         if let Err(reason) = (spec.enabled)(self) {
             return Err(format!("{}: {}", spec.id, reason));
@@ -212,6 +223,7 @@ impl Session {
             self.redo_labels.push(label);
         }
         self.project = previous;
+        self.project.words = self.words;
         self.dirty = true;
         Ok(())
     }
@@ -227,6 +239,7 @@ impl Session {
             self.undo_labels.push(label);
         }
         self.project = next;
+        self.project.words = self.words;
         self.dirty = true;
         Ok(())
     }
@@ -234,6 +247,7 @@ impl Session {
     /// Replaces the project and clears undo/redo history.
     pub(crate) fn reset(&mut self, project: Project) {
         self.project = project;
+        self.project.words = self.words;
         self.undo.clear();
         self.redo.clear();
         self.undo_labels.clear();

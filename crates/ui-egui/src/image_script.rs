@@ -254,8 +254,9 @@ impl DiscCraftApp {
                     .unwrap_or_default();
                 ui.label(tlf!("{file}: {n} subtitles", file = name, n = dialog.cues));
                 if dialog.missing_count > 0 {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(230, 90, 80),
+                    crate::theme::status_label(
+                        ui,
+                        crate::theme::Status::Error,
                         tlf!(
                             "{n} pictures are not found, such as {path}",
                             n = dialog.missing_count,
@@ -341,8 +342,9 @@ impl DiscCraftApp {
                     );
                 });
                 if dialog.relative && offset.is_none() {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(230, 90, 80),
+                    crate::theme::status_label(
+                        ui,
+                        crate::theme::Status::Error,
                         tl!("The offset is not a timecode."),
                     );
                 }

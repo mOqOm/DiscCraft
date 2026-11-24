@@ -1276,6 +1276,7 @@ mod tests {
                 still_time: 0,
                 playback_mode: 0,
                 subpicture_streams: 0,
+                letterbox_subpictures: false,
                 palette: Pgc::default_palette(),
             }],
             title_vobs_sectors: 20,

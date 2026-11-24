@@ -351,7 +351,7 @@ pub fn menu_psd_layers(
         .flat_map(|[r, g, b]| [*r, *g, *b, 255])
         .collect();
     let mut layers = vec![PsdLayer::Raster {
-        name: "背景".to_owned(),
+        name: project.words.background().to_owned(),
         rgba: background,
         visible: true,
     }];
@@ -359,7 +359,7 @@ pub fn menu_psd_layers(
         layers.push(graphic_psd_layer(project, graphic, width, height));
     }
     for text in &menu.texts {
-        layers.push(text_psd_layer(menu, text, width, height));
+        layers.push(text_psd_layer(menu, text, width, height, project.words));
     }
     for (index, button) in menu.buttons.iter().enumerate() {
         layers.push(button_psd_set(
@@ -367,6 +367,7 @@ pub fn menu_psd_layers(
             (index, button),
             artwork,
             (width, height),
+            project.words,
         ));
     }
     Ok((width, height, layers))
@@ -393,11 +394,15 @@ fn graphic_psd_layer(
 
 /// The name of a button's set: the button's own name (a PSD button's `(+)` group's, M10.46), else its text, else
 /// its number.
-fn button_title(index: usize, button: &disccraft_project::Button) -> String {
+fn button_title(
+    index: usize,
+    button: &disccraft_project::Button,
+    words: disccraft_project::Words,
+) -> String {
     if !button.name.trim().is_empty() {
         button.name.clone()
     } else if button.label.trim().is_empty() {
-        format!("ボタン {}", index.saturating_add(1))
+        words.button(index.saturating_add(1))
     } else {
         button.label.clone()
     }
@@ -411,10 +416,11 @@ fn button_psd_set(
     (index, button): (usize, &disccraft_project::Button),
     artwork: bool,
     (width, height): (u16, u16),
+    words: disccraft_project::Words,
 ) -> disccraft_photo::PsdLayer {
     use disccraft_photo::PsdLayer;
     let group = menu.highlight_group(button.highlight_group);
-    let title = button_title(index, button);
+    let title = button_title(index, button, words);
     let rect = button.rect;
     let values = highlight::button_values(menu, index, artwork).unwrap_or_default();
     let mut highlights = Vec::new();
@@ -443,7 +449,7 @@ fn button_psd_set(
             }
         }
         highlights.push(PsdLayer::Raster {
-            name: format!("(={n}) ハイライト"),
+            name: format!("(={n}) {}", words.highlight()),
             rgba,
             visible: false,
         });
@@ -468,7 +474,7 @@ fn button_psd_set(
             }
         }
         highlights.push(PsdLayer::Raster {
-            name: format!("(={n}) ハイライト"),
+            name: format!("(={n}) {}", words.highlight()),
             rgba,
             visible: false,
         });
@@ -506,7 +512,7 @@ fn button_psd_set(
             }
         }
         children.push(PsdLayer::Raster {
-            name: "(%) ビデオ".to_owned(),
+            name: format!("(%) {}", words.video()),
             rgba: placeholder,
             visible: true,
         });
@@ -542,12 +548,13 @@ fn label_psd_layer(
     menu: &Menu,
     (index, button): (usize, &disccraft_project::Button),
     (width, height): (u16, u16),
+    words: disccraft_project::Words,
 ) -> Option<disccraft_photo::PsdLayer> {
     use disccraft_photo::PsdLayer;
     if button.label.trim().is_empty() {
         return None;
     }
-    let name = button_title(index, button);
+    let name = button_title(index, button, words);
     let rgba = draw::label_rgba(menu, button, width, height);
     Some(match draw::label_type(menu, button) {
         Some(setting) => PsdLayer::Text {
@@ -571,6 +578,7 @@ fn text_psd_layer(
     text: &disccraft_project::MenuText,
     width: u16,
     height: u16,
+    words: disccraft_project::Words,
 ) -> disccraft_photo::PsdLayer {
     use disccraft_photo::PsdLayer;
     let typed = if text.effects.is_empty() {
@@ -586,7 +594,7 @@ fn text_psd_layer(
                 .lines()
                 .map(str::trim)
                 .find(|line| !line.is_empty())
-                .unwrap_or("テキスト")
+                .unwrap_or(words.text())
                 .to_owned(),
             rgba: draw::text_rgba(
                 menu,
@@ -601,7 +609,11 @@ fn text_psd_layer(
             text: Box::new(setting),
         },
         None => PsdLayer::Raster {
-            name: format!("テキスト: {}", text.text.lines().next().unwrap_or_default()),
+            name: format!(
+                "{}: {}",
+                words.text(),
+                text.text.lines().next().unwrap_or_default()
+            ),
             rgba: draw::text_rgba(menu, text, width, height),
             visible: !text.hidden,
         },
@@ -737,13 +749,13 @@ fn page_psd_group(
 ) -> disccraft_photo::PsdLayer {
     let artwork = draw::is_document_menu(project, page);
     disccraft_photo::PsdLayer::Group {
-        name: disccraft_photo::page_group_name(number),
+        name: disccraft_photo::page_group_name(&project.words.page(number)),
         id: None,
         children: page
             .buttons
             .iter()
             .enumerate()
-            .map(|button| button_psd_set(page, button, artwork, (width, height)))
+            .map(|button| button_psd_set(page, button, artwork, (width, height), project.words))
             .collect(),
     }
 }
@@ -777,7 +789,7 @@ fn menu_psd_additions(
         layers.extend(
             menu.texts
                 .iter()
-                .map(|text| text_psd_layer(menu, text, width, height)),
+                .map(|text| text_psd_layer(menu, text, width, height, project.words)),
         );
     }
     let buttons = menu
@@ -787,14 +799,21 @@ fn menu_psd_additions(
         .map(|(index, button)| disccraft_photo::PsdButtonAddition {
             id: button.psd_layer,
             name: button.name.clone(),
-            into: label_psd_layer(menu, (index, button), (width, height))
+            into: label_psd_layer(menu, (index, button), (width, height), project.words)
                 .into_iter()
                 .collect(),
-            set: button_psd_set(menu, (index, button), artwork, (width, height)),
+            set: button_psd_set(
+                menu,
+                (index, button),
+                artwork,
+                (width, height),
+                project.words,
+            ),
         })
         .collect();
     disccraft_photo::PsdAdditions {
         page,
+        name: project.words.page(page),
         layers,
         buttons,
     }
@@ -1144,6 +1163,94 @@ mod tests {
         Ok(())
     }
 
+    /// M6.433 (a tester's report: a PhotoCraft file mixed English and Japanese): a menu's PSD names its layers in one
+    /// language, the project's words: its background, a button's default name, its highlights and a text of pixels
+    /// (they were Japanese while a button's default name was English).
+    #[test]
+    fn a_menus_psd_names_its_layers_in_one_language() -> Result<(), Box<dyn Error>> {
+        use disccraft_photo::PsdLayer;
+        use disccraft_project::{LayerEffects, MenuText, StrokeEffect, Words};
+        fn names(layers: &[PsdLayer], out: &mut Vec<String>) {
+            for layer in layers {
+                match layer {
+                    PsdLayer::Group { name, children, .. } => {
+                        out.push(name.clone());
+                        names(children, out);
+                    }
+                    PsdLayer::Raster { name, .. } | PsdLayer::Text { name, .. } => {
+                        out.push(name.clone());
+                    }
+                }
+            }
+        }
+        for (words, expected) in [
+            (
+                Words::Japanese,
+                ["背景", "テキスト: Logo", "(+) ボタン 1", "(=1) ハイライト"],
+            ),
+            (
+                Words::English,
+                ["Background", "Text: Logo", "(+) Button 1", "(=1) Highlight"],
+            ),
+        ] {
+            let mut project = Project {
+                words,
+                ..Project::default()
+            };
+            let menu_id = project.add_menu(None)?;
+            let rect = Rect {
+                x: 100,
+                y: 300,
+                w: 180,
+                h: 40,
+            };
+            // A button added without text takes its number as its name; its text comes later.
+            let _ = project.add_button(menu_id, String::new(), Some(rect), Link::NotSet)?;
+            let menu = project.menu_mut(menu_id).ok_or("menu")?;
+            menu.buttons.retain(|button| button.rect == rect);
+            if let Some(button) = menu.buttons.first_mut() {
+                button.label = "Play".to_owned();
+            }
+            menu.texts.push(MenuText {
+                effects: LayerEffects {
+                    stroke: Some(StrokeEffect {
+                        size: 2,
+                        color: [255, 0, 0],
+                        opacity: 100,
+                    }),
+                    ..LayerEffects::default()
+                },
+                box_width: None,
+                box_height: None,
+                text: "Logo".to_owned(),
+                x: 60,
+                y: 60,
+                size: 32,
+                color: None,
+                font: None,
+                font_style: None,
+                format: disccraft_project::TextFormat::default(),
+                shadow: None,
+                orientation: disccraft_project::Orientation::default(),
+                hidden: false,
+                locked: false,
+                vertical: false,
+                spans: Vec::new(),
+            });
+            let menu = menu.clone();
+            let (_, _, layers) = super::menu_psd_layers(&project, &menu, None)?;
+            let mut found = Vec::new();
+            names(&layers, &mut found);
+            for name in expected {
+                assert!(
+                    found.iter().any(|found| found == name),
+                    "{name} in {found:?}"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// M6.335: a PSD button's subpicture layers in their own colours are laid over the button as its subpicture is
     /// (stretched), each state showing its layer, and go to a PSD and back as they are.
     /// M6.398 (GitHub issue #13: a menu made in DiscCraft came out of Save Menu as File flattened): its texts and
@@ -1229,7 +1336,7 @@ mod tests {
         let [_, _, _, _, x, y] = paragraph.transform;
         assert!((x - 300.0).abs() < 2.0 && y > 39.0 && y < 56.0, "{x} {y}");
         assert!(
-            matches!(layers.get(3), Some(PsdLayer::Raster { name, .. }) if name == "テキスト: Stroked")
+            matches!(layers.get(3), Some(PsdLayer::Raster { name, .. }) if name == "Text: Stroked")
         );
         let Some(PsdLayer::Group { children, .. }) = layers.get(4) else {
             return Err("no button set".into());

@@ -46,6 +46,10 @@ pub struct Pgc {
     pub audio_streams: u8,
     /// Number of subpicture streams controlled by this PGC, 0..=32.
     pub subpicture_streams: u8,
+    /// Each subpicture stream has a second one for a 16:9 picture letterboxed on a 4:3 television (stream
+    /// `subpicture_streams + n` for stream `n`; a 16:9 menu's highlights, as Encore writes one). Otherwise every
+    /// display uses the same stream.
+    pub letterbox_subpictures: bool,
     /// PGC still time; `0xFF` means infinite.
     pub still_time: u8,
     /// PG playback mode (byte 0xA2): 0 plays the programs in order; `0x80 | (n - 1)` plays `n` programs at
@@ -80,6 +84,7 @@ impl Default for Pgc {
             playback_time: BcdTime([0, 0, 0, 0]),
             audio_streams: 0,
             subpicture_streams: 0,
+            letterbox_subpictures: false,
             still_time: 0,
             playback_mode: 0,
             palette: Self::default_palette(),
@@ -108,7 +113,7 @@ pub fn write_pgc(pgc: &Pgc) -> Result<Vec<u8>, IfoError> {
     write_bcd(&mut w, 0x04, pgc.playback_time);
     w.put_u32(0x08, pgc.prohibited_ops);
     write_audio_control(&mut w, pgc.audio_streams)?;
-    write_subpicture_control(&mut w, pgc.subpicture_streams)?;
+    write_subpicture_control(&mut w, pgc.subpicture_streams, pgc.letterbox_subpictures)?;
     w.put_u8(0xA2, pgc.playback_mode);
     w.put_u8(0xA3, pgc.still_time);
     write_palette(&mut w, &pgc.palette)?;
@@ -144,7 +149,7 @@ pub fn read_pgc(data: &[u8]) -> Result<Pgc, IfoError> {
     let playback_time = read_bcd(&r, 0x04)?;
     let prohibited_ops = r.u32(0x08)?;
     let audio_streams = read_audio_streams(&r)?;
-    let subpicture_streams = read_subpicture_streams(&r)?;
+    let (subpicture_streams, letterbox_subpictures) = read_subpicture_streams(&r)?;
     let playback_mode = r.u8(0xA2)?;
     let still_time = r.u8(0xA3)?;
     let palette = read_palette(&r)?;
@@ -190,6 +195,7 @@ pub fn read_pgc(data: &[u8]) -> Result<Pgc, IfoError> {
         playback_time,
         audio_streams,
         subpicture_streams,
+        letterbox_subpictures,
         still_time,
         playback_mode,
         palette,
@@ -205,7 +211,12 @@ fn validate_pgc(pgc: &Pgc) -> Result<(), IfoError> {
     if usize::from(pgc.audio_streams) > AUDIO_ENTRIES {
         return Err(IfoError("too many audio streams".to_string()));
     }
-    if usize::from(pgc.subpicture_streams) > SUBPICTURE_ENTRIES {
+    let physical = if pgc.letterbox_subpictures {
+        usize::from(pgc.subpicture_streams).saturating_mul(2)
+    } else {
+        usize::from(pgc.subpicture_streams)
+    };
+    if physical > SUBPICTURE_ENTRIES {
         return Err(IfoError("too many subpicture streams".to_string()));
     }
     if pgc.program_entry_cells.len() > 255 {
@@ -279,7 +290,7 @@ fn write_audio_control(w: &mut Writer, streams: u8) -> Result<(), IfoError> {
     Ok(())
 }
 
-fn write_subpicture_control(w: &mut Writer, streams: u8) -> Result<(), IfoError> {
+fn write_subpicture_control(w: &mut Writer, streams: u8, letterbox: bool) -> Result<(), IfoError> {
     for i in 0..usize::from(streams) {
         let delta = i
             .checked_mul(4)
@@ -287,10 +298,17 @@ fn write_subpicture_control(w: &mut Writer, streams: u8) -> Result<(), IfoError>
         let pos = off(SUBPICTURE_OFFSET, delta)?;
         let stream = u8::try_from(i)
             .map_err(|_| IfoError("subpicture stream index too large".to_string()))?;
-        // Same stream for 4:3, wide, letterbox and pan&scan display.
+        // The 4:3, wide, letterbox and pan&scan display streams: the same one, or a letterbox one after them all.
+        let boxed = if letterbox {
+            streams
+                .checked_add(stream)
+                .ok_or_else(|| IfoError("subpicture stream index too large".to_string()))?
+        } else {
+            stream
+        };
         w.put_u8(pos, 0x80 | stream);
         w.put_u8(off(pos, 1)?, stream);
-        w.put_u8(off(pos, 2)?, stream);
+        w.put_u8(off(pos, 2)?, boxed);
         w.put_u8(off(pos, 3)?, stream);
     }
     Ok(())
@@ -492,8 +510,11 @@ fn read_audio_streams(r: &Reader<'_>) -> Result<u8, IfoError> {
     u8::try_from(count).map_err(|_| IfoError("audio stream count too large".to_string()))
 }
 
-fn read_subpicture_streams(r: &Reader<'_>) -> Result<u8, IfoError> {
+/// The number of subpicture streams and whether each has a letterbox stream after them all.
+fn read_subpicture_streams(r: &Reader<'_>) -> Result<(u8, bool), IfoError> {
     let mut mask = 0u32;
+    // The letterbox stream of each, as an offset from its own (0: the same stream).
+    let mut boxed = Vec::new();
     for i in 0..SUBPICTURE_ENTRIES {
         let delta = i
             .checked_mul(4)
@@ -508,8 +529,10 @@ fn read_subpicture_streams(r: &Reader<'_>) -> Result<u8, IfoError> {
         }
         let stream = u8::try_from(i)
             .map_err(|_| IfoError("subpicture stream index too large".to_string()))?;
-        if b0 == (0x80 | stream) && b1 == stream && b2 == stream && b3 == stream {
+        let gap = b2.checked_sub(stream);
+        if let (true, Some(gap)) = (b0 == (0x80 | stream) && b1 == stream && b3 == stream, gap) {
             mask |= 1u32 << i;
+            boxed.push(gap);
         } else {
             return Err(IfoError("invalid subpicture stream control".to_string()));
         }
@@ -529,7 +552,14 @@ fn read_subpicture_streams(r: &Reader<'_>) -> Result<u8, IfoError> {
             "non-contiguous subpicture stream control".to_string(),
         ));
     }
-    u8::try_from(count).map_err(|_| IfoError("subpicture stream count too large".to_string()))
+    let count = u8::try_from(count)
+        .map_err(|_| IfoError("subpicture stream count too large".to_string()))?;
+    let letterbox = boxed.first().is_some_and(|&first| first != 0);
+    let offset = if letterbox { count } else { 0 };
+    if boxed.iter().any(|&each| each != offset) {
+        return Err(IfoError("invalid subpicture stream control".to_string()));
+    }
+    Ok((count, letterbox))
 }
 
 fn read_palette(r: &Reader<'_>) -> Result<[u32; PALETTE_ENTRIES], IfoError> {
@@ -736,6 +766,39 @@ fn off(base: usize, delta: usize) -> Result<usize, IfoError> {
 mod uop_tests {
     use super::{Pgc, read_pgc, write_pgc};
     use std::error::Error;
+
+    /// Encore's 16:9 menu PGC names a letterbox subpicture stream (wide 1, letterbox 2); DiscCraft's has the
+    /// letterbox one after the others: `80 00 01 00` for one stream.
+    #[test]
+    fn a_letterbox_subpicture_stream_follows_the_others() -> Result<(), Box<dyn Error>> {
+        let pgc = Pgc {
+            subpicture_streams: 1,
+            letterbox_subpictures: true,
+            ..Pgc::default()
+        };
+        let bytes = write_pgc(&pgc)?;
+        assert_eq!(
+            bytes.get(0x1C..0x24),
+            Some(&[0x80, 0, 1, 0, 0, 0, 0, 0][..])
+        );
+        let read = read_pgc(&bytes)?;
+        assert_eq!(
+            (read.subpicture_streams, read.letterbox_subpictures),
+            (1, true)
+        );
+
+        let plain = Pgc {
+            subpicture_streams: 2,
+            ..Pgc::default()
+        };
+        let bytes = write_pgc(&plain)?;
+        assert_eq!(
+            bytes.get(0x1C..0x24),
+            Some(&[0x80, 0, 0, 0, 0x81, 1, 1, 1][..])
+        );
+        assert!(!read_pgc(&bytes)?.letterbox_subpictures);
+        Ok(())
+    }
 
     #[test]
     fn prohibited_operations_are_written_at_byte_8() -> Result<(), Box<dyn Error>> {

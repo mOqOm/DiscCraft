@@ -19,6 +19,8 @@ disccraft-dv.workspace = true
 # The AC-3 decoder: a raw .ac3 file is decoded for the monitor's sound and its waveform (never for the disc).
 craft-audio = { workspace = true, features = ["ac3-decode"] }
 craft-media.workspace = true
+# Inflates the zlib-compressed subtitle tracks of a Matroska file (M6.422).
+miniz_oxide.workspace = true
 filmcraft-media.workspace = true
 filmcraft-codecs.workspace = true
 filmcraft-frame.workspace = true

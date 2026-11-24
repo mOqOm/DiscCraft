@@ -1584,6 +1584,10 @@ pub struct Project {
     pub menu_color_sets: BTreeMap<String, crate::ColorSet>,
     #[serde(default = "default_next_id")]
     pub next_id: u64,
+    /// The language of the words DiscCraft makes up for the project (default names, a chapter index's Previous /
+    /// Next, a menu's PSD layers): the display language, which the session sets (M6.433). Not saved.
+    #[serde(skip)]
+    pub words: crate::Words,
 }
 
 /// The most named colour sets a project keeps.
@@ -1675,6 +1679,7 @@ impl Default for Project {
             menu_color_sets: BTreeMap::new(),
             flowchart: BTreeMap::new(),
             next_id: 1,
+            words: crate::Words::default(),
         }
     }
 }
@@ -1909,6 +1914,14 @@ impl Project {
                 poster: None,
             },
         );
+        // The chapters from `pos` on are one later: what names them follows (M6.428).
+        self.remap_chapters(tl, &|old| {
+            Some(if old >= pos {
+                old.saturating_add(1)
+            } else {
+                old
+            })
+        });
         Ok(pos)
     }
 
@@ -2079,8 +2092,8 @@ impl Project {
                 chapter.time = Tick(chapter.time.0.saturating_add(by.0).max(0));
             }
         }
-        timeline.chapters.sort_by_key(|chapter| chapter.time);
-        timeline.chapters.dedup_by_key(|chapter| chapter.time);
+        // Back in time order, with what names the chapters following them (M6.428).
+        self.sort_chapters(tl);
         Ok(())
     }
 
@@ -2200,7 +2213,7 @@ impl Project {
             .map(|(at, _)| at.saturating_add(1))
             .collect();
         for at in doubled.into_iter().rev() {
-            self.remove_chapter(tl, at)?;
+            self.merge_chapter_into_previous(tl, at)?;
         }
         Ok(())
     }
@@ -2224,7 +2237,40 @@ impl Project {
         }
 
         timeline.chapters.remove(index);
-        self.drop_chapter_from_playlists(tl, index);
+        // What named the chapter is not set any more (links) or goes (chapter playlist entries, parental
+        // chapters); what named a later chapter follows it down one (M6.428).
+        self.remap_chapters(tl, &|old| match old.cmp(&index) {
+            std::cmp::Ordering::Less => Some(old),
+            std::cmp::Ordering::Equal => None,
+            std::cmp::Ordering::Greater => Some(old.saturating_sub(1)),
+        });
+        Ok(())
+    }
+
+    /// Removes chapter `index` (not the first) of timeline `tl`, which sits at the same time as the one before it:
+    /// what named it names that one (M6.428).
+    fn merge_chapter_into_previous(
+        &mut self,
+        tl: TimelineId,
+        index: usize,
+    ) -> Result<(), ProjectError> {
+        let timeline = self
+            .timelines
+            .get_mut(&tl)
+            .ok_or_else(|| ProjectError::Invalid("timeline does not exist".to_string()))?;
+        if index == 0 || index >= timeline.chapters.len() {
+            return Err(ProjectError::Invalid(
+                "chapter index out of range".to_string(),
+            ));
+        }
+        timeline.chapters.remove(index);
+        self.remap_chapters(tl, &|old| {
+            Some(if old >= index {
+                old.saturating_sub(1)
+            } else {
+                old
+            })
+        });
         Ok(())
     }
 
@@ -2286,6 +2332,19 @@ impl Project {
                 poster: old.poster,
             },
         );
+        // The chapter is now at `pos`, the ones it passed one place nearer its old one: what names them follows
+        // (M6.428).
+        self.remap_chapters(tl, &|old| {
+            if old == index {
+                return Some(pos);
+            }
+            let taken_out = if old > index { old - 1 } else { old };
+            Some(if taken_out >= pos {
+                taken_out + 1
+            } else {
+                taken_out
+            })
+        });
         Ok(pos)
     }
 

@@ -158,6 +158,33 @@ pub(crate) fn burn_error_text(error: &BurnError) -> String {
             "Verify failed: the disc cannot be read back ({message}).",
             message = message
         ),
+        BurnError::LayerBreak {
+            wanted,
+            disc: 0,
+            ..
+        } => tlf!(
+            "The drive does not tell where the dual-layer disc's first layer ends, so the layer break (sector {wanted}) cannot be placed.",
+            wanted = wanted
+        ),
+        BurnError::LayerBreak {
+            wanted,
+            disc,
+            fixed: true,
+        } => tlf!(
+            "The disc's first layer is fixed at {disc} sectors, but the image's layer break is at sector {wanted}. Use a blank DVD+R DL.",
+            disc = disc,
+            wanted = wanted
+        ),
+        BurnError::LayerBreak { wanted, disc, .. } => tlf!(
+            "The image's first layer ({wanted} sectors) is larger than the disc's ({disc} sectors).",
+            wanted = wanted,
+            disc = disc
+        ),
+        BurnError::LayerBreakMoved { wanted, written } => tlf!(
+            "The written disc's first layer ends after {written} sectors, not at the image's layer break ({wanted}).",
+            written = written,
+            wanted = wanted
+        ),
         BurnError::System { .. } => error.to_string(),
     }
 }
@@ -359,6 +386,7 @@ impl DiscCraftApp {
             self.end_writing(tl!("No recorder").to_owned());
             return;
         };
+        let image_path = image.clone();
         let request = BurnRequest {
             image,
             recorder,
@@ -366,6 +394,8 @@ impl DiscCraftApp {
             erase_rewritable: self.disc.erase_rewritable,
             eject: true,
             verify: self.disc.verify,
+            // M9.42: a DVD-9 image's layer break, from the note the build writes beside it.
+            layer_break: disccraft_build::image_layer_break(&image_path),
         };
         let progress = Arc::new(Mutex::new((BurnStep::Writing, 0.0_f32)));
         let shared = Arc::clone(&progress);

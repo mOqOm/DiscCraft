@@ -62,17 +62,32 @@ impl DiscCraftApp {
         });
     }
 
-    /// 左の表: マスタータイムラインのチャプター。クリックで選び、ダブルクリックで右に加える。
+    /// The master chapters picked for chapter playlist `id`, in chapter order.
+    fn picked_chapters(&self, id: u64) -> Vec<usize> {
+        if self
+            .chapter_playlist_pick
+            .is_none_or(|(list, _)| list != id)
+        {
+            return Vec::new();
+        }
+        let mut picks = self.chapter_playlist_picks.clone();
+        picks.sort_unstable();
+        picks.dedup();
+        picks
+    }
+
+    /// 左の表: マスタータイムラインのチャプター。行のどこを押しても選び（M6.425: 行全体が選択の色。Shift+クリックで
+    /// 範囲、Ctrl+クリックで 1 つずつ足す・外す、表の上での Ctrl+A ですべて）、ダブルクリックでその行を右に加える。
     fn master_chapter_table(&mut self, ui: &mut Ui, id: u64, timeline: &Timeline) {
         let settings = self.session.project.settings.clone();
-        let mut picked = None;
+        let picks = self.picked_chapters(id);
+        let mut clicked = None;
         let mut added = None;
-        egui::ScrollArea::vertical()
+        let scroll = egui::ScrollArea::vertical()
             .id_salt(("master_chapters", id))
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                egui::Grid::new(("master_chapter_grid", id))
-                    .striped(true)
+                crate::theme::table_selecting_rows(("master_chapter_grid", id), picks.clone())
                     .num_columns(3)
                     .min_col_width(60.0)
                     .show(ui, |ui| {
@@ -81,35 +96,71 @@ impl DiscCraftApp {
                         ui.strong(tl!("In"));
                         ui.end_row();
                         for (index, chapter) in timeline.chapters.iter().enumerate() {
-                            let selected = self.chapter_playlist_pick == Some((id, index));
-                            let cells = [
-                                index.saturating_add(1).to_string(),
-                                crate::timeline_view::chapter_label(&chapter.name, index),
-                                format_time(chapter.time, &settings),
-                            ];
-                            for text in cells {
-                                let response = ui.selectable_label(selected, text);
-                                if response.clicked() {
-                                    picked = Some(index);
-                                }
-                                if response.double_clicked() {
-                                    added = Some(index);
-                                }
+                            let first = ui.label(index.saturating_add(1).to_string()).rect;
+                            let _ =
+                                ui.label(crate::timeline_view::chapter_label(&chapter.name, index));
+                            let last = ui.label(format_time(chapter.time, &settings)).rect;
+                            let row = crate::theme::table_row(
+                                ui,
+                                egui::Id::unique("master_chapter_row").with((id, index)),
+                                first,
+                                last,
+                            );
+                            if row.double_clicked() {
+                                added = Some(index);
+                            } else if row.clicked() {
+                                clicked = Some(index);
                             }
                             ui.end_row();
                         }
                     });
             });
-        if let Some(index) = picked {
-            self.chapter_playlist_pick = Some((id, index));
+        let (shift, command) = ui.input(|input| (input.modifiers.shift, input.modifiers.command));
+        if let Some(index) = clicked {
+            let anchor = self
+                .chapter_playlist_pick
+                .filter(|(list, _)| *list == id)
+                .map(|(_, anchor)| anchor);
+            match (shift, command, anchor) {
+                (true, _, Some(anchor)) => {
+                    self.chapter_playlist_picks = (anchor.min(index)..=anchor.max(index)).collect();
+                }
+                (false, true, Some(_)) => {
+                    let mut picks = picks.clone();
+                    if let Some(at) = picks.iter().position(|pick| *pick == index) {
+                        let _ = picks.remove(at);
+                    } else {
+                        picks.push(index);
+                    }
+                    self.chapter_playlist_picks = picks;
+                    self.chapter_playlist_pick = Some((id, index));
+                }
+                _ => {
+                    self.chapter_playlist_picks = vec![index];
+                    self.chapter_playlist_pick = Some((id, index));
+                }
+            }
+        }
+        // Ctrl+A over the table: every chapter.
+        let select_all = ui.rect_contains_pointer(scroll.inner_rect)
+            && ui.input(|input| input.modifiers.command && input.key_pressed(egui::Key::A));
+        if select_all && !timeline.chapters.is_empty() {
+            self.chapter_playlist_picks = (0..timeline.chapters.len()).collect();
+            if self
+                .chapter_playlist_pick
+                .is_none_or(|(list, _)| list != id)
+            {
+                self.chapter_playlist_pick = Some((id, 0));
+            }
         }
         if let Some(index) = added {
+            self.chapter_playlist_picks = vec![index];
             self.chapter_playlist_pick = Some((id, index));
-            self.add_chapter_playlist_entry(id, index);
+            self.add_chapter_playlist_entries(id, &[index]);
         }
     }
 
-    /// 右の表: 再生リストのエントリ。クリックで選び、ダブルクリックで外す。
+    /// 右の表: 再生リストのエントリ。行のどこを押しても選び（行全体が選択の色）、ダブルクリックで外す。
     fn entry_table(
         &mut self,
         ui: &mut Ui,
@@ -118,49 +169,56 @@ impl DiscCraftApp {
         timeline: &Timeline,
     ) {
         let settings = self.session.project.settings.clone();
+        let selected = self
+            .chapter_entry_pick
+            .filter(|(list, _)| *list == id)
+            .map(|(_, entry)| entry);
         let mut picked = None;
         let mut removed = None;
         egui::ScrollArea::vertical()
             .id_salt(("playlist_entries", id))
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                egui::Grid::new(("playlist_entry_grid", id))
-                    .striped(true)
-                    .num_columns(4)
-                    .min_col_width(60.0)
-                    .show(ui, |ui| {
-                        ui.strong(tl!("Entry #"));
-                        ui.strong(tl!("Chapter #"));
-                        ui.strong(tl!("Chapter Name"));
-                        ui.strong(tl!("In"));
-                        ui.end_row();
-                        for (entry, chapter) in playlist.chapters.iter().enumerate() {
-                            let selected = self.chapter_entry_pick == Some((id, entry));
-                            let index = usize::try_from(*chapter).unwrap_or(usize::MAX);
-                            let point = timeline.chapters.get(index);
-                            let cells = [
-                                entry.saturating_add(1).to_string(),
-                                index.saturating_add(1).to_string(),
-                                point.map_or_else(
-                                    || tl!("(missing chapter)").to_string(),
-                                    |point| crate::timeline_view::chapter_label(&point.name, index),
-                                ),
-                                point.map_or_else(String::new, |point| {
-                                    format_time(point.time, &settings)
-                                }),
-                            ];
-                            for text in cells {
-                                let response = ui.selectable_label(selected, text);
-                                if response.clicked() {
-                                    picked = Some(entry);
-                                }
-                                if response.double_clicked() {
-                                    removed = Some(entry);
-                                }
-                            }
-                            ui.end_row();
+                crate::theme::table_selecting_rows(
+                    ("playlist_entry_grid", id),
+                    selected.into_iter().collect(),
+                )
+                .num_columns(4)
+                .min_col_width(60.0)
+                .show(ui, |ui| {
+                    ui.strong(tl!("Entry #"));
+                    ui.strong(tl!("Chapter #"));
+                    ui.strong(tl!("Chapter Name"));
+                    ui.strong(tl!("In"));
+                    ui.end_row();
+                    for (entry, chapter) in playlist.chapters.iter().enumerate() {
+                        let index = usize::try_from(*chapter).unwrap_or(usize::MAX);
+                        let point = timeline.chapters.get(index);
+                        let first = ui.label(entry.saturating_add(1).to_string()).rect;
+                        let _ = ui.label(index.saturating_add(1).to_string());
+                        let _ = ui.label(point.map_or_else(
+                            || tl!("(missing chapter)").to_string(),
+                            |point| crate::timeline_view::chapter_label(&point.name, index),
+                        ));
+                        let last = ui
+                            .label(point.map_or_else(String::new, |point| {
+                                format_time(point.time, &settings)
+                            }))
+                            .rect;
+                        let row = crate::theme::table_row(
+                            ui,
+                            egui::Id::unique("playlist_entry_row").with((id, entry)),
+                            first,
+                            last,
+                        );
+                        if row.double_clicked() {
+                            removed = Some(entry);
+                        } else if row.clicked() {
+                            picked = Some(entry);
                         }
-                    });
+                        ui.end_row();
+                    }
+                });
             });
         if let Some(entry) = picked {
             self.chapter_entry_pick = Some((id, entry));
@@ -172,24 +230,20 @@ impl DiscCraftApp {
 
     /// 間の列: 加える（→）、削除、上へ / 下へ（Encore の 再生の順番）。
     fn middle_buttons(&mut self, ui: &mut Ui, id: u64, playlist: &ChapterPlaylist) {
-        let pick = self
-            .chapter_playlist_pick
-            .filter(|(list, _)| *list == id)
-            .map(|(_, index)| index);
+        let picks = self.picked_chapters(id);
         let entry = self
             .chapter_entry_pick
             .filter(|(list, _)| *list == id)
             .map(|(_, entry)| entry)
             .filter(|entry| *entry < playlist.chapters.len());
         if ui
-            .add_enabled(pick.is_some(), egui::Button::new(tl!("Add →")))
+            .add_enabled(!picks.is_empty(), egui::Button::new(tl!("Add →")))
             .on_hover_text(tl!(
-                "Add the selected chapter to the playlist (or double-click it)"
+                "Add the selected chapters to the playlist in chapter order (or double-click one). Shift+click picks a range, Ctrl+click one more, Ctrl+A every chapter"
             ))
             .clicked()
-            && let Some(index) = pick
         {
-            self.add_chapter_playlist_entry(id, index);
+            self.add_chapter_playlist_entries(id, &picks);
         }
         if ui
             .add_enabled(entry.is_some(), egui::Button::new(tl!("Remove")))
@@ -249,14 +303,17 @@ impl DiscCraftApp {
         }
     }
 
-    fn add_chapter_playlist_entry(&mut self, id: u64, chapter: usize) {
+    /// Adds `chapters` to the playlist in one go (one undo, M6.425) and selects the last entry added.
+    fn add_chapter_playlist_entries(&mut self, id: u64, chapters: &[usize]) {
         let added = self.run_command(
             "chapterplaylist.addChapter",
-            serde_json::json!({ "chapterPlaylist": id, "chapter": chapter }),
+            serde_json::json!({ "chapterPlaylist": id, "chapters": chapters }),
         );
         if let Some(entry) = added
             .as_ref()
-            .and_then(|value| value.get("entry"))
+            .and_then(|value| value.get("entries"))
+            .and_then(serde_json::Value::as_array)
+            .and_then(|entries| entries.last())
             .and_then(serde_json::Value::as_u64)
             .and_then(|entry| usize::try_from(entry).ok())
         {

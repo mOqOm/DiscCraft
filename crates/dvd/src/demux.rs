@@ -49,6 +49,16 @@ pub(crate) fn probe(path: &Path, standard: VideoStandard, kind: DiscKind) -> Opt
     if !is_container(path) {
         return None;
     }
+    // A transport stream whose programme lists neither MPEG video nor a stream that may be AC-3 (a Blu-ray's clip of
+    // H.264 and LPCM, M6.429) has nothing that goes on a disc as it is: it is answered from its tables, not read
+    // through to make its index.
+    if disccraft_transcode::ts_stream_types(path).is_some_and(|types| {
+        !types
+            .iter()
+            .any(|kind| matches!(kind, 0x01 | 0x02 | 0x06 | 0x81))
+    }) {
+        return None;
+    }
     let metadata = fs::metadata(path).ok()?;
     let modified = metadata
         .modified()

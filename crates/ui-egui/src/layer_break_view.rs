@@ -6,11 +6,8 @@ use crate::app::DiscCraftApp;
 use crate::i18n::{tl, tlf};
 use disccraft_build::{LayerBreak, OutputKind, frame_90k, millis};
 use disccraft_project::{Capacity, DiscKind, DiscSettings, Tick, TimelineId, VideoStandard};
-use egui::{Color32, Ui};
+use egui::Ui;
 use serde_json::json;
-
-/// Colour of a break that is where it was set.
-const MATCH: Color32 = Color32::from_rgb(0x3c, 0xb3, 0x71);
 
 /// Ticks of one frame at the disc's rate.
 fn frame_ticks(standard: VideoStandard) -> i64 {
@@ -207,11 +204,13 @@ impl DiscCraftApp {
                 ResultLine::Plain(text) => {
                     ui.label(text);
                 }
+                // M6.481: a tick or a cross as well as the colour (the green and red these were could not be told
+                // apart by many who see red and green alike).
                 ResultLine::Good(text) => {
-                    ui.colored_label(MATCH, text);
+                    crate::theme::status_label(ui, crate::theme::Status::Good, text);
                 }
                 ResultLine::Bad(text) => {
-                    ui.colored_label(ui.visuals().error_fg_color, text);
+                    crate::theme::status_label(ui, crate::theme::Status::Error, text);
                 }
             }
         }

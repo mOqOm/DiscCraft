@@ -686,6 +686,117 @@ fn builds_a_still_menu_with_audio() -> Result<(), Box<dyn Error>> {
     result
 }
 
+/// A 16:9 menu of 18 buttons or fewer has a second button group and subpicture stream for a 4:3 television's
+/// letterboxed picture, as Encore writes one (BTN_MD `0x2120`, the PGC's letterbox stream); one of 19 keeps one
+/// group (Encore turns the buttons past 18 into objects) (M6.437).
+#[test]
+fn a_wide_menu_has_letterbox_highlights() -> Result<(), Box<dyn Error>> {
+    let fixtures = fixtures_dir();
+    let m2v = fixtures.join("ntsc.m2v");
+    if !m2v.is_file() {
+        println!("skipped: no fixtures");
+        return Ok(());
+    }
+    let _guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
+    let dir = temp_dir("wide_menu");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir)?;
+
+    let mut project = Project::default();
+    let video = project.add_asset(&m2v)?;
+    let t = project.add_timeline(video, Some("Main".to_string()))?;
+    let few = project.add_menu(Some("Few".to_string()))?;
+    let many = project.add_menu(Some("Many".to_string()))?;
+    for index in 0..3 {
+        let play = Link::Timeline { id: t, chapter: 0 };
+        project.add_button(few, format!("Play {index}"), None, play)?;
+    }
+    for index in 0..19u16 {
+        let rect = disccraft_project::Rect {
+            x: 60 + (index % 2) * 320,
+            y: 40 + (index / 2) * 40,
+            w: 280,
+            h: 30,
+        };
+        let back = Link::Menu {
+            id: few,
+            button: None,
+        };
+        project.add_button(many, format!("Back {index}"), Some(rect), back)?;
+    }
+    for id in [few, many] {
+        project.menu_mut(id).ok_or("menu")?.widescreen = true;
+    }
+    project.settings.first_play = Link::Menu {
+        id: few,
+        button: None,
+    };
+
+    let out = dir.join("out");
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        build_video_ts(&project, &out)?;
+        let video_ts = out.join("VIDEO_TS");
+        let vmgi = disccraft_ifo::read_vmgi(&fs::read(video_ts.join("VIDEO_TS.IFO"))?)?;
+        let vob = fs::read(video_ts.join("VIDEO_TS.VOB"))?;
+        let mut menus = Vec::new();
+        for entry in &vmgi.menus.ok_or("no menus")?.pgcs {
+            let Some(cell) = entry.pgc.cells.first() else {
+                continue;
+            };
+            let start = usize::try_from(cell.first_sector)? * 2048;
+            let end = usize::try_from(cell.last_sector)? * 2048 + 2048;
+            let nav = vob.get(start..start + 2048).ok_or("no NAV pack")?;
+            let pci = nav.get(0x2D..0x2D + 979).ok_or("no PCI")?;
+            let mode = u16::from_be_bytes([pci[0x6E], pci[0x6F]]);
+            let count = pci[0x71];
+            // Button 1's top line in each group (BTN_IT byte 3 and 4), and the sub streams in the VOB.
+            let top = |entry: usize| {
+                let b = &pci[0x8E + 18 * entry..];
+                (u16::from(b[3] & 0x3F) << 4) | u16::from(b[4] >> 4)
+            };
+            let subs = sub_streams(vob.get(start..end).ok_or("menu VOB")?);
+            menus.push((
+                count,
+                mode,
+                entry.pgc.letterbox_subpictures,
+                top(0),
+                top(18),
+                subs,
+            ));
+        }
+        // Few: button 1 at line 120 (the automatic layout) is at line 60 + 90 letterboxed. Many: entry 19 is its
+        // own button 19 (line 400), in the one group.
+        let few = (3, 0x2120, true, 120, 150, vec![0x20, 0x21]);
+        let many = (19, 0x1100, false, 40, 400, vec![0x20]);
+        assert_eq!(menus, [few, many]);
+
+        let model = load_video_ts(&video_ts)?;
+        assert_eq!(disccraft_dvd::preview_model(&project)?, model);
+        Ok(())
+    })();
+    let _ = fs::remove_dir_all(&dir);
+    result
+}
+
+/// The private stream 1 sub streams in a run of VOB sectors, in order of first appearance.
+fn sub_streams(sectors: &[u8]) -> Vec<u8> {
+    let mut found = Vec::new();
+    for sector in sectors.as_chunks::<2048>().0 {
+        if sector.get(14..18) != Some(&[0, 0, 1, 0xBD][..]) {
+            continue;
+        }
+        let Some(&header) = sector.get(22) else {
+            continue;
+        };
+        if let Some(&sub) = sector.get(23 + usize::from(header))
+            && !found.contains(&sub)
+        {
+            found.push(sub);
+        }
+    }
+    found
+}
+
 /// A 16-bit stereo 48 kHz WAV of `frames` silent sample frames.
 fn silent_wav(frames: u32) -> Vec<u8> {
     let data = frames * 4;

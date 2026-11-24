@@ -42,7 +42,7 @@ impl Project {
         let name = name
             .map(|name| name.trim().to_string())
             .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| format!("Folder {}", self.folders.len().saturating_add(1)));
+            .unwrap_or_else(|| self.words.folder(self.folders.len().saturating_add(1)));
         let _ = self.folders.insert(id, Folder { id, name, parent });
         Ok(id)
     }

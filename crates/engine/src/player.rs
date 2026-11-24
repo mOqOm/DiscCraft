@@ -14,7 +14,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use disccraft_transcode::{AudioReader, FrameReader};
+use disccraft_transcode::{AudioReader, FRAME_SNAP_SECONDS, FrameReader};
+
+use crate::time_stretch::TimeStretch;
 
 /// The longest the worker sleeps before looking at the clock again.
 const MAX_SLEEP: Duration = Duration::from_millis(20);
@@ -26,6 +28,19 @@ const AUDIO_CHUNK: f64 = 0.1;
 const AUDIO_LATE: f64 = 0.08;
 /// The output rates a player decodes for (Hz).
 const AUDIO_RATES: std::ops::RangeInclusive<u32> = 8_000..=384_000;
+/// The playback speeds a player takes (M6.427): slower and faster ones are brought into this range.
+const SPEEDS: std::ops::RangeInclusive<f64> = 0.25..=16.0;
+/// The fastest playback whose sound is heard (M6.427); faster playback is silent.
+pub const MAX_HEARD_SPEED: f64 = 2.0;
+
+/// `speed` as a player uses it: within [`SPEEDS`], 1 when it is not a number.
+fn usable_speed(speed: f64) -> f64 {
+    if speed.is_finite() && speed > 0.0 {
+        speed.clamp(*SPEEDS.start(), *SPEEDS.end())
+    } else {
+        1.0
+    }
+}
 
 /// The sound of a playback: the file to take it from, and the output's rate.
 #[derive(Clone, Debug, PartialEq)]
@@ -113,17 +128,21 @@ pub fn audio_track_parts(
         } else {
             (0.0, trim + (cursor - start))
         };
+        // The track's stream of each clip's file (M6.429); a file with fewer streams plays its first.
+        let stream = if track.stream == 0
+            || clip.asset == track.asset
+            || disccraft_transcode::audio_stream_count(&path) > track.stream as usize
+        {
+            track.stream as usize
+        } else {
+            0
+        };
         parts.push(PlayerAudioPart {
             path,
             silence,
             from: file_from,
             until,
-            // The track's stream of its own file; another file's clips play their first.
-            stream: if clip.asset == track.asset {
-                track.stream as usize
-            } else {
-                0
-            },
+            stream,
         });
         match end {
             Some(end) => cursor = end,
@@ -151,6 +170,8 @@ struct AudioQueue {
 #[derive(Debug)]
 struct AudioShared {
     rate: u32,
+    /// The playback speed (M6.427): the queue holds the sound already played at it (pitch kept).
+    speed: f64,
     /// When the picture started (the playback clock's zero), set once the first frame is decoded.
     clock: Arc<OnceLock<Instant>>,
     queue: Mutex<AudioQueue>,
@@ -267,6 +288,20 @@ impl FrameSource {
         })
     }
 
+    /// [`FrameSource::open`] with a decoder of its own instead of the one the monitor shares with every other
+    /// reader of the file (M6.486): for the Timeline viewer's pictures, taken here and there in a file, which moved
+    /// the shared decoder away from where the monitor was playing (a stutter each time).
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be read as a video.
+    pub fn open_own(path: &std::path::Path) -> Result<Self, String> {
+        Ok(Self {
+            reader: FrameReader::open_own(path).map_err(|error| error.to_string())?,
+            path: path.to_path_buf(),
+        })
+    }
+
     /// Whether `path` opens without a wait: it is open already (or was found not to be a video). When it is not,
     /// it is opened on a thread of its own from here on, and this is asked again later.
     #[must_use]
@@ -300,6 +335,126 @@ impl FrameSource {
             rgb,
         })
     }
+
+    /// The first frame from `seconds` on that shows something, looked for every half second before `until`
+    /// (Encore's "find bright poster frames for the timeline", M6.483: a clip that fades in from black shows its
+    /// first lit picture, by the rule of a new timeline's poster frame); the frame at `seconds` when none does.
+    /// `go_on` is asked before each frame is decoded: when it says no, the search stops with `None` (the timeline's
+    /// pictures give way to playback, which needs the computer more).
+    ///
+    /// # Errors
+    ///
+    /// When the frame at `seconds` cannot be decoded.
+    pub fn lit_frame(
+        &self,
+        seconds: f64,
+        size: (u32, u32),
+        until: f64,
+        go_on: &dyn Fn() -> bool,
+    ) -> Result<Option<PlayerFrame>, String> {
+        /// How many half seconds are looked at, at most (ten seconds).
+        const STEPS: u32 = 20;
+        if !go_on() {
+            return Ok(None);
+        }
+        let first = self.frame(seconds, size)?;
+        if disccraft_transcode::is_poster_lit(&first.rgb) {
+            return Ok(Some(first));
+        }
+        for step in 1..=STEPS {
+            let at = seconds + f64::from(step) * disccraft_transcode::POSTER_STEP_SECONDS;
+            // Also stops for an `until` that is not a number.
+            if at.partial_cmp(&until) != Some(std::cmp::Ordering::Less) {
+                break;
+            }
+            if !go_on() {
+                return Ok(None);
+            }
+            match self.frame(at, size) {
+                Ok(frame) if disccraft_transcode::is_poster_lit(&frame.rgb) => {
+                    return Ok(Some(frame));
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        Ok(Some(first))
+    }
+}
+
+/// The name a Timeline viewer picture is remembered under (letters and digits, as the cache asks): its size and
+/// where it was looked for, in milliseconds.
+fn timeline_picture_kind(seconds: f64, until: f64, (width, height): (u32, u32)) -> String {
+    // `as` saturates; the times are a file's seconds.
+    let ms = |value: f64| {
+        if value.is_finite() {
+            (value.max(0.0) * 1000.0).round() as u64
+        } else {
+            0
+        }
+    };
+    format!("tlpic{width}x{height}a{}b{}", ms(seconds), ms(until))
+}
+
+/// A picture of the Timeline viewer ([`FrameSource::lit_frame`] at `seconds` before `until`, at `size`) remembered
+/// from an earlier run (M6.486): a project opens with its pictures at once instead of decoding them again.
+#[must_use]
+pub fn remembered_timeline_picture(
+    path: &std::path::Path,
+    seconds: f64,
+    until: f64,
+    size: (u32, u32),
+) -> Option<PlayerFrame> {
+    let blob =
+        disccraft_transcode::cached_blob(&timeline_picture_kind(seconds, until, size), path)?;
+    picture_from_blob(&blob, seconds, size)
+}
+
+/// Remembers a picture of the Timeline viewer for [`remembered_timeline_picture`] (with the file's other facts,
+/// when the application keeps them).
+pub fn remember_timeline_picture(
+    path: &std::path::Path,
+    (seconds, until): (f64, f64),
+    size: (u32, u32),
+    frame: &PlayerFrame,
+) {
+    disccraft_transcode::store_blob(
+        &timeline_picture_kind(seconds, until, size),
+        path,
+        &picture_blob(frame),
+    );
+}
+
+/// A picture as it is kept on disk: its width and height (little-endian) and its RGB24 pixels.
+fn picture_blob(frame: &PlayerFrame) -> Vec<u8> {
+    let mut blob = Vec::with_capacity(frame.rgb.len().saturating_add(8));
+    blob.extend_from_slice(&frame.width.to_le_bytes());
+    blob.extend_from_slice(&frame.height.to_le_bytes());
+    blob.extend_from_slice(&frame.rgb);
+    blob
+}
+
+/// The picture kept in `blob` ([`picture_blob`]) when it is whole and no larger than `size`: a file changed or cut
+/// short on disk gives nothing (and the picture is decoded again).
+fn picture_from_blob(blob: &[u8], seconds: f64, size: (u32, u32)) -> Option<PlayerFrame> {
+    let width = u32::from_le_bytes(blob.get(0..4)?.try_into().ok()?);
+    let height = u32::from_le_bytes(blob.get(4..8)?.try_into().ok()?);
+    let rgb = blob.get(8..)?;
+    let expected = usize::try_from(
+        u64::from(width)
+            .checked_mul(u64::from(height))?
+            .checked_mul(3)?,
+    )
+    .ok()?;
+    if width == 0 || height == 0 || width > size.0 || height > size.1 || rgb.len() != expected {
+        return None;
+    }
+    Some(PlayerFrame {
+        seconds,
+        width,
+        height,
+        rgb: rgb.to_vec(),
+    })
 }
 
 /// One still frame asked of a [`FrameLoader`].
@@ -503,6 +658,20 @@ impl Player {
         fps: f64,
         size: Option<(u32, u32)>,
     ) -> Self {
+        Self::start_at_speed(path, audio, from_seconds, fps, size, 1.0)
+    }
+
+    /// [`Player::start_sized`] at `speed` times real time (M6.427; 0.5 half speed, 2 twice as fast, within
+    /// 0.25 to 16). The sound keeps its pitch, and is not played above [`MAX_HEARD_SPEED`].
+    pub fn start_at_speed(
+        path: PathBuf,
+        audio: Option<PlayerAudio>,
+        from_seconds: f64,
+        fps: f64,
+        size: Option<(u32, u32)>,
+        speed: f64,
+    ) -> Self {
+        let speed = usable_speed(speed);
         let shared = Arc::new(Mutex::new(Shared {
             frame: None,
             status: PlayerStatus::Playing,
@@ -532,7 +701,7 @@ impl Player {
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     play(
                         &path,
-                        (from, fps, size, sound),
+                        (from, fps, size, sound, speed),
                         &worker_shared,
                         &worker_stop,
                         &worker_clock,
@@ -554,10 +723,10 @@ impl Player {
         };
 
         let audio = audio
-            .filter(|audio| AUDIO_RATES.contains(&audio.rate))
+            .filter(|audio| AUDIO_RATES.contains(&audio.rate) && speed <= MAX_HEARD_SPEED)
             .map(|audio| {
                 let audio_from = audio.from.filter(|at| at.is_finite()).unwrap_or(from);
-                start_audio(audio, audio_from, clock, &stop)
+                start_audio(audio, audio_from, (clock, speed), &stop)
             });
 
         Self {
@@ -628,12 +797,13 @@ fn set_status(shared: &Mutex<Shared>, status: PlayerStatus) {
 fn start_audio(
     audio: PlayerAudio,
     from: f64,
-    clock: Arc<OnceLock<Instant>>,
+    (clock, speed): (Arc<OnceLock<Instant>>, f64),
     stop: &Arc<AtomicBool>,
 ) -> (AudioFeed, Option<JoinHandle<()>>) {
     let feed = AudioFeed {
         shared: Arc::new(AudioShared {
             rate: audio.rate,
+            speed,
             clock,
             queue: Mutex::new(AudioQueue::default()),
         }),
@@ -689,21 +859,35 @@ fn decode_audio(
     } else {
         &audio.parts
     };
+    // At a speed other than 1, the sound goes into the queue already played at that speed (M6.427).
+    let mut stretch = TimeStretch::new(shared.speed, audio.rate);
     for part in parts {
-        if !decode_audio_part(part, audio.rate, shared, stop)? {
-            break;
+        if !decode_audio_part(part, audio.rate, shared, stop, &mut stretch)? {
+            return Ok(());
         }
+    }
+    if let Some(stretch) = stretch.as_mut() {
+        let rest = stretch.finish();
+        let mut queue = shared.queue.lock().map_err(|error| error.to_string())?;
+        queue.samples.extend(rest);
     }
     Ok(())
 }
 
-/// Decodes one part into the queue; `false` when the playback was stopped (no further part is wanted).
+/// Decodes one part into the queue (through `stretch` when the speed is not 1); `false` when the playback was
+/// stopped (no further part is wanted).
 fn decode_audio_part(
     part: &PlayerAudioPart,
     output_rate: u32,
     shared: &AudioShared,
     stop: &AtomicBool,
+    stretch: &mut Option<TimeStretch>,
 ) -> Result<bool, String> {
+    // What goes into the queue: the sound as it is, or played at the speed.
+    let played = |stretch: &mut Option<TimeStretch>, samples: Vec<f32>| match stretch {
+        Some(stretch) => stretch.push(&samples),
+        None => samples,
+    };
     let reader =
         AudioReader::open_stream(&part.path, part.stream).map_err(|error| error.to_string())?;
     let rate = f64::from(output_rate);
@@ -728,8 +912,15 @@ fn decode_audio_part(
     while !stop.load(Ordering::Relaxed) {
         let queued = {
             let mut queue = shared.queue.lock().map_err(|error| error.to_string())?;
-            // What the output skipped to catch up comes off the silence first, then off the sound.
-            let skip = std::mem::take(&mut queue.skip);
+            // What the output skipped to catch up comes off the silence first, then off the sound. The output
+            // counts in played frames: at a speed, that many times the speed of the file's.
+            let mut skip = std::mem::take(&mut queue.skip);
+            if skip > 0 && stretch.is_some() {
+                // `as` saturates; the skips are of seconds at most.
+                skip = (skip as f64 * shared.speed).round() as u64;
+                // The sound jumps: the stretch starts again from there.
+                *stretch = TimeStretch::new(shared.speed, output_rate);
+            }
             let from_silence = skip.min(silence);
             silence -= from_silence;
             position = position.saturating_add(skip - from_silence);
@@ -742,10 +933,9 @@ fn decode_audio_part(
         if silence > 0 {
             let frames = silence.min(chunk as u64);
             silence -= frames;
+            let samples = played(stretch, vec![0.0; frames as usize * 2]);
             let mut queue = shared.queue.lock().map_err(|error| error.to_string())?;
-            queue
-                .samples
-                .extend(std::iter::repeat_n(0.0, frames as usize * 2));
+            queue.samples.extend(samples);
             continue;
         }
         // Up to the trimmed out point.
@@ -762,6 +952,7 @@ fn decode_audio_part(
         }
         let frames = u64::try_from(samples.len() / 2).unwrap_or(0);
         position = position.saturating_add(frames);
+        let samples = played(stretch, samples);
         let mut queue = shared.queue.lock().map_err(|error| error.to_string())?;
         queue.samples.extend(samples);
     }
@@ -783,7 +974,7 @@ fn black_size(size: Option<(u32, u32)>) -> (u32, u32) {
 /// runs to the end of the file, and a black frame tells the time of each frame.
 fn play_sound_only(
     path: &std::path::Path,
-    (from, fps, size): (f64, f64, Option<(u32, u32)>),
+    (from, fps, size, speed): (f64, f64, Option<(u32, u32)>, f64),
     message: &str,
     shared: &Mutex<Shared>,
     stop: &AtomicBool,
@@ -805,16 +996,16 @@ fn play_sound_only(
     let started = *clock.get_or_init(Instant::now);
     let mut shown: Option<i64> = None;
     while !stop.load(Ordering::Relaxed) {
-        let now = from + started.elapsed().as_secs_f64();
+        let now = from + started.elapsed().as_secs_f64() * speed;
         if now >= end {
             return Ok(PlayerStatus::Ended);
         }
         // `as` saturates; the index only orders the frames.
-        let index = (now * fps).floor() as i64;
+        let index = frame_number(now, fps) as i64;
         if shown == Some(index) {
             let next = (index.saturating_add(1)) as f64 / fps;
             thread::sleep(Duration::from_secs_f64(
-                (next - now).clamp(0.0, MAX_SLEEP.as_secs_f64()),
+                ((next - now) / speed).clamp(0.0, MAX_SLEEP.as_secs_f64()),
             ));
             continue;
         }
@@ -831,10 +1022,17 @@ fn play_sound_only(
     Ok(PlayerStatus::Playing)
 }
 
+/// The number of the frame showing at `seconds` (a float, to order the frames), taken as the picture is: a hair
+/// later ([`FRAME_SNAP_SECONDS`]), so a play from a chapter (its start in seconds is a hair early about 1 time in 10
+/// at 29.97) starts on the chapter's frame, not the one before it (M6.449).
+fn frame_number(seconds: f64, fps: f64) -> f64 {
+    ((seconds + FRAME_SNAP_SECONDS) * fps).floor()
+}
+
 /// The worker: decode the frame for the clock until the end or a stop. The clock starts with the first frame.
 fn play(
     path: &std::path::Path,
-    (from, fps, size, sound): (f64, f64, Option<(u32, u32)>, bool),
+    (from, fps, size, sound, speed): (f64, f64, Option<(u32, u32)>, bool, f64),
     shared: &Mutex<Shared>,
     stop: &AtomicBool,
     clock: &OnceLock<Instant>,
@@ -844,7 +1042,7 @@ fn play(
         Err(error) if sound => {
             return play_sound_only(
                 path,
-                (from, fps, size),
+                (from, fps, size, speed),
                 &error.to_string(),
                 shared,
                 stop,
@@ -865,11 +1063,18 @@ fn play(
         return Ok(PlayerStatus::Ended);
     }
     // The first frame is decoded before the clock starts, so the sound waits for the picture.
-    let first = (from * fps).floor();
+    let first = frame_number(from, fps);
     let picture = match frame_at(first / fps) {
         Ok(picture) => picture,
         Err(message) if sound => {
-            return play_sound_only(path, (from, fps, size), &message, shared, stop, clock);
+            return play_sound_only(
+                path,
+                (from, fps, size, speed),
+                &message,
+                shared,
+                stop,
+                clock,
+            );
         }
         Err(message) => return Err(message),
     };
@@ -888,15 +1093,17 @@ fn play(
     }
 
     while !stop.load(Ordering::Relaxed) {
-        let now = from + started.elapsed().as_secs_f64();
+        // At a speed, the picture's time runs that many times as fast as the clock (M6.427).
+        let now = from + started.elapsed().as_secs_f64() * speed;
         if now >= end {
             return Ok(PlayerStatus::Ended);
         }
         // `as` saturates; the index only orders the frames.
-        let index = (now * fps).floor() as i64;
+        let index = frame_number(now, fps) as i64;
         if shown == Some(index) {
             let next = (index.saturating_add(1)) as f64 / fps;
-            let wait = Duration::from_secs_f64((next - now).clamp(0.0, MAX_SLEEP.as_secs_f64()));
+            let wait =
+                Duration::from_secs_f64(((next - now) / speed).clamp(0.0, MAX_SLEEP.as_secs_f64()));
             thread::sleep(wait);
             continue;
         }
@@ -917,10 +1124,74 @@ fn play(
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioFeed, AudioQueue, AudioShared, Player, PlayerAudio, PlayerStatus};
+    use super::{
+        AudioFeed, AudioQueue, AudioShared, Player, PlayerAudio, PlayerFrame, PlayerStatus,
+        frame_number, picture_blob, picture_from_blob, timeline_picture_kind,
+    };
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
+
+    /// The Timeline viewer's pictures kept on disk (M6.486): named with letters and digits only (what the cache
+    /// accepts), read back as they were written, and a file cut short, padded or claiming a larger picture is not
+    /// taken (it is decoded again).
+    #[test]
+    fn timeline_pictures_are_kept_and_checked_when_read_back() {
+        for (seconds, until) in [
+            (0.0, 1.5),
+            (12.345, 99.9),
+            (-3.0, f64::NAN),
+            (f64::INFINITY, 1e300),
+        ] {
+            let kind = timeline_picture_kind(seconds, until, (128, 72));
+            assert!(kind.chars().all(|c| c.is_ascii_alphanumeric()), "{kind}");
+        }
+        assert_eq!(
+            timeline_picture_kind(1.5, 3.0, (128, 72)),
+            "tlpic128x72a1500b3000"
+        );
+        let frame = PlayerFrame {
+            seconds: 2.0,
+            width: 4,
+            height: 2,
+            rgb: (0..24).collect(),
+        };
+        let blob = picture_blob(&frame);
+        assert_eq!(picture_from_blob(&blob, 2.0, (128, 72)), Some(frame));
+        // Cut short, one byte too many, bigger than asked for, empty or a zero size.
+        assert_eq!(
+            picture_from_blob(&blob[..blob.len() - 1], 2.0, (128, 72)),
+            None
+        );
+        let mut longer = blob.clone();
+        longer.push(0);
+        assert_eq!(picture_from_blob(&longer, 2.0, (128, 72)), None);
+        assert_eq!(picture_from_blob(&blob, 2.0, (2, 2)), None);
+        assert_eq!(picture_from_blob(&[], 2.0, (128, 72)), None);
+        assert_eq!(picture_from_blob(&[0; 8], 2.0, (128, 72)), None);
+        // A size whose pixels overflow is refused, not allocated.
+        let huge: Vec<u8> = [u32::MAX.to_le_bytes(), u32::MAX.to_le_bytes()].concat();
+        assert_eq!(picture_from_blob(&huge, 2.0, (u32::MAX, u32::MAX)), None);
+    }
+
+    #[test]
+    fn a_play_from_a_frame_start_starts_on_that_frame() {
+        // Every frame start of three hours at 29.97 and 23.976, carried as seconds as a chapter's is (the Gray disc's
+        // chapter 7, frame 31 238, started on 31 237).
+        const TICKS_PER_SECOND: i64 = 254_016_000_000;
+        for (numerator, denominator) in [(30_000_i64, 1001_i64), (24_000, 1001)] {
+            let fps = numerator as f64 / denominator as f64;
+            let frame_ticks = TICKS_PER_SECOND / numerator * denominator;
+            for frame in 0..(3 * 3600 * numerator / denominator) {
+                let seconds = (frame * frame_ticks) as f64 / TICKS_PER_SECOND as f64;
+                assert_eq!(
+                    frame_number(seconds, fps),
+                    frame as f64,
+                    "frame {frame} at {fps}"
+                );
+            }
+        }
+    }
 
     /// A feed at `rate` whose clock started `ago` and whose queue holds `frames` stereo frames of (0.5, -0.5).
     fn queued_feed(rate: u32, ago: Duration, frames: usize) -> AudioFeed {
@@ -933,6 +1204,7 @@ mod tests {
         AudioFeed {
             shared: Arc::new(AudioShared {
                 rate,
+                speed: 1.0,
                 clock: Arc::new(clock),
                 queue: Mutex::new(queue),
             }),
@@ -1213,6 +1485,7 @@ mod tests {
         };
         let shared = AudioShared {
             rate: 48_000,
+            speed: 1.0,
             clock: Arc::new(OnceLock::new()),
             queue: Mutex::new(AudioQueue::default()),
         };
@@ -1295,12 +1568,70 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// M6.427: at a speed, the sound goes into the queue already played at it: half as long at twice the speed,
+    /// twice as long at half, at the same level (the pitch is the time stretch's own test).
+    #[test]
+    fn the_sound_is_queued_at_the_playback_speed() {
+        use super::decode_audio;
+        let dir = std::env::temp_dir().join(format!("disccraft-speed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("steady.wav");
+        steady_wav(&wav, 0.8, 16_384);
+        for (speed, seconds) in [(2.0, 0.4), (0.5, 1.6)] {
+            let audio = PlayerAudio {
+                stream: 0,
+                path: wav.clone(),
+                rate: 48_000,
+                from: Some(0.0),
+                // A fifth of a second of the file at half speed (the queue holds no more than its lead). The
+                // file's end is given too: the sound decoder does not stop there by itself.
+                until: Some(if speed < 1.0 { 0.2 } else { 0.8 }),
+                parts: Vec::new(),
+            };
+            let shared = AudioShared {
+                rate: 48_000,
+                speed,
+                clock: Arc::new(OnceLock::new()),
+                queue: Mutex::new(AudioQueue::default()),
+            };
+            decode_audio(
+                &audio,
+                0.0,
+                &shared,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .unwrap();
+            let left: Vec<f32> = shared
+                .queue
+                .lock()
+                .unwrap()
+                .samples
+                .iter()
+                .step_by(2)
+                .copied()
+                .collect();
+            let expected = if speed < 1.0 { 0.4 } else { seconds } * 48_000.0;
+            assert!(
+                (left.len() as f64 - expected).abs() < 0.05 * 48_000.0,
+                "{speed}: {} frames for {expected}",
+                left.len()
+            );
+            let middle = &left[left.len() / 4..left.len() * 3 / 4];
+            assert!(
+                middle.iter().all(|value| (value - 0.5).abs() < 0.01),
+                "{speed}: level"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_feed_is_silent_until_the_picture_starts() {
         let feed = queued_feed(1000, Duration::ZERO, 4);
         let unstarted = AudioFeed {
             shared: Arc::new(AudioShared {
                 rate: 1000,
+                speed: 1.0,
                 clock: Arc::new(OnceLock::new()),
                 queue: Mutex::new(AudioQueue::default()),
             }),

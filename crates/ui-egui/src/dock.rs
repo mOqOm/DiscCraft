@@ -12,7 +12,7 @@ use crate::icons::{self, Icon};
 use crate::theme::bar_frame;
 use crate::workspace::{Panel, WorkspaceId, WorkspacePreset, permissions};
 
-use craft_ui::docking::{Action, DockArea, DockContent, DockStyle, PanelState};
+use craft_ui::docking::{Action, DockArea, DockContent, DockEvent, DockStyle, PanelState, Target};
 use disccraft_project::{MenuId, TimelineId};
 use egui::{Sense, Ui};
 
@@ -29,6 +29,10 @@ const CLOSE_SPACE: f32 = 14.0;
 const CHOICE_SPACE: f32 = 24.0;
 /// craft-ui がタブの左端から名前（つまみの場所を含む）を描き始めるまでの幅。
 const TAB_TEXT_INSET: f32 = 12.0;
+/// タブの帯の右端の、パネルのメニューのボタン（≡）の幅。
+const MENU_WIDTH: f32 = 24.0;
+/// パネルのメニューの ドッキングを解除 で、浮かべる窓を元の場所からずらす量（craft-ui のタブのメニューと同じ）。
+const FLOAT_OFFSET: f32 = 24.0;
 
 impl DiscCraftApp {
     /// メニューバーの下のすべてを描く。
@@ -54,7 +58,7 @@ impl DiscCraftApp {
 
         // パネルの間の暗い溝の上にタブグループを並べる。
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(crate::theme::GUTTER))
+            .frame(egui::Frame::NONE.fill(crate::theme::GUTTER.get()))
             .show(ui, |ui| self.dock_area(ui));
     }
 
@@ -62,13 +66,49 @@ impl DiscCraftApp {
     fn dock_area(&mut self, ui: &mut Ui) {
         let style = dock_style(ui);
         let layout = self.dock.layout.clone();
-        let mut content = DiscContent { app: self };
-        let output = DockArea::new(area_id()).show_content(ui, &layout, &style, &mut content);
+        // A maximized frame that was closed, undocked or replaced by a workspace is not maximized any more.
+        self.maximized_panel = self
+            .maximized_panel
+            .filter(|panel| layout.contains(panel) && !self.floating(*panel));
+        let before = std::mem::take(&mut self.panel_bodies);
+        let maximized = self.maximized_panel;
+        let mut content = DiscContent {
+            app: self,
+            before,
+            actions: Vec::new(),
+            maximize: None,
+        };
+        let output = DockArea::new(area_id()).maximized(maximized).show_content(
+            ui,
+            &layout,
+            &style,
+            &mut content,
+        );
+        let DiscContent {
+            actions: menu_actions,
+            maximize,
+            ..
+        } = content;
+        // A press on a tab or its strip makes that panel the one being worked in, as a press in its body does.
+        if let Some(panel) = output.focused {
+            self.active_panel = Some(panel);
+        }
         let close = self.tab_chrome(ui);
+        self.focus_outline(ui);
 
         let mut actions = output.actions;
+        actions.extend(menu_actions);
         if let Some(panel) = close {
             actions.push(Action::Close { panel });
+        }
+        // フレームを最大化（タブの右クリックのメニューかパネルのメニュー）: もう一度で元の大きさ。
+        for event in output.events {
+            if let DockEvent::ToggleMaximize { panel } = event {
+                self.toggle_maximize(panel);
+            }
+        }
+        if let Some(panel) = maximize {
+            self.toggle_maximize(panel);
         }
         if let Some(error) = output.error {
             self.status = tlf!(
@@ -99,13 +139,7 @@ impl DiscCraftApp {
                 continue;
             };
             // フローティングの窓のタブは窓のレイヤーにある（そこには描かない）。
-            if self
-                .dock
-                .layout
-                .floating
-                .iter()
-                .any(|window| window.contains(&panel))
-            {
+            if self.floating(panel) {
                 continue;
             }
             // 後ろのタブは名前だけ（Encore と同じ）。
@@ -150,9 +184,9 @@ impl DiscCraftApp {
                     .rect_filled(close_rect, 2.0, crate::craft_timeline::style::HOVER);
             }
             let color = if response.hovered() {
-                crate::theme::TEXT_STRONG
+                crate::theme::TEXT_STRONG.get()
             } else {
-                crate::theme::TEXT
+                crate::theme::TEXT.get()
             };
             icons::paint(ui.painter(), close_rect.shrink(3.0), Icon::Close, color);
             if response.clicked() {
@@ -165,6 +199,46 @@ impl DiscCraftApp {
         close
     }
 
+    /// Encore と同じく、操作中のパネル（最後に押したパネル）を 1 本の線で囲む: 前面のタブの上と左右、中身の上と
+    /// 左右と下（タブの下には線がない。M6.474）。ドッキングしたパネルだけ（浮かんだ窓は窓のレイヤーにある）、
+    /// ドラッグ中は描かない。タブの場所は craft-ui が前のフレームで記録したもの、中身の場所はこのフレームのもの。
+    fn focus_outline(&self, ui: &Ui) {
+        use craft_ui::docking::Hit;
+        let Some(panel) = self.active_panel else {
+            return;
+        };
+        let ctx = ui.ctx();
+        if ctx.dragged_id().is_some() || self.floating(panel) || !self.panel_front(panel) {
+            return;
+        }
+        let Some(body) = self
+            .panel_bodies
+            .iter()
+            .find(|(drawn, _)| *drawn == panel)
+            .map(|(_, rect)| *rect)
+        else {
+            return;
+        };
+        let tab = DockArea::<Panel>::hit_rects(ctx, area_id())
+            .into_iter()
+            .find_map(|(hit, rect)| matches!(hit, Hit::Tab(p) if p == panel).then_some(rect));
+        let painter = ui.painter();
+        let half = 0.5 / painter.pixels_per_point();
+        let points: Vec<egui::Pos2> = focus_path(body, tab, half)
+            .into_iter()
+            .map(|point| {
+                egui::pos2(
+                    painter.round_to_pixel_center(point.x),
+                    painter.round_to_pixel_center(point.y),
+                )
+            })
+            .collect();
+        painter.add(egui::Shape::closed_line(
+            points,
+            egui::Stroke::new(1.0, crate::theme::FOCUS_OUTLINE),
+        ));
+    }
+
     /// タブに切り替えのリストの箱を出すか: 前面に出ているビューアで、選べる項目があるとき。
     fn tab_choice_box(&self, panel: Panel) -> bool {
         self.tab_has_chrome(panel) && !self.viewer_choices(panel).is_empty()
@@ -173,13 +247,25 @@ impl DiscCraftApp {
     /// タブにつまみと × を出すか: グループの前面に出ているタブ（Encore と同じ）。フローティングの窓のタブは
     /// craft-ui の描くまま。
     fn tab_has_chrome(&self, panel: Panel) -> bool {
-        self.panel_front(panel)
-            && !self
-                .dock
-                .layout
-                .floating
-                .iter()
-                .any(|window| window.contains(&panel))
+        self.panel_front(panel) && !self.floating(panel)
+    }
+
+    /// `panel` がフローティングの窓にあるか。
+    fn floating(&self, panel: Panel) -> bool {
+        self.dock
+            .layout
+            .floating
+            .iter()
+            .any(|window| window.contains(&panel))
+    }
+
+    /// フレームを最大化: `panel` のフレームを最大化する。そのパネルのフレームが最大化されていれば元の大きさに戻す。
+    fn toggle_maximize(&mut self, panel: Panel) {
+        self.maximized_panel = if self.maximized_panel == Some(panel) {
+            None
+        } else {
+            Some(panel)
+        };
     }
 
     /// ビューアのタブの ▼ で選べる項目（選んだときの選択と名前、プロジェクトの順）。ビューアでなければ空。
@@ -535,32 +621,33 @@ fn dock_style(ui: &Ui) -> DockStyle {
     let mut style = DockStyle::from_ui(ui);
     style.tab_height = TAB_HEIGHT;
     style.gap = 4.0;
-    style.background = PANEL;
-    style.tab_background = TAB_STRIP;
-    style.active_background = PANEL;
-    style.floating_background = PANEL;
-    style.text = TEXT_STRONG;
-    style.inactive_text = TEXT_WEAK;
+    style.background = PANEL.get();
+    style.tab_background = TAB_STRIP.get();
+    style.active_background = PANEL.get();
+    style.floating_background = PANEL.get();
+    style.text = TEXT_STRONG.get();
+    style.inactive_text = TEXT_WEAK.get();
     style.border = egui::Stroke::new(1.0, BORDER);
     // Encore と同じく、ドラッグ中はポインタの下のグループの上下左右に台形の区画の枠を出し、落とす先の区画
     // （端の台形なら分割、中ならタブとして入る）を青で塗る（FilmCraft と同じ設定）。
     style.side_edge_zones = true;
-    style.accent = crate::craft_timeline::style::PLAYHEAD;
+    style.accent = crate::craft_timeline::style::PLAYHEAD.get();
     style.middle_click_closes_tabs = true;
     style.wheel_selects_tabs = true;
     style.close_others_item = true;
     style.maximize_item = true;
     style.float_label = tl!("Undock Panel").to_owned();
     style.close_label = tl!("Close Panel").to_owned();
-    style.move_panel_to_label = tl!("Move Panel to Group").to_owned();
+    style.move_panel_to_label = tl!("Move Panel to Frame").to_owned();
     style.panels_label = tl!("Panels").to_owned();
-    style.move_group_label = tl!("Move Tab Group").to_owned();
-    style.close_group_label = tl!("Close Tab Group").to_owned();
+    style.move_group_label = tl!("Move Frame").to_owned();
+    // Encore calls a tab group a frame (its panel menu: Undock Frame, Close Frame, Maximize Frame).
+    style.close_group_label = tl!("Close Frame").to_owned();
     style.minimize_label = tl!("Minimize").to_owned();
     style.expand_label = tl!("Expand").to_owned();
-    style.float_group_label = tl!("Undock Tab Group").to_owned();
-    style.move_group_to_label = tl!("Move Tab Group To").to_owned();
-    style.close_others_label = tl!("Close Other Panels in Group").to_owned();
+    style.float_group_label = tl!("Undock Frame").to_owned();
+    style.move_group_to_label = tl!("Move Frame To").to_owned();
+    style.close_others_label = tl!("Close Other Panels in Frame").to_owned();
     style.maximize_label = tl!("Maximize Frame").to_owned();
     style.restore_frame_label = tl!("Restore Frame Size").to_owned();
     style.close_window_label = tl!("Close Panel Window").to_owned();
@@ -570,11 +657,113 @@ fn dock_style(ui: &Ui) -> DockStyle {
 /// DiscCraft の側のドッキング（1 フレームぶん）。
 struct DiscContent<'a> {
     app: &'a mut DiscCraftApp,
+    /// 前のフレームで描いた各パネルの中身の場所（ドッキングを解除 で浮かべる窓の場所と大きさ）。
+    before: Vec<(Panel, egui::Rect)>,
+    /// パネルのメニューで選ばれた並びの変更。
+    actions: Vec<Action<Panel>>,
+    /// パネルのメニューで フレームを最大化 / 元に戻す が選ばれたパネル。
+    maximize: Option<Panel>,
+}
+
+impl DiscContent<'_> {
+    /// Encore のパネルのメニュー（タブの帯の右端の ≡）: パネルのドッキングを解除 / フレームのドッキングを解除 /
+    /// パネルを閉じる / フレームを閉じる / フレームを最大化、そのあとにパネルごとの項目（フローチャート、ライブラリ）。
+    /// フローティングの窓では、ドッキングを解除 と 最大化 は選べない。Encore と同じく、どの項目の名前もチェックの
+    /// 印の列の後ろから始まる。
+    fn panel_menu_items(
+        &mut self,
+        ui: &mut Ui,
+        button: egui::Rect,
+        (panels, active, floating): (&[Panel], Panel, bool),
+    ) {
+        let item = |ui: &mut Ui, enabled: bool, label: &str| {
+            let clicked = ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::new(crate::actions::indented(label.to_owned())),
+                )
+                .clicked();
+            if clicked {
+                ui.close();
+            }
+            clicked
+        };
+        let float = self.float_rect(active, button);
+        if item(ui, !floating, tl!("Undock Panel")) {
+            self.actions.push(Action::Float {
+                panel: active,
+                rect: float,
+            });
+        }
+        if item(ui, !floating, tl!("Undock Frame")) {
+            self.actions.push(Action::MoveGroup {
+                panel: active,
+                to: Target::Float { rect: Some(float) },
+            });
+        }
+        if item(ui, true, tl!("Close Panel")) {
+            self.actions.push(Action::Close { panel: active });
+        }
+        if item(ui, true, tl!("Close Frame")) {
+            self.actions.push(Action::CloseGroup { panel: active });
+        }
+        let maximized = self
+            .app
+            .maximized_panel
+            .filter(|panel| panels.contains(panel));
+        let label = if maximized.is_some() {
+            tl!("Restore Frame Size")
+        } else {
+            tl!("Maximize Frame")
+        };
+        if item(ui, !floating, label) {
+            self.maximize = Some(maximized.unwrap_or(active));
+        }
+        if has_panel_items(active) {
+            ui.separator();
+            self.app.panel_items(ui, active);
+        }
+    }
+
+    /// ドッキングを解除 で浮かべる窓の場所と大きさ（`[x, y, 幅, 高さ]`）: 前のフレームのパネルの中身の場所から
+    /// 少しずらして同じ大きさ。中身を描いていなかった（最小化していた）ときは、メニューのボタンの下に 400×300。
+    fn float_rect(&self, panel: Panel, button: egui::Rect) -> [f32; 4] {
+        let rect = self
+            .before
+            .iter()
+            .find(|(drawn, _)| *drawn == panel)
+            .map(|(_, rect)| rect.translate(egui::vec2(FLOAT_OFFSET, FLOAT_OFFSET)))
+            .unwrap_or_else(|| {
+                egui::Rect::from_min_size(
+                    egui::pos2(button.right() - 400.0, button.bottom()),
+                    egui::vec2(400.0, 300.0),
+                )
+            });
+        [rect.left(), rect.top(), rect.width(), rect.height()]
+    }
+}
+
+/// パネルのメニューにパネルごとの項目があるか（Encore では フローチャート と ライブラリ。文字 と メタデータ の
+/// 項目は DiscCraft にない機能なので出さない）。
+fn has_panel_items(panel: Panel) -> bool {
+    matches!(panel, Panel::Flowchart | Panel::Library)
+}
+
+impl DiscCraftApp {
+    /// パネルのメニューとタブの右クリックのメニューの、パネルごとの項目。
+    fn panel_items(&mut self, ui: &mut Ui, panel: Panel) {
+        match panel {
+            Panel::Flowchart => self.flow_panel_menu(ui),
+            Panel::Library => self.library_menu(ui),
+            _ => {}
+        }
+    }
 }
 
 impl DockContent<Panel> for DiscContent<'_> {
     fn body(&mut self, ui: &mut Ui, panel: &Panel) {
         let rect = ui.max_rect();
+        self.app.panel_bodies.push((*panel, rect));
         let inner = rect.shrink(f32::from(crate::theme::GROUP_MARGIN));
         let mut child = ui.new_child(
             egui::UiBuilder::new()
@@ -589,6 +778,59 @@ impl DockContent<Panel> for DiscContent<'_> {
 
     fn logical_label(&self, panel: &Panel) -> String {
         self.app.panel_label(*panel)
+    }
+
+    /// タブの右クリックのメニューの頭に、パネルのメニューと同じパネルごとの項目（そのあとに craft-ui の
+    /// ドッキングを解除・移動・閉じる など）。
+    fn panel_menu(&mut self, ui: &mut Ui, panel: &Panel) {
+        if has_panel_items(*panel) {
+            self.app.panel_items(ui, *panel);
+            ui.separator();
+        }
+    }
+
+    /// タブの帯の右端に、パネルのメニューのボタン（Encore と同じ場所）。
+    fn group_header_width(
+        &self,
+        _panels: &[Panel],
+        _active: &Panel,
+        _floating: bool,
+        strip_width: f32,
+    ) -> f32 {
+        MENU_WIDTH.min(strip_width)
+    }
+
+    /// パネルのメニューのボタン（Craft の ≡ のアイコン）。押すと前面のパネルのメニューが開く。
+    fn group_header(&mut self, ui: &mut Ui, panels: &[Panel], active: &Panel, floating: bool) {
+        let header = ui.max_rect();
+        let rect = egui::Rect::from_center_size(header.center(), egui::vec2(18.0, 16.0));
+        let response = ui.interact(
+            rect,
+            egui::Id::unique("panel_menu_button").with(*active),
+            Sense::click(),
+        );
+        response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl!("Panel Menu")));
+        let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
+        if response.hovered() || open {
+            ui.painter()
+                .rect_filled(rect, 2.0, crate::craft_timeline::style::HOVER);
+        }
+        let color = if response.hovered() || open {
+            crate::theme::TEXT_STRONG.get()
+        } else {
+            crate::theme::TEXT.get()
+        };
+        icons::paint(
+            ui.painter(),
+            egui::Rect::from_center_size(rect.center(), egui::vec2(14.0, 14.0)),
+            Icon::Hamburger,
+            color,
+        );
+        let _ = egui::Popup::menu(&response).show(|ui| {
+            ui.set_min_width(180.0);
+            self.panel_menu_items(ui, rect, (panels, *active, floating));
+        });
     }
 
     /// 前面のタブの名前に、左のつまみ（グリップ）と右の × の場所を空ける。前面のビューアのタブは、名前と × の
@@ -648,9 +890,17 @@ fn viewer_tab_box(
     let painter = ui.painter();
     // 名前の文字はそのまま見えるように、塗りはごく薄く。
     let fill = if response.hovered() {
-        egui::Color32::from_white_alpha(16)
+        crate::theme::Shade::new(
+            egui::Color32::from_white_alpha(16),
+            egui::Color32::from_black_alpha(18),
+        )
+        .get()
     } else {
-        egui::Color32::from_white_alpha(6)
+        crate::theme::Shade::new(
+            egui::Color32::from_white_alpha(6),
+            egui::Color32::from_black_alpha(7),
+        )
+        .get()
     };
     painter.rect(
         rect,
@@ -693,9 +943,127 @@ fn viewer_tab_box(
     chosen
 }
 
+/// 操作中のパネルを囲む線の点（閉じた折れ線）: 中身（`body`）の上の行から始まり、前面のタブ（`tab`。グループの
+/// 幅に収める）があればその左の辺を上がって上を通り右の辺を下り、中身の右上、右下、左下へ。点は端の画素の中心
+/// （`half` は半画素）。同じ点が続くところ（タブがグループの左端にあるとき）は 1 つにまとめる。
+fn focus_path(body: egui::Rect, tab: Option<egui::Rect>, half: f32) -> Vec<egui::Pos2> {
+    let (left, right) = (body.left() + half, body.right() - half);
+    let (top, bottom) = (body.top() + half, body.bottom() - half);
+    let mut points = vec![egui::pos2(left, top)];
+    if let Some(tab) = tab.filter(|tab| tab.is_positive()) {
+        let tab_left = (tab.left() + half).clamp(left, right);
+        let tab_right = (tab.right() - half).clamp(left, right);
+        let tab_top = (tab.top() + half).min(top);
+        points.extend([
+            egui::pos2(tab_left, top),
+            egui::pos2(tab_left, tab_top),
+            egui::pos2(tab_right, tab_top),
+            egui::pos2(tab_right, top),
+        ]);
+    }
+    points.extend([
+        egui::pos2(right, top),
+        egui::pos2(right, bottom),
+        egui::pos2(left, bottom),
+    ]);
+    points.dedup();
+    if points.len() > 1 && points.first() == points.last() {
+        let _ = points.pop();
+    }
+    points
+}
+
 /// パネルいっぱいに広がるスクロール領域（中身が小さいとその大きさまで縮まないように）。
 fn fill_scroll(id: &str) -> egui::ScrollArea {
     egui::ScrollArea::both()
         .id_salt(id)
         .auto_shrink([false, false])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DiscContent, FLOAT_OFFSET, Panel, focus_path};
+    use crate::DiscCraftApp;
+    use egui::{Rect, pos2};
+
+    /// The outline of the panel being worked in runs over its front tab and round its body, as Encore's does: up
+    /// the tab's sides and over it, along the body's top beside the tab, and round the rest, on the edge pixels.
+    #[test]
+    fn the_focus_outline_goes_over_the_front_tab() {
+        let body = Rect::from_min_max(pos2(0.0, 20.0), pos2(100.0, 80.0));
+        let at_left = Rect::from_min_max(pos2(0.0, 0.0), pos2(30.0, 20.0));
+        assert_eq!(
+            focus_path(body, Some(at_left), 0.5),
+            vec![
+                pos2(0.5, 20.5),
+                pos2(0.5, 0.5),
+                pos2(29.5, 0.5),
+                pos2(29.5, 20.5),
+                pos2(99.5, 20.5),
+                pos2(99.5, 79.5),
+                pos2(0.5, 79.5),
+            ]
+        );
+        let in_middle = Rect::from_min_max(pos2(40.0, 0.0), pos2(60.0, 20.0));
+        assert_eq!(
+            focus_path(body, Some(in_middle), 0.5),
+            vec![
+                pos2(0.5, 20.5),
+                pos2(40.5, 20.5),
+                pos2(40.5, 0.5),
+                pos2(59.5, 0.5),
+                pos2(59.5, 20.5),
+                pos2(99.5, 20.5),
+                pos2(99.5, 79.5),
+                pos2(0.5, 79.5),
+            ]
+        );
+        // No tab recorded (or an empty one): round the body only.
+        for tab in [None, Some(Rect::NOTHING)] {
+            assert_eq!(
+                focus_path(body, tab, 0.5),
+                vec![
+                    pos2(0.5, 20.5),
+                    pos2(99.5, 20.5),
+                    pos2(99.5, 79.5),
+                    pos2(0.5, 79.5),
+                ]
+            );
+        }
+    }
+
+    /// Maximize Frame (the panel menu's or the tab menu's) maximizes the frame; the same again restores it.
+    #[test]
+    fn maximize_frame_toggles() {
+        let mut app = DiscCraftApp::new(&egui::Context::default());
+        app.toggle_maximize(Panel::Library);
+        assert_eq!(app.maximized_panel, Some(Panel::Library));
+        app.toggle_maximize(Panel::Flowchart);
+        assert_eq!(app.maximized_panel, Some(Panel::Flowchart));
+        app.toggle_maximize(Panel::Flowchart);
+        assert_eq!(app.maximized_panel, None);
+    }
+
+    /// Undock opens the window where the panel was, a little lower right and as large; a panel not drawn in the
+    /// last frame (a minimized group) gets a 400 × 300 window under the menu button.
+    #[test]
+    fn an_undocked_panel_floats_beside_where_it_was() {
+        let mut app = DiscCraftApp::new(&egui::Context::default());
+        let body = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(300.0, 200.0));
+        let content = DiscContent {
+            app: &mut app,
+            before: vec![(Panel::Library, body)],
+            actions: Vec::new(),
+            maximize: None,
+        };
+        let button = egui::Rect::from_min_size(egui::pos2(900.0, 10.0), egui::vec2(18.0, 16.0));
+        assert_eq!(
+            content.float_rect(Panel::Library, button),
+            [100.0 + FLOAT_OFFSET, 50.0 + FLOAT_OFFSET, 300.0, 200.0]
+        );
+        assert_eq!(
+            content.float_rect(Panel::Styles, button),
+            [518.0, 26.0, 400.0, 300.0]
+        );
+    }
 }

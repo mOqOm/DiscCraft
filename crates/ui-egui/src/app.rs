@@ -47,6 +47,10 @@ pub struct DiscCraftApp {
     pub(crate) dock: Dock,
     /// 並びが変わって、まだ設定に保存していない。
     pub(crate) dock_dirty: bool,
+    /// フレームを最大化 で最大化しているフレームのパネル（Encore と同じく、もう一度選ぶと元の大きさに戻る）。
+    pub(crate) maximized_panel: Option<crate::workspace::Panel>,
+    /// 前のフレームで描いた各パネルの中身の場所（パネルのメニューの ドッキングを解除 で、浮かべる窓の場所と大きさ）。
+    pub(crate) panel_bodies: Vec<(crate::workspace::Panel, egui::Rect)>,
     /// 名前を付けて保存したワークスペース（作った順）。
     pub(crate) user_workspaces: Vec<String>,
     /// 「新規ワークスペース…」ダイアログの名前の欄（開いているときだけ）。
@@ -64,6 +68,9 @@ pub struct DiscCraftApp {
     pub(crate) last_chapter_playlist: Option<u64>,
     /// チャプター再生リストビューアで選んだマスターのチャプター（再生リスト, チャプター番号）とエントリ。
     pub(crate) chapter_playlist_pick: Option<(u64, usize)>,
+    /// M6.425: every master chapter picked (Shift / Ctrl+click, Ctrl+A) for the chapter playlist of
+    /// `chapter_playlist_pick`, which is the anchor of a Shift+click range.
+    pub(crate) chapter_playlist_picks: Vec<usize>,
     pub(crate) chapter_entry_pick: Option<(u64, usize)>,
     /// アセットの `asset.probe` の結果（キーはアセット ID）。
     pub(crate) durations: BTreeMap<u64, crate::project_panel::ProbeInfo>,
@@ -73,6 +80,8 @@ pub struct DiscCraftApp {
     pub(crate) last_frames: BTreeMap<u64, Option<egui::TextureHandle>>,
     /// オーディオトラックの波形（アセットごと、別のスレッドで作る）。
     pub(crate) waveforms: crate::waveforms::Waveforms,
+    /// The pictures along the video clips in the Timeline viewer (M6.483).
+    pub(crate) clip_thumbs: crate::clip_thumbs::ClipThumbs,
     /// 起動時のようこそ画面と新規プロジェクトダイアログ。
     pub(crate) welcome: Welcome,
     /// 最近使ったプロジェクト（新しい順）。
@@ -208,6 +217,8 @@ pub struct DiscCraftApp {
     )>,
     /// The Interpret Footage dialog, while it is open.
     pub(crate) interpret_footage_dialog: Option<crate::interpret_footage::InterpretDraft>,
+    /// File ▸ Import ▸ Blu-ray…: the disc's playlists to choose from (M6.429).
+    pub(crate) bluray_dialog: Option<crate::bluray_import::BlurayDraft>,
     /// 開いている「リンクの指定」ダイアログ（Ctrl+L）。
     pub(crate) link_dialog: Option<crate::link_dialog::LinkDialog>,
     /// The Drop Shadow dialog while it is open.
@@ -247,6 +258,24 @@ pub struct DiscCraftApp {
     pub(crate) flow_thumbnails: bool,
     /// フローチャートでボタンを隠しているメニュー（ノードの右クリックの「ボタンを表示」を外したもの）。
     pub(crate) flow_hidden_buttons: Vec<MenuId>,
+    /// フローチャートの拡大率（Encore のフローチャートとトレイの間のスライダー。1 で Encore のいつもの大きさ）。
+    pub(crate) flow_zoom: f32,
+    /// フローチャートのノードに出すチャプターの絵（タイムライン、チャプター、その時刻、クリップの並びごと。M6.432、
+    /// 見えなくなったものは捨てる M6.436）。
+    pub(crate) flow_frames:
+        std::collections::BTreeMap<(u64, u32, i64, u64), Option<egui::TextureHandle>>,
+    /// フローチャートで親ごとに揃えるリンク（Encore: 最後にクリックしたボタンの行か子の箱のリンク。選択を外しても残り、
+    /// 開き直すと既定の並び。M6.440）。
+    pub(crate) flow_focus:
+        std::collections::BTreeMap<crate::flowchart::NodeId, crate::flowchart::Port>,
+    /// リンクを揃え直したクリックの的（次の描画で画面の同じ位置に留まるようスクロールする）。
+    pub(crate) flow_anchor: Option<crate::flowchart::FlowAnchor>,
+    /// フローチャートでクリックした場所（項目そのものか、その繰り返しか。Encore はそこだけ青く光らせ、ほかは灰色）。
+    pub(crate) flow_clicked: Option<crate::flowchart::AnchorItem>,
+    /// フローチャートの箱の絵になるチャプターのポスター（タイムラインはチャプター 1、チャプター再生リストは最初の項目。
+    /// M6.439、鍵は `flow_frames` と同じ）。
+    pub(crate) flow_node_frames:
+        std::collections::BTreeMap<(u64, u32, i64, u64), Option<egui::TextureHandle>>,
     /// メニュービューアでピクセルをテレビ画面の縦横比に補正する（Encore の「テレビ画面に合わせてメニュー
     /// ピクセルを校正」。外すと 720x480 をそのままの比率で出す）。
     pub(crate) correct_pixel_aspect: bool,
@@ -270,6 +299,9 @@ pub struct DiscCraftApp {
     pub(crate) subtitle_edit: Option<crate::subtitle_edit::SubtitleEdit>,
     /// タイムラインの再生（タイムライン ▸ 再生、Space）。
     pub(crate) playback: Option<crate::playback::Playback>,
+    /// How fast the Monitor plays a timeline (M6.427): 1 real time, 2 twice as fast. From the speed menu under
+    /// the Monitor and J / K / L.
+    pub(crate) playback_speed: f64,
     /// タイムラインのビデオクリップの位置（タイムライン、クリップとトリムのキー、クリップ）。
     pub(crate) clip_cache: Option<(TimelineId, Vec<u64>, Vec<crate::playback::ClipSpan>)>,
     /// Why an asset's video is converted for the project's Blu-ray (M6.376), by asset and Blu-ray format: read from
@@ -323,11 +355,13 @@ pub struct DiscCraftApp {
     pub(crate) canvas_drag: Option<CanvasDrag>,
     /// ドラッグ中のボタンの今の矩形（番号と矩形）。
     pub(crate) drag_rects: Vec<(usize, Rect)>,
+    /// メニュービューアにセーフエリアを重ねるか（Encore のバーのボタン。M6.489 から初めは出さない）。
     pub(crate) show_safe_areas: bool,
     /// モニターにセーフエリアを重ねるか（Encore のモニターのボタン。初めは出さない）。
     pub(crate) show_monitor_safe_areas: bool,
     pub(crate) show_routing: bool,
-    /// 表示 ▸ ガイドを表示 / ガイドにスナップ / ガイドをロック。
+    /// 表示 ▸ ガイドを表示 / ガイドにスナップ / ガイドをロック（ガイドを表示は M6.489 から初めはオフ。新規ガイドを
+    /// 打つとオンになる）。
     pub(crate) show_guides: bool,
     pub(crate) snap_to_guides: bool,
     pub(crate) lock_guides: bool,
@@ -359,7 +393,9 @@ pub struct DiscCraftApp {
     pub(crate) chapter_in_value: String,
     /// チャプターのシートのポスターフレームの入力欄。
     pub(crate) chapter_poster_value: String,
-    pub(crate) highlight_preview: HighlightPreview,
+    /// メニュービューアで全部のボタンに重ねるサブピクチャの状態（Encore の 標準 / 選択時 / アクティベート時。
+    /// M6.489: 初めはどれでもない。1 つずつで、押しているものをもう一度押すと消える）。
+    pub(crate) highlight_preview: Option<HighlightPreview>,
     pub(crate) preview: PreviewState,
     pub(crate) build_output: OutputKind,
     pub(crate) build_path: String,
@@ -424,6 +460,8 @@ impl DiscCraftApp {
             workspace,
             dock,
             dock_dirty: false,
+            maximized_panel: None,
+            panel_bodies: Vec::new(),
             user_workspaces,
             new_workspace: None,
             preload_waveforms: false,
@@ -434,11 +472,13 @@ impl DiscCraftApp {
             last_slideshow: None,
             last_chapter_playlist: None,
             chapter_playlist_pick: None,
+            chapter_playlist_picks: Vec::new(),
             chapter_entry_pick: None,
             durations: BTreeMap::new(),
             thumbnails: BTreeMap::new(),
             last_frames: BTreeMap::new(),
             waveforms: crate::waveforms::Waveforms::default(),
+            clip_thumbs: crate::clip_thumbs::ClipThumbs::default(),
             welcome: Welcome::opened(),
             recent: load_recent(),
             check_window: crate::check_window::CheckWindow::default(),
@@ -464,6 +504,7 @@ impl DiscCraftApp {
             monitor_note: None,
             photocraft_icon: None,
             playback: None,
+            playback_speed: 1.0,
             clip_cache: None,
             bd_mismatch_cache: std::collections::HashMap::new(),
             preview_playback: None,
@@ -496,6 +537,7 @@ impl DiscCraftApp {
             timeline_color_set_dialog: None,
             image_script_import: None,
             interpret_footage_dialog: None,
+            bluray_dialog: None,
             video_output: crate::video_out::VideoOutput::from_setting(
                 crate::workspace::load_video_output().0,
             ),
@@ -532,6 +574,12 @@ impl DiscCraftApp {
             renaming_folder: None,
             new_item_folder: None,
             flow_hidden_buttons: Vec::new(),
+            flow_zoom: 1.0,
+            flow_frames: std::collections::BTreeMap::new(),
+            flow_node_frames: std::collections::BTreeMap::new(),
+            flow_focus: std::collections::BTreeMap::new(),
+            flow_anchor: None,
+            flow_clicked: None,
             correct_pixel_aspect: true,
             column_widths: crate::workspace::load_settings().column_widths,
             column_widths_dirty: false,
@@ -565,10 +613,10 @@ impl DiscCraftApp {
             playlist_item_pick: None,
             canvas_drag: None,
             drag_rects: Vec::new(),
-            show_safe_areas: true,
+            show_safe_areas: false,
             show_monitor_safe_areas: false,
             show_routing: false,
-            show_guides: true,
+            show_guides: false,
             snap_to_guides: true,
             lock_guides: false,
             guide_dialog: None,
@@ -585,7 +633,7 @@ impl DiscCraftApp {
             chapter_name_value: String::new(),
             chapter_in_value: String::new(),
             chapter_poster_value: String::new(),
-            highlight_preview: HighlightPreview::default(),
+            highlight_preview: None,
             preview: PreviewState::default(),
             build_output: OutputKind::Folder,
             build_path: String::new(),
@@ -623,8 +671,11 @@ impl DiscCraftApp {
 
     /// Draws the whole UI.
     pub fn ui(&mut self, ui: &mut Ui) {
-        // Strings are looked up per thread; set the language before anything is drawn.
+        // Strings are looked up per thread; set the language before anything is drawn. The words the project makes up
+        // (default names, a menu's PSD and PhotoCraft layers) follow it too (M6.433), whatever project is open.
         crate::i18n::set_current(self.language);
+        self.session
+            .set_words(disccraft_project::Words::from_code(self.language.code()));
 
         if let Some(result) = self.build_job.poll() {
             self.handle_build_result(result);
@@ -656,10 +707,17 @@ impl DiscCraftApp {
             }
         }
 
+        // The window's ground under the menu bar, in the look on screen (M6.480).
+        ui.painter()
+            .rect_filled(ui.max_rect(), 0.0, crate::theme::APP_BG);
         self.menu_bar(ui);
         self.start_preloading_waveforms(ui.ctx());
         self.poll_playback(ui.ctx());
         self.poll_preview_playback(ui.ctx());
+        // The timeline's pictures wait while something plays (they made the monitor stutter).
+        let playing =
+            self.is_playing() || self.preview_playback.is_some() || self.project_preview.is_some();
+        self.clip_thumbs.set_paused(playing);
         self.poll_external_edits(ui.ctx());
         self.draw_groups(ui);
         self.accept_dropped_files(ui.ctx());
@@ -683,6 +741,7 @@ impl DiscCraftApp {
         // The next frame's picture is whatever the Monitor shows then.
         self.video_out_frame = None;
         self.interpret_footage_window(ui.ctx());
+        self.bluray_import_window(ui.ctx());
         self.link_window(ui.ctx());
         self.shadow_window(ui.ctx());
         self.effects_window(ui.ctx());
@@ -1090,15 +1149,22 @@ impl DiscCraftApp {
         self.last_slideshow = None;
         self.last_chapter_playlist = None;
         self.chapter_playlist_pick = None;
+        self.chapter_playlist_picks.clear();
         self.chapter_entry_pick = None;
         self.durations.clear();
         self.thumbnails.clear();
         self.last_frames.clear();
         self.waveforms.clear();
+        self.clip_thumbs.clear();
         self.monitor_frame = None;
         self.playback = None;
         self.preview_playback = None;
         self.preview_slides.clear();
+        self.flow_frames.clear();
+        self.flow_node_frames.clear();
+        self.flow_focus.clear();
+        self.flow_anchor = None;
+        self.flow_clicked = None;
         self.metadata_cache.clear();
         self.subtitle_cache.clear();
         self.image_subtitles.clear();
@@ -1200,6 +1266,27 @@ impl DiscCraftApp {
     }
 
     pub(crate) fn select(&mut self, selection: Selection) {
+        self.select_showing(selection, true);
+    }
+
+    /// Bring the viewer of `selection` forward (Encore opens it on a double click).
+    pub(crate) fn show_viewer(&mut self, selection: Selection) {
+        let panel = match selection {
+            Selection::Menu(_) => Panel::MenuViewer,
+            Selection::Timeline(_) => Panel::TimelineViewer,
+            Selection::Slideshow(_) => Panel::SlideshowViewer,
+            Selection::Playlist(_) => Panel::Properties,
+            Selection::ChapterPlaylist(_) => Panel::ChapterPlaylist,
+            Selection::Asset(_) | Selection::None => return,
+        };
+        self.show_panel(panel);
+    }
+
+    /// [`Self::select`]. `show`: bring the item's viewer forward (the flowchart's click does not, as Encore's: its
+    /// double-click opens the item).
+    pub(crate) fn select_showing(&mut self, selection: Selection, show: bool) {
+        // フローチャートでクリックした場所は、選び直したら忘れる（フローチャートのクリックは選んだ後で覚え直す）。
+        self.flow_clicked = None;
         // 項目を選び直したら（同じタイムラインやメニューでも）プロパティはその項目のシートに戻す。
         self.chapter_focus = None;
         self.cue_focus = None;
@@ -1214,26 +1301,15 @@ impl DiscCraftApp {
 
         self.selection = selection;
 
-        // 選択物に合わせてビューアのタブを出す（Encore はダブルクリックでビューアが開く）。
         match selection {
-            Selection::Menu(id) => {
-                self.show_panel(Panel::MenuViewer);
-                self.last_menu = Some(id);
-            }
-            Selection::Timeline(id) => {
-                self.show_panel(Panel::TimelineViewer);
-                self.last_timeline = Some(id);
-            }
-            Selection::Slideshow(id) => {
-                self.show_panel(Panel::SlideshowViewer);
-                self.last_slideshow = Some(id);
-            }
-            Selection::Playlist(_) => self.show_panel(Panel::Properties),
-            Selection::ChapterPlaylist(id) => {
-                self.show_panel(Panel::ChapterPlaylist);
-                self.last_chapter_playlist = Some(id);
-            }
-            Selection::Asset(_) | Selection::None => {}
+            Selection::Menu(id) => self.last_menu = Some(id),
+            Selection::Timeline(id) => self.last_timeline = Some(id),
+            Selection::Slideshow(id) => self.last_slideshow = Some(id),
+            Selection::ChapterPlaylist(id) => self.last_chapter_playlist = Some(id),
+            Selection::Playlist(_) | Selection::Asset(_) | Selection::None => {}
+        }
+        if show {
+            self.show_viewer(selection);
         }
 
         self.selected_buttons.clear();

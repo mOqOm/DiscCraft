@@ -24,7 +24,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "チャプターを追加",
         menu: &["チャプター再生リスト"],
         shortcut: None,
-        params: r#"{"chapterPlaylist": id, "chapter": index, "at"?: index}"#,
+        params: r#"{"chapterPlaylist": id, "chapter": index | "chapters": [index, ...], "at"?: index} → {"entry", "entries"} (chapters: まとめて 1 回の操作で、この順に)"#,
         enabled: always_enabled,
         run: run_add_chapter,
         journal: true,
@@ -151,18 +151,44 @@ fn chapter_indexes(params: &Value) -> Result<Vec<u32>, String> {
 
 fn run_add_chapter(session: &mut Session, params: &Value) -> CommandResult {
     let id = req_u64(params, "chapterPlaylist")?;
-    let chapter = u32::try_from(req_u64(params, "chapter")?)
-        .map_err(|_| "parameter \"chapter\" is too large".to_string())?;
-    let at = opt_u64(params, "at")?
+    // One chapter, or several in one go (M6.425: the chapters picked together in the viewer).
+    let chapters: Vec<u32> = match params.get("chapters") {
+        Some(Value::Array(list)) => list
+            .iter()
+            .map(|value| {
+                value
+                    .as_u64()
+                    .and_then(|chapter| u32::try_from(chapter).ok())
+                    .ok_or_else(|| "parameter \"chapters\" holds an invalid chapter".to_string())
+            })
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err("parameter \"chapters\" must be a list".to_string()),
+        None => vec![
+            u32::try_from(req_u64(params, "chapter")?)
+                .map_err(|_| "parameter \"chapter\" is too large".to_string())?,
+        ],
+    };
+    if chapters.is_empty() {
+        return Err("no chapter to add".to_string());
+    }
+    let mut at = opt_u64(params, "at")?
         .map(|at| usize::try_from(at).map_err(|_| "parameter \"at\" is too large".to_string()))
         .transpose()?;
 
-    let entry = session
-        .project
-        .add_chapter_playlist_entry(id, chapter, at)
-        .map_err(|error| error.to_string())?;
-    let entry = u64::try_from(entry).map_err(|_| "entry index is too large".to_string())?;
-    Ok(object(&[("entry", Value::from(entry))]))
+    let mut entries = Vec::with_capacity(chapters.len());
+    for chapter in chapters {
+        let entry = session
+            .project
+            .add_chapter_playlist_entry(id, chapter, at)
+            .map_err(|error| error.to_string())?;
+        at = at.map(|_| entry.saturating_add(1));
+        entries.push(u64::try_from(entry).map_err(|_| "entry index is too large".to_string())?);
+    }
+    let first = entries.first().copied().unwrap_or_default();
+    Ok(object(&[
+        ("entry", Value::from(first)),
+        ("entries", Value::from(entries)),
+    ]))
 }
 
 fn run_remove_entry(session: &mut Session, params: &Value) -> CommandResult {
@@ -389,6 +415,63 @@ mod tests {
             session.undo()?;
         }
         assert!(session.project.chapter_playlists.is_empty());
+        Ok(())
+    }
+
+    /// M6.425: several chapters added in one go, in the order given, as one undo step.
+    #[test]
+    fn several_chapters_are_added_in_one_step() -> Result<(), Box<dyn Error>> {
+        let (mut session, timeline) = session_with_chapters()?;
+        let created = session.execute(
+            "chapterplaylist.create",
+            &json!({ "timeline": timeline, "chapters": [] }),
+        )?;
+        let id = value_u64(&created, "chapterPlaylist")?;
+        let added = session.execute(
+            "chapterplaylist.addChapter",
+            &json!({ "chapterPlaylist": id, "chapters": [0, 1, 2] }),
+        )?;
+        assert_eq!(added["entries"], json!([0, 1, 2]));
+        assert_eq!(value_u64(&added, "entry")?, 0);
+        let chapters = |session: &Session| {
+            session
+                .project
+                .chapter_playlist(id)
+                .map(|list| list.chapters.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(chapters(&session), [0, 1, 2]);
+        // Placed together at a place.
+        let _ = session.execute(
+            "chapterplaylist.addChapter",
+            &json!({ "chapterPlaylist": id, "chapters": [2, 1], "at": 1 }),
+        )?;
+        assert_eq!(chapters(&session), [0, 2, 1, 1, 2]);
+        session.undo()?;
+        assert_eq!(chapters(&session), [0, 1, 2], "one undo takes the two back");
+        session.undo()?;
+        assert!(
+            chapters(&session).is_empty(),
+            "one undo takes the three back"
+        );
+        for bad in [
+            json!([]),
+            json!("1"),
+            json!([1, -1]),
+            json!([9]),
+            json!([1, 9]),
+        ] {
+            assert!(
+                session
+                    .execute(
+                        "chapterplaylist.addChapter",
+                        &json!({ "chapterPlaylist": id, "chapters": bad })
+                    )
+                    .is_err(),
+                "{bad}"
+            );
+        }
+        assert!(chapters(&session).is_empty(), "a refused list adds nothing");
         Ok(())
     }
 

@@ -604,8 +604,10 @@ impl Project {
     /// Adds a slideshow.
     pub fn add_slideshow(&mut self, name: Option<String>) -> Result<u64, ProjectError> {
         let id = self.alloc_id()?;
-        let name = name
-            .unwrap_or_else(|| format!("Slideshow {}", self.slideshows.len().saturating_add(1)));
+        let name = name.unwrap_or_else(|| {
+            self.words
+                .slideshow(self.slideshows.len().saturating_add(1))
+        });
 
         self.slideshows.insert(
             id,
@@ -932,7 +934,7 @@ impl Project {
     pub fn add_playlist(&mut self, name: Option<String>) -> Result<u64, ProjectError> {
         let id = self.alloc_id()?;
         let name =
-            name.unwrap_or_else(|| format!("Playlist {}", self.playlists.len().saturating_add(1)));
+            name.unwrap_or_else(|| self.words.playlist(self.playlists.len().saturating_add(1)));
 
         self.playlists.insert(
             id,

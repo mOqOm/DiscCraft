@@ -47,6 +47,16 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "flowchart.link",
+        label: "リンクを設定",
+        menu: &["フローチャート"],
+        shortcut: None,
+        params: r#"{"command": a link command's id, "params": its params, "node": the item it links to}"#,
+        enabled: always_enabled,
+        run: run_link_node,
+        journal: true,
+    },
+    CommandSpec {
         id: "flowchart.arrange",
         label: "自動レイアウト",
         menu: &["フローチャート"],
@@ -91,6 +101,25 @@ fn run_move_node(session: &mut Session, params: &Value) -> CommandResult {
     }
     project.flowchart.insert(node, point);
     Ok(empty_object())
+}
+
+/// A link made on the flowchart to an item that was put there from the tray: the link command (`command` with
+/// `params`), and the item takes its place in the tree beside the link, as Encore lines up the node of the newest
+/// link, instead of staying where it was put. One step to undo.
+fn run_link_node(session: &mut Session, params: &Value) -> CommandResult {
+    let id = params
+        .get("command")
+        .and_then(Value::as_str)
+        .ok_or("parameter \"command\" must be a command id")?;
+    let node = req_u64(params, "node")?;
+    let spec = super::find_command(id)
+        .filter(|spec| spec.journal && !spec.id.starts_with("flowchart."))
+        .ok_or_else(|| format!("{id} is not a link command"))?;
+    (spec.enabled)(session).map_err(|reason| format!("{id}: {reason}"))?;
+    let empty = Value::Object(serde_json::Map::new());
+    let result = (spec.run)(session, params.get("params").unwrap_or(&empty))?;
+    let _ = session.project.flowchart.remove(&node);
+    Ok(result)
 }
 
 /// Encore's 自動レイアウト: forget where a node was moved (`node`), or every moved node (すべて自動レイアウト), so
@@ -182,6 +211,50 @@ mod tests {
         }
         assert_eq!(session.project.settings.first_play, Link::NotSet);
         assert_eq!(session.project.settings.title_remote, Link::NotSet);
+        Ok(())
+    }
+
+    /// A link made on the flowchart to an item put there from the tray: the item goes into the tree (its place is
+    /// forgotten), as Encore lines up the node of the newest link; one undo takes back both. Only link commands.
+    #[test]
+    fn a_link_to_a_placed_item_lines_it_up_in_one_step() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::Link;
+        let mut session = Session::new();
+        let menu = session.project.add_menu(None)?;
+        let other = session.project.add_menu(None)?;
+        let _ = session
+            .project
+            .add_button(menu, "Go".to_owned(), None, Link::Stop)?;
+        session.execute(
+            "flowchart.moveNode",
+            &json!({"node": other.0, "x": 300, "y": 40}),
+        )?;
+        let link = json!({
+            "command": "button.setLink",
+            "params": {"menu": menu.0, "button": 0, "target": {"menu": other.0}},
+            "node": other.0,
+        });
+        session.execute("flowchart.link", &link)?;
+        let button = |session: &Session| {
+            session
+                .project
+                .menu(menu)
+                .and_then(|menu| menu.buttons.first())
+                .map(|button| button.link.clone())
+        };
+        assert!(matches!(button(&session), Some(Link::Menu { id, .. }) if id == other));
+        assert!(session.project.flowchart.is_empty());
+        session.execute("edit.undo", &json!({}))?;
+        assert_eq!(button(&session), Some(Link::Stop));
+        assert_eq!(session.project.flowchart.len(), 1);
+        for bad in ["flowchart.arrange", "edit.undo", "no.such"] {
+            let wrapped = json!({"command": bad, "params": {}, "node": other.0});
+            assert!(
+                session.execute("flowchart.link", &wrapped).is_err(),
+                "{bad}"
+            );
+        }
+        assert_eq!(session.project.flowchart.len(), 1);
         Ok(())
     }
 

@@ -160,7 +160,32 @@ impl ProjectColumn {
     fn index(self) -> usize {
         Self::ALL.iter().position(|c| *c == self).unwrap_or(0)
     }
+
+    /// The column's width before it is dragged (M6.469): Encore's (名前 222, 種類 78, デュレーション 78, DVD トランスコード
+    /// ステータス 113, DVD トランスコード設定 223, the Blu-ray ones 78, as its Project panel opens) less the gap
+    /// between cells; the columns Encore hides at first take the width of one of the same sort.
+    pub(crate) fn encore_width(self) -> f32 {
+        let encore: f32 = match self {
+            ProjectColumn::Name | ProjectColumn::DvdSettings => 222.0,
+            ProjectColumn::DvdStatus | ProjectColumn::Category | ProjectColumn::Modified => 113.0,
+            ProjectColumn::Description | ProjectColumn::Path => 222.0,
+            ProjectColumn::Type
+            | ProjectColumn::Duration
+            | ProjectColumn::Dimensions
+            | ProjectColumn::BlurayStatus
+            | ProjectColumn::BluraySettings
+            | ProjectColumn::Size
+            | ProjectColumn::Bitrate => 78.0,
+        };
+        encore - CELL_GAP
+    }
 }
+
+/// The gap between a table's cells (egui's item spacing in the theme).
+const CELL_GAP: f32 = 7.0;
+/// The room before an item's mark in the Name column (Encore: the mark 17 in from the column's edge, room for a
+/// folder's triangle).
+const NAME_LEAD: f32 = 16.0;
 
 /// アセットのトランスコードステータス（`asset.transcodeStatus`）。Encore の「トランスコードステータス」の列に当たる。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -636,10 +661,15 @@ impl DiscCraftApp {
             .into_iter()
             .filter(|column| self.project_column_shown(*column))
             .collect();
-        // 見出しの右端をドラッグして決めた列の幅（ない列は中身に合わせる）。
+        // 見出しの右端をドラッグして決めた列の幅（ない列は Encore の初めの幅。M6.469）。
         let widths: Vec<Option<f32>> = columns
             .iter()
-            .map(|column| self.column_width("project_grid", column.index()))
+            .map(|column| {
+                Some(
+                    self.column_width("project_grid", column.index())
+                        .unwrap_or_else(|| column.encore_width()),
+                )
+            })
             .collect();
         let mut edges = Vec::new();
         let table = crate::theme::table_selecting("project_grid", selected)
@@ -673,9 +703,9 @@ impl DiscCraftApp {
                     let first =
                         crate::theme::fixed_cell(ui, widths.first().copied().flatten(), |ui| {
                             ui.horizontal(|ui| {
-                                ui.add_space(indent(row.depth));
+                                ui.add_space(indent(row.depth) + NAME_LEAD);
                                 row_glyph(ui, row.icon);
-                                ui.label(&row.name);
+                                let _ = crate::theme::elided_label(ui, &row.name);
                             });
                         })
                         .1;
@@ -780,6 +810,7 @@ impl DiscCraftApp {
         let first = crate::theme::fixed_cell(ui, widths.first().copied().flatten(), |ui| {
             ui.horizontal(|ui| {
                 ui.add_space(indent(row.depth));
+                // The folder's triangle stands in the room an item keeps before its mark (NAME_LEAD).
                 let arrow = if collapsed { "▸" } else { "▾" };
                 if ui
                     .add(egui::Label::new(arrow).sense(egui::Sense::click()))
@@ -846,7 +877,7 @@ impl DiscCraftApp {
                 egui::StrokeKind::Inside,
             );
         }
-        if let Some(payload) = response.dnd_release_payload::<DragRow>()
+        if let Some(payload) = crate::pickwhip::released::<DragRow>(&response)
             && payload.0 != folder
         {
             let _ = self.run_command(
@@ -930,7 +961,7 @@ impl DiscCraftApp {
             ProjectColumn::Modified => row.modified.map(modified_text).unwrap_or_default(),
             ProjectColumn::Path => row.path.clone(),
         };
-        crate::theme::fixed_cell(ui, width, |ui| ui.label(text)).1
+        crate::theme::fixed_cell(ui, width, |ui| crate::theme::elided_label(ui, &text)).1
     }
 
     /// その列を出しているか（名前は常に）。
@@ -1411,23 +1442,30 @@ impl DiscCraftApp {
         // looked like a white background once made small.
         let (_, frame_height) = disccraft_project::frame_size(&self.session.project.settings);
         let cell = usize::from(frame_height) * 8 / MENU_THUMBNAIL_HEIGHT;
-        let texture = self
-            .render_menu_picture_checked(&menu, cell)
-            .ok()
-            .and_then(|rendered| {
-                let frame = (rendered.width, rendered.height);
-                let to = menu_thumbnail_size(crate::menu_editor::menu_aspect(&menu, frame));
-                let small = shrink_rgb(
-                    &rendered.rgb,
-                    (usize::from(frame.0), usize::from(frame.1)),
-                    to,
-                )?;
-                Some(ctx.load_texture(
-                    format!("menu_thumbnail_{}", id.0),
-                    egui::ColorImage::from_rgb([to.0, to.1], &small),
-                    egui::TextureOptions::LINEAR,
-                ))
-            });
+        // A picture of the menu while one of its videos is still opening would lack it (a motion menu's background
+        // came out black and stayed so): drawn again once the files are open, not kept until then.
+        let pending_before = std::mem::replace(&mut self.media_pending, false);
+        let rendered = self.render_menu_picture_checked(&menu, cell);
+        let pending = self.media_pending;
+        self.media_pending = pending || pending_before;
+        if pending {
+            ctx.request_repaint();
+            return None;
+        }
+        let texture = rendered.ok().and_then(|rendered| {
+            let frame = (rendered.width, rendered.height);
+            let to = menu_thumbnail_size(crate::menu_editor::menu_aspect(&menu, frame));
+            let small = shrink_rgb(
+                &rendered.rgb,
+                (usize::from(frame.0), usize::from(frame.1)),
+                to,
+            )?;
+            Some(ctx.load_texture(
+                format!("menu_thumbnail_{}", id.0),
+                egui::ColorImage::from_rgb([to.0, to.1], &small),
+                egui::TextureOptions::LINEAR,
+            ))
+        });
         let _ = self.menu_thumbnails.insert(id.0, (hash, texture.clone()));
         texture
     }
@@ -2081,6 +2119,16 @@ pub(crate) fn draw_fitted(
     rect: egui::Rect,
     texture: &egui::TextureHandle,
 ) {
+    draw_fitted_tinted(painter, rect, texture, egui::Color32::WHITE);
+}
+
+/// [`draw_fitted`] の色を掛けたもの（フローチャートの薄い繰り返しのノード）。
+pub(crate) fn draw_fitted_tinted(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    texture: &egui::TextureHandle,
+    tint: egui::Color32,
+) {
     let size = texture.size_vec2();
     if size.x <= 0.0 || size.y <= 0.0 {
         return;
@@ -2091,7 +2139,7 @@ pub(crate) fn draw_fitted(
         texture.id(),
         fitted,
         egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-        egui::Color32::WHITE,
+        tint,
     );
 }
 
@@ -2293,7 +2341,7 @@ impl RowIcon {
     }
 
     /// 絵の色（種類ごとに少しずつ違う色）。
-    fn color(self) -> egui::Color32 {
+    pub(crate) fn color(self) -> egui::Color32 {
         match self {
             Self::Video | Self::Timeline => egui::Color32::from_rgb(120, 170, 225),
             Self::Audio => egui::Color32::from_rgb(130, 200, 140),
@@ -2310,8 +2358,12 @@ impl RowIcon {
 /// 名前の前の 14 x 12 の絵（DiscCraft の簡単な図形。種類ごとに形と色を変える）。
 fn row_glyph(ui: &mut Ui, icon: RowIcon) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 12.0), egui::Sense::hover());
-    let painter = ui.painter();
-    let color = icon.color();
+    paint_glyph(ui.painter(), rect, icon, 1.0);
+}
+
+/// [`row_glyph`] の絵を `rect`（14 x 12）に描く。`fade` は濃さ（1 でそのまま。フローチャートのノードの隅にも使う）。
+pub(crate) fn paint_glyph(painter: &egui::Painter, rect: egui::Rect, icon: RowIcon, fade: f32) {
+    let color = icon.color().gamma_multiply(fade);
     let stroke = egui::Stroke::new(1.0, color);
     let r = rect.shrink2(egui::vec2(0.5, 1.0));
     match icon {

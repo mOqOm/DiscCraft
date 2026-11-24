@@ -17,8 +17,9 @@ use std::path::Path;
 
 use disccraft_bdmv::index::read_index;
 use disccraft_bdmv::mobj::{MovieObject, read_movie_objects};
-use disccraft_bdmv::mpls::read_mpls;
-use disccraft_pgs::ig::IgPage;
+use disccraft_bdmv::outline::read_outline;
+use disccraft_pgs::PaletteEntry;
+use disccraft_pgs::ig::{IgObject, IgPage};
 
 use crate::{Key, VmError};
 
@@ -72,6 +73,12 @@ pub struct BdMenu {
     pub popup: bool,
     /// The pages.
     pub pages: Vec<IgPage>,
+    /// The buttons' pictures (M6.430), decoded to palette indices.
+    pub objects: Vec<IgObject>,
+    /// The palettes the pages use (M6.430).
+    pub palettes: Vec<(u8, Vec<PaletteEntry>)>,
+    /// The size of the picture the buttons are placed on (M6.430), e.g. 1920 x 1080.
+    pub size: (u16, u16),
 }
 
 /// Where the disc is.
@@ -154,26 +161,36 @@ pub fn load_bdmv(dir: &Path) -> Result<BdDisc, VmError> {
         else {
             continue;
         };
-        let playlist = read_mpls(&std::fs::read(&path)?)
+        // Any authoring tool's playlist (M6.430): the outline steps over sub-paths, angles and link points.
+        let playlist = read_outline(&std::fs::read(&path)?)
             .map_err(|error| VmError::Invalid(format!("{}: {}", path.display(), error.0)))?;
         let marks = u32::try_from(playlist.marks.len()).unwrap_or(u32::MAX);
-        let menu = match playlist.items.first() {
-            Some(item) if !item.streams.ig.is_empty() => {
-                let clip = String::from_utf8_lossy(&item.clip).into_owned();
-                clip_menu(&bdmv.join("STREAM").join(format!("{clip}.m2ts")))?
+        // The interactive graphics: in the first play item's clip, or (another tool's menus) in a sub-path's clip of
+        // its own (sub-path type 3).
+        let clip_of = |clip: &str| bdmv.join("STREAM").join(format!("{clip}.m2ts"));
+        let mut menu = None;
+        let sources = playlist
+            .sub_paths
+            .iter()
+            .filter(|sub_path| sub_path.kind == 3 && !sub_path.clip.is_empty())
+            .map(|sub_path| sub_path.clip.clone())
+            .chain(playlist.items.first().map(|item| item.clip.clone()));
+        for clip in sources {
+            let file = clip_of(&clip);
+            if file.is_file()
+                && let Some(found) = clip_menu(&file)?
+            {
+                menu = Some(found);
+                break;
             }
-            _ => None,
-        };
-        let languages = |streams: &[disccraft_bdmv::Stream]| -> Vec<[u8; 3]> {
-            streams
-                .iter()
-                .map(|stream| stream.coding.language().unwrap_or(*b"und"))
-                .collect()
+        }
+        let languages = |streams: &[disccraft_bdmv::outline::OutlineStream]| -> Vec<[u8; 3]> {
+            streams.iter().map(|stream| stream.language).collect()
         };
         let (audio_languages, pg_languages) = playlist
             .items
             .first()
-            .map(|item| (languages(&item.streams.audio), languages(&item.streams.pg)))
+            .map(|item| (languages(&item.audio), languages(&item.subtitles)))
             .unwrap_or_default();
         let _ = playlists.insert(
             number,
@@ -199,20 +216,34 @@ pub fn load_bdmv(dir: &Path) -> Result<BdDisc, VmError> {
 }
 
 /// The first interactive composition of a clip's IG stream, read from its start.
+/// The interactive graphics of the clip at `path`: its first composition, with the objects and palettes of the
+/// stream. The IG streams of a clip are on PIDs 0x1400 to 0x141F (DiscCraft writes the first).
 fn clip_menu(path: &Path) -> Result<Option<BdMenu>, VmError> {
     use std::io::Read;
     let mut head = Vec::new();
     let _ = std::fs::File::open(path)?
         .take(IG_SCAN_BYTES)
         .read_to_end(&mut head)?;
-    let payloads = disccraft_m2tsmux::pes_payloads(&head, disccraft_m2tsmux::IG_PID)
-        .map_err(|error| VmError::Invalid(format!("{}: {}", path.display(), error.0)))?;
-    let compositions = disccraft_pgs::read::interactive_compositions(&payloads.concat())
-        .map_err(|error| VmError::Invalid(format!("{}: {}", path.display(), error.0)))?;
-    Ok(compositions.into_iter().next().map(|composition| BdMenu {
-        popup: composition.popup,
-        pages: composition.pages,
-    }))
+    for pid in disccraft_m2tsmux::IG_PID..disccraft_m2tsmux::IG_PID + 0x20 {
+        let payloads = disccraft_m2tsmux::pes_payloads(&head, pid)
+            .map_err(|error| VmError::Invalid(format!("{}: {}", path.display(), error.0)))?;
+        if payloads.is_empty() {
+            continue;
+        }
+        let stream = payloads.concat();
+        let compositions = disccraft_pgs::read::interactive_compositions(&stream)
+            .map_err(|error| VmError::Invalid(format!("{}: {}", path.display(), error.0)))?;
+        if let Some(composition) = compositions.into_iter().next() {
+            return Ok(Some(BdMenu {
+                popup: composition.popup,
+                size: (composition.width, composition.height),
+                pages: composition.pages,
+                objects: disccraft_pgs::read::objects(&stream),
+                palettes: disccraft_pgs::read::palettes(&stream),
+            }));
+        }
+    }
+    Ok(None)
 }
 
 /// One decoded HDMV command.
@@ -222,7 +253,9 @@ enum Command {
     GoTo(u32),
     JumpObject(u32),
     JumpTitle(u32),
-    PlayPl(u32, u32),
+    /// PlayPL (at a mark): the playlist and the mark, each a number or a register (M6.430: a disc from another
+    /// authoring tool plays at the mark a menu button left in a GPR).
+    PlayPl(Operand, Operand),
     Compare(Compare, Operand, Operand),
     Set(SetOp, u32, Operand),
     SetStream(u32),
@@ -243,9 +276,20 @@ enum Compare {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SetOp {
     Move,
+    Swap,
     Add,
     Sub,
     Mul,
+    Div,
+    Mod,
+    Rnd,
+    And,
+    Or,
+    Xor,
+    BitSet,
+    BitClear,
+    ShiftLeft,
+    ShiftRight,
 }
 
 /// An operand: an immediate value, or a register (GPR, or PSR with its flag).
@@ -282,8 +326,14 @@ fn decode(command: &disccraft_bdmv::mobj::NavCommand) -> Result<Command, VmError
             _ => Err(unsupported()),
         },
         (0, 2) => match (op >> 16) & 0xF {
-            0 => Ok(Command::PlayPl(dst, 0)),
-            2 => Ok(Command::PlayPl(dst, src)),
+            0 => Ok(Command::PlayPl(
+                operand(dst, immediate_dst),
+                Operand::Immediate(0),
+            )),
+            2 => Ok(Command::PlayPl(
+                operand(dst, immediate_dst),
+                operand(src, immediate_src),
+            )),
             _ => Err(unsupported()),
         },
         (1, _) => {
@@ -304,11 +354,24 @@ fn decode(command: &disccraft_bdmv::mobj::NavCommand) -> Result<Command, VmError
             ))
         }
         (2, 0) => {
+            // The Set operations of the HDMV navigation commands (M6.430: discs of other authoring tools mask
+            // and test their registers).
             let set = match op & 0x1F {
                 1 => SetOp::Move,
+                2 => SetOp::Swap,
                 3 => SetOp::Add,
                 4 => SetOp::Sub,
                 5 => SetOp::Mul,
+                6 => SetOp::Div,
+                7 => SetOp::Mod,
+                8 => SetOp::Rnd,
+                9 => SetOp::And,
+                10 => SetOp::Or,
+                11 => SetOp::Xor,
+                12 => SetOp::BitSet,
+                13 => SetOp::BitClear,
+                14 => SetOp::ShiftLeft,
+                15 => SetOp::ShiftRight,
                 _ => return Err(unsupported()),
             };
             if immediate_dst {
@@ -620,17 +683,23 @@ impl<'a> BdVm<'a> {
                     pc = 0;
                 }
                 Command::JumpTitle(title) => {
-                    let target = usize::try_from(title)
-                        .ok()
-                        .and_then(|title| title.checked_sub(1))
-                        .and_then(|index| self.disc.titles.get(index))
-                        .copied()
-                        .ok_or_else(|| VmError::Invalid(format!("title {title} does not exist")))?;
+                    // Title 0 is the Top Menu and 0xFFFF the First Playback (as PSR 4 numbers them).
+                    let target = match title {
+                        0 => Some(self.disc.top_menu),
+                        0xFFFF => Some(self.disc.first_playback),
+                        _ => usize::try_from(title)
+                            .ok()
+                            .and_then(|title| title.checked_sub(1))
+                            .and_then(|index| self.disc.titles.get(index))
+                            .copied(),
+                    }
+                    .ok_or_else(|| VmError::Invalid(format!("title {title} does not exist")))?;
                     commands = self.object_commands(target)?;
                     object = Some(target);
                     pc = 0;
                 }
                 Command::PlayPl(playlist, mark) => {
+                    let (playlist, mark) = (self.value(playlist), self.value(mark));
                     self.play(playlist, mark)?;
                     // A movie object waits for the playlist; a button's play leaves the waiting object as it was.
                     if let Some(object) = object {
@@ -659,9 +728,27 @@ impl<'a> BdVm<'a> {
                     let current = self.value(Operand::Register(register));
                     let result = match set {
                         SetOp::Move => value,
+                        SetOp::Swap => {
+                            // The source register takes the destination's value.
+                            if let Operand::Register(other) = source {
+                                self.set_register(other, current)?;
+                            }
+                            value
+                        }
                         SetOp::Add => current.wrapping_add(value),
                         SetOp::Sub => current.saturating_sub(value),
                         SetOp::Mul => current.wrapping_mul(value),
+                        SetOp::Div => current.checked_div(value).unwrap_or(current),
+                        SetOp::Mod => current.checked_rem(value).unwrap_or(current),
+                        // A number from 1 to `value`: the preview always takes the first.
+                        SetOp::Rnd => 1,
+                        SetOp::And => current & value,
+                        SetOp::Or => current | value,
+                        SetOp::Xor => current ^ value,
+                        SetOp::BitSet => current | 1u32.checked_shl(value).unwrap_or(0),
+                        SetOp::BitClear => current & !1u32.checked_shl(value).unwrap_or(0),
+                        SetOp::ShiftLeft => current.checked_shl(value).unwrap_or(0),
+                        SetOp::ShiftRight => current.checked_shr(value).unwrap_or(0),
                     };
                     self.set_register(register, result)?;
                 }
@@ -880,6 +967,9 @@ mod tests {
                     button(1, 0, vec![NavCommand::jump_object(chapter_object)]),
                 ],
             }],
+            objects: Vec::new(),
+            palettes: Vec::new(),
+            size: (1920, 1080),
         };
         let popup = BdMenu {
             popup: true,
@@ -889,6 +979,9 @@ mod tests {
                 palette_id: 0,
                 buttons: vec![button(0, 0, vec![NavCommand::jump_object(menu_object)])],
             }],
+            objects: Vec::new(),
+            palettes: Vec::new(),
+            size: (1920, 1080),
         };
         let mut playlists = BTreeMap::new();
         let _ = playlists.insert(
@@ -992,6 +1085,9 @@ mod tests {
                     ],
                 ),
             ],
+            objects: Vec::new(),
+            palettes: Vec::new(),
+            size: (1920, 1080),
         };
         let mut playlists = BTreeMap::new();
         let _ = playlists.insert(

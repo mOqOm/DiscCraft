@@ -9,7 +9,7 @@
 )]
 
 use disccraft_ui_egui::{
-    DiscCraftApp, apply_theme, enable_media_cache, install_crash_log, install_japanese_font,
+    DiscCraftApp, apply_theme, enable_media_cache, install_crash_log, install_fonts,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -20,7 +20,7 @@ struct AppWrapper {
 
 impl AppWrapper {
     fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> Self {
-        install_japanese_font(&cc.egui_ctx);
+        install_fonts(&cc.egui_ctx);
         apply_theme(&cc.egui_ctx);
 
         enable_media_cache();

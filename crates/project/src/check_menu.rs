@@ -3,7 +3,9 @@
 use crate::check::{Problem, Severity};
 use crate::ids::{MenuId, TimelineId};
 use crate::link::Link;
-use crate::menu::{MAX_BUTTONS, MAX_MENU_SECONDS, Menu, MenuBackground, Rect, frame_size};
+use crate::menu::{
+    LETTERBOX_MOST_BUTTONS, MAX_BUTTONS, MAX_MENU_SECONDS, Menu, MenuBackground, Rect, frame_size,
+};
 use crate::model::{AssetKind, Project};
 
 /// Validates menus and buttons.
@@ -22,6 +24,28 @@ pub(crate) fn check_menus(project: &Project, problems: &mut Vec<Problem>) {
             ),
         ));
     }
+    check_letterbox_buttons(project, problems);
+}
+
+/// A 16:9 DVD menu has its highlights for a 4:3 television's letterboxed picture in a second button group, of 18
+/// buttons at most (Encore turns the buttons past 18 into objects: 「メニューにボタンが 18 個以上あります。いくつかの
+/// ボタンはオブジェクトに変換されます。」). DiscCraft keeps them all in one group and warns: there the highlights
+/// are not on the letterboxed buttons.
+fn check_letterbox_buttons(project: &Project, problems: &mut Vec<Problem>) {
+    if project.settings.kind != crate::model::DiscKind::Dvd || !project.menus_wide() {
+        return;
+    }
+    for menu in project.menus.values() {
+        if menu.buttons.len() > LETTERBOX_MOST_BUTTONS {
+            problems.push(warning(
+                "wideMenuButtons",
+                format!(
+                    "menu {} has more than {LETTERBOX_MOST_BUTTONS} buttons at 16:9; a 4:3 television shows its                      highlights off the letterboxed buttons",
+                    menu.id.0
+                ),
+            ));
+        }
+    }
 }
 
 fn check_menu(project: &Project, menu: &Menu, problems: &mut Vec<Problem>) {
@@ -35,13 +59,17 @@ fn check_menu(project: &Project, menu: &Menu, problems: &mut Vec<Problem>) {
     check_audio(project, menu, problems);
 }
 
-/// Menu audio must be an audio asset.
+/// Menu audio must be an audio asset, or (M6.430) the video of the menu's motion background, whose sound it is (a
+/// Blu-ray menu's video carries its music).
 fn check_audio(project: &Project, menu: &Menu, problems: &mut Vec<Problem>) {
     if let Some(asset) = menu.audio {
-        let valid = project
-            .assets
-            .get(&asset)
-            .is_some_and(|asset| asset.kind == AssetKind::Audio);
+        let background_video =
+            matches!(menu.background, MenuBackground::Video { asset: video, .. } if video == asset);
+        let valid = background_video
+            || project
+                .assets
+                .get(&asset)
+                .is_some_and(|asset| asset.kind == AssetKind::Audio);
         if !valid {
             problems.push(error(
                 "missingAsset",
@@ -477,6 +505,40 @@ mod tests {
         let problems = problems_for(&project);
         assert!(has_error_code(&problems, "tooManyButtons"));
 
+        Ok(())
+    }
+
+    /// M6.437: a 16:9 DVD menu of more than 18 buttons has no letterbox button group (Encore keeps 18); a 4:3 menu
+    /// and a Blu-ray menu have none to have.
+    #[test]
+    fn a_wide_dvd_menu_of_more_than_18_buttons_warns() -> Result<(), Box<dyn Error>> {
+        let mut project = Project::default();
+        let menu = project.add_menu(None)?;
+        for index in 0..18u16 {
+            let rect = Rect {
+                x: 40 + (index % 2) * 320,
+                y: 20 + (index / 2) * 40,
+                w: 280,
+                h: 30,
+            };
+            project.add_button(menu, format!("B{index}"), Some(rect), Link::Stop)?;
+        }
+        project.menu_mut(menu).ok_or("menu")?.widescreen = true;
+        let warns = |project: &Project| has_warning_code(&problems_for(project), "wideMenuButtons");
+        assert!(!warns(&project));
+        let rect = Rect {
+            x: 40,
+            y: 400,
+            w: 280,
+            h: 30,
+        };
+        project.add_button(menu, "B18".to_owned(), Some(rect), Link::Stop)?;
+        assert!(warns(&project));
+        project.menu_mut(menu).ok_or("menu")?.widescreen = false;
+        assert!(!warns(&project));
+        project.menu_mut(menu).ok_or("menu")?.widescreen = true;
+        project.settings.kind = crate::model::DiscKind::BluRay;
+        assert!(!warns(&project));
         Ok(())
     }
 

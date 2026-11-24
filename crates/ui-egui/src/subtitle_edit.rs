@@ -393,18 +393,15 @@ fn subtitle_button(ui: &mut Ui, rect: Rect, button: SubtitleButton, enabled: boo
             },
         )
         .on_hover_text(button.tooltip());
-    let visuals = ui.style().interact(&response);
-    if enabled && response.hovered() {
-        ui.painter().rect(
-            rect,
-            2.0,
-            visuals.weak_bg_fill,
-            visuals.bg_stroke,
-            egui::StrokeKind::Inside,
-        );
+    // Encore's bar (M6.476): a raised box and a gold icon under the pointer.
+    let hovered = enabled && response.hovered();
+    if hovered {
+        crate::theme::hover_box(ui.painter(), rect.shrink2(vec2(0.0, 3.0)));
     }
-    let color = if enabled {
-        visuals.fg_stroke.color
+    let color = if hovered {
+        crate::theme::HOVER_ICON.get()
+    } else if enabled {
+        crate::theme::BAR_ICON.get()
     } else {
         ui.visuals().weak_text_color().gamma_multiply(0.6)
     };

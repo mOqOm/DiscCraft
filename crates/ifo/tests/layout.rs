@@ -122,6 +122,7 @@ fn pgc_round_trip() {
         still_time: 0,
         playback_mode: 0,
         subpicture_streams: 0,
+        letterbox_subpictures: false,
         palette: Pgc::default_palette(),
     };
     let bytes = write_pgc(&pgc).unwrap();
@@ -145,6 +146,7 @@ fn first_play_pgc_round_trip() {
         still_time: 0,
         playback_mode: 0,
         subpicture_streams: 0,
+        letterbox_subpictures: false,
         palette: Pgc::default_palette(),
     };
     let bytes = write_pgc(&pgc).unwrap();

@@ -4,6 +4,8 @@ use std::sync::LazyLock;
 
 mod arrange;
 mod asset;
+mod bluray;
+mod bluray_menu;
 mod build;
 mod chapter_playlist;
 mod disc;
@@ -44,6 +46,8 @@ fn build_all() -> Box<[CommandSpec]> {
     all.extend_from_slice(file::COMMANDS);
     all.extend_from_slice(asset::COMMANDS);
     all.extend_from_slice(timeline::COMMANDS);
+    all.extend_from_slice(bluray::COMMANDS);
+    all.extend_from_slice(bluray_menu::COMMANDS);
     all.extend_from_slice(disc::COMMANDS);
     all.extend_from_slice(menu::COMMANDS);
     all.extend_from_slice(menu_color_set::COMMANDS);

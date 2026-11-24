@@ -279,15 +279,16 @@ pub(crate) fn usage_fraction(usage: &Usage) -> f32 {
     ratio.clamp(0.0, 1.0) as f32
 }
 
-pub(crate) fn problem_color(severity: &str) -> egui::Color32 {
-    let lower = severity.to_lowercase();
-
-    if lower.contains("error") {
-        egui::Color32::RED
-    } else if lower.contains("warn") {
-        egui::Color32::YELLOW
-    } else {
-        egui::Color32::GRAY
+/// A problem of the project check: its mark and text in the colour of its severity (an error, a warning), or grey
+/// for a note (M6.481: the mark's shape tells them apart without the colour).
+pub(crate) fn problem_label(
+    ui: &mut Ui,
+    severity: &str,
+    text: impl Into<egui::RichText>,
+) -> egui::Response {
+    match crate::theme::Status::of_severity(severity) {
+        Some(status) => crate::theme::status_label(ui, status, text),
+        None => ui.colored_label(egui::Color32::GRAY, text),
     }
 }
 
@@ -312,7 +313,7 @@ impl DiscCraftApp {
                 }
 
                 if !summary.dead_ends.is_empty() {
-                    ui.colored_label(egui::Color32::RED, tl!("Dead ends"));
+                    crate::theme::status_label(ui, crate::theme::Status::Error, tl!("Dead ends"));
 
                     for line in &summary.dead_ends {
                         ui.label(line);
@@ -320,7 +321,7 @@ impl DiscCraftApp {
                 }
 
                 if !summary.loops.is_empty() {
-                    ui.colored_label(egui::Color32::YELLOW, tl!("Loops"));
+                    crate::theme::status_label(ui, crate::theme::Status::Warning, tl!("Loops"));
 
                     for line in &summary.loops {
                         ui.label(line);

@@ -23,6 +23,12 @@ mod dv_decoder;
 mod dv_source;
 mod file_chapters;
 pub use file_chapters::file_chapters;
+mod stream_languages;
+pub use stream_languages::audio_stream_languages;
+mod embedded_subtitles;
+pub use embedded_subtitles::{
+    EmbeddedFormat, EmbeddedSubtitle, embedded_subtitles, extract_embedded_subtitle,
+};
 pub mod h264_sps;
 pub mod hd;
 mod media_cache;
@@ -47,6 +53,8 @@ mod source;
 mod ts_audio;
 pub mod ts_index;
 mod ts_probe;
+mod ts_streams;
+pub use ts_streams::ts_stream_types;
 mod wav;
 
 use std::path::{Path, PathBuf};
@@ -291,7 +299,7 @@ pub fn probe_seconds(input: &Path) -> Result<f64, TranscodeError> {
 
 /// The facts of a video file remembered in the probe cache (`media_cache`), if any.
 fn remembered_video(input: &Path) -> Option<VideoProbe> {
-    let text = media_cache::fact("video", input)?;
+    let text = media_cache::fact("video", input).or_else(|| told("video", input))?;
     let mut parts = text.split(',');
     let probe = VideoProbe {
         seconds: parts.next()?.parse().ok()?,
@@ -384,6 +392,89 @@ fn probe_video_as_it_is(input: &Path) -> Result<VideoProbe, TranscodeError> {
         ),
     );
     Ok(probe)
+}
+
+/// Remembers what video file `input` is as something other than the file tells it (M6.429: a Blu-ray's playlist and
+/// clip information give a clip's length, picture size, rate and sound), so that [`probe_video`] answers without
+/// reading the file through (indexing a transport stream reads all of it: minutes for a Blu-ray's clips). A file
+/// already probed keeps what it said; what is remembered goes when the file changes.
+pub fn tell_video(input: &Path, probe: &VideoProbe) {
+    if remembered_video(input).is_some()
+        || !probe.seconds.is_finite()
+        || probe.seconds <= 0.0
+        || !probe.fps.is_finite()
+        || probe.fps <= 0.0
+    {
+        return;
+    }
+    let text = format!(
+        "{},{},{},{},{},{}",
+        probe.seconds,
+        probe.width,
+        probe.height,
+        probe.fps,
+        u8::from(probe.wide),
+        u8::from(probe.has_audio)
+    );
+    tell("video", input, &text);
+}
+
+/// Remembers how long the sound of media file `input` is (seconds) as something other than the file tells it
+/// (M6.429: a Blu-ray clip's presentation time), so that [`probe_audio_seconds`] answers without reading the file
+/// through. A file already measured keeps what it said.
+pub fn tell_audio_seconds(input: &Path, seconds: f64) {
+    if !seconds.is_finite() || seconds <= 0.0 || told("audio", input).is_some() {
+        return;
+    }
+    if media_cache::fact("audio", input).is_some() {
+        return;
+    }
+    tell("audio", input, &seconds.to_string());
+}
+
+/// Keeps fact `kind` of `input` for this run (whether or not the media cache keeps facts between runs) and in the
+/// media cache.
+fn tell(kind: &str, input: &Path, text: &str) {
+    if let (Some(key), Ok(mut told)) = (told_key(kind, input), TOLD.lock()) {
+        if told.len() >= MAX_TOLD {
+            told.clear();
+        }
+        told.retain(|(known, _)| *known != key);
+        told.push((key, text.to_owned()));
+    }
+    media_cache::remember(kind, input, text);
+}
+
+/// What [`tell_video`] and [`tell_audio_seconds`] were told in this run, by kind and file (its path, size and
+/// modification time).
+static TOLD: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+/// The most files told of in one run.
+const MAX_TOLD: usize = 1_000;
+
+/// The key of fact `kind` of a file as it is now for [`TOLD`].
+fn told_key(kind: &str, input: &Path) -> Option<String> {
+    let metadata = std::fs::metadata(input).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |since| since.as_nanos());
+    let path = std::path::absolute(input).unwrap_or_else(|_| input.to_path_buf());
+    Some(format!(
+        "{kind}	{}	{}	{modified}",
+        path.display(),
+        metadata.len()
+    ))
+}
+
+/// What was told of fact `kind` of `input` in this run, as the file is now.
+fn told(kind: &str, input: &Path) -> Option<String> {
+    let key = told_key(kind, input)?;
+    TOLD.lock()
+        .ok()?
+        .iter()
+        .find(|(told, _)| *told == key)
+        .map(|(_, text)| text.clone())
 }
 
 /// [`probe_video`] by opening the file.
@@ -492,6 +583,29 @@ pub const BRIGHT_STEP_SECONDS: f64 = 0.25;
 /// How far [`FrameReader::first_bright_time`] looks.
 pub const BRIGHT_SEARCH_SECONDS: f64 = 10.0;
 
+/// How far apart [`FrameReader::first_chapter_poster`] looks: half a second, as Encore picks a new timeline's poster
+/// frame (1;15 or 2;00 for clips that fade in from black).
+pub const POSTER_STEP_SECONDS: f64 = 0.5;
+
+/// Whether an RGB24 picture shows something to stand for a new timeline (Encore's first-chapter poster frame): more
+/// than 0.1 % of its pixels have a channel above 180. Measured on Encore CS6's own picks (2026-11-23, the Gray
+/// disc's clips): a fade from black whose brightest part has reached 165 is still passed over, one at 199 is taken,
+/// whatever the average (a dim picture with a bright title counts; a mid-grey fade does not).
+pub fn is_poster_lit(rgb: &[u8]) -> bool {
+    const LEVEL: u8 = 180;
+    let pixels = rgb.len() / 3;
+    if pixels == 0 {
+        return false;
+    }
+    let lit = rgb
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .filter(|pixel| pixel.iter().any(|channel| *channel > LEVEL))
+        .count();
+    lit.saturating_mul(1000) > pixels
+}
+
 /// Whether an RGB24 picture is bright (not black): more than 2 % of its pixels have a channel above 40 (a fade from
 /// black, letterbox bars and a dark scene with something in it are told apart from a black frame).
 pub fn is_bright(rgb: &[u8]) -> bool {
@@ -575,6 +689,21 @@ impl AudioReader {
     }
 }
 
+/// How much later than asked a picture is taken (M6.449). A time carried in seconds (f64) can land a hair before
+/// the frame it names: the Gray disc's chapter 7, tick 264 762 891 993 600 (frame 31 238 at 29.97), comes back as
+/// tick …599.97, and the frame before a cut there was shown in its place (about 1 frame start in 40 at 29.97). A
+/// microsecond is far past such error and far inside any frame.
+pub const FRAME_SNAP_SECONDS: f64 = 1e-6;
+
+/// The tick whose picture shows at `seconds` (0 for a bad or negative time): [`FRAME_SNAP_SECONDS`] later.
+fn picture_tick(seconds: f64) -> i64 {
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return 0;
+    }
+    // `as` saturates at the i64 range.
+    ((seconds + FRAME_SNAP_SECONDS) * TICKS_PER_SECOND as f64) as i64
+}
+
 /// The widest frame [`FrameReader::frame_sized`] renders (UHD).
 pub const MAX_FRAME_WIDTH: u32 = 3840;
 /// The tallest frame [`FrameReader::frame_sized`] renders (UHD).
@@ -591,6 +720,14 @@ impl FrameReader {
     pub fn open(input: &Path) -> Result<Self, TranscodeError> {
         Ok(Self {
             source: source::Source::open(input)?,
+        })
+    }
+
+    /// Opens a video file with a decoder of its own, not the one shared with every other reader of the file
+    /// (M6.486): asking it for pictures far apart does not move the shared decoder (the monitor's playback) away.
+    pub fn open_own(input: &Path) -> Result<Self, TranscodeError> {
+        Ok(Self {
+            source: source::Source::open_own(input)?,
         })
     }
 
@@ -622,6 +759,27 @@ impl FrameReader {
         }
     }
 
+    /// The poster frame Encore gives a new timeline's first chapter: none when the picture at the start shows
+    /// something ([`is_poster_lit`]); otherwise the first half second (0.5 s, 1 s, 1.5 s…, up to
+    /// [`BRIGHT_SEARCH_SECONDS`] and the end of the file) that does, or none when nothing does.
+    pub fn first_chapter_poster(&self) -> Result<Option<f64>, TranscodeError> {
+        if is_poster_lit(&self.picture(0.0)?.2) {
+            return Ok(None);
+        }
+        let end = BRIGHT_SEARCH_SECONDS.min(self.duration_seconds());
+        let mut step = 1_u32;
+        loop {
+            let time = f64::from(step) * POSTER_STEP_SECONDS;
+            if time >= end {
+                return Ok(None);
+            }
+            if is_poster_lit(&self.picture(time)?.2) {
+                return Ok(Some(time));
+            }
+            step = step.saturating_add(1);
+        }
+    }
+
     /// The picture at `seconds` (clamped to the file) without letterbox or pillarbox bars, as RGB24: (width,
     /// height, pixels). A video thumbnail stretches it over its area, as Encore shows the whole picture there.
     pub fn picture(&self, seconds: f64) -> Result<(u32, u32, Vec<u8>), TranscodeError> {
@@ -631,14 +789,8 @@ impl FrameReader {
     /// `seconds` as a time inside the file.
     fn tick_at(&self, seconds: f64) -> filmcraft_time::Tick {
         let duration = self.source.info().duration.0;
-        let wanted = if seconds.is_finite() && seconds > 0.0 {
-            // `as` saturates at the i64 range.
-            (seconds * TICKS_PER_SECOND as f64) as i64
-        } else {
-            0
-        };
         let last = duration.saturating_sub(1).max(0);
-        filmcraft_time::Tick(wanted.clamp(0, last))
+        filmcraft_time::Tick(picture_tick(seconds).clamp(0, last))
     }
 
     /// The frame at `seconds` (clamped to the file) as letterboxed RGB24, 720 x 480.
@@ -677,6 +829,7 @@ pub fn audio_stream_count(input: &Path) -> usize {
 /// read) is measured from its sync frames: 1536 samples each.
 pub fn probe_audio_seconds(input: &Path) -> Result<f64, TranscodeError> {
     if let Some(seconds) = media_cache::fact("audio", input)
+        .or_else(|| told("audio", input))
         .and_then(|text| text.parse::<f64>().ok())
         .filter(|seconds| seconds.is_finite())
     {
@@ -738,7 +891,26 @@ pub fn for_each_frame(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_bright, is_wide};
+    use super::{TICKS_PER_SECOND, is_bright, is_poster_lit, is_wide, picture_tick};
+
+    #[test]
+    fn a_frame_start_in_seconds_shows_that_frame() {
+        // Every frame start of three hours at 29.97 and 23.976, carried as seconds, lands inside its own frame (the
+        // Gray disc's chapter 7, frame 31 238, showed the frame before a cut).
+        for (numerator, denominator) in [(30_000_i64, 1001_i64), (24_000, 1001)] {
+            let frame_ticks = TICKS_PER_SECOND / numerator * denominator;
+            for frame in 0..(3 * 3600 * numerator / denominator) {
+                let start = frame * frame_ticks;
+                let tick = picture_tick(start as f64 / TICKS_PER_SECOND as f64);
+                assert!(
+                    (start..start + frame_ticks).contains(&tick),
+                    "frame {frame} at {numerator}/{denominator}: tick {tick}, frame from {start}"
+                );
+            }
+        }
+        assert_eq!(picture_tick(-1.0), 0);
+        assert_eq!(picture_tick(f64::NAN), 0);
+    }
 
     #[test]
     fn a_picture_is_wide_from_its_display_aspect() {
@@ -779,5 +951,33 @@ mod tests {
         }
         assert!(is_bright(&lit));
         assert!(!is_bright(&[]));
+    }
+
+    /// Encore's first-chapter poster takes a picture with something near white in it, not a dim one (the Gray
+    /// clips: brightest 165 passed over, 199 taken), and not a speck.
+    #[test]
+    fn a_poster_needs_something_near_white() {
+        // 2000 pixels of video black.
+        let black = vec![16_u8; 6000];
+        assert!(!is_poster_lit(&black));
+        // A fade whose brightest part is at 165 everywhere: still passed over.
+        assert!(!is_poster_lit(&vec![165_u8; 6000]));
+        // A dim picture with a bright title over 0.15 % of it: taken.
+        let mut title = black.clone();
+        for index in 0..3 {
+            if let Some(pixel) = title.get_mut(index * 3..index * 3 + 3) {
+                pixel.copy_from_slice(&[199, 199, 199]);
+            }
+        }
+        assert!(is_poster_lit(&title));
+        // Two bright pixels in 2000 (0.1 %): a speck, not taken.
+        let mut speck = black;
+        for index in 0..2 {
+            if let Some(pixel) = speck.get_mut(index * 3..index * 3 + 3) {
+                pixel.copy_from_slice(&[255, 255, 255]);
+            }
+        }
+        assert!(!is_poster_lit(&speck));
+        assert!(!is_poster_lit(&[]));
     }
 }

@@ -124,7 +124,7 @@ impl DiscCraftApp {
 
         // Encore と同じく、ファーストプレイの項目は「ファーストプレイを解除」になる。
         ui.separator();
-        self.first_play_items(ui, selection);
+        self.first_play_items(ui, selection, false);
 
         ui.separator();
         // 切り取りは Encore でも灰色。コピーは項目を覚え、貼り付けはその複製を作る（アセットは複製しない）。
@@ -240,29 +240,57 @@ impl DiscCraftApp {
     /// The right-click menu of the flowchart's background (Encore: すべてのサムネールを表示 / 新規 ▸ / 読み込み ▸ /
     /// プレビュー).
     pub(crate) fn flow_background_menu(&mut self, ui: &mut Ui) {
+        // Encore's order: すべて自動レイアウト, then 新規 / 読み込み, then プレビュー (without its shortcut), each label
+        // behind the check mark column.
+        let indented = |label: &str| crate::actions::indented(label.to_owned());
+        self.flow_thumbnails_item(ui);
+        ui.separator();
+        self.flow_auto_layout_all_item(ui);
+        ui.separator();
+        ui.menu_button(indented(tl!("New")), |ui| self.new_items(ui, None, None));
+        ui.menu_button(indented(tl!("Import")), |ui| self.import_items(ui));
+        ui.separator();
+        self.flow_preview_item(ui);
+    }
+
+    /// The flowchart's own items of its panel menu (Encore: すべてのサムネールを表示 / すべて自動レイアウト / プレビュー,
+    /// each after a separator).
+    pub(crate) fn flow_panel_menu(&mut self, ui: &mut Ui) {
+        self.flow_thumbnails_item(ui);
+        ui.separator();
+        self.flow_auto_layout_all_item(ui);
+        ui.separator();
+        self.flow_preview_item(ui);
+    }
+
+    /// すべてのサムネールを表示 (a check).
+    fn flow_thumbnails_item(&mut self, ui: &mut Ui) {
         if crate::actions::menu_check(
             ui,
             crate::actions::Action::ShowAllThumbnails,
             self.flow_thumbnails,
         ) {
-            self.flow_thumbnails = !self.flow_thumbnails;
+            self.toggle_flow_thumbnails();
             ui.close();
         }
-        ui.separator();
-        ui.menu_button(tl!("New"), |ui| self.new_items(ui, None, None));
-        ui.menu_button(tl!("Import"), |ui| self.import_items(ui));
-        ui.separator();
-        // Encore の「すべて自動レイアウト」: 手で動かしたノードを、すべて自動の配置に戻す。
+    }
+
+    /// Encore の「すべて自動レイアウト」: 手で動かしたノードを、すべて自動の配置に戻す（動かしていなければ選べない）。
+    fn flow_auto_layout_all_item(&mut self, ui: &mut Ui) {
         let moved = !self.session.project.flowchart.is_empty();
-        if ui
-            .add_enabled(moved, egui::Button::new(tl!("Auto Layout All")))
-            .clicked()
-        {
+        let label = crate::actions::indented(tl!("Auto Layout All").to_owned());
+        if ui.add_enabled(moved, egui::Button::new(label)).clicked() {
             let _ = self.run_command("flowchart.arrange", serde_json::json!({}));
             ui.close();
         }
-        ui.separator();
-        if crate::actions::menu_item(ui, crate::actions::Action::Preview, true) {
+    }
+
+    /// プレビュー (without its shortcut, behind the check mark column).
+    fn flow_preview_item(&mut self, ui: &mut Ui) {
+        if ui
+            .button(crate::actions::indented(tl!("Preview").to_owned()))
+            .clicked()
+        {
             self.run_action(ui, crate::actions::Action::Preview);
             ui.close();
         }
@@ -272,10 +300,8 @@ impl DiscCraftApp {
     fn flow_auto_layout_item(&mut self, ui: &mut Ui, node: NodeId) {
         let key = crate::flowchart::node_key(node);
         let moved = self.session.project.flowchart.contains_key(&key);
-        if ui
-            .add_enabled(moved, egui::Button::new(tl!("Auto Layout")))
-            .clicked()
-        {
+        let label = crate::actions::indented(tl!("Auto Layout").to_owned());
+        if ui.add_enabled(moved, egui::Button::new(label)).clicked() {
             let _ = self.run_command("flowchart.arrange", serde_json::json!({ "node": key }));
             ui.close();
         }
@@ -286,31 +312,33 @@ impl DiscCraftApp {
     /// first play).
     pub(crate) fn flow_node_menu(&mut self, ui: &mut Ui, node: NodeId) {
         let selection = node_selection(node);
+        // Encore lines every label of this menu up behind the check mark column, and shows no shortcuts.
+        let indented = |label: &str| crate::actions::indented(label.to_owned());
         if selection != Selection::None {
-            if ui.button(tl!("Open")).clicked() {
+            if ui.button(indented(tl!("Open"))).clicked() {
                 self.select(selection);
                 ui.close();
             }
             self.flow_auto_layout_item(ui, node);
-            if ui.button(tl!("Rename…")).clicked() {
+            if ui.button(indented(tl!("Rename…"))).clicked() {
                 self.select(selection);
                 self.start_rename();
                 ui.close();
             }
             if let Selection::Menu(id) = selection {
                 // Encore の「ボタンを表示」: 外すとノードのボタンのポートを畳む。
-                let mut shown = !self.flow_hidden_buttons.contains(&id);
-                if ui.checkbox(&mut shown, tl!("Show Buttons")).changed() {
+                let shown = !self.flow_hidden_buttons.contains(&id);
+                if crate::actions::menu_check_label(ui, tl!("Show Buttons").to_owned(), shown) {
                     if shown {
-                        self.flow_hidden_buttons.retain(|menu| *menu != id);
-                    } else {
                         self.flow_hidden_buttons.push(id);
+                    } else {
+                        self.flow_hidden_buttons.retain(|menu| *menu != id);
                     }
                     ui.close();
                 }
                 ui.separator();
-                if crate::actions::menu_item(ui, crate::actions::Action::EditMenuInPhotoCraft, true)
-                {
+                let edit = crate::actions::Action::EditMenuInPhotoCraft.label();
+                if ui.button(indented(edit)).clicked() {
                     self.edit_menu_in_photocraft(id);
                     ui.close();
                 }
@@ -365,7 +393,7 @@ impl DiscCraftApp {
             ),
         };
         let mut chosen = None;
-        let _ = ui.menu_button(tl!("Specify Link"), |ui| {
+        let _ = ui.menu_button(indented(tl!("Specify Link")), |ui| {
             chosen = self.link_menu(ui, &current, &targets);
             if chosen.is_some() {
                 ui.close();
@@ -385,14 +413,14 @@ impl DiscCraftApp {
             return;
         }
         ui.separator();
-        self.first_play_items(ui, selection);
+        self.first_play_items(ui, selection, true);
         ui.separator();
-        if ui.button(tl!("Clear")).clicked() {
+        if ui.button(indented(tl!("Clear"))).clicked() {
             self.remove_object(selection);
             ui.close();
         }
         ui.separator();
-        if ui.button(tl!("Preview from Here")).clicked() {
+        if ui.button(indented(tl!("Preview from Here"))).clicked() {
             self.preview_from(selection);
             ui.close();
         }
@@ -401,7 +429,7 @@ impl DiscCraftApp {
     /// The right-click menu of a row of the Menus or Timelines panel, as Encore has it (M6.338): ファーストプレイに
     /// 設定 (を解除) / コピー / 消去 / 名前の変更… / (a menu: メニューを PhotoCraft で編集) / 開く / ここからプレビューする.
     pub(crate) fn tab_item_menu(&mut self, ui: &mut Ui, selection: Selection) {
-        self.first_play_items(ui, selection);
+        self.first_play_items(ui, selection, false);
         ui.separator();
         if ui.button(tl!("Copy")).clicked() {
             self.copy_item(ui.ctx(), selection);
@@ -584,18 +612,26 @@ impl DiscCraftApp {
     }
 
     /// 「ファーストプレイに設定」（ファーストプレイの項目では「ファーストプレイを解除」。Encore と同じ）。
-    fn first_play_items(&mut self, ui: &mut Ui, selection: Selection) {
+    /// ファーストプレイに設定 / を解除 (`indent`: behind the check mark column, in a menu that has one).
+    fn first_play_items(&mut self, ui: &mut Ui, selection: Selection, indent: bool) {
         let link = selection_node(selection).and_then(link_to);
         let is_first_play = link
             .as_ref()
             .is_some_and(|link| same_target(link, &self.session.project.settings.first_play));
+        let label = |text: &str| {
+            if indent {
+                egui::Button::new(crate::actions::indented(text.to_owned()))
+            } else {
+                egui::Button::new(text.to_owned())
+            }
+        };
         if is_first_play {
-            if ui.button(tl!("Clear First Play")).clicked() {
+            if ui.add(label(tl!("Clear First Play"))).clicked() {
                 self.set_first_play(&disccraft_project::Link::NotSet);
                 ui.close();
             }
         } else if ui
-            .add_enabled(link.is_some(), egui::Button::new(tl!("Set as First Play")))
+            .add_enabled(link.is_some(), label(tl!("Set as First Play")))
             .clicked()
         {
             if let Some(link) = link {

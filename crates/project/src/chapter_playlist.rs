@@ -114,7 +114,7 @@ impl Project {
             .timelines
             .get(&timeline)
             .ok_or_else(|| ProjectError::Invalid("timeline does not exist".to_string()))?;
-        let name = name.unwrap_or_else(|| format!("{} Chapter Playlist", master.name));
+        let name = name.unwrap_or_else(|| self.words.chapter_playlist(&master.name));
         let id = self.alloc_id()?;
         self.chapter_playlists.insert(
             id,
@@ -226,25 +226,6 @@ impl Project {
             .filter(|playlist| playlist.timeline == timeline)
             .map(|playlist| playlist.id)
             .collect()
-    }
-
-    /// Keeps chapter playlists in step with a removed chapter of `timeline`: entries of the chapter go, later
-    /// entries move down one.
-    pub(crate) fn drop_chapter_from_playlists(&mut self, timeline: TimelineId, index: usize) {
-        let Ok(removed) = u32::try_from(index) else {
-            return;
-        };
-        for playlist in self.chapter_playlists.values_mut() {
-            if playlist.timeline != timeline {
-                continue;
-            }
-            playlist.chapters.retain(|chapter| *chapter != removed);
-            for chapter in &mut playlist.chapters {
-                if *chapter > removed {
-                    *chapter = chapter.saturating_sub(1);
-                }
-            }
-        }
     }
 
     fn chapter_playlist_master_chapters(&self, id: u64) -> Result<usize, ProjectError> {

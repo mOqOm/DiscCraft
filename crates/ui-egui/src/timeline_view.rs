@@ -163,6 +163,8 @@ struct DurationProbe {
     joins: Vec<f64>,
     /// Where every clip plays, as (start, end) in seconds (empty: one clip over the whole duration).
     spans: Vec<(f64, f64)>,
+    /// Where each of those clips starts in its file, in seconds (its trimmed in point).
+    sources: Vec<f64>,
 }
 
 /// Drag state for a chapter marker.
@@ -286,6 +288,8 @@ struct TimelineSnapshot {
     joins: Vec<f64>,
     /// Where every clip plays, as (start, end) in seconds (filled in with the duration).
     spans: Vec<(f64, f64)>,
+    /// Where each clip starts in its file, in seconds (filled in with the duration; empty for one whole clip).
+    sources: Vec<f64>,
     /// The empty stretches in front of the clips, in frames (so a moved clip is measured again).
     gaps: Vec<u64>,
     /// The clips' trims as numbers (start, end + 1 or 0), so a changed trim is measured again.
@@ -329,10 +333,11 @@ struct TimelineFrame<'a> {
     selected: Option<usize>,
     /// Active marker drag.
     drag: Option<MarkerDrag>,
-    /// The video clip's first frame (drawn at the start of the video bar).
-    first: Option<egui::TextureHandle>,
     /// The video clip's last frame (drawn at the end of the video bar).
     last: Option<egui::TextureHandle>,
+    /// The pictures along each video clip (Encore): per clip, where each starts in the timeline (the clip's head and
+    /// its chapter points) and its picture when it is ready.
+    pictures: Vec<Vec<(f64, Option<egui::TextureHandle>)>>,
     /// Whether chapter names are drawn next to the chapter points (View ▸ Show Chapter Names).
     show_names: bool,
     /// A video clip being dragged along the track: the clip and how far, in seconds.
@@ -588,7 +593,7 @@ impl DiscCraftApp {
                     let height = canvas_height(&snapshot.tracks);
                     let _ = ui.horizontal_top(|ui| {
                         ui.spacing_mut().item_spacing.x = 0.0;
-                        self.track_headers(ui, &snapshot, id, height, &interaction, duration);
+                        self.track_headers(ui, &snapshot, id, height, &mut interaction, duration);
                         self.timeline_scroll(
                             ui,
                             &snapshot,
@@ -619,7 +624,6 @@ impl DiscCraftApp {
     ) {
         let height = canvas_height(&snapshot.tracks);
         let video = disccraft_project::AssetId(snapshot.video);
-        let first = self.asset_thumbnail(ui.ctx(), video);
         let last = self.clip_last_frame(ui.ctx(), video, duration);
         let (canvas, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width().max(60.0), height),
@@ -647,6 +651,11 @@ impl DiscCraftApp {
             ui.input_mut(|input| input.smooth_scroll_delta = egui::Vec2::ZERO);
             ui.ctx().request_repaint();
         }
+        let in_view = (
+            x_to_time(canvas.min.x, origin_x, zoom),
+            x_to_time(canvas.max.x, origin_x, zoom),
+        );
+        let pictures = self.clip_pictures(ui.ctx(), snapshot, duration, in_view);
         let frame = TimelineFrame {
             snapshot,
             canvas,
@@ -656,8 +665,8 @@ impl DiscCraftApp {
             playhead: interaction.playhead,
             selected: interaction.selected,
             drag: interaction.drag,
-            first,
             last,
+            pictures,
             show_names: self.show_chapter_names,
             audio_move: ui
                 .data(|data| {
@@ -729,7 +738,56 @@ impl DiscCraftApp {
             }
         }
         self.note_drop_target(ui, &frame, id);
+        self.timeline_pick_whip(ui, &frame, &response, id);
         self.timeline_context_menu(ui, &frame, &response, id, interaction);
+    }
+
+    /// A pick whip dropped on the timeline (Encore): on a chapter marker it links to that chapter, elsewhere to the
+    /// timeline's start. The marker under it is outlined while it hovers.
+    fn timeline_pick_whip(
+        &mut self,
+        ui: &Ui,
+        frame: &TimelineFrame<'_>,
+        response: &Response,
+        id: TimelineId,
+    ) {
+        use crate::pickwhip::{PickWhip, exact_link_for_drop, released};
+        let hovering = response.dnd_hover_payload::<PickWhip>().is_some();
+        let Some(point) = ui
+            .ctx()
+            .pointer_hover_pos()
+            .filter(|point| frame.canvas.contains(*point))
+        else {
+            return;
+        };
+        let markers_x: Vec<f32> = frame
+            .snapshot
+            .chapters
+            .iter()
+            .map(|chapter| time_to_x(chapter.time, frame.origin_x, frame.zoom))
+            .collect();
+        let hit = hit_marker(&markers_x, point.x, HIT_TOLERANCE);
+        if hovering {
+            let stroke = ui.visuals().selection.stroke;
+            let _ = match hit.and_then(|index| markers_x.get(index)) {
+                Some(x) => {
+                    ui.painter()
+                        .vline(*x, frame.canvas.y_range(), Stroke::new(2.0, stroke.color))
+                }
+                None => {
+                    ui.painter()
+                        .rect_stroke(frame.canvas, 0.0, stroke, egui::StrokeKind::Inside)
+                }
+            };
+        }
+        if let Some(payload) = released::<PickWhip>(response) {
+            let chapter = hit.and_then(|index| u32::try_from(index).ok()).unwrap_or(0);
+            let link = disccraft_project::Link::Timeline { id, chapter };
+            let node = crate::flowchart::NodeId::Timeline(id);
+            if let Some((command, base, link)) = exact_link_for_drop(payload.0, node, link) {
+                self.apply_link(command, base, &link);
+            }
+        }
     }
 
     /// Chooses a clip of timeline `timeline` (outlined; Edit ▸ Clear and Ripple Delete act on it), and the timeline.
@@ -738,6 +796,57 @@ impl DiscCraftApp {
         self.clip_selection = Some((id, pick));
         self.cue_focus = None;
         self.select(crate::app::Selection::Timeline(id));
+    }
+
+    /// Lets go of the clip and the subtitle chosen in timeline `id` (Encore's Next Clip past the last clip).
+    fn let_go_of_clips(&mut self, id: TimelineId) {
+        if self
+            .clip_selection
+            .is_some_and(|(timeline, _)| timeline == id)
+        {
+            self.clip_selection = None;
+        }
+        if self
+            .cue_focus
+            .is_some_and(|(timeline, _, _)| timeline == id)
+        {
+            self.cue_focus = None;
+        }
+    }
+
+    /// Encore's ◂ / ▸ of an audio or subtitle track's header: the playhead goes to the start of the clip before it /
+    /// after it on that track (past the last clip, to its end), and that clip is chosen.
+    fn step_track_clip(
+        &mut self,
+        id: TimelineId,
+        track: &TrackRow,
+        interaction: &mut TimelineInteraction,
+        duration: f64,
+        forward: bool,
+    ) {
+        if track.subtitle {
+            let cues = track_step_spans(track, duration);
+            if let Some((time, cue)) = clip_step(&cues, interaction.playhead, forward) {
+                interaction.playhead = time;
+                self.let_go_of_clips(id);
+                if let Some(cue) = cue {
+                    self.select(crate::app::Selection::Timeline(id));
+                    self.cue_focus = Some((id, track.index, cue));
+                }
+            }
+            return;
+        }
+        let boxes = sorted_audio_boxes(track, duration);
+        let spans: Vec<(f64, f64)> = boxes.iter().map(|(start, end, _)| (*start, *end)).collect();
+        if let Some((time, clip)) = clip_step(&spans, interaction.playhead, forward) {
+            interaction.playhead = time;
+            match clip.and_then(|index| boxes.get(index)) {
+                Some((_, _, number)) => {
+                    self.pick_clip(id.0, ClipPick::Audio(track.index, *number));
+                }
+                None => self.let_go_of_clips(id),
+            }
+        }
     }
 
     /// Edit ▸ Clear on a chosen clip: a video clip leaves its place empty (a timeline's only clip stays); an audio
@@ -862,6 +971,64 @@ impl DiscCraftApp {
         }
     }
 
+    /// The pictures along each video clip (M6.483, as Encore shows them): the frame at the clip's head and at each
+    /// chapter point in it. Only the pictures of the stretch `in_view` (seconds) are asked for; they are decoded on
+    /// a thread of their own ([`crate::clip_thumbs`]).
+    fn clip_pictures(
+        &mut self,
+        ctx: &egui::Context,
+        snapshot: &TimelineSnapshot,
+        duration: f64,
+        in_view: (f64, f64),
+    ) -> Vec<Vec<(f64, Option<egui::TextureHandle>)>> {
+        let spans = if snapshot.spans.is_empty() {
+            vec![(0.0, duration)]
+        } else {
+            snapshot.spans.clone()
+        };
+        let assets: Vec<u64> = std::iter::once(snapshot.video)
+            .chain(snapshot.more_video.iter().map(|(asset, _)| *asset))
+            .collect();
+        let fps = frames_per_second(snapshot.fps_num, snapshot.fps_den).max(1.0);
+        let chapters: Vec<f64> = snapshot
+            .chapters
+            .iter()
+            .map(|chapter| chapter.time)
+            .collect();
+        let mut out = Vec::with_capacity(spans.len());
+        for (index, (start, end)) in spans.iter().enumerate() {
+            let path = assets.get(index).and_then(|asset| {
+                self.session
+                    .project
+                    .assets
+                    .get(&disccraft_project::AssetId(*asset))
+                    .map(|found| (*asset, std::path::PathBuf::from(&found.path)))
+            });
+            let Some((asset, path)) = path else {
+                out.push(Vec::new());
+                continue;
+            };
+            let source = snapshot.sources.get(index).copied().unwrap_or(0.0);
+            let starts = picture_starts(*start, *end, &chapters, 0.5 / fps);
+            let mut pictures = Vec::with_capacity(starts.len());
+            for (n, at) in starts.iter().enumerate() {
+                let until = starts.get(n + 1).copied().unwrap_or(*end);
+                let texture = if until >= in_view.0 && *at <= in_view.1 {
+                    let seconds = at - start + source;
+                    // `as` saturates; a frame number in a file is small.
+                    let key = (asset, (seconds * fps).round() as i64);
+                    self.clip_thumbs
+                        .get(ctx, key, &path, (seconds, until - start + source))
+                } else {
+                    None
+                };
+                pictures.push((*at, texture));
+            }
+            out.push(pictures);
+        }
+        out
+    }
+
     /// The last frame of a video asset (cached per asset; `asset.frame` at one frame before the end).
     fn clip_last_frame(
         &mut self,
@@ -900,8 +1067,10 @@ impl DiscCraftApp {
         let timeline = &self.session.project.timeline(id)?.clone();
         let (fps_num, fps_den) = frame_rate(self.session.project.settings.standard);
 
+        // Encore shows a clip by its file's name with the extension (00001.m2ts), as the Project panel does
+        // (M6.482).
         let asset_name = match self.session.project.assets.get(&timeline.video) {
-            Some(asset) => asset.name.clone(),
+            Some(asset) => crate::project_panel::name_with_extension(&asset.name, &asset.path),
             None => String::new(),
         };
 
@@ -926,7 +1095,9 @@ impl DiscCraftApp {
                     .project
                     .assets
                     .get(asset)
-                    .map_or_else(String::new, |found| found.name.clone());
+                    .map_or_else(String::new, |found| {
+                        crate::project_panel::name_with_extension(&found.name, &found.path)
+                    });
                 (asset.0, name)
             })
             .collect();
@@ -938,6 +1109,7 @@ impl DiscCraftApp {
             more_video,
             joins: Vec::new(),
             spans: Vec::new(),
+            sources: Vec::new(),
             gaps: timeline
                 .video_gaps
                 .iter()
@@ -986,7 +1158,7 @@ impl DiscCraftApp {
                 .project
                 .assets
                 .get(asset)
-                .map(|asset| asset.name.clone())
+                .map(|asset| crate::project_panel::name_with_extension(&asset.name, &asset.path))
                 .unwrap_or_default()
         };
         let audio = timeline
@@ -997,7 +1169,16 @@ impl DiscCraftApp {
                 label: tlf!("Audio {n}:", n = index.saturating_add(1)),
                 index,
                 language: track.language.clone(),
-                clip: name(&track.asset),
+                // M6.424: a track playing another sound stream of its file than the first says which.
+                clip: if track.stream > 0 {
+                    tlf!(
+                        "{clip} (Stream {n})",
+                        clip = name(&track.asset),
+                        n = track.stream.saturating_add(1)
+                    )
+                } else {
+                    name(&track.asset)
+                },
                 subtitle: false,
                 cues: None,
                 asset: track.asset,
@@ -1073,6 +1254,7 @@ impl DiscCraftApp {
                 seconds: 0.0,
                 joins: Vec::new(),
                 spans: Vec::new(),
+                sources: Vec::new(),
             },
         };
 
@@ -1109,6 +1291,16 @@ impl DiscCraftApp {
                             .collect()
                     })
                     .unwrap_or_default();
+                probe.sources = value
+                    .get("clips")
+                    .and_then(Value::as_array)
+                    .map(|clips| {
+                        clips
+                            .iter()
+                            .map(|clip| seconds(clip.get("sourceStart")).unwrap_or(0.0))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 probe.joins = probe
                     .spans
                     .iter()
@@ -1120,6 +1312,7 @@ impl DiscCraftApp {
         }
         snapshot.joins.clone_from(&probe.joins);
         snapshot.spans.clone_from(&probe.spans);
+        snapshot.sources.clone_from(&probe.sources);
 
         if probe.seconds > 0.0 {
             probe.seconds
@@ -1185,6 +1378,103 @@ impl DiscCraftApp {
         );
     }
 
+    /// Encore's timeline and source times in the timeline header (M6.483): hot text that a drag moves a frame a point
+    /// and a click lets be typed. The source time is where the playhead is in the video clip under it (none in a
+    /// gap); a typed source time goes to that time in the clip's file, within the clip.
+    fn header_times(
+        &mut self,
+        ui: &mut Ui,
+        rect: Rect,
+        snapshot: &TimelineSnapshot,
+        id: TimelineId,
+        interaction: &mut TimelineInteraction,
+        duration: f64,
+    ) {
+        let painter = ui.painter().clone();
+        let at = |x: f32, y: f32| egui::pos2(rect.min.x + x, rect.min.y + y);
+        let time_font = egui::FontId::proportional(12.0);
+        let fps = frames_per_second(snapshot.fps_num, snapshot.fps_den).max(1.0);
+        let frame_seconds = 1.0 / fps;
+        let playhead = interaction.playhead;
+        let mut moved_to: Option<f64> = None;
+        match crate::hot_text::hot_timecode(
+            ui,
+            Id::unique("timeline_time").with(id.0),
+            (at(HEADER_TIME_X, 22.0), egui::Align2::LEFT_TOP),
+            &timecode(playhead, snapshot.fps_num, snapshot.fps_den),
+            time_font.clone(),
+        ) {
+            crate::hot_text::HotChange::Frames(frames) => {
+                // `as` is exact for a drag's frames.
+                moved_to = Some(playhead + frames as f64 * frame_seconds);
+            }
+            crate::hot_text::HotChange::Typed(text) => {
+                match disccraft_project::parse_time(&text, &self.session.project.settings) {
+                    Ok(time) => moved_to = Some(ticks_to_seconds(time.0)),
+                    Err(error) => self.status = error.to_string(),
+                }
+            }
+            crate::hot_text::HotChange::None => {}
+        }
+        // The source time: where the playhead is in the video clip under it (Encore); none in a gap.
+        let spans = if snapshot.spans.is_empty() {
+            vec![(0.0, duration)]
+        } else {
+            snapshot.spans.clone()
+        };
+        let under = spans.iter().enumerate().find(|(index, (start, end))| {
+            playhead >= *start
+                && (playhead < *end || (*index + 1 == spans.len() && playhead <= *end))
+        });
+        match under {
+            Some((index, (start, end))) => {
+                let source = snapshot.sources.get(index).copied().unwrap_or(0.0);
+                match crate::hot_text::hot_timecode(
+                    ui,
+                    Id::unique("timeline_source_time").with(id.0),
+                    (at(HEADER_SOURCE_X, 22.0), egui::Align2::LEFT_TOP),
+                    &timecode(
+                        playhead - start + source,
+                        snapshot.fps_num,
+                        snapshot.fps_den,
+                    ),
+                    time_font,
+                ) {
+                    crate::hot_text::HotChange::Frames(frames) => {
+                        // `as` is exact for a drag's frames.
+                        moved_to = Some(playhead + frames as f64 * frame_seconds);
+                    }
+                    crate::hot_text::HotChange::Typed(text) => {
+                        match disccraft_project::parse_time(&text, &self.session.project.settings) {
+                            // A time in the clip's file: there in the timeline, within the clip.
+                            Ok(time) => {
+                                moved_to = Some(
+                                    (start + ticks_to_seconds(time.0) - source).clamp(*start, *end),
+                                );
+                            }
+                            Err(error) => self.status = error.to_string(),
+                        }
+                    }
+                    crate::hot_text::HotChange::None => {}
+                }
+            }
+            None => {
+                painter.text(
+                    at(HEADER_SOURCE_X, 22.0),
+                    egui::Align2::LEFT_TOP,
+                    "--;--;--;--",
+                    time_font,
+                    craft_timeline::style::TEXT_DIM.get(),
+                );
+            }
+        }
+        if let Some(seconds) = moved_to {
+            // Moving the time stops playback, as the other ways of moving the playhead do.
+            self.playback = None;
+            interaction.playhead = seconds.clamp(0.0, duration.max(0.0));
+        }
+    }
+
     /// The header column: the current time ("Timeline:" and, inside the clip, "Source:") with the add-chapter-point
     /// button, then a header per row: "Video", and each audio and subtitle track with its language as a list.
     fn track_headers(
@@ -1193,65 +1483,55 @@ impl DiscCraftApp {
         snapshot: &TimelineSnapshot,
         id: TimelineId,
         height: f32,
-        interaction: &TimelineInteraction,
+        interaction: &mut TimelineInteraction,
         duration: f64,
     ) {
         let (rect, _) =
             ui.allocate_exact_size(egui::vec2(HEADER_WIDTH, height), egui::Sense::hover());
         let painter = ui.painter().clone();
-        let weak = ui.visuals().weak_text_color();
-        let small = egui::FontId::proportional(10.0);
-
-        // The Craft apps' timeline (FilmCraft's, as in Premiere): the big blue current time at the top left, the
-        // source timecode beside it, and the toolbar under it.
-        let playhead = timecode(interaction.playhead, snapshot.fps_num, snapshot.fps_den);
+        // Encore's timeline header (M6.483): "Timeline:" and "Source:" with the times under them as hot text (orange,
+        // dotted under; drag sideways a frame a point, click to type), and the tools at the bottom right (Encore's
+        // add-chapter mark there; DiscCraft's display settings beside it).
         let at = |x: f32, y: f32| egui::pos2(rect.min.x + x, rect.min.y + y);
         painter.rect_filled(
             Rect::from_min_max(rect.min, at(HEADER_WIDTH, RULER_HEIGHT)),
             0.0,
             craft_timeline::style::TL_BG,
         );
-        painter.text(
-            at(10.0, 3.0),
-            egui::Align2::LEFT_TOP,
-            playhead.clone(),
-            egui::FontId::proportional(19.0),
-            craft_timeline::style::TIMECODE,
-        );
-        if interaction.playhead <= duration {
-            // The source timecode at the right of the toolbar row, under the big time.
+        let label_font = egui::FontId::proportional(11.0);
+        for (x, label) in [
+            (HEADER_TIME_X, tl!("Timeline:")),
+            (HEADER_SOURCE_X, tl!("Source timecode:")),
+        ] {
             painter.text(
-                at(HEADER_WIDTH - 6.0, 29.0),
-                egui::Align2::RIGHT_TOP,
-                tl!("Source timecode:"),
-                small.clone(),
-                weak,
-            );
-            painter.text(
-                at(HEADER_WIDTH - 6.0, 40.0),
-                egui::Align2::RIGHT_TOP,
-                playhead,
-                small,
-                craft_timeline::style::TEXT_DIM,
+                at(x, 6.0),
+                egui::Align2::LEFT_TOP,
+                label,
+                label_font.clone(),
+                craft_timeline::style::TEXT.get(),
             );
         }
+        self.header_times(ui, rect, snapshot, id, interaction, duration);
 
-        // Toolbar: add a chapter point at the playhead (the Craft marker), the display settings.
+        // The tools at the bottom right: the display settings, then adding a chapter point at the playhead.
         let tools = [
-            (
-                crate::icons::Icon::Marker,
-                "marker",
-                tl!("Add Chapter at Playhead"),
-            ),
             (
                 crate::icons::Icon::Wrench,
                 "settings",
                 tl!("Timeline Display Settings"),
             ),
+            (
+                crate::icons::Icon::Marker,
+                "marker",
+                tl!("Add Chapter at Playhead"),
+            ),
         ];
-        let mut x = 8.0;
+        let mut x = HEADER_WIDTH - 2.0 * HEADER_TOOL - 6.0;
         for (icon, key, tip) in tools {
-            let button = Rect::from_min_size(at(x, 27.0), egui::vec2(26.0, 26.0));
+            let button = Rect::from_min_size(
+                at(x, RULER_HEIGHT - HEADER_TOOL - 3.0),
+                egui::vec2(HEADER_TOOL, HEADER_TOOL),
+            );
             let response = ui
                 .interact(
                     button,
@@ -1260,16 +1540,16 @@ impl DiscCraftApp {
                 )
                 .on_hover_text(tip);
             if response.hovered() {
-                painter.rect_filled(button, 4.0, craft_timeline::style::HOVER);
+                crate::theme::hover_box(&painter, button);
             }
             crate::icons::paint(
                 &painter,
-                button.shrink(6.0),
+                button.shrink(4.0),
                 icon,
                 if response.hovered() {
-                    craft_timeline::style::TEXT
+                    crate::theme::HOVER_ICON.get()
                 } else {
-                    craft_timeline::style::TEXT_DIM
+                    craft_timeline::style::TEXT_DIM.get()
                 },
             );
             if key == "marker" && response.clicked() {
@@ -1283,23 +1563,41 @@ impl DiscCraftApp {
                             ui.checkbox(&mut self.show_chapter_names, tl!("Show Chapter Names"));
                     });
             }
-            x += 28.0;
+            x += HEADER_TOOL + 2.0;
         }
 
-        // Track headers as the Craft apps draw them (FilmCraft's): a badge (V1, A1, S1) in the track colour, for a
-        // subtitle track the eye that shows it in the monitor, the name, and the language list.
+        // Track headers as Encore draws them (M6.474): a small box at the left with the track's mark (the video's
+        // eye, an audio track's speaker, a subtitle track's eye), the name after it, and the language list.
         let video = Rect::from_min_max(
             at(0.0, VIDEO_TOP),
             at(HEADER_WIDTH, VIDEO_TOP + VIDEO_HEIGHT),
         );
-        header_row(
+        header_row(&painter, video, tl!("Video"));
+        // Encore's video eye shows the track is seen; clicking it changes nothing (measured), so it is only drawn.
+        let eye = mark_box(video);
+        paint_mark_box(&painter, eye, false);
+        crate::icons::paint(
             &painter,
-            video,
-            "V1",
-            craft_timeline::style::TRACK_TARGET,
-            tl!("Video"),
-            44.0,
+            mark_icon(eye),
+            crate::icons::Icon::Eye,
+            craft_timeline::style::ICON_ACTIVE.get(),
         );
+        // Encore's ◂ ▸ (Previous Clip / Next Clip) at the right of every track header.
+        let spans: Vec<(f64, f64)> = if snapshot.spans.is_empty() {
+            vec![(0.0, duration)]
+        } else {
+            snapshot.spans.clone()
+        };
+        let reach = step_reach(&spans, interaction.playhead);
+        if let Some(forward) = step_arrows(ui, &painter, video, (id.0, 0, 0), reach)
+            && let Some((time, clip)) = clip_step(&spans, interaction.playhead, forward)
+        {
+            interaction.playhead = time;
+            match clip {
+                Some(clip) => self.pick_clip(id.0, ClipPick::Video(clip)),
+                None => self.let_go_of_clips(id),
+            }
+        }
 
         for (track, (top, row_h)) in snapshot
             .tracks
@@ -1307,44 +1605,27 @@ impl DiscCraftApp {
             .zip(track_rows_geometry(&snapshot.tracks))
         {
             let row = Rect::from_min_max(at(0.0, top), at(HEADER_WIDTH, top + row_h));
-            let (badge, color) = if track.subtitle {
-                (
-                    format!("S{}", track.index.saturating_add(1)),
-                    craft_timeline::style::CAPTION,
-                )
-            } else {
-                (
-                    format!("A{}", track.index.saturating_add(1)),
-                    craft_timeline::style::TRACK_TARGET,
-                )
-            };
-            let name_x = 64.0;
-            header_row(&painter, row, &badge, color, &track.label, name_x);
+            header_row(&painter, row, &track.label);
+            let mark = mark_box(row);
             if !track.subtitle {
                 // The speaker marks the audio track heard in the monitor (Encore: the box at the left of an audio
                 // track's header; a new track takes it).
-                let speaker = Rect::from_center_size(
-                    egui::pos2(row.min.x + 49.0, row.center().y),
-                    egui::vec2(18.0, 18.0),
-                );
                 let response = ui
                     .interact(
-                        speaker,
+                        mark,
                         Id::unique("audio_heard").with((id.0, track.index)),
                         egui::Sense::click(),
                     )
                     .on_hover_text(tl!("Hear This Track in Monitor"));
                 let heard = self.heard_audio(id) == Some(track.index);
-                if response.hovered() {
-                    painter.rect_filled(speaker.expand(2.0), 3.0, craft_timeline::style::HOVER);
-                }
+                paint_mark_box(&painter, mark, response.hovered());
                 paint_speaker(
                     &painter,
-                    speaker.shrink(3.0),
+                    mark_icon(mark).shrink(1.0),
                     if heard {
-                        craft_timeline::style::ICON_ACTIVE
+                        craft_timeline::style::ICON_ACTIVE.get()
                     } else {
-                        craft_timeline::style::TEXT_DIM
+                        craft_timeline::style::TEXT_DIM.get()
                     },
                     heard,
                 );
@@ -1354,41 +1635,46 @@ impl DiscCraftApp {
             }
             if track.subtitle {
                 // The eye shows the track's subtitles in the monitor (Encore: one track or none).
-                let eye = Rect::from_center_size(
-                    egui::pos2(row.min.x + 49.0, row.center().y),
-                    egui::vec2(18.0, 18.0),
-                );
                 let response = ui
                     .interact(
-                        eye,
+                        mark,
                         Id::unique("subtitle_shown").with((id.0, track.index)),
                         egui::Sense::click(),
                     )
                     .on_hover_text(tl!("Show Subtitles in Monitor"));
                 let shown = self.shown_subtitle(id) == Some(track.index);
-                if response.hovered() {
-                    painter.rect_filled(eye.expand(2.0), 3.0, craft_timeline::style::HOVER);
-                }
+                paint_mark_box(&painter, mark, response.hovered());
                 crate::icons::paint(
                     &painter,
-                    eye.shrink(2.0),
+                    mark_icon(mark),
                     if shown {
                         crate::icons::Icon::Eye
                     } else {
                         crate::icons::Icon::EyeOff
                     },
                     if shown {
-                        craft_timeline::style::ICON_ACTIVE
+                        craft_timeline::style::ICON_ACTIVE.get()
                     } else {
-                        craft_timeline::style::TEXT_DIM
+                        craft_timeline::style::TEXT_DIM.get()
                     },
                 );
                 if response.clicked() {
                     self.toggle_shown_subtitle(id, track.index);
                 }
             }
+            let reach = step_reach(&track_step_spans(track, duration), interaction.playhead);
+            if let Some(forward) = step_arrows(
+                ui,
+                &painter,
+                row,
+                (id.0, 1 + u8::from(track.subtitle), track.index),
+                reach,
+            ) {
+                self.step_track_clip(id, track, interaction, duration, forward);
+            }
+            // The language list, left of the ◂ ▸ (Encore's place).
             let combo = Rect::from_min_size(
-                egui::pos2(row.max.x - 66.0, row.center().y - 10.0),
+                egui::pos2(row.max.x - 66.0 - STEP_ARROWS_WIDTH, row.center().y - 10.0),
                 egui::vec2(60.0, 20.0),
             );
             // An audio track without a language of its own gets the disc's, else the display language.
@@ -2135,8 +2421,9 @@ fn draw_rows(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
     }
 }
 
-/// Draws the time ruler as the Craft apps do (FilmCraft's): a markers row at the top, timecodes far enough apart
-/// (every label on a tick), and ticks evenly between them, on whole frames of the timecode.
+/// Draws the time ruler as Encore lays it out (M6.475; the strides are the Craft apps', FilmCraft's): timecodes far
+/// enough apart (every label on a tick), the ticks hanging over a light line, and under it a dark band for the
+/// chapter flags, the ticks reaching into it as far again.
 fn draw_ruler(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
     let fps = frames_per_second(frame.snapshot.fps_num, frame.snapshot.fps_den);
     if fps <= 0.0 {
@@ -2148,10 +2435,19 @@ fn draw_ruler(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
         egui::pos2(frame.canvas.max.x, frame.canvas.min.y + RULER_HEIGHT),
     );
     painter.rect_filled(ruler, 0.0, craft_timeline::style::TL_BG);
+    let band = flag_band(ruler);
+    painter.rect_filled(band, 0.0, FLAG_BAND_FILL);
+    // The light line the ticks hang from, and a dimmer one under it (Encore: 179 and 148).
+    let line = band.min.y - 2.0;
+    painter.hline(ruler.x_range(), line + 0.5, Stroke::new(1.0, RULER_LINE));
+    painter.hline(
+        ruler.x_range(),
+        line + 1.5,
+        Stroke::new(1.0, RULER_LINE_DIM),
+    );
     let pps = f64::from(BASE_SCALE) * f64::from(frame.zoom);
-    let (minor, label_step) = craft_timeline::ruler_steps(pps / fps, rate.timecode_base());
-    let label_y = ruler.min.y + 24.0;
-    let tick_base = ruler.max.y - 3.0;
+    let (minor, per_label) = encore_ruler_steps(pps / fps);
+    let label_y = line - 18.0;
     let at_frame = |f: i64| frame.origin_x + (f as f64 / fps * pps) as f32;
     // `as` saturates; the frames only bound the loop.
     let first = (((f64::from(ruler.min.x - frame.origin_x)) / pps * fps).floor() as i64).max(0);
@@ -2160,11 +2456,16 @@ fn draw_ruler(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
     let mut count = 0_u32;
     while f <= last && count < 10_000 {
         let x = at_frame(f);
-        let major = f % label_step == 0;
-        let h = if major { 10.0 } else { 4.0 };
+        let tick = f / minor;
+        let major = tick % per_label == 0;
+        let h = tick_height(tick);
         painter.line_segment(
-            [egui::pos2(x, tick_base - h), egui::pos2(x, tick_base)],
+            [egui::pos2(x, line - h), egui::pos2(x, line)],
             Stroke::new(1.0, craft_timeline::style::RULER_TICK),
+        );
+        painter.line_segment(
+            [egui::pos2(x, band.min.y), egui::pos2(x, band.min.y + h)],
+            Stroke::new(1.0, RULER_TICK_IN_BAND),
         );
         if major {
             painter.text(
@@ -2172,12 +2473,59 @@ fn draw_ruler(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
                 egui::Align2::CENTER_CENTER,
                 format_frames(f, rate),
                 egui::FontId::proportional(11.0),
-                craft_timeline::style::RULER_TEXT,
+                craft_timeline::style::RULER_TEXT.get(),
             );
         }
         f = f.saturating_add(minor);
         count += 1;
     }
+}
+
+/// The ruler's ticks as Encore spaces them (M6.479, measured: a tick every 8 px, a timecode every 32 ticks, 256 px):
+/// `(frames between ticks, ticks between timecodes)` for `frame_px` pixels a frame. The ticks stay on whole frames;
+/// zoomed in past 8 px a frame, there is a tick on every frame and the timecodes stay about 256 px apart (on a long
+/// tick).
+fn encore_ruler_steps(frame_px: f64) -> (i64, i64) {
+    const TICK_PX: f64 = 8.0;
+    const LABEL_PX: f64 = 256.0;
+    if !(frame_px.is_finite() && frame_px > 0.0) {
+        return (1, 32);
+    }
+    // `as` saturates; a frame count on a ruler is small.
+    let minor = ((TICK_PX / frame_px).round() as i64).max(1);
+    // Minor ticks are frame_px * minor apart; a timecode every few long ticks (every 4 ticks), 256 px apart.
+    let tick_px = frame_px * minor as f64;
+    let long_ticks = ((LABEL_PX / (tick_px * 4.0)).round() as i64).clamp(1, 8);
+    (minor, long_ticks * 4)
+}
+
+/// A tick's height from its number (Encore: 8 every fourth tick, 6 every other one, 4 for the rest).
+fn tick_height(tick: i64) -> f32 {
+    if tick % 4 == 0 {
+        8.0
+    } else if tick % 2 == 0 {
+        6.0
+    } else {
+        4.0
+    }
+}
+
+/// Where a video clip from `start` to `end` shows a picture (M6.483, Encore): its head, then each chapter point in
+/// it (sorted; a point within `near` seconds of the one before, or of the clip's ends, adds none).
+fn picture_starts(start: f64, end: f64, chapters: &[f64], near: f64) -> Vec<f64> {
+    let mut inside: Vec<f64> = chapters
+        .iter()
+        .copied()
+        .filter(|time| time.is_finite() && *time > start + near && *time < end - near)
+        .collect();
+    inside.sort_by(f64::total_cmp);
+    let mut starts = vec![start];
+    for time in inside {
+        if starts.last().is_none_or(|last| time - last > near) {
+            starts.push(time);
+        }
+    }
+    starts
 }
 
 /// A small speaker (DiscCraft's own drawing): the box and cone, and two sound waves when `on`.
@@ -2251,9 +2599,18 @@ fn clip_edge_at(frame: &TimelineFrame<'_>, point: egui::Pos2) -> Option<(usize, 
     None
 }
 
-/// Draws the video clip as the Craft apps draw a clip: the label colour (Iris), a lighter top edge, the name band,
-/// the head and tail frames below it, and the corner marks where the clip reaches the media's first and last frame
-/// (a title's clip is the whole file).
+/// A video clip's ground and the name on it, its lower edge, and the line between its pictures (Encore, measured:
+/// (161,179,192), black, (135,144,153) and 206; the same in both looks).
+const VIDEO_CLIP: Color32 = Color32::from_rgb(161, 179, 192);
+const VIDEO_CLIP_NAME: Color32 = Color32::BLACK;
+const VIDEO_CLIP_EDGE: Color32 = Color32::from_rgb(135, 144, 153);
+const PICTURE_LINE: Color32 = Color32::from_gray(206);
+
+/// Draws the video clips as Encore does (M6.483): a light blue-grey clip with its file's name in black, and under
+/// the name the frame at the clip's head and at each chapter point, each from its place to the next (cut off where
+/// the next begins; the clip's ground shows where a stretch is wider than its picture), a light line between them,
+/// and the last clip's last frame at its end. The corner marks show where the clip reaches the media's first and
+/// last frame.
 fn draw_video_bar(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
     let origin_x = frame.origin_x;
     let spans = clip_spans_of(frame);
@@ -2275,32 +2632,69 @@ fn draw_video_bar(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
             continue;
         }
         let body = Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom));
-        craft_timeline::clip_body(painter, body, craft_timeline::style::CLIP_VIDEO);
-        // The first clip's first frame at its start and the last clip's last frame at its end, below the name
-        // band.
+        painter.rect_filled(body, 0.0, VIDEO_CLIP);
+        painter.hline(
+            body.x_range(),
+            body.max.y - 0.5,
+            Stroke::new(1.0, VIDEO_CLIP_EDGE),
+        );
         let strip = Rect::from_min_max(
             egui::pos2(body.min.x + 1.0, body.min.y + craft_timeline::NAME_BAND),
             egui::pos2(body.max.x - 1.0, body.max.y - 1.0),
         );
-        let thumb_width = strip.height() * 4.0 / 3.0;
-        if strip.width() > thumb_width * 2.0 + 4.0 {
-            if index == 0
-                && let Some(texture) = &frame.first
-            {
-                let at = Rect::from_min_size(strip.min, egui::vec2(thumb_width, strip.height()));
-                crate::project_panel::draw_fitted(painter, at, texture);
+        let pictures = frame.pictures.get(index).map_or(&[][..], Vec::as_slice);
+        let mut covered = strip.min.x;
+        for (n, (at, texture)) in pictures.iter().enumerate() {
+            let x = time_to_x(*at, origin_x, frame.zoom)
+                .max(strip.min.x)
+                .round();
+            let next = pictures.get(n + 1).map_or(strip.max.x, |(time, _)| {
+                time_to_x(*time, origin_x, frame.zoom)
+            });
+            if next < frame.canvas.min.x || x > frame.canvas.max.x {
+                continue;
             }
-            if index == last
-                && let Some(texture) = &frame.last
-            {
+            if n > 0 {
+                painter.vline(x - 0.5, strip.y_range(), Stroke::new(1.0, PICTURE_LINE));
+            }
+            if let Some(texture) = texture {
+                let size = texture.size_vec2();
+                let width = strip.height() * size.x / size.y.max(1.0);
+                let place = Rect::from_min_size(
+                    egui::pos2(x, strip.min.y),
+                    egui::vec2(width, strip.height()),
+                );
+                let room = Rect::from_min_max(
+                    egui::pos2(x, strip.min.y),
+                    egui::pos2((next - 1.0).min(strip.max.x), strip.max.y),
+                );
+                painter
+                    .with_clip_rect(room.intersect(painter.clip_rect()))
+                    .image(
+                        texture.id(),
+                        place,
+                        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                covered = covered.max(place.max.x.min(room.max.x));
+            }
+        }
+        // The last clip's last frame at its end, when the stretch before it leaves room (Encore: the clip's head,
+        // its chapter points and its end).
+        if index == last
+            && let Some(texture) = &frame.last
+        {
+            let size = texture.size_vec2();
+            let width = strip.height() * size.x / size.y.max(1.0);
+            if strip.max.x - width > covered + 4.0 {
                 let at = Rect::from_min_size(
-                    egui::pos2(strip.max.x - thumb_width, strip.min.y),
-                    egui::vec2(thumb_width, strip.height()),
+                    egui::pos2(strip.max.x - width, strip.min.y),
+                    egui::vec2(width, strip.height()),
                 );
                 crate::project_panel::draw_fitted(painter, at, texture);
             }
         }
-        craft_timeline::clip_name_and_edges(painter, body, name, true, true);
+        craft_timeline::clip_name_and_edges(painter, body, name, (true, true), VIDEO_CLIP_NAME);
         // The chosen clip: outlined.
         if frame.picked == Some(ClipPick::Video(index)) {
             let _ = painter.rect_stroke(
@@ -2365,45 +2759,226 @@ fn track_rows_geometry(tracks: &[TrackRow]) -> Vec<(f32, f32)> {
         .collect()
 }
 
-/// A track header row as the Craft apps draw it: the header background, the separator under it, the badge (V1, A1,
-/// S1) in the track colour at the left, and the name from `name_x`.
-fn header_row(
-    painter: &egui::Painter,
-    row: Rect,
-    badge: &str,
-    color: Color32,
-    name: &str,
-    name_x: f32,
-) {
-    painter.rect_filled(row, 0.0, craft_timeline::style::TL_BG);
+/// A track header row as Encore draws it (M6.478, measured): a lighter grey than the timeline (102), a dark line
+/// along the top with a blue-grey one under it and a dark line along the bottom, and the name in light grey after
+/// the mark box (the Craft badge, V1 / A1 / S1, is gone since M6.474).
+fn header_row(painter: &egui::Painter, row: Rect, name: &str) {
+    painter.rect_filled(row, 0.0, HEADER_ROW);
+    painter.hline(
+        row.x_range(),
+        row.min.y + 0.5,
+        Stroke::new(1.0, HEADER_ROW_EDGE),
+    );
+    painter.hline(
+        row.x_range(),
+        row.min.y + 1.5,
+        Stroke::new(1.0, HEADER_ROW_TOP),
+    );
     painter.hline(
         row.x_range(),
         row.max.y - 0.5,
-        Stroke::new(1.0, craft_timeline::style::SEPARATOR),
-    );
-    let height = (row.height() - 6.0).min(22.0);
-    let badge_rect = Rect::from_min_size(
-        egui::pos2(row.min.x + 13.0, row.center().y - height / 2.0),
-        egui::vec2(24.0, height),
-    );
-    painter.rect_filled(badge_rect, 2.0, color);
-    painter.text(
-        badge_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        badge,
-        egui::FontId::proportional(10.0),
-        craft_timeline::style::SELECTED_BORDER,
+        Stroke::new(1.0, HEADER_ROW_EDGE),
     );
     painter.with_clip_rect(row.shrink(1.0)).text(
-        egui::pos2(row.min.x + name_x, row.center().y),
+        egui::pos2(row.min.x + MARK_NAME_X, row.center().y),
         egui::Align2::LEFT_CENTER,
         name,
         egui::FontId::proportional(11.0),
-        craft_timeline::style::TEXT_DIM,
+        HEADER_ROW_TEXT.get(),
+    );
+}
+
+/// A track header row's ground, its dark top and bottom lines, the blue-grey line under the top, and the name
+/// (Encore: 102, 54, (85,110,110) and 217).
+const HEADER_ROW: crate::theme::Shade = crate::theme::Shade::gray(102, 209);
+const HEADER_ROW_EDGE: crate::theme::Shade = crate::theme::Shade::gray(54, 179);
+const HEADER_ROW_TOP: crate::theme::Shade = crate::theme::Shade::new(
+    Color32::from_rgb(85, 110, 110),
+    Color32::from_rgb(174, 199, 199),
+);
+const HEADER_ROW_TEXT: crate::theme::Shade = crate::theme::Shade::gray(217, 40);
+
+/// Centre of the mark box from a header's left edge, the box's size, and where the track's name starts (Encore:
+/// the box at 15–30, the name from 37).
+const MARK_CENTER_X: f32 = 22.0;
+const MARK_SIZE: egui::Vec2 = egui::vec2(18.0, 16.0);
+const MARK_NAME_X: f32 = 36.0;
+/// The mark box, etched into the header (Encore: a light edge outside, a dark one inside, the ground a little
+/// darker than the header; M6.478). Lighter under the pointer when the box does something.
+const MARK_FILL: crate::theme::Shade = crate::theme::Shade::gray(99, 205);
+const MARK_FILL_HOVER: crate::theme::Shade = crate::theme::Shade::gray(116, 222);
+const MARK_OUTER: crate::theme::Shade = crate::theme::Shade::gray(122, 240);
+const MARK_INNER: crate::theme::Shade = crate::theme::Shade::gray(84, 165);
+
+/// The box at the left of a track header that holds its mark, centred on the row.
+fn mark_box(row: Rect) -> Rect {
+    Rect::from_center_size(
+        egui::pos2(row.min.x + MARK_CENTER_X, row.center().y),
+        MARK_SIZE,
+    )
+}
+
+/// Where the mark is drawn inside its box (an icon of the Craft set is drawn on a square).
+fn mark_icon(mark: Rect) -> Rect {
+    Rect::from_center_size(mark.center(), egui::vec2(14.0, 14.0))
+}
+
+/// Width the ◂ ▸ take at the right of a track header.
+const STEP_ARROWS_WIDTH: f32 = 26.0;
+/// The ◂ ▸ when they go somewhere and when there is nowhere to go (Encore: 202 and 132; M6.478).
+const STEP_ARROW: crate::theme::Shade = crate::theme::Shade::gray(202, 70);
+const STEP_ARROW_DIM: crate::theme::Shade = crate::theme::Shade::gray(132, 168);
+
+/// Encore's ◂ ▸ at the right of a track header (Previous Clip, Next Clip): `Some(false)` when ◂ was clicked,
+/// `Some(true)` for ▸. `can` says whether each (◂, ▸) has somewhere to go; one that has not is dim and does
+/// nothing, as in Encore (◂ at the head of the timeline). Under the pointer, Encore's raised box with the
+/// triangle gold. The triangles are plain shapes (DiscCraft's own drawing).
+fn step_arrows(
+    ui: &mut Ui,
+    painter: &egui::Painter,
+    row: Rect,
+    salt: (u64, u8, usize),
+    can: (bool, bool),
+) -> Option<bool> {
+    let mut clicked = None;
+    for (forward, enabled, from_right, tip) in [
+        (false, can.0, 19.0, tl!("Previous Clip")),
+        (true, can.1, 8.0, tl!("Next Clip")),
+    ] {
+        let hit = Rect::from_center_size(
+            egui::pos2(row.max.x - from_right, row.center().y),
+            egui::vec2(11.0, 16.0),
+        );
+        let response = ui
+            .interact(
+                hit,
+                Id::unique(("clip_step", forward)).with(salt),
+                if enabled {
+                    egui::Sense::click()
+                } else {
+                    egui::Sense::hover()
+                },
+            )
+            .on_hover_text(tip);
+        let hovered = enabled && response.hovered();
+        if hovered {
+            crate::theme::hover_box(painter, hit);
+        }
+        let color = if hovered {
+            crate::theme::HOVER_ICON.get()
+        } else if enabled {
+            STEP_ARROW.get()
+        } else {
+            STEP_ARROW_DIM.get()
+        };
+        let (x, y) = (hit.center().x, hit.center().y);
+        let (back, front) = if forward { (-2.5, 3.0) } else { (2.5, -3.0) };
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(x + back, y - 5.5),
+                egui::pos2(x + front, y),
+                egui::pos2(x + back, y + 5.5),
+            ],
+            color,
+            Stroke::NONE,
+        ));
+        if enabled && response.clicked() {
+            clicked = Some(forward);
+        }
+    }
+    clicked
+}
+
+/// Whether ◂ and ▸ have somewhere to go from `playhead` on a track whose clips are `spans`.
+fn step_reach(spans: &[(f64, f64)], playhead: f64) -> (bool, bool) {
+    (
+        clip_step(spans, playhead, false).is_some(),
+        clip_step(spans, playhead, true).is_some(),
+    )
+}
+
+/// An audio track's clips as (start, end, number), in order of their start.
+fn sorted_audio_boxes(track: &TrackRow, duration: f64) -> Vec<(f64, f64, usize)> {
+    let mut boxes: Vec<(f64, f64, usize)> = clip_boxes(track, duration)
+        .iter()
+        .map(|clip| (clip.start, clip.end, clip.number))
+        .collect();
+    boxes.sort_by(|a, b| a.0.total_cmp(&b.0));
+    boxes
+}
+
+/// What ◂ ▸ step through on a track row: a subtitle track's subtitles, an audio track's clips (in order).
+fn track_step_spans(track: &TrackRow, duration: f64) -> Vec<(f64, f64)> {
+    if track.subtitle {
+        track
+            .cues
+            .as_deref()
+            .map(|cues| cues.iter().map(|cue| (cue.start, cue.end)).collect())
+            .unwrap_or_default()
+    } else {
+        sorted_audio_boxes(track, duration)
+            .iter()
+            .map(|(start, end, _)| (*start, *end))
+            .collect()
+    }
+}
+
+/// Encore's Previous Clip / Next Clip on a track whose clips are `spans` ((start, end) in seconds): where the
+/// playhead goes from `playhead`, and the index of the clip chosen there. Next: the first clip starting after the
+/// playhead; past the last one, the end of the last clip with no clip chosen. Previous: the last clip starting
+/// before the playhead (from inside a clip, that clip's start). `None` when there is nowhere to go. Measured in
+/// Encore CS6 (encore-behavior.md 9.28).
+fn clip_step(spans: &[(f64, f64)], playhead: f64, forward: bool) -> Option<(f64, Option<usize>)> {
+    // Within this much of a clip's start, the playhead is at it (a frame is far longer).
+    const NEAR: f64 = 1e-4;
+    let clips = spans
+        .iter()
+        .enumerate()
+        .filter(|(_, (start, end))| start.is_finite() && end.is_finite());
+    if forward {
+        if let Some((index, (start, _))) = clips
+            .clone()
+            .filter(|(_, (start, _))| *start > playhead + NEAR)
+            .min_by(|a, b| a.1.0.total_cmp(&b.1.0))
+        {
+            return Some((*start, Some(index)));
+        }
+        let end = clips.map(|(_, (_, end))| *end).max_by(f64::total_cmp)?;
+        (end > playhead + NEAR).then_some((end, None))
+    } else {
+        clips
+            .filter(|(_, (start, _))| *start < playhead - NEAR)
+            .max_by(|a, b| a.1.0.total_cmp(&b.1.0))
+            .map(|(index, (start, _))| (*start, Some(index)))
+    }
+}
+
+/// The mark box: etched into the header, lighter while the pointer is over a box that does something.
+fn paint_mark_box(painter: &egui::Painter, mark: Rect, hovered: bool) {
+    use egui::emath::GuiRounding as _;
+    let mark = mark.round_to_pixels(painter.pixels_per_point());
+    let fill = if hovered { MARK_FILL_HOVER } else { MARK_FILL };
+    painter.rect_filled(mark, 0.0, fill);
+    painter.rect_stroke(
+        mark,
+        0.0,
+        Stroke::new(1.0, MARK_OUTER),
+        egui::StrokeKind::Inside,
+    );
+    painter.rect_stroke(
+        mark.shrink(1.0),
+        0.0,
+        Stroke::new(1.0, MARK_INNER),
+        egui::StrokeKind::Inside,
     );
 }
 /// Width of the track header column.
 const HEADER_WIDTH: f32 = 200.0;
+/// Where the timeline's and the source's times start in the header (Encore: 18 and 96 of its 216), and the size of
+/// the tools at its bottom right.
+const HEADER_TIME_X: f32 = 10.0;
+const HEADER_SOURCE_X: f32 = 92.0;
+const HEADER_TOOL: f32 = 22.0;
 /// The languages offered in a track header (ISO 639-1), like the list in Encore. A track's own language is kept
 /// in the list even when it is not one of these.
 pub(crate) const LANGUAGES: &[&str] = &[
@@ -2621,7 +3196,7 @@ fn draw_track_bars(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
             if lane.width() <= 0.0 {
                 continue;
             }
-            craft_timeline::clip_body(painter, lane, craft_timeline::style::CLIP_AUDIO);
+            craft_timeline::clip_body(painter, lane, craft_timeline::style::CLIP_AUDIO.get());
             // Each clip's own file's waveform.
             if let Some(peaks) = clip.peaks {
                 let pps = f64::from(BASE_SCALE) * f64::from(frame.zoom);
@@ -2632,10 +3207,16 @@ fn draw_track_bars(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
                     peaks,
                     // The time in the file: the clip's head is its trimmed in point.
                     |x| f64::from(x - origin_x) / pps - start + trim_start,
-                    craft_timeline::darker(craft_timeline::style::CLIP_AUDIO),
+                    craft_timeline::darker(craft_timeline::style::CLIP_AUDIO.get()),
                 );
             }
-            craft_timeline::clip_name_and_edges(painter, lane, clip.name, true, true);
+            craft_timeline::clip_name_and_edges(
+                painter,
+                lane,
+                clip.name,
+                (true, true),
+                craft_timeline::style::CLIP_NAME.get(),
+            );
             // The chosen clip: outlined.
             if frame.picked == Some(ClipPick::Audio(track.index, clip.number)) {
                 let _ = painter.rect_stroke(
@@ -2764,8 +3345,12 @@ fn draw_cues(
 /// Draws chapter markers.
 fn draw_markers(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
     let origin_x = frame.origin_x;
-    // The Craft apps' marker flags (8 × 12 pt) on the ruler's markers row; a faint line through the video row.
-    let flag_top = frame.canvas.min.y + 2.0;
+    // Encore's numbered flags in the ruler's bottom band (M6.475), a faint line through the video row.
+    let ruler = Rect::from_min_max(
+        frame.canvas.min,
+        egui::pos2(frame.canvas.max.x, frame.canvas.min.y + RULER_HEIGHT),
+    );
+    let band = flag_band(ruler);
     let top = frame.canvas.min.y + RULER_HEIGHT;
     let bottom = frame.canvas.min.y + VIDEO_TOP + VIDEO_HEIGHT;
 
@@ -2785,32 +3370,27 @@ fn draw_markers(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
         let color = if index == 0 {
             Color32::GRAY
         } else if selected {
-            craft_timeline::style::SELECTED_BORDER
+            craft_timeline::style::SELECTED_BORDER.get()
         } else {
-            craft_timeline::style::MARKER
+            craft_timeline::style::MARKER.get()
         };
 
-        painter.line_segment(
-            [egui::pos2(x, top), egui::pos2(x, bottom)],
-            Stroke::new(
-                if selected { 1.5 } else { 1.0 },
-                color.gamma_multiply(if selected { 0.9 } else { 0.55 }),
-            ),
-        );
-        craft_timeline::marker_glyph(
-            painter,
-            Rect::from_min_size(egui::pos2(x - 4.0, flag_top), egui::vec2(8.0, 12.0)),
-            4.0,
-            craft_timeline::MarkerPart::Whole,
-            color,
-        );
+        // Encore draws no line through the video row (its pictures change at each chapter point, M6.483); one shows
+        // where a chapter point being dragged would go.
+        if dragging {
+            painter.line_segment(
+                [egui::pos2(x, top), egui::pos2(x, bottom)],
+                Stroke::new(1.5, color.gamma_multiply(0.9)),
+            );
+        }
+        chapter_flag(painter, band, x, index, selected);
 
-        // ポスターフレームは小さな絵の枠で（チャプターと同じ色）。
+        // ポスターフレームは小さな絵の枠で（チャプターと同じ色）。ルーラーの上の端に。
         if let Some(poster) = chapter.poster {
             let px = time_to_x(poster, origin_x, frame.zoom);
             if px >= frame.canvas.min.x - 20.0 && px <= frame.canvas.max.x + 20.0 {
                 let picture = egui::Rect::from_center_size(
-                    egui::pos2(px, flag_top + 18.0),
+                    egui::pos2(px, ruler.min.y + 6.0),
                     egui::vec2(8.0, 6.0),
                 );
                 let _ = painter.rect_stroke(
@@ -2840,7 +3420,8 @@ fn draw_markers(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
     }
 }
 
-/// Draws the playhead as the Craft apps do: a short head on the ruler's tick row and a line down through the rows.
+/// Draws the playhead as Encore does (M6.484): a yellow head on the ruler's tick row (above the flag band), an
+/// orange-red line through the flag band and a red one down through the rows.
 fn draw_playhead(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
     let x = time_to_x(frame.playhead, frame.origin_x, frame.zoom);
     if x < frame.canvas.min.x - 1.0 || x > frame.canvas.max.x + 1.0 {
@@ -2850,13 +3431,149 @@ fn draw_playhead(painter: &egui::Painter, frame: &TimelineFrame<'_>) {
         frame.canvas.min,
         egui::pos2(frame.canvas.max.x, frame.canvas.min.y + RULER_HEIGHT),
     );
-    craft_timeline::draw_playhead(painter, x, ruler, frame.canvas.max.y);
+    let ticks = Rect::from_min_max(ruler.min, egui::pos2(ruler.max.x, flag_band(ruler).min.y));
+    craft_timeline::draw_playhead(painter, x, ticks, ruler.max.y, frame.canvas.max.y);
+}
+
+/// Height of the ruler's bottom band, where the chapter flags hang (Encore: 16).
+const FLAG_BAND: f32 = 16.0;
+/// The band's fill, the light line over it and the dimmer line under that, the ticks reaching into the band
+/// (Encore's greys 41, 179, 148 and 148, set against DiscCraft's darker timeline).
+const FLAG_BAND_FILL: crate::theme::Shade = crate::theme::Shade::gray(34, 153);
+const RULER_LINE: crate::theme::Shade = crate::theme::Shade::gray(170, 250);
+const RULER_LINE_DIM: crate::theme::Shade = crate::theme::Shade::gray(120, 76);
+const RULER_TICK_IN_BAND: crate::theme::Shade = crate::theme::Shade::gray(105, 110);
+/// A chapter flag: its face and edge, a chosen flag's face, and the number on it.
+const FLAG_FACE: Color32 = Color32::from_gray(232);
+const FLAG_EDGE: Color32 = Color32::from_gray(120);
+const FLAG_CHOSEN: Color32 = Color32::from_rgb(0, 114, 178);
+/// The number on a chosen flag.
+const FLAG_CHOSEN_NUMBER: Color32 = Color32::WHITE;
+const FLAG_NUMBER: Color32 = Color32::from_gray(40);
+
+/// The ruler's bottom band, where the chapter flags hang.
+fn flag_band(ruler: Rect) -> Rect {
+    Rect::from_min_max(
+        egui::pos2(ruler.min.x, (ruler.max.y - FLAG_BAND).max(ruler.min.y)),
+        ruler.max,
+    )
+}
+
+/// A chapter flag as Encore shows one (M6.475): a light label with the chapter's number (1 the first), hanging
+/// under the tick line from a short point at the chapter's time. The shape is DiscCraft's own (a rounded label and
+/// a narrow point), not Encore's. A later flag covers an earlier one where they meet, as in Encore.
+fn chapter_flag(painter: &egui::Painter, band: Rect, x: f32, index: usize, chosen: bool) {
+    let number = index.saturating_add(1).to_string();
+    // M6.481: the chosen flag is a strong blue with a white number, far from the other flags' white in lightness
+    // as well as colour (it was a light blue, near white for those who see blue and yellow alike).
+    let ink = if chosen {
+        FLAG_CHOSEN_NUMBER
+    } else {
+        FLAG_NUMBER
+    };
+    let galley = painter.layout_no_wrap(number, egui::FontId::proportional(9.0), ink);
+    let width = (galley.size().x + 4.0).max(9.0).round();
+    let face = Rect::from_min_size(
+        egui::pos2((x - width / 2.0).round(), band.min.y + 4.0),
+        egui::vec2(width, 10.0),
+    );
+    let fill = if chosen { FLAG_CHOSEN } else { FLAG_FACE };
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(x - 2.5, face.min.y + 0.5),
+            egui::pos2(x, band.min.y),
+            egui::pos2(x + 2.5, face.min.y + 0.5),
+        ],
+        fill,
+        Stroke::NONE,
+    ));
+    painter.rect(
+        face,
+        2.0,
+        fill,
+        Stroke::new(1.0, FLAG_EDGE),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(face.center() - galley.size() / 2.0, galley, ink);
 }
 
 /// Unit tests for pure timeline helpers.
 #[cfg(test)]
 mod tests {
-    use super::{chapter_label, hit_marker, time_to_x, timecode, x_to_time};
+    use super::{
+        chapter_label, clip_step, encore_ruler_steps, hit_marker, picture_starts, step_reach,
+        tick_height, time_to_x, timecode, x_to_time,
+    };
+
+    /// Encore's pictures along a video clip (M6.483): the clip's head and each chapter point inside it, once each.
+    #[test]
+    fn a_clip_shows_a_picture_at_its_head_and_each_chapter_point() {
+        let chapters = [0.0, 10.0, 10.01, 50.0, 99.99, 120.0, 150.0];
+        assert_eq!(
+            picture_starts(0.0, 100.0, &chapters, 0.02),
+            vec![0.0, 10.0, 50.0]
+        );
+        // The second clip: its head (a chapter point is there too) and the point inside it.
+        assert_eq!(
+            picture_starts(100.0, 200.0, &[100.0, 120.0, f64::NAN], 0.02),
+            vec![100.0, 120.0]
+        );
+        assert_eq!(picture_starts(5.0, 6.0, &[], 0.02), vec![5.0]);
+    }
+
+    /// Encore's ruler (M6.479): a tick every 8 px on whole frames, taller every second and fourth one, a timecode
+    /// every 32 ticks (256 px); zoomed in, a tick on every frame with the timecodes still about 256 px apart.
+    #[test]
+    fn the_ruler_ticks_are_as_fine_as_encores() {
+        assert_eq!(encore_ruler_steps(8.0 / 256.0), (256, 32));
+        assert_eq!(encore_ruler_steps(0.5), (16, 32));
+        // 9 px ticks: seven long ticks (252 px) between timecodes.
+        assert_eq!(encore_ruler_steps(3.0), (3, 28));
+        // A frame wider than a tick: every frame, a timecode every two long ticks (320 px).
+        assert_eq!(encore_ruler_steps(40.0), (1, 8));
+        assert_eq!(encore_ruler_steps(1000.0), (1, 4));
+        // Broken input does not stop the ruler.
+        assert_eq!(encore_ruler_steps(0.0), (1, 32));
+        assert_eq!(encore_ruler_steps(f64::NAN), (1, 32));
+        assert_eq!(
+            (0..5).map(tick_height).collect::<Vec<_>>(),
+            [8.0, 4.0, 6.0, 4.0, 8.0]
+        );
+    }
+
+    /// Encore dims ◂ where there is no clip to go back to (the head of the timeline) and ▸ past the end of the last
+    /// clip (M6.478).
+    #[test]
+    fn the_clip_arrows_dim_where_there_is_nowhere_to_go() {
+        let spans = [(0.0, 100.0), (100.0, 170.0)];
+        assert_eq!(step_reach(&spans, 0.0), (false, true));
+        assert_eq!(step_reach(&spans, 50.0), (true, true));
+        assert_eq!(step_reach(&spans, 170.0), (true, false));
+        // A track with nothing on it goes nowhere.
+        assert_eq!(step_reach(&[], 10.0), (false, false));
+    }
+
+    /// Encore's Previous Clip / Next Clip (measured, encore-behavior.md 9.28): next goes to the next clip's start and
+    /// chooses it, past the last clip to its end with none chosen; previous goes to the start of the clip the
+    /// playhead is in (or, at a start, the clip before).
+    #[test]
+    fn previous_and_next_clip_go_where_encore_goes() {
+        let spans = [(0.0, 100.0), (100.0, 170.0), (170.0, 250.0)];
+        assert_eq!(clip_step(&spans, 0.0, true), Some((100.0, Some(1))));
+        assert_eq!(clip_step(&spans, 100.0, true), Some((170.0, Some(2))));
+        assert_eq!(clip_step(&spans, 170.0, true), Some((250.0, None)));
+        assert_eq!(clip_step(&spans, 250.0, true), None);
+        assert_eq!(clip_step(&spans, 135.0, false), Some((100.0, Some(1))));
+        assert_eq!(clip_step(&spans, 100.0, false), Some((0.0, Some(0))));
+        assert_eq!(clip_step(&spans, 250.0, false), Some((170.0, Some(2))));
+        assert_eq!(clip_step(&spans, 0.0, false), None);
+        // Clips out of order, with gaps; a broken time goes nowhere.
+        let spans = [(50.0, 60.0), (0.0, 10.0)];
+        assert_eq!(clip_step(&spans, 20.0, true), Some((50.0, Some(0))));
+        assert_eq!(clip_step(&spans, 20.0, false), Some((0.0, Some(1))));
+        assert_eq!(clip_step(&spans, f64::NAN, true), None);
+        assert_eq!(clip_step(&[], 0.0, true), None);
+    }
 
     /// M6.299: a dragged subtitle clip moves by whole frames, stays off its neighbours and the start, keeps at least
     /// the shortest length when trimmed, and snaps to the nearest snap point within reach.

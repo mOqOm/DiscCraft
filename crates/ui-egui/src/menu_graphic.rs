@@ -402,6 +402,52 @@ impl DiscCraftApp {
     /// A Project panel row dropped on the menu canvas (Encore: dragging assets and timelines into a menu): an
     /// image becomes a graphic at the drop point; a timeline, slideshow, playlist or chapter playlist becomes a
     /// button there, named after it and linked to it.
+    /// A pick whip dropped on the menu (Encore): on a button it links to the menu at that button, elsewhere to the
+    /// menu. The button under it is outlined while it hovers.
+    fn menu_pick_whip(
+        &mut self,
+        ui: &Ui,
+        menu: &Menu,
+        frame: (u16, u16),
+        response: &egui::Response,
+    ) {
+        use crate::pickwhip::{PickWhip, exact_link_for_drop, released};
+        let Some(point) = ui
+            .ctx()
+            .pointer_hover_pos()
+            .filter(|point| response.rect.contains(*point))
+        else {
+            return;
+        };
+        let button = self
+            .hit_button(menu, frame, response.rect, point)
+            .map(|(index, _)| index);
+        if response.dnd_hover_payload::<PickWhip>().is_some() {
+            let area = button
+                .and_then(|index| menu.buttons.get(index))
+                .map_or(response.rect, |found| {
+                    to_canvas(found.rect, frame, response.rect)
+                });
+            let _ = ui.painter().rect_stroke(
+                area,
+                0.0,
+                ui.visuals().selection.stroke,
+                egui::StrokeKind::Inside,
+            );
+        }
+        if let Some(payload) = released::<PickWhip>(response) {
+            let root = self.session.project.menu_root(menu.id);
+            let link = disccraft_project::Link::Menu {
+                id: menu.id,
+                button: button.and_then(|index| u32::try_from(index).ok()),
+            };
+            let node = crate::flowchart::NodeId::Menu(root);
+            if let Some((command, base, link)) = exact_link_for_drop(payload.0, node, link) {
+                self.apply_link(command, base, &link);
+            }
+        }
+    }
+
     pub(crate) fn accept_canvas_drop(
         &mut self,
         ui: &Ui,
@@ -410,6 +456,7 @@ impl DiscCraftApp {
         response: &egui::Response,
     ) {
         use crate::project_panel::DragRow;
+        self.menu_pick_whip(ui, menu, frame, response);
         if response.dnd_hover_payload::<DragRow>().is_some()
             || response
                 .dnd_hover_payload::<crate::library_panel::LibraryDrag>()
@@ -433,12 +480,14 @@ impl DiscCraftApp {
             )
         };
         // A Library item: placed at the drop point (Encore).
-        if let Some(payload) = response.dnd_release_payload::<crate::library_panel::LibraryDrag>() {
+        if let Some(payload) =
+            crate::pickwhip::released::<crate::library_panel::LibraryDrag>(response)
+        {
             let at = drop_point(ui);
             self.drop_library_item(menu.id, payload.0, at);
             return;
         }
-        let Some(payload) = response.dnd_release_payload::<DragRow>() else {
+        let Some(payload) = crate::pickwhip::released::<DragRow>(response) else {
             return;
         };
         let (x, y) = drop_point(ui);

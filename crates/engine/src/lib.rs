@@ -23,6 +23,7 @@ pub mod metadata_edit;
 mod params;
 mod player;
 mod session;
+mod time_stretch;
 pub mod waveform;
 pub mod xmp_schemas;
 
@@ -46,8 +47,9 @@ pub fn clear_media_cache() -> usize {
 }
 
 pub use player::{
-    AudioFeed, FrameLoader, FrameRequest, FrameSource, Player, PlayerAudio, PlayerAudioPart,
-    PlayerFrame, PlayerStatus, audio_stream_count, audio_track_parts,
+    AudioFeed, FrameLoader, FrameRequest, FrameSource, MAX_HEARD_SPEED, Player, PlayerAudio,
+    PlayerAudioPart, PlayerFrame, PlayerStatus, audio_stream_count, audio_track_parts,
+    remember_timeline_picture, remembered_timeline_picture,
 };
 pub use session::{Session, UNDO_LIMIT};
 

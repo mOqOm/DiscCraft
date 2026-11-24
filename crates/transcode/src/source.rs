@@ -42,6 +42,30 @@ impl Source {
         Ok(source)
     }
 
+    /// [`Source::open`] with a reader of its own instead of the one shared by everything that asks for the file
+    /// (`crate::media_cache`): for pictures taken here and there in a file while the shared one plays (M6.486: the
+    /// Timeline viewer's pictures moved the monitor's decoder away from where it was playing). The file's index is
+    /// remembered on disk, so the second opening does not read the file through again.
+    pub(crate) fn open_own(path: &Path) -> Result<Self, TranscodeError> {
+        let resolved = crate::session::resolved(path)?;
+        let path = resolved.as_ref();
+        if let Some(key) = crate::media_cache::FileKey::of(path)
+            && crate::media_cache::refused_file(&key)
+        {
+            return Err(TranscodeError::Decode(format!(
+                "{}: cannot be read as media",
+                path.display()
+            )));
+        }
+        let source = Self::open_file(path)?;
+        if source.media.info().video.is_none() {
+            return Err(TranscodeError::Unsupported(
+                "input has no video stream".to_string(),
+            ));
+        }
+        Ok(source)
+    }
+
     /// Open a media file and require a bounded-duration audio stream.
     pub(crate) fn open_audio(path: &Path) -> Result<Self, TranscodeError> {
         let source = Self::open_media(path)?;

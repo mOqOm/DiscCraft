@@ -14,6 +14,7 @@ pub mod clpi;
 pub mod index;
 pub mod mobj;
 pub mod mpls;
+pub mod outline;
 
 use std::fmt;
 
@@ -129,25 +130,166 @@ impl StreamCoding {
     }
 }
 
-/// The ISO 639-2 code a Blu-ray names a language with, for an ISO 639-1 one (`ja` → `jpn`); `und` for one it
-/// does not know, and for none.
+/// The languages of ISO 639-1 with their ISO 639-2 codes (the terminology code, and the bibliographic one where it
+/// differs), from the ISO 639-2 code list of the Library of Congress (the registration authority). A Blu-ray names a
+/// language with the ISO 639-2 code, a DVD with the ISO 639-1 one; media files use either (M6.421).
+const LANGUAGES: &[(&str, &str, &str)] = &[
+    ("aa", "aar", ""),
+    ("ab", "abk", ""),
+    ("af", "afr", ""),
+    ("ak", "aka", ""),
+    ("am", "amh", ""),
+    ("ar", "ara", ""),
+    ("as", "asm", ""),
+    ("ay", "aym", ""),
+    ("az", "aze", ""),
+    ("ba", "bak", ""),
+    ("be", "bel", ""),
+    ("bg", "bul", ""),
+    ("bn", "ben", ""),
+    ("bo", "bod", "tib"),
+    ("br", "bre", ""),
+    ("bs", "bos", ""),
+    ("ca", "cat", ""),
+    ("cs", "ces", "cze"),
+    ("cy", "cym", "wel"),
+    ("da", "dan", ""),
+    ("de", "deu", "ger"),
+    ("el", "ell", "gre"),
+    ("en", "eng", ""),
+    ("eo", "epo", ""),
+    ("es", "spa", ""),
+    ("et", "est", ""),
+    ("eu", "eus", "baq"),
+    ("fa", "fas", "per"),
+    ("fi", "fin", ""),
+    ("fj", "fij", ""),
+    ("fo", "fao", ""),
+    ("fr", "fra", "fre"),
+    ("fy", "fry", ""),
+    ("ga", "gle", ""),
+    ("gd", "gla", ""),
+    ("gl", "glg", ""),
+    ("gn", "grn", ""),
+    ("gu", "guj", ""),
+    ("ha", "hau", ""),
+    ("he", "heb", ""),
+    ("hi", "hin", ""),
+    ("hr", "hrv", ""),
+    ("hu", "hun", ""),
+    ("hy", "hye", "arm"),
+    ("id", "ind", ""),
+    ("ig", "ibo", ""),
+    ("is", "isl", "ice"),
+    ("it", "ita", ""),
+    ("iu", "iku", ""),
+    ("ja", "jpn", ""),
+    ("jv", "jav", ""),
+    ("ka", "kat", "geo"),
+    ("kk", "kaz", ""),
+    ("km", "khm", ""),
+    ("kn", "kan", ""),
+    ("ko", "kor", ""),
+    ("ku", "kur", ""),
+    ("ky", "kir", ""),
+    ("la", "lat", ""),
+    ("lb", "ltz", ""),
+    ("lo", "lao", ""),
+    ("lt", "lit", ""),
+    ("lv", "lav", ""),
+    ("mg", "mlg", ""),
+    ("mi", "mri", "mao"),
+    ("mk", "mkd", "mac"),
+    ("ml", "mal", ""),
+    ("mn", "mon", ""),
+    ("mr", "mar", ""),
+    ("ms", "msa", "may"),
+    ("mt", "mlt", ""),
+    ("my", "mya", "bur"),
+    ("nb", "nob", ""),
+    ("ne", "nep", ""),
+    ("nl", "nld", "dut"),
+    ("nn", "nno", ""),
+    ("no", "nor", ""),
+    ("pa", "pan", ""),
+    ("pl", "pol", ""),
+    ("ps", "pus", ""),
+    ("pt", "por", ""),
+    ("qu", "que", ""),
+    ("rm", "roh", ""),
+    ("ro", "ron", "rum"),
+    ("ru", "rus", ""),
+    ("rw", "kin", ""),
+    ("sa", "san", ""),
+    ("sd", "snd", ""),
+    ("si", "sin", ""),
+    ("sk", "slk", "slo"),
+    ("sl", "slv", ""),
+    ("sm", "smo", ""),
+    ("sn", "sna", ""),
+    ("so", "som", ""),
+    ("sq", "sqi", "alb"),
+    ("sr", "srp", ""),
+    ("st", "sot", ""),
+    ("su", "sun", ""),
+    ("sv", "swe", ""),
+    ("sw", "swa", ""),
+    ("ta", "tam", ""),
+    ("te", "tel", ""),
+    ("tg", "tgk", ""),
+    ("th", "tha", ""),
+    ("ti", "tir", ""),
+    ("tk", "tuk", ""),
+    ("tl", "tgl", ""),
+    ("tn", "tsn", ""),
+    ("to", "ton", ""),
+    ("tr", "tur", ""),
+    ("ts", "tso", ""),
+    ("tt", "tat", ""),
+    ("ug", "uig", ""),
+    ("uk", "ukr", ""),
+    ("ur", "urd", ""),
+    ("uz", "uzb", ""),
+    ("vi", "vie", ""),
+    ("wo", "wol", ""),
+    ("xh", "xho", ""),
+    ("yi", "yid", ""),
+    ("yo", "yor", ""),
+    ("zh", "zho", "chi"),
+    ("zu", "zul", ""),
+];
+
+/// The ISO 639-2 code a Blu-ray names a language with, for an ISO 639-1 one (`ja` → `jpn`, `fr` → `fra`); `und`
+/// for one it does not know, and for none.
 #[must_use]
 pub fn iso639_2(language: Option<[u8; 2]>) -> [u8; 3] {
-    match language {
-        Some([b'j', b'a']) => *b"jpn",
-        Some([b'e', b'n']) => *b"eng",
-        Some([b'f', b'r']) => *b"fra",
-        Some([b'd', b'e']) => *b"deu",
-        Some([b'e', b's']) => *b"spa",
-        Some([b'i', b't']) => *b"ita",
-        Some([b'z', b'h']) => *b"zho",
-        Some([b'k', b'o']) => *b"kor",
-        Some([b'p', b't']) => *b"por",
-        Some([b'r', b'u']) => *b"rus",
-        Some([b'n', b'l']) => *b"nld",
-        Some([b's', b'v']) => *b"swe",
-        Some(_) | None => *b"und",
-    }
+    language
+        .and_then(|code| {
+            LANGUAGES
+                .iter()
+                .find(|(one, _, _)| one.as_bytes() == code.as_slice())
+        })
+        .and_then(|(_, two, _)| <[u8; 3]>::try_from(two.as_bytes()).ok())
+        .unwrap_or(*b"und")
+}
+
+/// The ISO 639-1 code (what a DVD and DiscCraft's tracks name a language with) of a language as a media file names
+/// it (M6.421): an ISO 639-1 code, an ISO 639-2 one (terminology or bibliographic: `jpn`, `fre`), or a BCP 47 tag
+/// (`ja-JP`, by its first part), in any case. `None` for `und`, `mul`, `zxx`, `mis` and codes not in the table.
+#[must_use]
+pub fn iso639_1(language: &str) -> Option<&'static str> {
+    let code = language
+        .split(['-', '_'])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    LANGUAGES
+        .iter()
+        .find(|(one, two, bibliographic)| {
+            *one == code || *two == code || (!bibliographic.is_empty() && *bibliographic == code)
+        })
+        .map(|(one, _, _)| *one)
 }
 
 /// One elementary stream of a clip: its PID and coding.
@@ -242,7 +384,44 @@ impl<'a> Reader<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Reader, patch_u32};
+    use super::{LANGUAGES, Reader, iso639_1, iso639_2, patch_u32};
+
+    /// M6.421: languages by either code, both ways; the table has no code twice.
+    #[test]
+    fn languages_are_found_by_any_of_their_codes() {
+        assert_eq!(iso639_2(Some(*b"th")), *b"tha");
+        assert_eq!(iso639_2(Some(*b"fr")), *b"fra");
+        assert_eq!(iso639_2(Some(*b"xy")), *b"und");
+        for (code, expected) in [
+            ("jpn", Some("ja")),
+            ("ENG", Some("en")),
+            ("fre", Some("fr")),
+            ("fra", Some("fr")),
+            ("ger", Some("de")),
+            ("chi", Some("zh")),
+            ("ja-JP", Some("ja")),
+            ("zh_Hant", Some("zh")),
+            ("ko", Some("ko")),
+            ("und", None),
+            ("mul", None),
+            ("", None),
+            ("qaa", None),
+        ] {
+            assert_eq!(iso639_1(code), expected, "{code}");
+        }
+        let mut codes: Vec<&str> = LANGUAGES
+            .iter()
+            .flat_map(|(one, two, bibliographic)| [*one, *two, *bibliographic])
+            .filter(|code| !code.is_empty())
+            .collect();
+        let all = codes.len();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), all, "a code appears twice");
+        for (one, two, _) in LANGUAGES {
+            assert_eq!(iso639_1(two), Some(*one));
+        }
+    }
 
     #[test]
     fn reader_reports_truncation() {

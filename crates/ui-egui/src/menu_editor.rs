@@ -23,18 +23,34 @@ pub(crate) struct MenuTexture {
     pub(crate) colour_states: Vec<Option<[Option<egui::TextureHandle>; 3]>>,
     pub(crate) width: u16,
     pub(crate) height: u16,
+    /// Drawn while a video of the menu (its background) was still being opened, so without it: drawn again once
+    /// the files are open (M6.490: a motion menu stayed black in the Menu Viewer, where Encore shows the video's
+    /// first frame).
+    pub(crate) waiting: bool,
 }
 
 /// ハイライトのプレビュー状態（Encore の「通常 / 選択 / 決定」に当たる）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HighlightPreview {
     /// 通常。
     Normal,
     /// 選択（ハイライト）。
-    #[default]
     Selected,
     /// 決定。
     Activated,
+}
+
+/// The subpicture state shown after `state`'s button is pressed (Encore's 標準 / 選択時 / アクティベート時, M6.489):
+/// that state, one at a time; none when it was the one shown.
+pub(crate) fn toggled_preview(
+    shown: Option<HighlightPreview>,
+    state: HighlightPreview,
+) -> Option<HighlightPreview> {
+    if shown == Some(state) {
+        None
+    } else {
+        Some(state)
+    }
 }
 
 impl HighlightPreview {
@@ -45,11 +61,12 @@ impl HighlightPreview {
         HighlightPreview::Activated,
     ];
 
-    pub(crate) fn label(self) -> &'static str {
+    /// ツールバーの絵（M6.487）。
+    fn glyph(self) -> crate::tool_icons::Glyph {
         match self {
-            HighlightPreview::Normal => tl!("Normal"),
-            HighlightPreview::Selected => tl!("Selected"),
-            HighlightPreview::Activated => tl!("Activated"),
+            HighlightPreview::Normal => crate::tool_icons::Glyph::SubpictureNormal,
+            HighlightPreview::Selected => crate::tool_icons::Glyph::SubpictureSelected,
+            HighlightPreview::Activated => crate::tool_icons::Glyph::SubpictureActivated,
         }
     }
 
@@ -263,7 +280,7 @@ impl DiscCraftApp {
 
     fn menu_preview(&mut self, ui: &mut Ui, menu: &Menu) {
         // Encore のメニュービューアと同じく、操作は下のツールバー。狭いビューアでは 2 段以上に折り返す（右の
-        // ページの矢印や「ボタンを追加」が隠れない。M9.37）。
+        // ページの矢印が隠れない。M9.37）。
         let _ = egui::Panel::bottom("menu_viewer_bar")
             .resizable(false)
             .show(ui, |ui| {
@@ -291,12 +308,7 @@ impl DiscCraftApp {
             .or_else(|| self.color_set_preview(menu));
         let menu = previewed.as_ref().unwrap_or(menu);
         let hash = self.picture_hash(menu);
-        let need_render = self
-            .menu_texture
-            .as_ref()
-            .is_none_or(|cached| cached.hash != hash);
-
-        if need_render {
+        if self.menu_texture_due(hash) {
             self.render_menu_texture(ui.ctx(), menu, hash);
         }
 
@@ -455,12 +467,7 @@ impl DiscCraftApp {
             .or_else(|| self.color_set_preview(menu));
         let menu = previewed.as_ref().unwrap_or(menu);
         let hash = self.picture_hash(menu);
-        let need_render = self
-            .menu_texture
-            .as_ref()
-            .is_none_or(|cached| cached.hash != hash);
-
-        if need_render {
+        if self.menu_texture_due(hash) {
             self.render_menu_texture(ui.ctx(), menu, hash);
         }
 
@@ -490,63 +497,72 @@ impl DiscCraftApp {
         Some(rect)
     }
 
-    /// 下のツールバー: 拡大率 | セーフエリア・ボタンルート | 標準・選択時・アクティベート時 | ボタンを追加。
+    /// 下のツールバー（Encore のメニュービューアの並びと絵のボタン。M6.487）: 拡大率 | 校正 | セーフエリア・
+    /// ボタンルート・ガイド・新規ガイド | 標準・選択時・アクティベート時 | ページ送り。押している切り替えは
+    /// くぼんだ箱、マウスが乗ると金色。名前はヒントに（Encore と同じ文言）。ボタンの追加は Encore と同じく
+    /// メニュー ▸ ボタンを追加。
     fn canvas_controls(&mut self, ui: &mut Ui, menu: MenuId) {
+        use crate::tool_icons::{Glyph, bar_button, bar_divider};
+        ui.spacing_mut().item_spacing.x = 4.0;
         let mut zoom = self.menu_zoom;
         crate::monitor::zoom_combo(ui, "menu_viewer_zoom", &mut zoom);
         self.menu_zoom = zoom;
-        ui.separator();
-        if ui
-            .selectable_label(self.correct_pixel_aspect, tl!("Calibrate"))
-            .on_hover_text(tl!("Correct menu pixels to the TV screen"))
-            .clicked()
-        {
+        bar_divider(ui);
+        if bar_button(
+            ui,
+            Glyph::Calibrate,
+            (self.correct_pixel_aspect, true),
+            tl!("Correct menu pixels to the TV screen"),
+        ) {
             self.correct_pixel_aspect = !self.correct_pixel_aspect;
         }
-        if ui
-            .selectable_label(self.show_safe_areas, tl!("Safe areas"))
-            .on_hover_text(tl!("Show / hide safe areas"))
-            .clicked()
-        {
+        bar_divider(ui);
+        if bar_button(
+            ui,
+            Glyph::SafeArea,
+            (self.show_safe_areas, true),
+            tl!("Show / hide safe areas"),
+        ) {
             self.show_safe_areas = !self.show_safe_areas;
         }
-        if ui
-            .selectable_label(self.show_routing, tl!("Routing"))
-            .on_hover_text(tl!("Set button routing"))
-            .clicked()
-        {
+        if bar_button(
+            ui,
+            Glyph::Routing,
+            (self.show_routing, true),
+            tl!("Set button routing"),
+        ) {
             self.show_routing = !self.show_routing;
         }
-        if ui
-            .selectable_label(self.show_guides, tl!("Guides"))
-            .on_hover_text(tl!("Show guides"))
-            .clicked()
-        {
+        if bar_button(
+            ui,
+            Glyph::Guides,
+            (self.show_guides, true),
+            tl!("Show guides"),
+        ) {
             self.show_guides = !self.show_guides;
         }
-        if ui
-            .button(tl!("New Guide"))
-            .on_hover_text(tl!("New guide"))
-            .clicked()
-        {
+        if bar_button(ui, Glyph::NewGuide, (false, true), tl!("New guide")) {
             self.open_guide_dialog();
         }
-        ui.separator();
+        bar_divider(ui);
         for state in HighlightPreview::ALL {
-            if ui
-                .selectable_label(self.highlight_preview == state, state.label())
-                .on_hover_text(state.hint())
-                .clicked()
-            {
-                self.highlight_preview = state;
+            if bar_button(
+                ui,
+                state.glyph(),
+                (self.highlight_preview == Some(state), true),
+                state.hint(),
+            ) {
+                self.toggle_highlight_preview(state);
             }
         }
-        ui.separator();
+        bar_divider(ui);
         self.page_buttons(ui, menu);
-        ui.separator();
-        if ui.button(tl!("Add Button")).clicked() {
-            self.add_button(menu);
-        }
+    }
+
+    /// Encore の 標準 / 選択時 / アクティベート時 のボタン（とメニューの 表示 ▸ …サブピクチャを表示）を押したとき
+    /// （[`toggled_preview`]）。
+    pub(crate) fn toggle_highlight_preview(&mut self, state: HighlightPreview) {
+        self.highlight_preview = toggled_preview(self.highlight_preview, state);
     }
 
     /// Encore のビューアの下の ページ送り: 前のページを表示 / 現在のページ番号（0 から）/ 次のページを表示。
@@ -558,12 +574,14 @@ impl DiscCraftApp {
             .and_then(|index| pages.get(index).copied());
         let next = pages.get(number.saturating_add(1)).copied();
         let mut go = None;
-        // The Craft apps' shared chevrons.
+        // The Craft apps' shared chevrons, in the bar's look (M6.487).
         let page_button = |ui: &mut Ui, enabled: bool, icon: crate::icons::Icon, tip: &str| {
-            ui.add_enabled_ui(enabled, |ui| crate::icons::icon_button(ui, icon, false))
-                .inner
-                .on_hover_text(tip)
-                .clicked()
+            crate::tool_icons::bar_button_with(
+                ui,
+                |painter, rect, color| crate::icons::paint(painter, rect, icon, color),
+                (false, enabled),
+                tip,
+            )
         };
         if page_button(
             ui,
@@ -573,9 +591,12 @@ impl DiscCraftApp {
         ) {
             go = previous;
         }
-        let _ = ui
-            .label(number.to_string())
-            .on_hover_text(tlf!("Current page number: {n}", n = number));
+        // Encore: a mark, the number in its tip.
+        crate::tool_icons::bar_mark(
+            ui,
+            crate::tool_icons::Glyph::MenuPage,
+            &tlf!("Current page number: {n}", n = number),
+        );
         if page_button(
             ui,
             next.is_some(),
@@ -636,21 +657,22 @@ impl DiscCraftApp {
 
             // The disc's own highlight (the frame, the text of a text subpicture, or a subpicture's layers) in the
             // state's colours 1 to 3.
-            // A preview (the monitor, the project preview) shows the remote's highlight in its selected look,
-            // whatever the editor's 標準 / 選択時 / アクティベート時 shows.
-            let look = if highlight.is_some() {
-                HighlightPreview::Selected
-            } else {
-                self.highlight_preview
+            // A preview (the monitor, the project preview) shows the remote's highlight on its button in its
+            // selected look, whatever the editor shows. The editor shows the state of Encore's 標準 / 選択時 /
+            // アクティベート時 on every button, and no subpicture while none is on (M6.489).
+            let (look, lit) = match highlight {
+                Some(_) => (Some(HighlightPreview::Selected), highlighted),
+                None => (self.highlight_preview, true),
             };
             let tint = |n: u8| {
                 let (color, opacity) = match look {
-                    HighlightPreview::Selected if active => group.selected_color(n),
-                    HighlightPreview::Activated if active => group.activated_color(n),
-                    _ => {
+                    Some(HighlightPreview::Selected) if lit => group.selected_color(n),
+                    Some(HighlightPreview::Activated) if lit => group.activated_color(n),
+                    Some(_) => {
                         let normal = set.normal_color(n);
                         (normal.color, normal.opacity)
                     }
+                    None => return None,
                 };
                 let [tr, tg, tb] = color;
                 (opacity > 0).then(|| {
@@ -684,11 +706,12 @@ impl DiscCraftApp {
                     .filter(|_| highlight.is_none());
                 if let Some(states) = own {
                     let state = match look {
-                        HighlightPreview::Selected if active => 1,
-                        HighlightPreview::Activated if active => 2,
-                        _ => 0,
+                        Some(HighlightPreview::Selected) if lit => Some(1),
+                        Some(HighlightPreview::Activated) if lit => Some(2),
+                        Some(_) => Some(0),
+                        None => None,
                     };
-                    if let Some(Some(texture)) = states.get(state) {
+                    if let Some(Some(texture)) = state.and_then(|state| states.get(state)) {
                         let whole =
                             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
                         ui.painter()
@@ -704,13 +727,13 @@ impl DiscCraftApp {
             }
 
             let color = match look {
-                HighlightPreview::Selected if active => {
+                Some(HighlightPreview::Selected) if lit => {
                     egui::Color32::from_rgba_unmultiplied(r, g, b, selected_alpha)
                 }
-                HighlightPreview::Activated if active => {
+                Some(HighlightPreview::Activated) if lit => {
                     egui::Color32::from_rgba_unmultiplied(ar, ag, ab, activated_alpha)
                 }
-                _ if normal.opacity > 0 => {
+                Some(_) if normal.opacity > 0 => {
                     let [nr, ng, nb] = normal.color;
                     egui::Color32::from_rgba_unmultiplied(
                         nr,
@@ -723,14 +746,35 @@ impl DiscCraftApp {
             };
 
             let overlaps = overlapping.get(index).copied().unwrap_or(false);
-            let stroke = if overlaps {
-                egui::Stroke::new(2.0, OVERLAP_COLOR)
+            if overlaps {
+                // M6.481: white with red dashes over it, so the frame shows by its stripes even where the red
+                // cannot be told from the button's colour.
+                let frame_rect = canvas_rect.shrink(1.0);
+                let _ = ui.painter().rect_stroke(
+                    frame_rect,
+                    0.0,
+                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                    egui::StrokeKind::Middle,
+                );
+                let corners = [
+                    frame_rect.left_top(),
+                    frame_rect.right_top(),
+                    frame_rect.right_bottom(),
+                    frame_rect.left_bottom(),
+                    frame_rect.left_top(),
+                ];
+                let _ = ui.painter().add(egui::Shape::dashed_line(
+                    &corners,
+                    egui::Stroke::new(2.0, OVERLAP_COLOR),
+                    5.0,
+                    4.0,
+                ));
             } else {
-                egui::Stroke::new(if active { 2.0 } else { 1.0 }, color)
-            };
-            let _ = ui
-                .painter()
-                .rect_stroke(canvas_rect, 0.0, stroke, egui::StrokeKind::Inside);
+                let stroke = egui::Stroke::new(if active { 2.0 } else { 1.0 }, color);
+                let _ =
+                    ui.painter()
+                        .rect_stroke(canvas_rect, 0.0, stroke, egui::StrokeKind::Inside);
+            }
 
             // 絵のないビデオサムネール（リンクがない、ビデオ以外へのリンク）は、編集画面だけ点線で場所を示す。
             if highlight.is_none()
@@ -1142,8 +1186,25 @@ impl DiscCraftApp {
         None
     }
 
+    /// Whether the menu's picture is to be drawn (again): it is not there, the menu changed (`hash`), or it was
+    /// drawn while a video of it was still being opened and the files are open now.
+    pub(crate) fn menu_texture_due(&self, hash: u64) -> bool {
+        self.menu_texture
+            .as_ref()
+            .is_none_or(|cached| cached.hash != hash || (cached.waiting && !self.media_pending))
+    }
+
     pub(crate) fn render_menu_texture(&mut self, ctx: &Context, menu: &Menu, hash: u64) {
-        match self.render_menu_picture(menu) {
+        // Whether a video of the menu is still being opened (its frame is not had yet): the picture is drawn again
+        // when it is open. The app looks again every 250 ms while a file is opening.
+        let pending_before = std::mem::replace(&mut self.media_pending, false);
+        let rendered = self.render_menu_picture(menu);
+        let waiting = self.media_pending;
+        self.media_pending = waiting || pending_before;
+        if waiting {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        match rendered {
             Ok(rendered) => {
                 let width = usize::from(rendered.width);
                 let height = usize::from(rendered.height);
@@ -1173,6 +1234,7 @@ impl DiscCraftApp {
                     colour_states: colour_state_textures(ctx, menu),
                     width: rendered.width,
                     height: rendered.height,
+                    waiting,
                 });
             }
             Err(error) => {
@@ -1702,12 +1764,57 @@ fn menu_link_label(project: &Project, id: MenuId, button: Option<u32>) -> String
 #[cfg(test)]
 mod canvas_tests {
     use super::{
-        CanvasDrag, DragKind, clamp_rect, drag_delta, dragged_rect, to_canvas, to_frame_point,
+        CanvasDrag, DragKind, HighlightPreview, clamp_rect, drag_delta, dragged_rect, to_canvas,
+        to_frame_point, toggled_preview,
     };
     use disccraft_project::{MenuId, Rect};
     use egui::{Rect as ERect, pos2, vec2};
 
     const NTSC: (u16, u16) = (720, 480);
+
+    /// M6.490: a menu's picture drawn while its background video was still being opened (black where the video's
+    /// first frame goes) is drawn again once the files are open, not every frame before that; a changed menu is
+    /// always drawn again.
+    #[test]
+    fn a_menu_picture_waiting_for_its_video_is_drawn_again_once_open() {
+        let ctx = egui::Context::default();
+        let mut app = crate::DiscCraftApp::new(&ctx);
+        assert!(app.menu_texture_due(7));
+        app.menu_texture = Some(super::MenuTexture {
+            hash: 7,
+            handle: ctx.load_texture(
+                "waiting",
+                egui::ColorImage::filled([1, 1], egui::Color32::BLACK),
+                egui::TextureOptions::default(),
+            ),
+            highlights: [None, None, None],
+            colour_states: Vec::new(),
+            width: 1,
+            height: 1,
+            waiting: true,
+        });
+        app.media_pending = true;
+        assert!(!app.menu_texture_due(7), "still opening");
+        app.media_pending = false;
+        assert!(app.menu_texture_due(7), "open now");
+        if let Some(texture) = app.menu_texture.as_mut() {
+            texture.waiting = false;
+        }
+        assert!(!app.menu_texture_due(7));
+        assert!(app.menu_texture_due(8));
+    }
+
+    /// Encore's 標準 / 選択時 / アクティベート時 (M6.489, measured): one at a time, none at first; pressing another
+    /// moves to it, pressing the one on turns them all off.
+    #[test]
+    fn the_subpicture_buttons_go_one_at_a_time_and_off_again() {
+        use HighlightPreview::{Activated, Normal, Selected};
+        assert_eq!(toggled_preview(None, Normal), Some(Normal));
+        assert_eq!(toggled_preview(Some(Normal), Selected), Some(Selected));
+        assert_eq!(toggled_preview(Some(Selected), Selected), None);
+        assert_eq!(toggled_preview(Some(Selected), Activated), Some(Activated));
+        assert_eq!(toggled_preview(Some(Activated), Activated), None);
+    }
 
     fn canvas() -> ERect {
         ERect::from_min_size(pos2(100.0, 50.0), vec2(360.0, 240.0))
