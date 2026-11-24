@@ -224,16 +224,19 @@ pub struct PsdAdditions {
     /// The page: 0 the document's top level (the first page), n the n-th `(#)` group (1 for the lowest). A page the
     /// document has no group for (M6.401: a page added to the menu since) becomes a new `(#)` group over the others.
     pub page: usize,
+    /// The page's name, for the `(#)` group made when the document has none for it ("ページ 2" as Encore names the
+    /// pages it adds, in the display language; empty: "Page n").
+    pub name: String,
     /// Layers laid over the page, bottom to top.
     pub layers: Vec<PsdLayer>,
     /// The page's buttons, bottom to top.
     pub buttons: Vec<PsdButtonAddition>,
 }
 
-/// The name [`write_psd_over`] and a menu's PSD give the `(#)` group of page `number` (1 for the second page), as
-/// Encore names the pages it adds.
-pub fn page_group_name(number: usize) -> String {
-    format!("(#) ページ {number}")
+/// The name of the `(#)` group of a page named `name` ("ページ 1" for the second page, as Encore names the pages it
+/// adds; the caller gives the name in the display language, M6.433).
+pub fn page_group_name(name: &str) -> String {
+    format!("(#) {}", name.trim())
 }
 
 /// A button of [`PsdAdditions`]: when the PSD has its button set (by its layer id, else its name), `into` goes into
@@ -303,8 +306,13 @@ pub fn write_psd_over(
             // A page the document has no group for: a new group over the others, with the page's sets.
             let mut children = Vec::new();
             lay_over(&mut children, &mut top, buttons);
+            let name = if page.name.trim().is_empty() {
+                format!("Page {}", page.page)
+            } else {
+                page.name.clone()
+            };
             doc.layers
-                .push(Layer::group(page_group_name(page.page), children));
+                .push(Layer::group(page_group_name(&name), children));
             continue;
         }
         // The page group the additions go into, by its place among the top level's layers.
@@ -1468,6 +1476,7 @@ mod tests {
         )?;
         let additions = PsdAdditions {
             page: 2,
+            name: "ページ 2".to_owned(),
             layers: vec![raster("added text")],
             buttons: vec![
                 PsdButtonAddition {
@@ -1502,6 +1511,7 @@ mod tests {
         // A page added later (the PSD has two page groups): a new group over them, with its sets.
         let added = PsdAdditions {
             page: 3,
+            name: "ページ 3".to_owned(),
             layers: Vec::new(),
             buttons: vec![PsdButtonAddition {
                 id: None,
@@ -1526,6 +1536,7 @@ mod tests {
         // layers, the additions scaled to it.
         let half = PsdAdditions {
             page: 0,
+            name: String::new(),
             layers: vec![PsdLayer::Raster {
                 name: "added".to_owned(),
                 rgba: {

@@ -113,14 +113,14 @@ impl MenuGraphic {
     /// A short name for layer lists ("Image: sunset.png" / "Rectangle").
     pub fn kind_name(&self, project: &Project) -> String {
         match &self.kind {
-            GraphicKind::Image { asset } => project
-                .assets
-                .get(asset)
-                .map_or_else(|| "Image".to_owned(), |asset| asset.name.clone()),
+            GraphicKind::Image { asset } => project.assets.get(asset).map_or_else(
+                || project.words.image().to_owned(),
+                |asset| asset.name.clone(),
+            ),
             GraphicKind::Shape { shape, .. } => match shape {
-                ShapeKind::Rectangle => "Rectangle".to_owned(),
-                ShapeKind::RoundedRectangle => "Rounded Rectangle".to_owned(),
-                ShapeKind::Ellipse => "Ellipse".to_owned(),
+                ShapeKind::Rectangle => project.words.rectangle().to_owned(),
+                ShapeKind::RoundedRectangle => project.words.rounded_rectangle().to_owned(),
+                ShapeKind::Ellipse => project.words.ellipse().to_owned(),
             },
         }
     }

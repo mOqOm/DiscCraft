@@ -320,6 +320,17 @@ pub fn millis(time_90k: u64) -> f64 {
     time_90k as f64 / 90.0
 }
 
+/// The layer break of the DVD-9 image `image` as its note beside it says (`LayerBreak=` of `<name>.layerbreak.txt`):
+/// the sectors it puts on layer 0, for writing it on a dual-layer disc (M9.42); `None` without a note.
+#[must_use]
+pub fn image_layer_break(image: &std::path::Path) -> Option<u32> {
+    let note = std::fs::read_to_string(image.with_extension("layerbreak.txt")).ok()?;
+    note.lines()
+        .find_map(|line| line.strip_prefix("LayerBreak="))
+        .and_then(|sectors| sectors.trim().parse::<u32>().ok())
+        .filter(|sectors| *sectors > 0)
+}
+
 /// `<name>.layerbreak.txt`: the break sector first (as before), then the layers and where the break is.
 fn note_text(found: &LayerBreak, standard: VideoStandard) -> String {
     let mut text = format!(
@@ -401,5 +412,35 @@ mod tests {
             time_text(25 * 3600, VideoStandard::Pal),
             "frame 25 (1000.00 ms)"
         );
+    }
+
+    /// M9.42: the burner takes an image's layer break from the note beside it.
+    #[test]
+    fn the_layer_break_is_read_back_from_the_note() {
+        let dir = std::env::temp_dir().join(format!("disccraft-layer-note-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("Gray.iso");
+        assert_eq!(super::image_layer_break(&image), None);
+        let found = LayerBreak {
+            sector: 2_030_528,
+            total_sectors: 4_003_200,
+            manual: false,
+            place: None,
+            requested_90k: None,
+        };
+        std::fs::write(
+            image.with_extension("layerbreak.txt"),
+            note_text(&found, VideoStandard::Ntsc),
+        )
+        .unwrap();
+        assert_eq!(super::image_layer_break(&image), Some(2_030_528));
+        std::fs::write(
+            image.with_extension("layerbreak.txt"),
+            "LayerBreak=nonsense
+",
+        )
+        .unwrap();
+        assert_eq!(super::image_layer_break(&image), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

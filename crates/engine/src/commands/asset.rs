@@ -204,7 +204,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "アセットのフレームを取り出す",
         menu: &["アセット"],
         shortcut: None,
-        params: r#"{"asset": id, "seconds": f64, "bright"?: bool, "bars"?: bool, "width"?: n, "height"?: n (帯を付ける枠), "wait"?: bool (既定 true。false: まだ開いていなければ裏で開き {"pending": true} を返す)}"#,
+        params: r#"{"asset": id, "seconds": f64, "bright"?: bool, "poster"?: bool, "bars"?: bool, "width"?: n, "height"?: n (帯を付ける枠), "wait"?: bool (既定 true。false: まだ開いていなければ裏で開き {"pending": true} を返す)}"#,
         enabled: always_enabled,
         run: run_frame,
         journal: false,
@@ -288,6 +288,9 @@ fn run_frame(session: &mut Session, params: &Value) -> CommandResult {
     // "bright": the first bright (non-black) frame from there (a still video thumbnail without a poster frame).
     // "bars": false gives the picture without its letterbox bars (a video thumbnail stretches it over its area).
     let bright = matches!(params.get("bright"), Some(Value::Bool(true)));
+    // "poster": at the file's start, the poster frame Encore gives a new timeline's first chapter (where a video that
+    // starts black first shows something), for a first chapter that has no poster of its own.
+    let poster = matches!(params.get("poster"), Some(Value::Bool(true))) && seconds <= 0.0;
     let bars = !matches!(params.get("bars"), Some(Value::Bool(false)));
     let media = asset.media_file();
     let path: &Path = &media;
@@ -300,6 +303,11 @@ fn run_frame(session: &mut Session, params: &Value) -> CommandResult {
         reader
             .first_bright_time(seconds)
             .map_err(|error| error.to_string())?
+    } else if poster {
+        reader
+            .first_chapter_poster()
+            .map_err(|error| error.to_string())?
+            .unwrap_or(seconds)
     } else {
         seconds
     };
@@ -1118,7 +1126,14 @@ fn run_probe(session: &mut Session, params: &Value) -> CommandResult {
     if matches!(asset.kind, AssetKind::Video | AssetKind::Audio) && !wait(params) {
         let media = asset.media_file();
         let path: &Path = &media;
-        if !disccraft_transcode::probe_ready(path) {
+        // A transport stream's sound streams, their languages and its field order are in its index, which reads
+        // the whole file: a file whose length is known (remembered, or told by a Blu-ray's playlist, M6.429) is
+        // still opened in the background first, not on the caller's thread.
+        let unindexed_stream = || {
+            !disccraft_transcode::media_open(path)
+                && disccraft_transcode::ts_stream_types(path).is_some()
+        };
+        if !disccraft_transcode::probe_ready(path) || unindexed_stream() {
             disccraft_transcode::warm(path);
             return Ok(pending(id));
         }
@@ -1141,6 +1156,41 @@ fn run_probe(session: &mut Session, params: &Value) -> CommandResult {
                     let streams =
                         disccraft_transcode::audio_stream_count(&asset.media_file()).max(1);
                     let _ = fields.insert("audioStreams".to_string(), Value::from(streams));
+                    // M6.421: the language the file names for each stream (ISO 639-1, null for none).
+                    let languages = super::timeline::stream_languages(&asset.media_file());
+                    if !languages.is_empty() {
+                        let _ = fields.insert(
+                            "audioLanguages".to_string(),
+                            Value::from(
+                                languages
+                                    .into_iter()
+                                    .map(|code| code.map_or(Value::Null, Value::from))
+                                    .collect::<Vec<_>>(),
+                            ),
+                        );
+                    }
+                }
+                // M6.422: the subtitle tracks inside the file that can be taken out.
+                let embedded = disccraft_transcode::embedded_subtitles(&asset.media_file());
+                if !embedded.is_empty() {
+                    let streams: Vec<Value> = embedded
+                        .iter()
+                        .map(|subtitle| {
+                            serde_json::json!({
+                                "format": match subtitle.format {
+                                    disccraft_transcode::EmbeddedFormat::Text => "text",
+                                    disccraft_transcode::EmbeddedFormat::Pgs => "pgs",
+                                },
+                                "language": subtitle
+                                    .language
+                                    .as_deref()
+                                    .and_then(disccraft_bdmv::iso639_1),
+                                "name": subtitle.name,
+                                "forced": subtitle.forced,
+                            })
+                        })
+                        .collect();
+                    let _ = fields.insert("subtitleStreams".to_string(), Value::Array(streams));
                 }
                 if let Some(fps) = Number::from_f64(probe.fps).filter(|_| probe.fps > 0.0) {
                     let _ = fields.insert("fps".to_string(), Value::Number(fps));

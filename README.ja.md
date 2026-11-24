@@ -71,6 +71,7 @@ DiscCraft は映像・音声・静止画から DVD-Video / Blu-ray（BDMV）を�
 - 素材: 映像（MP4 / MOV / MKV / m2v / DV など）、音声（WAV / AC-3 / MP3 / FLAC など）、画像（PNG / JPEG / PSD / TIFF）、
   ベクター画像（SVG。表示する大きさで描くのでぼけない）、字幕（SRT / WebVTT / タイムコード付きテキスト。UTF-8 / UTF-16 / Shift_JIS）
 - ナビゲーション: ファーストプレイ、タイトルボタン、リモートメニュー、リンク、フローチャート、プレイリスト、スライドショー
+- Blu-ray から DVD へ: ファイル ▸ 読み込み ▸ Blu-ray… で、暗号化されていない Blu-ray のプレイリストをタイムラインに（クリップ、チャプター、LPCM / AC-3 の音声）、メニューは同じボタンが同じチャプターにリンクしたモーションメニューに。そのまま DVD にビルドできる。コマンドラインの `bd-chapters` で Blu-ray のチャプターを出せる
 - ディスクへの書き込み（Windows）: ビルドパネルの出力「DVD ディスク / Blu-ray ディスク」で、レコーダー・書き込み速度・コピー数を選んで書き込む（書き換え可能ディスクの消去も）。コマンドラインの `recorders` と `burn` も
 - トランスコード: 自動トランスコード（音声は Dolby Digital（AC-3）192 kbps）、容量に合わせたビットレート配分、キャッシュ、
   複数の素材の変換を並列に（MPEG-2 エンコーダはマクロブロックの行でマルチスレッド、AC-3 は区間に分けて全コアで）。
@@ -135,7 +136,7 @@ disccraft-cli build project.dcproj --iso disc.iso
 
 規格に合わない素材はビルドのときに変換し、出力先の `disccraft-cache` に残す（2 回目からは変換を飛ばす）。
 
-画面ごとの使い方は [ユーザーマニュアル](docs/user-guide.ja.md) にある。まだできないことは [残りの課題と予定](docs/open-issues.ja.md) にまとめた。
+画面ごとの使い方は [ユーザーマニュアル](docs/user-guide.ja.md) にある。まだできないことは [残りの課題と予定](docs/open-issues.ja.md) にまとめた。版ごとの変更は [変更履歴](CHANGELOG.ja.md) にある。
 
 ## AI エージェントから使う（MCP）
 

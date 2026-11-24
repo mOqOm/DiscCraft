@@ -336,11 +336,7 @@ impl DiscCraftApp {
             self.popup_texture = self.render_popup(ui.ctx(), &menu, hash);
         }
         // ハイライトの形はメニューの絵の段の覚え（`menu_texture`）から。
-        if self
-            .menu_texture
-            .as_ref()
-            .is_none_or(|cached| cached.hash != hash)
-        {
+        if self.menu_texture_due(hash) {
             self.render_menu_texture(ui.ctx(), &menu, hash);
         }
         let Some(cached) = &self.popup_texture else {

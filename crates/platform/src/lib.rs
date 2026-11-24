@@ -15,8 +15,8 @@ pub mod displays;
 pub mod hw_video;
 pub mod memory;
 
-pub use burn::{BurnError, BurnRequest, BurnStep, Media, MediaKind, Recorder};
-pub use displays::{Display, displays};
+pub use burn::{BurnError, BurnRequest, BurnStep, LayerBoundary, Media, MediaKind, Recorder};
+pub use displays::{Display, displays, keep_on_top};
 pub use hw_video::{
     HwCodec, HwPacket, HwVideoConfig, HwVideoEncoder, hardware_encoders, hardware_h264_encoders,
     use_for_transcodes,

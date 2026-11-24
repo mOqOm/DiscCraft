@@ -75,6 +75,9 @@ What works today:
   vector graphics (SVG, drawn at the displayed size so they never blur), subtitles (SRT / WebVTT / timecode text;
   UTF-8 / UTF-16 / Shift_JIS)
 - Navigation: first play, title button, remote menu, links, flowchart, playlists, slideshows
+- Blu-ray to DVD: File ▸ Import ▸ Blu-ray… makes a timeline of an unencrypted Blu-ray's playlist (its clips, chapters and
+  LPCM / AC-3 sound) and its menu a motion menu with the same buttons linked to the same chapters, ready to build as
+  a DVD; `bd-chapters` on the command line prints a Blu-ray's chapters
 - Writing to disc (Windows): the Build panel's "DVD Disc / Blu-ray Disc" output writes to a recorder, with the write speed and the number of copies (erasing rewritable discs too); also `recorders` and `burn` on the command line
 - Transcode: automatic transcoding (audio to Dolby Digital (AC-3) at 192 kbps), bitrate allocation to fit the capacity, caching,
   several sources converted in parallel (the MPEG-2 encoder is multithreaded over macroblock rows, AC-3 is encoded in segments
@@ -142,7 +145,7 @@ Example `commands.jsonl` (a DVD with one video and one menu):
 Material that doesn't meet the spec is converted at build time and kept in `disccraft-cache` in the output folder (later
 builds skip the conversion).
 
-The [user manual](docs/user-guide.md) explains the screens one by one. What is not done yet is in [open issues](docs/open-issues.md).
+The [user manual](docs/user-guide.md) explains the screens one by one. What is not done yet is in [open issues](docs/open-issues.md). What changed in each version is in the [changelog](CHANGELOG.md).
 
 ## Driving it from an AI agent (MCP)
 

@@ -13,6 +13,7 @@
     clippy::unreachable
 )]
 
+mod bd_chapters;
 mod inspect;
 
 use clap::{Parser, Subcommand};
@@ -90,6 +91,23 @@ enum Sub {
         #[arg(long)]
         no_verify: bool,
     },
+    /// List a Blu-ray's playlists and print the chapters of the main one (M9.41): a disc in a drive (`D:`), a
+    /// disc's folder, its BDMV or PLAYLIST folder, or one .mpls file. Encrypted discs are not read
+    BdChapters {
+        path: PathBuf,
+        /// The playlist whose chapters are printed (1, 00001 or 00001.mpls; default: the longest)
+        #[arg(long, conflicts_with = "all")]
+        playlist: Option<String>,
+        /// The chapters of every playlist that has any
+        #[arg(long)]
+        all: bool,
+        /// Print JSON (every playlist and its chapters in seconds)
+        #[arg(long, conflicts_with = "ogm")]
+        json: bool,
+        /// Print the chapters as an OGM chapter file (CHAPTER01=00:00:00.000 / CHAPTER01NAME=...)
+        #[arg(long)]
+        ogm: bool,
+    },
     /// Read the disc in a recorder back and compare it with a disc image, sector by sector (M9.38)
     Verify {
         image: PathBuf,
@@ -159,6 +177,21 @@ fn run(cli: Cli) -> Result<(), String> {
             no_verify,
         } => burn_image(&image, recorder.as_deref(), speed, (erase, !no_verify)),
         Sub::Verify { image, recorder } => verify_disc(&image, recorder.as_deref()),
+        Sub::BdChapters {
+            path,
+            playlist,
+            all,
+            json,
+            ogm,
+        } => bd_chapters::run(
+            &path,
+            &bd_chapters::Options {
+                playlist,
+                all,
+                json,
+                ogm,
+            },
+        ),
     }
 }
 
@@ -238,6 +271,18 @@ fn list_recorders() -> Result<(), String> {
                     media.total_bytes,
                     speeds.join(" ")
                 );
+                // M9.42: where a dual-layer disc's first layer ends, and whether it can still be set.
+                if let Some(boundary) = media.layer_boundary {
+                    println!(
+                        "	layer 0: {} sectors ({})",
+                        boundary.layer0_sectors,
+                        if boundary.fixed {
+                            "fixed"
+                        } else {
+                            "can be made smaller"
+                        }
+                    );
+                }
             }
             Err(error) => println!("\t{error}"),
         }
@@ -277,6 +322,8 @@ fn burn_image(
         erase_rewritable: erase,
         eject: true,
         verify,
+        // M9.42: a DVD-9 image's layer break, from the note the build writes beside it.
+        layer_break: disccraft_build::image_layer_break(image),
     };
     let progress: Arc<dyn Fn(BurnStep, f32) + Send + Sync> = Arc::new(|step, fraction| {
         use std::io::Write;

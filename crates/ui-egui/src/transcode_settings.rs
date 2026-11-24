@@ -586,6 +586,9 @@ pub(crate) fn bluray_list(
     (presets, automatic)
 }
 
+/// The width of the dialog's preset combos.
+const COMBO_WIDTH: f32 = 260.0;
+
 /// A quality preset combo (Encore's): the presets, a separator, Automatic, `extra` (a Blu-ray's "Use Project
 /// Settings") and "Don't Transcode" for a video that `fits` the disc as it is. When a preset can make such a video transcoded all the same (`forceable`: a DVD's),
 /// "Don't Transcode" is its setting until a preset is picked, and picking it again takes the preset away; otherwise
@@ -598,6 +601,7 @@ pub(crate) fn preset_combo<P: Clone>(
     presets: &[(String, P)],
     (fits, forceable): (bool, bool),
     extra: Option<&str>,
+    width: f32,
 ) -> Option<Picked<P>> {
     let mut picked = None;
     let locked = fits && !forceable;
@@ -609,7 +613,7 @@ pub(crate) fn preset_combo<P: Clone>(
         current
     };
     let _ = egui::ComboBox::from_id_salt(salt)
-        .width(260.0)
+        .width(width)
         .selected_text(shown)
         .show_ui(ui, |ui| {
             ui.set_min_width(300.0);
@@ -883,13 +887,14 @@ impl DiscCraftApp {
             })
     }
 
-    /// The DVD preset combo for an asset as `shown` (in the dialog or the Properties): what was picked.
+    /// The DVD preset combo for an asset as `shown` (in the dialog or the Properties, `width` wide): what was
+    /// picked.
     pub(crate) fn dvd_preset_combo(
         &self,
         ui: &mut egui::Ui,
         salt: &str,
         shown: &Asset,
-        passes: bool,
+        (passes, width): (bool, f32),
     ) -> Option<Picked<DvdPreset>> {
         let presets: Vec<(String, DvdPreset)> = dvd_presets(
             self.session.project.settings.standard,
@@ -905,6 +910,7 @@ impl DiscCraftApp {
             &presets,
             (passes, true),
             None,
+            width,
         )
     }
 
@@ -936,6 +942,7 @@ impl DiscCraftApp {
             &presets,
             (passes, true),
             Some(tl!("Use Project Settings")),
+            COMBO_WIDTH,
         )
     }
 
@@ -972,8 +979,9 @@ impl DiscCraftApp {
                 .unwrap_or_else(|| tl!("Automatic").to_owned())
         };
         let mut picked = None;
+        // As wide as the Properties panel allows (Encore's fields run to its right edge, M6.464).
         let _ = egui::ComboBox::from_id_salt(salt)
-            .width(260.0)
+            .width((ui.available_width() - 8.0).max(COMBO_WIDTH))
             .height(480.0)
             .selected_text(text)
             .show_ui(ui, |ui| {
@@ -1128,7 +1136,7 @@ impl DiscCraftApp {
                             ui.horizontal(|ui| {
                                 ui.label(tl!("Quality Preset:"));
                                 if let Some(picked) =
-                                    self.dvd_preset_combo(ui, "transcode_dvd_preset", &shown, dvd_passes)
+                                    self.dvd_preset_combo(ui, "transcode_dvd_preset", &shown, (dvd_passes, COMBO_WIDTH))
                                 {
                                     draft.dvd = match picked {
                                         Picked::Preset(preset) => DvdDraft::of(preset),

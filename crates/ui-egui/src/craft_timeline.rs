@@ -15,42 +15,49 @@ use egui::{Color32, Rect, Response, Sense, Stroke, Ui, pos2, vec2};
 
 /// The Timeline's colours: FilmCraft's Medium theme (Premiere's brightness slider at its middle).
 pub(crate) mod style {
+    use crate::theme::Shade;
     use egui::Color32;
 
-    /// Background of the tracks, the ruler and the headers.
-    pub(crate) const TL_BG: Color32 = Color32::from_rgb(0x32, 0x32, 0x32);
+    /// Background of the tracks, the ruler and the headers (the light look: Encore's 242).
+    pub(crate) const TL_BG: Shade =
+        Shade::new(Color32::from_rgb(0x32, 0x32, 0x32), Color32::from_gray(242));
     /// The ruler's ticks.
-    pub(crate) const RULER_TICK: Color32 = Color32::from_rgb(0x8d, 0x8d, 0x8d);
+    pub(crate) const RULER_TICK: Shade = Shade::gray(0x8d, 120);
     /// The ruler's timecodes.
-    pub(crate) const RULER_TEXT: Color32 = Color32::from_rgb(0xb0, 0xb0, 0xb0);
-    /// The playhead.
-    pub(crate) const PLAYHEAD: Color32 = Color32::from_rgb(0x58, 0x95, 0xec);
-    /// The big current-time timecode.
-    pub(crate) const TIMECODE: Color32 = Color32::from_rgb(0x40, 0x96, 0xf3);
+    pub(crate) const RULER_TEXT: Shade = Shade::gray(0xb0, 60);
+    /// The playhead's blue, kept as the docking's accent colour.
+    pub(crate) const PLAYHEAD: Shade = Shade::same(Color32::from_rgb(0x58, 0x95, 0xec));
+    /// Encore's playhead (M6.484, measured; the same in both looks): its head shaded from (239,184,5) at the top to
+    /// (208,158,3) at the point, its line orange-red through the ruler and red through the tracks.
+    pub(crate) const PLAYHEAD_HEAD_TOP: Color32 = Color32::from_rgb(239, 184, 5);
+    pub(crate) const PLAYHEAD_HEAD_BOTTOM: Color32 = Color32::from_rgb(208, 158, 3);
+    pub(crate) const PLAYHEAD_IN_RULER: Color32 = Color32::from_rgb(240, 87, 11);
+    pub(crate) const PLAYHEAD_LINE: Color32 = Color32::from_rgb(252, 0, 0);
     /// A selected clip's border.
-    pub(crate) const SELECTED_BORDER: Color32 = Color32::from_rgb(0xeb, 0xeb, 0xeb);
+    pub(crate) const SELECTED_BORDER: Shade = Shade::same(Color32::from_rgb(0xeb, 0xeb, 0xeb));
     /// The scroll bar's track and its thumb.
-    pub(crate) const SEPARATOR: Color32 = Color32::from_rgb(0x30, 0x30, 0x30);
-    pub(crate) const SCROLL_THUMB: Color32 = Color32::from_gray(0x4b);
-    pub(crate) const SCROLL_THUMB_HOVER: Color32 = Color32::from_gray(0x6a);
+    pub(crate) const SEPARATOR: Shade = Shade::gray(0x30, 200);
+    pub(crate) const SCROLL_THUMB: Shade = Shade::gray(0x4b, 190);
+    pub(crate) const SCROLL_THUMB_HOVER: Shade = Shade::gray(0x6a, 165);
     /// Text and icons.
-    pub(crate) const TEXT: Color32 = Color32::from_rgb(0xd1, 0xd1, 0xd1);
-    pub(crate) const TEXT_DIM: Color32 = Color32::from_rgb(0xb0, 0xb0, 0xb0);
-    pub(crate) const ICON_ACTIVE: Color32 = Color32::from_rgb(0xd1, 0xd1, 0xd1);
+    pub(crate) const TEXT: Shade = Shade::gray(0xd1, 40);
+    pub(crate) const TEXT_DIM: Shade = Shade::gray(0xb0, 90);
+    pub(crate) const ICON_ACTIVE: Shade = Shade::gray(0xd1, 40);
     /// A hovered toolbar button.
-    pub(crate) const HOVER: Color32 = Color32::from_rgb(64, 64, 64);
+    pub(crate) const HOVER: Shade = Shade::gray(64, 215);
     /// FilmCraft's default marker colour (its label colour "Green").
-    pub(crate) const MARKER: Color32 = Color32::from_rgb(0x3d, 0xa8, 0x4b);
-    /// A track header's badge (Premiere's track targeting blue).
-    pub(crate) const TRACK_TARGET: Color32 = Color32::from_rgb(0x26, 0x5b, 0xc1);
-    /// Clip colours: Premiere's default labels for video (Iris) and audio (Caribbean) media.
-    pub(crate) const CLIP_VIDEO: Color32 = Color32::from_rgb(0x1d, 0x4a, 0x64);
-    pub(crate) const CLIP_AUDIO: Color32 = Color32::from_rgb(0x35, 0x54, 0x18);
+    pub(crate) const MARKER: Shade = Shade::same(Color32::from_rgb(0x3d, 0xa8, 0x4b));
+    /// The audio clips' colour: Premiere's default label for audio (Caribbean) media (the same in both looks, as
+    /// Encore keeps its clips' colours; the video clips are Encore's since M6.483).
+    pub(crate) const CLIP_AUDIO: Shade = Shade::same(Color32::from_rgb(0x35, 0x54, 0x18));
     /// A clip's name.
-    pub(crate) const CLIP_NAME: Color32 = Color32::from_rgb(0xd9, 0xd9, 0xd9);
+    pub(crate) const CLIP_NAME: Shade = Shade::same(Color32::from_rgb(0xd9, 0xd9, 0xd9));
     /// A caption (subtitle) block, and its track's lane.
-    pub(crate) const CAPTION: Color32 = Color32::from_rgb(0x6b, 0x4f, 0x8f);
-    pub(crate) const CAPTION_LANE: Color32 = Color32::from_rgb(0x23, 0x20, 0x2a);
+    pub(crate) const CAPTION: Shade = Shade::same(Color32::from_rgb(0x6b, 0x4f, 0x8f));
+    pub(crate) const CAPTION_LANE: Shade = Shade::new(
+        Color32::from_rgb(0x23, 0x20, 0x2a),
+        Color32::from_rgb(225, 222, 232),
+    );
 }
 
 /// Height of a clip's name band (FilmCraft's `draw_clip`).
@@ -154,8 +161,8 @@ pub(crate) fn clip_name_and_edges(
     painter: &egui::Painter,
     body: Rect,
     name: &str,
-    head: bool,
-    tail: bool,
+    (head, tail): (bool, bool),
+    text: Color32,
 ) {
     let w = body.width();
     let clip = painter.with_clip_rect(body.shrink2(vec2(1.0, 0.0)).intersect(painter.clip_rect()));
@@ -165,7 +172,7 @@ pub(crate) fn clip_name_and_edges(
             egui::Align2::LEFT_CENTER,
             name,
             egui::FontId::proportional(11.5),
-            style::CLIP_NAME,
+            text,
         );
     }
     let tri = 5.0;
@@ -268,27 +275,66 @@ pub(crate) fn marker_glyph(
     painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
 }
 
-/// The playhead's short head on the tick row (as in Effect Controls, so it leaves the markers and timecodes clear)
-/// and its line down through the tracks, at `px`.
-pub(crate) fn draw_playhead(painter: &egui::Painter, px: f32, ruler: Rect, bottom: f32) {
-    let (top, tip) = (ruler.max.y - 13.0, ruler.max.y);
-    let head = [
-        pos2(px - 5.0, top),
-        pos2(px + 5.0, top),
-        pos2(px + 5.0, tip - 5.0),
-        pos2(px, tip),
-        pos2(px - 5.0, tip - 5.0),
+/// The playhead as Encore draws it (M6.484): a yellow head like a shield, its point on the tick row's bottom (so it
+/// leaves the chapter flags clear), and its line down from there, orange-red through the rest of the ruler (to
+/// `ruler_bottom`) and red through the tracks, at `px`. The head's shape is DiscCraft's own drawing.
+pub(crate) fn draw_playhead(
+    painter: &egui::Painter,
+    px: f32,
+    ticks: Rect,
+    ruler_bottom: f32,
+    bottom: f32,
+) {
+    // On a pixel's middle, so the line is one sharp pixel as Encore's (and the head stays on it).
+    let px = painter.round_to_pixel_center(px);
+    let tip = ticks.max.y;
+    let top = tip - 12.0;
+    // Encore's head, row by row: 7 pixels wide at the top, 11 for four rows, 9 for three, then narrowing to 4.
+    let outline = [
+        pos2(px - 3.5, top),
+        pos2(px + 3.5, top),
+        pos2(px + 5.5, top + 2.0),
+        pos2(px + 5.5, top + 6.0),
+        pos2(px + 4.5, top + 7.0),
+        pos2(px + 4.5, top + 9.0),
+        pos2(px + 2.0, tip),
+        pos2(px - 2.0, tip),
+        pos2(px - 4.5, top + 9.0),
+        pos2(px - 4.5, top + 7.0),
+        pos2(px - 5.5, top + 6.0),
+        pos2(px - 5.5, top + 2.0),
     ];
-    painter.add(egui::Shape::convex_polygon(
-        head.to_vec(),
-        style::PLAYHEAD,
-        Stroke::NONE,
-    ));
+    // Shaded top to bottom: a fan from the middle, each corner coloured by its height.
+    let shade = |y: f32| {
+        let t = ((y - top) / (tip - top)).clamp(0.0, 1.0);
+        let mix = |a: u8, b: u8| {
+            // `as` saturates; the value is 0..=255.
+            (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8
+        };
+        let (a, b) = (style::PLAYHEAD_HEAD_TOP, style::PLAYHEAD_HEAD_BOTTOM);
+        Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
+    };
+    let mut mesh = egui::Mesh::default();
+    let middle = pos2(px, top + 6.0);
+    mesh.colored_vertex(middle, shade(middle.y));
+    for point in outline {
+        mesh.colored_vertex(point, shade(point.y));
+    }
+    let corners = u32::try_from(outline.len()).unwrap_or(0);
+    for i in 0..corners {
+        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % corners);
+    }
+    painter.add(egui::Shape::mesh(mesh));
     // a path, not a line segment: egui rounds line segments to whole pixels, so while playing
     // the line would move in uneven pixel steps and part from its head
+    let ruler_bottom = ruler_bottom.clamp(tip, bottom.max(tip));
     painter.add(egui::Shape::line(
-        vec![pos2(px, tip), pos2(px, bottom)],
-        Stroke::new(1.0, style::PLAYHEAD),
+        vec![pos2(px, tip), pos2(px, ruler_bottom)],
+        Stroke::new(1.0, style::PLAYHEAD_IN_RULER),
+    ));
+    painter.add(egui::Shape::line(
+        vec![pos2(px, ruler_bottom), pos2(px, bottom)],
+        Stroke::new(1.0, style::PLAYHEAD_LINE),
     ));
 }
 

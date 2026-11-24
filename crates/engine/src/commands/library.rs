@@ -137,7 +137,11 @@ fn run_new_menu(session: &mut Session, params: &Value) -> CommandResult {
             }
             session
                 .project
-                .add_menu_from_spec(name.unwrap_or_else(|| "Menu".to_owned()), &spec, &labels)
+                .add_menu_from_spec(
+                    name.unwrap_or_else(|| session.project.words.menu_name().to_owned()),
+                    &spec,
+                    &labels,
+                )
                 .map_err(|error| error.to_string())?
         }
         _ => return Err("give exactly one of \"preset\" or \"spec\"".to_string()),

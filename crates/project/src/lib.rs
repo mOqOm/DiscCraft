@@ -16,6 +16,7 @@
 mod arrange;
 mod chapter_index;
 mod chapter_playlist;
+mod chapter_refs;
 mod check;
 mod check_lists;
 mod check_menu;
@@ -47,6 +48,7 @@ mod timecode;
 mod transition;
 
 mod user_ops;
+mod words;
 pub use arrange::{
     Align, Arrange, Axis, align_rects, arranged_order, bounds, distribute_rects, free_offset,
     moved_order, safe_area,
@@ -81,10 +83,11 @@ pub use lists::{
 };
 pub use menu::{AUTO_LEADING, LINE_PITCHES, MAX_LINE_PITCH, MIN_LINE_PITCH};
 pub use menu::{
-    Button, DEFAULT_TEXT_SIZE, MAX_BUTTONS, MAX_FONT_NAME_CHARS, MAX_LEADING,
-    MAX_MENU_AUDIO_SECONDS, MAX_MENU_SECONDS, MAX_MENU_TEXTS, MAX_TEXT_CHARS, MAX_TEXT_SIZE,
-    MAX_TRACKING, MIN_LEADING, MIN_TEXT_SIZE, MIN_TRACKING, MenuBackground, MenuText, Rect,
-    TextAlign, TextCaps, TextFormat, auto_button_rect, frame_size, safe_area_guides,
+    Button, DEFAULT_TEXT_SIZE, LETTERBOX_MOST_BUTTONS, MAX_BUTTONS, MAX_FONT_NAME_CHARS,
+    MAX_LEADING, MAX_MENU_AUDIO_SECONDS, MAX_MENU_SECONDS, MAX_MENU_TEXTS, MAX_TEXT_CHARS,
+    MAX_TEXT_SIZE, MAX_TRACKING, MIN_LEADING, MIN_TEXT_SIZE, MIN_TRACKING, MenuBackground,
+    MenuText, Rect, TextAlign, TextCaps, TextFormat, auto_button_rect, frame_size,
+    safe_area_guides,
 };
 pub use menu::{ButtonDefaults, ButtonKind, NO_PSD_PAGE, PopupBackground, RouteOptions, WrapMode};
 pub use menu::{
@@ -127,3 +130,4 @@ pub use text_span::{MAX_TEXT_SPANS, SpanStyle, TextSpan};
 pub use thumbnail::{MenuThumbnail, THUMBNAIL_PARTS, ThumbnailArea, ThumbnailSource};
 pub use timecode::{format_frames, format_time, parse_time};
 pub use user_ops::{UserOp, dvd_uop_mask, normalized_ops};
+pub use words::{Words, default_chapter_number};

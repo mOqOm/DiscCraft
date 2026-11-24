@@ -222,6 +222,16 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "timeline.importSourceSubtitles",
+        label: "動画の中の字幕を字幕トラックに",
+        menu: &["タイムライン"],
+        shortcut: None,
+        params: r#"{"timeline": id} → {"added", "skipped"} (mkv の字幕を .srt / .sup に取り出して `<プロジェクト>.subtitles` に置き、字幕トラックとして足す。DVD では PGS を除く)"#,
+        enabled: always_enabled,
+        run: run_import_source_subtitles,
+        journal: true,
+    },
+    CommandSpec {
         id: "timeline.importFilmCraftMarkers",
         label: "FilmCraft のマーカーをチャプターに",
         menu: &["タイムライン"],
@@ -493,12 +503,47 @@ fn run_create(session: &mut Session, params: &Value) -> CommandResult {
         .add_timeline(asset, name)
         .map_err(|error| error.to_string())?;
     take_source_streams(session, id);
+    take_first_chapter_poster(session, id);
     // The chapters its file carries become its chapter points (Encore: the chapter markers embedded in a file).
     let _ = source_chapters(session, id);
     // As in Encore, the first timeline becomes the disc's first play.
     session.project.adopt_first_play(id);
 
     Ok(object(&[("timeline", Value::from(id.0))]))
+}
+
+/// A new timeline's first chapter gets the poster frame Encore gives it: where a video that starts black first shows
+/// something, at a half second (Encore CS6, 2026-11-23: the Gray clips that fade in got 1;15 or 2;00, the others none),
+/// at the nearest frame. Nothing changes when the file cannot be read or does not start black.
+fn take_first_chapter_poster(session: &mut Session, timeline: TimelineId) {
+    let rate = session.project.settings.frame_rate();
+    let video = session
+        .project
+        .timelines
+        .get(&timeline)
+        .and_then(|timeline| session.project.assets.get(&timeline.video))
+        .filter(|asset| asset.kind == AssetKind::Video)
+        .map(|asset| asset.media_file().into_owned());
+    let poster = video
+        .and_then(|path| disccraft_transcode::FrameReader::open(&path).ok())
+        .and_then(|reader| reader.first_chapter_poster().ok().flatten());
+    let Some(seconds) = poster else {
+        return;
+    };
+    let frame = (seconds * rate.as_f64()).round();
+    if !frame.is_finite() {
+        return;
+    }
+    // `as` saturates.
+    let tick = rate.tick_of(frame as i64);
+    if let Some(first) = session
+        .project
+        .timelines
+        .get_mut(&timeline)
+        .and_then(|timeline| timeline.chapters.first_mut())
+    {
+        first.poster = Some(tick);
+    }
 }
 
 /// A new timeline takes from its video what Encore's timelines do: the aspect (16:9 for a wide picture, 4:3
@@ -529,12 +574,17 @@ fn take_source_streams(session: &mut Session, timeline: TimelineId) {
                 .as_deref()
                 .map_or(1, disccraft_transcode::audio_stream_count)
                 .clamp(1, DVD_MAX_AUDIO_TRACKS);
+            // M6.421: each track in the language the file names for its stream (else the disc's own).
+            let languages = video_path
+                .as_deref()
+                .map(stream_languages)
+                .unwrap_or_default();
             for stream in 0..streams {
                 timeline.audio.push(disccraft_project::AudioTrack {
                     more: Vec::new(),
                     asset: video,
                     stream: u32::try_from(stream).unwrap_or(0),
-                    language: String::new(),
+                    language: languages.get(stream).cloned().flatten().unwrap_or_default(),
                     start: 0,
                     trim_start: 0,
                     trim_end: None,
@@ -542,6 +592,136 @@ fn take_source_streams(session: &mut Session, timeline: TimelineId) {
             }
         }
     }
+    if let Some(path) = video_path.as_deref() {
+        let empty = session
+            .project
+            .timelines
+            .get(&timeline)
+            .is_some_and(|timeline| timeline.subtitles.is_empty());
+        if empty {
+            let _ = add_embedded_subtitles(session, timeline, path);
+        }
+    }
+}
+
+/// The most subtitle tracks a timeline has (a DVD's subpicture streams; a Blu-ray takes as many PGS streams).
+const MAX_SUBTITLE_TRACKS: usize = 32;
+
+/// Where subtitles taken out of video files are kept (M6.422): `<project>.subtitles` beside the project, or a
+/// temporary folder before the project is saved.
+fn subtitle_folder(session: &Session) -> std::path::PathBuf {
+    match session.path.as_deref() {
+        Some(project) => {
+            let stem = project
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("project");
+            project
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join(format!("{stem}.subtitles"))
+        }
+        None => std::env::temp_dir().join("DiscCraft").join("subtitles"),
+    }
+}
+
+/// M6.422: the subtitle tracks inside the video file `path`, each taken out as a subtitle file (`.srt`, or `.sup` on
+/// a Blu-ray: a DVD takes no PGS) and laid out as a subtitle track of `timeline` in the language the file names for it
+/// (English on every track counts as the file saying nothing, as for the sound streams), up to
+/// [`MAX_SUBTITLE_TRACKS`] in all. Gives (added, left out): a track that cannot be taken out, a PGS one on a DVD, and
+/// those past the limit are left out.
+fn add_embedded_subtitles(
+    session: &mut Session,
+    timeline: TimelineId,
+    path: &std::path::Path,
+) -> (usize, usize) {
+    let room = session
+        .project
+        .timelines
+        .get(&timeline)
+        .map_or(0, |timeline| {
+            MAX_SUBTITLE_TRACKS.saturating_sub(timeline.subtitles.len())
+        });
+    let bluray = session.project.settings.kind == DiscKind::BluRay;
+    let all = disccraft_transcode::embedded_subtitles(path);
+    let found = all.len();
+    let embedded: Vec<disccraft_transcode::EmbeddedSubtitle> = all
+        .into_iter()
+        .filter(|subtitle| bluray || subtitle.format == disccraft_transcode::EmbeddedFormat::Text)
+        .take(room)
+        .collect();
+    if embedded.is_empty() {
+        return (0, found);
+    }
+    let english = |code: &str| disccraft_bdmv::iso639_1(code) == Some("en");
+    let all_english = embedded
+        .iter()
+        .filter_map(|subtitle| subtitle.language.as_deref())
+        .all(english);
+    let folder = subtitle_folder(session);
+    let mut added = 0usize;
+    for subtitle in embedded {
+        let Ok(file) =
+            disccraft_transcode::extract_embedded_subtitle(path, subtitle.stream, &folder)
+        else {
+            continue;
+        };
+        let Ok(asset) = session.project.add_asset(&file) else {
+            continue;
+        };
+        let language = subtitle
+            .language
+            .as_deref()
+            .filter(|code| !(all_english && english(code)))
+            .and_then(disccraft_bdmv::iso639_1)
+            .unwrap_or_default()
+            .to_owned();
+        if let Some(timeline) = session.project.timelines.get_mut(&timeline) {
+            timeline.subtitles.push(SubtitleTrack {
+                asset,
+                language,
+                group: 0,
+            });
+            added += 1;
+        }
+    }
+    (added, found.saturating_sub(added))
+}
+
+/// `timeline.importSourceSubtitles` (M6.422): the subtitle tracks inside the timeline's video file as subtitle tracks,
+/// beside the ones it has.
+fn run_import_source_subtitles(session: &mut Session, params: &Value) -> CommandResult {
+    let timeline = TimelineId(req_u64(params, "timeline")?);
+    let video = session
+        .project
+        .timeline(timeline)
+        .ok_or_else(|| format!("timeline {} does not exist", timeline.0))?
+        .video;
+    let path = session
+        .project
+        .assets
+        .get(&video)
+        .filter(|asset| asset.kind == AssetKind::Video)
+        .map(|asset| asset.media_file().into_owned())
+        .ok_or_else(|| format!("timeline {} has no video file", timeline.0))?;
+    let (added, skipped) = add_embedded_subtitles(session, timeline, &path);
+    Ok(object(&[
+        ("added", Value::from(added)),
+        ("skipped", Value::from(skipped)),
+    ]))
+}
+
+/// The languages (ISO 639-1, as a track holds them) the media file at `path` names for its sound streams, in their
+/// order (M6.421); `None` for a stream it names none for, or names one the disc formats do not know.
+pub(crate) fn stream_languages(path: &std::path::Path) -> Vec<Option<String>> {
+    disccraft_transcode::audio_stream_languages(path)
+        .into_iter()
+        .map(|code| {
+            code.as_deref()
+                .and_then(disccraft_bdmv::iso639_1)
+                .map(str::to_owned)
+        })
+        .collect()
 }
 
 fn run_add_chapter(session: &mut Session, params: &Value) -> CommandResult {
@@ -1936,7 +2116,7 @@ fn run_remove_subtitle_track(session: &mut Session, params: &Value) -> CommandRe
 fn run_add_audio_track(session: &mut Session, params: &Value) -> CommandResult {
     let timeline = TimelineId(req_u64(params, "timeline")?);
     let asset = AssetId(req_u64(params, "asset")?);
-    let language = opt_str(params, "language")?.unwrap_or_default();
+    let language = opt_str(params, "language")?;
     let stream = opt_u64(params, "stream")?.unwrap_or(0);
 
     let (asset_id, asset_kind, path) = match session.project.assets.get(&asset) {
@@ -1958,6 +2138,15 @@ fn run_add_audio_track(session: &mut Session, params: &Value) -> CommandResult {
     }
 
     let stream = checked_stream(session, asset_id, stream)?;
+    // M6.421: without a language given, the one the file names for the stream.
+    let language = match language {
+        Some(language) => language,
+        None => stream_languages(std::path::Path::new(&path))
+            .get(usize::try_from(stream).unwrap_or(usize::MAX))
+            .cloned()
+            .flatten()
+            .unwrap_or_default(),
+    };
     let is_dvd = session.project.settings.kind == DiscKind::Dvd;
     let Some(timeline) = session.project.timeline_mut(timeline) else {
         return Err(format!("timeline {} does not exist", timeline.0));

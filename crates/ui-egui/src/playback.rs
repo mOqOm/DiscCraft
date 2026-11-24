@@ -1,7 +1,7 @@
 //! タイムラインの再生（タイムライン ▸ 再生、Space）。engine の [`Player`] が映像を実時間でデコードし、
 //! 画面は描くたびにいちばん新しいフレームをモニターに映して再生ヘッドを進める。音（M6.175）はタイムラインの
 //! 1 つ目のオーディオトラック（なければ映像のファイルの音）を、OS の既定の出力デバイスで鳴らす
-//! （[`crate::audio_out`]）。
+//! （[`crate::audio_out`]）。速さ（M6.427）はモニターの速さのメニューと J / K / L で変え、2 倍までは音の高さを保って鳴らす。
 
 use crate::DiscCraftApp;
 use crate::i18n::{tl, tlf};
@@ -11,6 +11,27 @@ use disccraft_project::{AssetId, TimelineId};
 
 /// 再生ヘッドを利用者が動かしたとみなすずれ（秒）。これより動いていたら再生を止める。
 const MOVED_BY_USER: f64 = 0.25;
+
+/// The speeds the Monitor plays a timeline at (M6.427), slowest first: the speed menu, and the steps of J and L.
+pub(crate) const PLAYBACK_SPEEDS: [f64; 6] = [0.5, 1.0, 1.5, 2.0, 4.0, 8.0];
+
+/// `speed` as the menu shows it: `0.5×`, `2×`.
+pub(crate) fn speed_label(speed: f64) -> String {
+    format!("{speed}×")
+}
+
+/// The speed one step faster (`up`) or slower than `speed` in [`PLAYBACK_SPEEDS`], or `speed` at the end.
+pub(crate) fn speed_step(speed: f64, up: bool) -> f64 {
+    let next = if up {
+        PLAYBACK_SPEEDS.iter().find(|step| **step > speed + 1e-9)
+    } else {
+        PLAYBACK_SPEEDS
+            .iter()
+            .rev()
+            .find(|step| **step < speed - 1e-9)
+    };
+    next.copied().unwrap_or(speed)
+}
 
 /// 再生中のタイムライン。
 pub(crate) struct Playback {
@@ -60,6 +81,47 @@ impl DiscCraftApp {
             from = 0.0;
         }
         self.start_playback_at(ctx, id, from);
+    }
+
+    /// Plays the timeline in the viewer at `speed` (M6.427): when it plays, again from where it is at the new
+    /// speed; otherwise the speed is kept for the next playback.
+    pub(crate) fn set_playback_speed(&mut self, ctx: &egui::Context, speed: f64) {
+        if (speed - self.playback_speed).abs() < 1e-9 {
+            return;
+        }
+        self.playback_speed = speed;
+        if let Some(playing) = self.playback.take() {
+            let id = playing.timeline;
+            // The old player stops before the new one starts (one sound at a time).
+            drop(playing);
+            let here = crate::timeline_view::playhead_seconds(ctx, id);
+            self.start_playback_at(ctx, id, here);
+        }
+    }
+
+    /// L (M6.427): stopped, plays at real time; playing, one step faster.
+    pub(crate) fn play_faster(&mut self, ctx: &egui::Context) {
+        if self.is_playing() {
+            self.set_playback_speed(ctx, speed_step(self.playback_speed, true));
+        } else {
+            self.playback_speed = 1.0;
+            self.toggle_playback(ctx);
+        }
+    }
+
+    /// J (M6.427): one step slower; stopped, plays a step slower than real time.
+    pub(crate) fn play_slower(&mut self, ctx: &egui::Context) {
+        if self.is_playing() {
+            self.set_playback_speed(ctx, speed_step(self.playback_speed, false));
+        } else {
+            self.playback_speed = speed_step(1.0, false);
+            self.toggle_playback(ctx);
+        }
+    }
+
+    /// K (M6.427): stops the playback.
+    pub(crate) fn stop_playback(&mut self) {
+        self.playback = None;
     }
 
     /// Edit ▸ Ripple Delete: the video clip under the playhead of the timeline in the viewer goes, and the clips
@@ -226,12 +288,19 @@ impl DiscCraftApp {
                 .map(|asset| asset.media_file().into_owned()),
             None => Some(path.clone()),
         };
-        let device = match crate::audio_out::AudioDevice::open_default() {
-            Ok(device) => Some(device),
-            Err(message) => {
-                self.status = tlf!("Playing without sound: {message}", message = message);
-                None
+        // Faster than the sound is played (M6.427): silent.
+        let speed = self.playback_speed;
+        let heard = speed <= disccraft_engine::MAX_HEARD_SPEED;
+        let device = if heard {
+            match crate::audio_out::AudioDevice::open_default() {
+                Ok(device) => Some(device),
+                Err(message) => {
+                    self.status = tlf!("Playing without sound: {message}", message = message);
+                    None
+                }
             }
+        } else {
+            None
         };
         let player_audio = match (&device, audio_path) {
             (Some(device), Some(audio)) => Some(PlayerAudio {
@@ -248,7 +317,7 @@ impl DiscCraftApp {
         // The frames at the disc's frame size, as its still frames, or smaller (Preferences ▸ General ▸ Playback
         // quality, M6.341).
         let size = self.playback_quality.size(self.monitor_frame_size(id));
-        let player = Player::start_sized(path, player_audio, local, fps, Some(size));
+        let player = Player::start_at_speed(path, player_audio, local, fps, Some(size), speed);
         let audio = match (device, player.audio()) {
             (Some(device), Some(feed)) => match device.play(feed) {
                 Ok(out) => Some(out),
@@ -584,5 +653,28 @@ mod heard_tests {
         assert_eq!(heard_track(Some((2, 0)), 3), Some(2));
         // The chosen track is gone.
         assert_eq!(heard_track(Some((2, 1)), 1), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod speed_tests {
+    use super::{PLAYBACK_SPEEDS, speed_label, speed_step};
+
+    /// M6.427: J and L step through the speeds and stop at the ends; the menu shows them as `0.5×`, `2×`.
+    #[test]
+    fn j_and_l_step_through_the_speeds() {
+        assert_eq!(speed_step(1.0, true), 1.5);
+        assert_eq!(speed_step(2.0, true), 4.0);
+        assert_eq!(speed_step(8.0, true), 8.0);
+        assert_eq!(speed_step(1.0, false), 0.5);
+        assert_eq!(speed_step(0.5, false), 0.5);
+        // A speed between the steps goes to the next one either way.
+        assert_eq!(speed_step(3.0, true), 4.0);
+        assert_eq!(speed_step(3.0, false), 2.0);
+        let labels: Vec<String> = PLAYBACK_SPEEDS
+            .iter()
+            .map(|speed| speed_label(*speed))
+            .collect();
+        assert_eq!(labels, ["0.5×", "1×", "1.5×", "2×", "4×", "8×"]);
     }
 }

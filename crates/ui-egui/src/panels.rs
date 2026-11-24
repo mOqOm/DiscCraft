@@ -27,8 +27,10 @@ impl DiscCraftApp {
             self.rename_value.clone_from(&current);
         }
 
+        // Encore: the name field runs to the panel's right edge (M6.464).
+        let width = (ui.available_width() - 8.0).max(200.0);
         let response =
-            ui.add(egui::TextEdit::singleline(&mut self.rename_value).desired_width(200.0));
+            ui.add(egui::TextEdit::singleline(&mut self.rename_value).desired_width(width));
         if std::mem::take(&mut self.focus_rename) {
             response.request_focus();
         }

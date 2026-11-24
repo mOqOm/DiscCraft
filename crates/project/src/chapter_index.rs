@@ -44,15 +44,16 @@ const NEXT: Rect = Rect {
     h: 40,
 };
 
-/// Text for the buttons of a chapter index (the caller translates them).
+/// Text for the buttons of a chapter index (the caller translates them; what it leaves empty is in the project's
+/// [`crate::Words`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ChapterIndexLabels {
     /// Label per chapter, by chapter index. A missing or empty entry falls back to the chapter's own name, then to
     /// "Chapter N" (N = index + 1).
     pub chapters: Vec<String>,
-    /// Label of the "previous page" button (empty: "Previous").
+    /// Label of the "previous page" button (empty: "Previous" / "前へ").
     pub previous: String,
-    /// Label of the "next page" button (empty: "Next").
+    /// Label of the "next page" button (empty: "Next" / "次へ").
     pub next: String,
 }
 
@@ -136,16 +137,21 @@ fn pages(chapters: usize, per_page: Option<usize>) -> Result<Vec<Vec<usize>>, Pr
     Ok(all.chunks(size).map(<[usize]>::to_vec).collect())
 }
 
-/// The label of chapter `index`: the given label, the chapter's own name, or "Chapter N".
-fn chapter_text(labels: &ChapterIndexLabels, names: &[String], index: usize) -> String {
-    let given = labels
+/// The label of chapter `index`: the given label, else the chapter's name ("Chapter N" in `words` for a chapter
+/// without a name of its own, M6.433).
+fn chapter_text(
+    labels: &ChapterIndexLabels,
+    names: &[String],
+    index: usize,
+    words: crate::Words,
+) -> String {
+    match labels
         .chapters
         .get(index)
-        .filter(|label| !label.trim().is_empty());
-    let own = names.get(index).filter(|name| !name.trim().is_empty());
-    match given.or(own) {
+        .filter(|label| !label.trim().is_empty())
+    {
         Some(text) => text.clone(),
-        None => format!("Chapter {}", index.saturating_add(1)),
+        None => words.chapter_name(names.get(index).map_or("", String::as_str), index),
     }
 }
 
@@ -484,7 +490,7 @@ impl Project {
                 chapter: u32::try_from(chapter)
                     .map_err(|_| invalid("chapter index is too large"))?,
             };
-            let label = chapter_text(labels, names, chapter);
+            let label = chapter_text(labels, names, chapter, self.words);
             let index = self.add_button(menu, label, Some(placed(rect, &self.settings)), link)?;
             self.set_button_kind_quietly(menu, index, crate::menu::ButtonKind::Chapter);
         }
@@ -519,7 +525,7 @@ impl Project {
                 id: target,
                 button: None,
             };
-            let label = or_default(&labels.previous, "Previous");
+            let label = or_default(&labels.previous, self.words.previous());
             let index =
                 self.add_button(menu, label, Some(placed(PREVIOUS, &self.settings)), link)?;
             self.set_button_kind_quietly(menu, index, crate::menu::ButtonKind::Previous);
@@ -529,7 +535,7 @@ impl Project {
                 id: target,
                 button: None,
             };
-            let label = or_default(&labels.next, "Next");
+            let label = or_default(&labels.next, self.words.next());
             let index = self.add_button(menu, label, Some(placed(NEXT, &self.settings)), link)?;
             self.set_button_kind_quietly(menu, index, crate::menu::ButtonKind::Next);
         }
@@ -992,6 +998,84 @@ mod tests {
         assert_eq!(
             project.fill_chapter_index(MenuId(999)),
             Err(FillChapterIndexError::NoMenu)
+        );
+        Ok(())
+    }
+
+    /// M6.433 (a tester's report: menus mixed English and Japanese): with Japanese words, a chapter index's chapters
+    /// without names of their own, its Previous / Next, a button added without text and a template's chapter button
+    /// named from its link are Japanese; a chapter's own name is kept.
+    #[test]
+    fn made_up_words_follow_the_display_language() -> Result<(), Box<dyn Error>> {
+        let (mut project, timeline) = project_with_chapters(3)?;
+        project.words = crate::Words::Japanese;
+        if let Some(chapter) = project
+            .timeline_mut(timeline)
+            .and_then(|found| found.chapters.get_mut(1))
+        {
+            chapter.name = "オープニング".to_owned();
+        }
+        let menus =
+            project.create_chapter_index(timeline, "x", Some(2), &ChapterIndexLabels::default())?;
+        let labels = |project: &Project, menu: Option<&MenuId>| -> Vec<String> {
+            menu.and_then(|menu| project.menu(*menu))
+                .map(|found| {
+                    found
+                        .buttons
+                        .iter()
+                        .map(|button| button.label.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            labels(&project, menus.first()),
+            ["チャプター 1", "オープニング", "次へ"]
+        );
+        assert_eq!(labels(&project, menus.get(1)), ["チャプター 3", "前へ"]);
+
+        let menu = project.add_menu(None)?;
+        let _ = project.add_button(menu, String::new(), None, Link::NotSet)?;
+        let name = |project: &Project| {
+            project
+                .menu(menu)
+                .and_then(|found| found.buttons.last())
+                .map(|button| button.name.clone())
+        };
+        assert_eq!(name(&project).as_deref(), Some("ボタン 1"));
+        if let Some(button) = project
+            .menu_mut(menu)
+            .and_then(|found| found.buttons.last_mut())
+        {
+            button.kind = crate::menu::ButtonKind::Chapter;
+            button.name_from_link = true;
+            button.link = Link::Timeline {
+                id: timeline,
+                chapter: 2,
+            };
+        }
+        assert_eq!(project.fill_chapter_index(menu), Ok(1));
+        assert_eq!(name(&project).as_deref(), Some("チャプター 3"));
+        assert!(
+            project
+                .menu(menu)
+                .is_some_and(|found| found.name.starts_with("メニュー "))
+        );
+        // M6.436: a folder's and a chapter playlist's default names too.
+        let folder = project.add_folder(None, None)?;
+        assert_eq!(
+            project
+                .folders
+                .get(&folder)
+                .map(|found| found.name.as_str()),
+            Some("フォルダー 1")
+        );
+        let list = project.add_chapter_playlist(timeline, None)?;
+        assert!(
+            project
+                .chapter_playlists
+                .get(&list)
+                .is_some_and(|found| found.name.ends_with(" チャプター再生リスト"))
         );
         Ok(())
     }

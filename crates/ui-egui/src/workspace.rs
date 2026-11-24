@@ -222,10 +222,11 @@ pub(crate) fn standard_layout() -> DockLayout {
     use Panel::*;
     let left = tabs(&[Project, Menus, Timelines, Build], 0);
     let center = tabs(&[Monitor, MenuViewer, Flowchart], 0);
-    // Encore と同じく、右下はライブラリが前。
+    // Encore と同じく、右上は プロパティ・文字・メタデータ・進行状況（DiscCraft はディスクも。M6.477）、右下は
+    // ライブラリが前。
     let right = above(
         0.51,
-        tabs(&[Properties, Disc, Character, Metadata], 0),
+        tabs(&[Properties, Disc, Character, Metadata, Progress], 0),
         tabs(&[Library, Styles, Layers], 0),
     );
     let bottom = tabs(&[TimelineViewer, SlideshowViewer], 0);
@@ -700,6 +701,18 @@ pub(crate) fn load_hide_tools() -> bool {
     load_settings().hide_tools
 }
 
+/// Reads the screen's brightness (Preferences ▸ Interface, M6.480): dark unless the light look was chosen.
+pub(crate) fn load_appearance() -> crate::theme::Appearance {
+    load_settings().appearance.unwrap_or_default()
+}
+
+/// Saves the screen's brightness (the other settings stay).
+pub(crate) fn save_appearance(appearance: crate::theme::Appearance) -> Result<(), String> {
+    let mut settings = load_settings();
+    settings.appearance = Some(appearance);
+    save(&settings)
+}
+
 /// Saves whether the toolbar is hidden (the other settings stay).
 pub(crate) fn save_hide_tools(hide: bool) -> Result<(), String> {
     let mut settings = load_settings();
@@ -1034,13 +1047,16 @@ pub(crate) struct Saved {
     /// Preferences ▸ General ▸ Playback quality (M6.341). `None`: automatic, as Encore starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) playback_quality: Option<PlaybackQuality>,
+    /// Preferences ▸ Interface ▸ Brightness (M6.480). `None`: the dark look, as Encore starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) appearance: Option<crate::theme::Appearance>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Dock, Panel, Saved, SavedDock, WorkspaceId, WorkspacePreset, default_dock, permissions,
-        saved_dock, standard_layout,
+        Dock, Node, Panel, Saved, SavedDock, WorkspaceId, WorkspacePreset, default_dock,
+        permissions, saved_dock, standard_layout,
     };
     use crate::i18n::{self, Language};
     use craft_ui::docking::{Action, PanelState};
@@ -1126,14 +1142,36 @@ mod tests {
         assert!(layout.validate().is_ok());
         let dock = WorkspacePreset::Standard.dock();
         for panel in Panel::ALL {
-            // The chapter playlist viewer opens with a playlist (Encore opens one per playlist), and the
-            // Progress panel when it is asked for (F10), as in Encore.
+            // The chapter playlist viewer opens with a playlist (Encore opens one per playlist).
             assert_eq!(
                 dock.layout.contains(&panel),
-                !matches!(panel, Panel::ChapterPlaylist | Panel::Progress),
+                panel != Panel::ChapterPlaylist,
                 "{panel:?}"
             );
         }
+        // Encore's upper right: Properties, Character, Metadata and Progress (and DiscCraft's Disc; M6.477).
+        fn group_with(node: &Node<Panel>, panel: Panel) -> Option<Vec<Panel>> {
+            match node {
+                Node::Tabs { panels, .. } => panels.contains(&panel).then(|| panels.clone()),
+                Node::Split { first, second, .. } => {
+                    group_with(first, panel).or_else(|| group_with(second, panel))
+                }
+                _ => None,
+            }
+        }
+        assert_eq!(
+            dock.layout
+                .root
+                .as_ref()
+                .and_then(|root| group_with(root, Panel::Properties)),
+            Some(vec![
+                Panel::Properties,
+                Panel::Disc,
+                Panel::Character,
+                Panel::Metadata,
+                Panel::Progress,
+            ])
+        );
         for panel in [
             Panel::Project,
             Panel::Monitor,

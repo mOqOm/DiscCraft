@@ -3430,6 +3430,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("disccraft-psd-over-{}", std::process::id()));
         std::fs::create_dir_all(&dir)?;
         let mut session = Session::new();
+        // The layer names in the display language (M6.433): Japanese, as Encore's own.
+        session.set_words(disccraft_project::Words::Japanese);
         let created = session.execute(
             "library.newMenu",
             &serde_json::json!({ "preset": "menu.bottom-bar" }),
@@ -3488,7 +3490,8 @@ mod tests {
                 "(+) Chapters",
                 "(+) Play",
                 "Title",
-                "Rectangle",
+                // M6.433: in the words of the rest (it was "Rectangle" next to "背景").
+                "長方形",
                 "背景"
             ]
         );
@@ -3523,6 +3526,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("disccraft-psd-pages-{}", std::process::id()));
         std::fs::create_dir_all(&dir)?;
         let mut session = Session::new();
+        // The layer names in the display language (M6.433): Japanese, as Encore's own.
+        session.set_words(disccraft_project::Words::Japanese);
         let created = session.execute(
             "library.newMenu",
             &serde_json::json!({ "preset": "menu.bottom-bar" }),
@@ -3617,6 +3622,7 @@ mod tests {
             (u32::from(w), u32::from(h)),
             &[PsdAdditions {
                 page: 2,
+                name: "ページ 2".to_owned(),
                 layers: Vec::new(),
                 buttons: vec![PsdButtonAddition {
                     id: None,

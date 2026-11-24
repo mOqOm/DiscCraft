@@ -765,6 +765,45 @@ impl DiscCraftApp {
                 self.set_language(language);
             }
         });
+        // Encore's Brightness (its slider from dark to light): the dark look, as Encore starts, or the light one
+        // (M6.480).
+        ui.horizontal(|ui| {
+            ui.label(tl!("Brightness:"));
+            let current = if crate::theme::is_light() {
+                crate::theme::Appearance::Light
+            } else {
+                crate::theme::Appearance::Dark
+            };
+            let mut chosen = None;
+            egui::ComboBox::from_id_salt("prefs_brightness")
+                .selected_text(current.label())
+                .show_ui(ui, |ui| {
+                    for appearance in crate::theme::Appearance::ALL {
+                        if ui
+                            .selectable_label(current == appearance, appearance.label())
+                            .clicked()
+                        {
+                            chosen = Some(appearance);
+                        }
+                    }
+                });
+            if let Some(appearance) = chosen.filter(|chosen| *chosen != current) {
+                self.set_appearance(ui.ctx(), appearance);
+            }
+        });
+    }
+
+    /// 画面の明るさを切り替えて設定に保存する（次のフレームから新しい明るさで描く）。
+    pub(crate) fn set_appearance(&mut self, ctx: &Context, appearance: crate::theme::Appearance) {
+        crate::theme::set_appearance(ctx, appearance);
+        self.status = tlf!("Brightness: {name}", name = appearance.label());
+        if let Err(error) = crate::workspace::save_appearance(appearance) {
+            self.status = tlf!(
+                "Brightness: {name} (could not save: {error})",
+                name = appearance.label(),
+                error
+            );
+        }
     }
 }
 

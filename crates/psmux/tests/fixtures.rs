@@ -172,6 +172,7 @@ fn ffmpeg_menu_vob() {
     let hli = Hli {
         start_ptm: 0,
         buttons,
+        letterbox: Vec::new(),
         default_button: 1,
         button_offset: 0,
         color_sets: [[0x10, 0x00, 0xF0, 0x00, 0x20, 0x00, 0xF0, 0x00]; 3],
@@ -180,6 +181,7 @@ fn ffmpeg_menu_vob() {
         video: &video,
         video_data: &v,
         spu: &spu,
+        letterbox_spu: None,
         hli: &hli,
         vob_id: 1,
         ntsc: true,

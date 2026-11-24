@@ -151,21 +151,23 @@ pub(crate) fn safe_area_button(ui: &mut Ui, rect: egui::Rect, shown: &mut bool) 
     if response.clicked() {
         *shown = !*shown;
     }
-    let visuals = ui.style().interact_selectable(&response, *shown);
-    if *shown || response.hovered() {
-        ui.painter().rect(
-            rect,
-            2.0,
-            visuals.weak_bg_fill,
-            visuals.bg_stroke,
-            egui::StrokeKind::Inside,
-        );
+    // Encore's bar (M6.476): pressed in while the areas show, a raised box and a gold icon under the pointer.
+    let hovered = response.hovered();
+    let box_rect = rect.shrink2(egui::vec2(0.0, 3.0));
+    if *shown {
+        crate::theme::sunken_box(ui.painter(), box_rect);
+    } else if hovered {
+        crate::theme::hover_box(ui.painter(), box_rect);
     }
     crate::tool_icons::paint(
         ui.painter(),
         egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0)),
         crate::tool_icons::Glyph::SafeArea,
-        visuals.fg_stroke.color,
+        if hovered {
+            crate::theme::HOVER_ICON.get()
+        } else {
+            crate::theme::BAR_ICON.get()
+        },
     );
 }
 impl DiscCraftApp {
@@ -204,8 +206,8 @@ impl DiscCraftApp {
             None
         };
 
-        // タイムラインを映しているときは FilmCraft のプログラムモニターと同じ 3 段の操作部、プレビュー中は
-        // リモコンの操作バー。
+        // タイムラインを映しているときは Encore の操作バーと小さなタイムラインの 2 段の操作部（M6.476）、
+        // プレビュー中はリモコンの操作バー。
         let timeline = match (state.open, self.viewer_timeline()) {
             (false, Some(id)) => Some(id),
             _ => None,
@@ -220,7 +222,7 @@ impl DiscCraftApp {
 
         // FilmCraft と同じく、映像のまわりはパネルの地、映像は黒い画面の中に。
         let surround = if timeline.is_some() {
-            crate::theme::PANEL
+            crate::theme::PANEL.get()
         } else {
             egui::Color32::BLACK
         };

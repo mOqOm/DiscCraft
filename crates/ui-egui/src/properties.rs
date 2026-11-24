@@ -13,6 +13,7 @@ use crate::timeline_view::{chapter_label, frame_rate, set_selected_chapter, tick
 use disccraft_project::{
     AssetId, Capacity, DiscKind, Link, MenuId, TimelineId, VideoStandard, format_time,
 };
+use egui::class::HasClasses as _;
 use egui::{Align, Layout, Ui};
 use serde_json::json;
 
@@ -20,6 +21,14 @@ use serde_json::json;
 const LABEL_WIDTH: f32 = 130.0;
 /// 選択欄の幅。
 const FIELD_WIDTH: f32 = 130.0;
+/// リンクの欄の後ろの ▶ の幅（間を含む）。
+const LINK_BUTTON: f32 = 30.0;
+
+/// 行の残りをパネルの右端まで埋める欄の幅（Encore の選択欄とリンクの欄は右端まで伸びる。M6.464）。`after` は
+/// その後ろに置くもの（リンクの欄の ▶）の幅。狭いパネルでも [`FIELD_WIDTH`] より狭くしない。
+fn field_width(ui: &Ui, after: f32) -> f32 {
+    (ui.available_width() - after - 8.0).max(FIELD_WIDTH)
+}
 
 impl DiscCraftApp {
     /// プロパティのシート。
@@ -326,7 +335,12 @@ impl DiscCraftApp {
                 prop_label(ui, tl!("DVD Transcode:"));
                 if applies(dvd) {
                     let fits = self.passes_through_kinds(id).0;
-                    dvd_pick = self.dvd_preset_combo(ui, "sheet_dvd_preset", &asset, fits);
+                    dvd_pick = self.dvd_preset_combo(
+                        ui,
+                        "sheet_dvd_preset",
+                        &asset,
+                        (fits, field_width(ui, 0.0)),
+                    );
                 } else {
                     ui.label(dvd.setting_label());
                 }
@@ -414,7 +428,7 @@ impl DiscCraftApp {
         if asset.offline {
             ui.horizontal(|ui| {
                 prop_label(ui, "");
-                ui.colored_label(egui::Color32::YELLOW, tl!("Offline"));
+                crate::theme::status_label(ui, crate::theme::Status::Warning, tl!("Offline"));
                 if ui.button(tl!("Locate Asset…")).clicked() {
                     self.relink_asset(id);
                 }
@@ -644,6 +658,7 @@ impl DiscCraftApp {
             ui.horizontal(|ui| {
                 prop_label(ui, &tlf!("Subtitle {n}:", n = track.saturating_add(1)));
                 egui::ComboBox::from_id_salt(("subtitle_track_group", id.0, track))
+                    .width(field_width(ui, 0.0))
                     .selected_text(tlf!("Group {n}", n = subtitle.group.saturating_add(1)))
                     .show_ui(ui, |ui| {
                         for group in 0..disccraft_project::SubtitleColorSet::GROUPS {
@@ -810,7 +825,7 @@ impl DiscCraftApp {
             .horizontal(|ui| {
                 prop_label(ui, tl!("Parental Alternative:"));
                 egui::ComboBox::from_id_salt(("chapter_parental_video", id.0, index))
-                    .width(FIELD_WIDTH)
+                    .width(field_width(ui, 0.0))
                     .selected_text(shown)
                     .show_ui(ui, |ui| {
                         let _ = ui.selectable_value(&mut chosen.0, None, tl!("None"));
@@ -828,6 +843,7 @@ impl DiscCraftApp {
                 ui.horizontal(|ui| {
                     prop_label(ui, tl!("For Levels Below:"));
                     egui::ComboBox::from_id_salt(("chapter_parental_level", id.0, index))
+                        .width(field_width(ui, 0.0))
                         .selected_text(chosen.1.to_string())
                         .show_ui(ui, |ui| {
                             for choice in 2..=8u8 {
@@ -948,7 +964,7 @@ impl DiscCraftApp {
             prop_label(ui, tl!("Default button:"));
             let mut chosen = None;
             egui::ComboBox::from_id_salt("menu_default_button")
-                .width(FIELD_WIDTH)
+                .width(field_width(ui, 0.0))
                 .selected_text(current_text)
                 .show_ui(ui, |ui| {
                     for (index, text) in &buttons {
@@ -983,7 +999,7 @@ impl DiscCraftApp {
             prop_label(ui, tl!("Color Set:"));
             let mut chosen = None;
             egui::ComboBox::from_id_salt(("menu_color_set_kind", id.0))
-                .width(FIELD_WIDTH)
+                .width(field_width(ui, 0.0))
                 .selected_text(if own {
                     tl!("Menu Default")
                 } else {
@@ -1092,7 +1108,7 @@ impl DiscCraftApp {
         ui.horizontal(|ui| {
             prop_label(ui, tl!("Video:"));
             egui::ComboBox::from_id_salt(("menu_motion_video", menu.id.0))
-                .width(FIELD_WIDTH)
+                .width(field_width(ui, 0.0))
                 .selected_text(shown)
                 .show_ui(ui, |ui| {
                     if ui
@@ -1297,7 +1313,7 @@ impl DiscCraftApp {
             ui.horizontal(|ui| {
                 prop_label(ui, tl!("Background Timeline:"));
                 egui::ComboBox::from_id_salt(("menu_popup_timeline", menu.id.0))
-                    .width(FIELD_WIDTH)
+                    .width(field_width(ui, 0.0))
                     .selected_text(shown)
                     .show_ui(ui, |ui| {
                         if ui
@@ -1523,7 +1539,7 @@ impl DiscCraftApp {
         ui.horizontal(|ui| {
             prop_label(ui, tl!("Asset:"));
             egui::ComboBox::from_id_salt(("button_transition", id.0, index))
-                .width(FIELD_WIDTH)
+                .width(field_width(ui, 0.0))
                 .selected_text(current)
                 .show_ui(ui, |ui| {
                     if ui
@@ -1691,7 +1707,7 @@ impl DiscCraftApp {
         ui.horizontal(|ui| {
             prop_label(ui, tl!("Audio:"));
             egui::ComboBox::from_id_salt("menu_audio")
-                .width(FIELD_WIDTH)
+                .width(field_width(ui, 0.0))
                 .selected_text(current)
                 .show_ui(ui, |ui| {
                     if ui
@@ -1802,7 +1818,7 @@ impl DiscCraftApp {
             let mut chosen = None;
             egui::ComboBox::from_id_salt(("button_kind", id.0, index))
                 .selected_text(button_kind_label(button.kind))
-                .width(FIELD_WIDTH)
+                .width(field_width(ui, 0.0))
                 .show_ui(ui, |ui| {
                     for kind in disccraft_project::ButtonKind::ALL {
                         if ui
@@ -1826,7 +1842,7 @@ impl DiscCraftApp {
             let mut chosen = None;
             egui::ComboBox::from_id_salt(("button_highlight_group", id.0, index))
                 .selected_text(tlf!("Group {n}", n = button.highlight_group))
-                .width(FIELD_WIDTH)
+                .width(field_width(ui, 0.0))
                 .show_ui(ui, |ui| {
                     for group in 1..=3_u8 {
                         if ui
@@ -1996,7 +2012,7 @@ impl DiscCraftApp {
                     .unwrap_or_else(|| tl!("None").to_owned());
                 egui::ComboBox::from_id_salt(("button_route", id.0, index, key))
                     .selected_text(text)
-                    .width(FIELD_WIDTH)
+                    .width(field_width(ui, 0.0))
                     .show_ui(ui, |ui| {
                         if ui.selectable_label(value == 0, tl!("None")).clicked() {
                             change = Some((key, 0));
@@ -2359,6 +2375,7 @@ impl DiscCraftApp {
             prop_label(ui, tl!("Highlight:"));
             ui.add_enabled_ui(slide.subtitle, |ui| {
                 egui::ComboBox::from_id_salt(("slide_subtitle_group", id, index))
+                    .width(field_width(ui, 0.0))
                     .selected_text(tlf!(
                         "Group {n}",
                         n = slide.subtitle_group.saturating_add(1)
@@ -2391,6 +2408,7 @@ impl DiscCraftApp {
             prop_label(ui, tl!("Stroke:"));
             ui.add_enabled_ui(slide.subtitle, |ui| {
                 egui::ComboBox::from_id_salt(("slide_stroke", id, index))
+                    .width(field_width(ui, 0.0))
                     .selected_text(slide_stroke_label(slide.subtitle_stroke))
                     .show_ui(ui, |ui| {
                         for stroke in disccraft_project::SlideStroke::ALL {
@@ -2456,6 +2474,7 @@ impl DiscCraftApp {
             prop_label(ui, tl!("Pan:"));
             ui.add_enabled_ui(slide.effect.is_some(), |ui| {
                 egui::ComboBox::from_id_salt(("slide_pan", id, index))
+                    .width(field_width(ui, 0.0))
                     .selected_text(slide_pan_label(pan))
                     .show_ui(ui, |ui| {
                         for choice in disccraft_project::SlidePan::ALL {
@@ -2468,6 +2487,7 @@ impl DiscCraftApp {
             prop_label(ui, tl!("Zoom:"));
             ui.add_enabled_ui(slide.effect.is_some(), |ui| {
                 egui::ComboBox::from_id_salt(("slide_zoom", id, index))
+                    .width(field_width(ui, 0.0))
                     .selected_text(slide_zoom_label(zoom))
                     .show_ui(ui, |ui| {
                         for choice in disccraft_project::SlideZoom::ALL {
@@ -2797,6 +2817,7 @@ impl DiscCraftApp {
         ui.horizontal(|ui| {
             prop_label(ui, tl!("Composition:"));
             egui::ComboBox::from_id_salt(("asset_composition", id.0))
+                .width(field_width(ui, 0.0))
                 .selected_text(
                     asset
                         .composition
@@ -2871,6 +2892,7 @@ impl DiscCraftApp {
         ui.horizontal(|ui| {
             prop_label(ui, tl!("Color Set:"));
             egui::ComboBox::from_id_salt(("color_set_choice", command, id))
+                .width(field_width(ui, 0.0))
                 .selected_text(shown)
                 .show_ui(ui, |ui| {
                     if ui
@@ -3104,6 +3126,7 @@ impl DiscCraftApp {
         ui.horizontal(|ui| {
             prop_label(ui, tl!("Highlight:"));
             egui::ComboBox::from_id_salt(("cue_group", id.0, track, index))
+                .width(field_width(ui, 0.0))
                 .selected_text(match cue.look.group {
                     Some(group) => tlf!("Group {n}", n = group.saturating_add(1)),
                     None => track_group.clone(),
@@ -3146,6 +3169,7 @@ impl DiscCraftApp {
         ui.horizontal(|ui| {
             prop_label(ui, tl!("Stroke:"));
             egui::ComboBox::from_id_salt(("cue_stroke", id.0, track, index))
+                .width(field_width(ui, 0.0))
                 .selected_text(slide_stroke_label(current_stroke))
                 .show_ui(ui, |ui| {
                     for stroke in disccraft_project::SlideStroke::ALL {
@@ -3168,6 +3192,7 @@ impl DiscCraftApp {
         ui.horizontal(|ui| {
             prop_label(ui, tl!("Justify:"));
             egui::ComboBox::from_id_salt(("cue_justify", id.0, track, index))
+                .width(field_width(ui, 0.0))
                 .selected_text(justify_label(current_justify))
                 .show_ui(ui, |ui| {
                     for side in disccraft_project::SubtitleJustify::ALL {
@@ -3248,6 +3273,7 @@ impl DiscCraftApp {
             .horizontal(|ui| {
                 prop_label(ui, tl!("Parental level:"));
                 egui::ComboBox::from_id_salt(salt)
+                    .width(field_width(ui, 0.0))
                     .selected_text(name(current))
                     .show_ui(ui, |ui| {
                         for choice in [None, Some(0)].into_iter().chain((1..=8).map(Some)) {
@@ -3296,7 +3322,8 @@ impl DiscCraftApp {
             prop_label(ui, label);
             self.pick_whip(ui, port);
             egui::ComboBox::from_id_salt(("link_row", format!("{port:?}")))
-                .width(FIELD_WIDTH)
+                .with_class(crate::theme::LINK_FIELD)
+                .width(field_width(ui, LINK_BUTTON))
                 .selected_text(current_label)
                 .show_ui(ui, |ui| {
                     for (name, link) in targets {
@@ -3477,7 +3504,8 @@ pub(crate) fn committed_text(
         .data(|data| data.get_temp::<String>(buffer_id))
         .unwrap_or_else(|| current.to_owned());
     let edit = if multiline {
-        egui::TextEdit::multiline(&mut buffer).desired_rows(6)
+        // Encore's Description box is 175 high (13 rows at the 11-point text; M6.464).
+        egui::TextEdit::multiline(&mut buffer).desired_rows(13)
     } else {
         egui::TextEdit::singleline(&mut buffer)
     };
@@ -3585,7 +3613,7 @@ pub(crate) fn sheet_title(ui: &mut Ui, title: &str) {
         egui::Align2::CENTER_CENTER,
         title,
         egui::FontId::proportional(14.0),
-        crate::theme::TEXT_STRONG,
+        crate::theme::TEXT_STRONG.get(),
     );
     ui.add_space(4.0);
 }
@@ -3741,7 +3769,7 @@ fn asset_choice(
     ui.horizontal(|ui| {
         prop_label(ui, label);
         egui::ComboBox::from_id_salt(id)
-            .width(FIELD_WIDTH)
+            .width(field_width(ui, 0.0))
             .selected_text(text)
             .show_ui(ui, |ui| {
                 for (asset, name) in assets {
@@ -3869,7 +3897,7 @@ fn choice_row<T: Copy + PartialEq>(
     ui.horizontal(|ui| {
         prop_label(ui, label);
         egui::ComboBox::from_id_salt(id)
-            .width(FIELD_WIDTH)
+            .width(field_width(ui, 0.0))
             .selected_text(current_text)
             .show_ui(ui, |ui| {
                 for (value, text) in choices {

@@ -322,6 +322,9 @@ fn load_subtitles(
                 }
                 (units, vobsub.language)
             }
+            // M6.422: a Blu-ray's SD title takes the PGS segments themselves (`streams::subtitle_tracks`, which
+            // replaces these units), so nothing is drawn for it here (this stopped such a build before).
+            SubtitleFile::Pgs if project.settings.kind == DiscKind::BluRay => (Vec::new(), None),
             SubtitleFile::Pgs => {
                 return Err(DvdError::Unsupported(format!(
                     "{}: PGS (.sup) subtitles are a Blu-ray's; a DVD takes VobSub (.idx/.sub) or text subtitles",

@@ -293,6 +293,13 @@ pub(crate) fn container_video(
     path: &Path,
     standard: VideoStandard,
 ) -> Option<(u64, Vec<(f64, bool)>)> {
+    // A transport stream whose programme has no MPEG video (H.264 from a camcorder or a Blu-ray) cannot pass
+    // through: it is answered from its tables, not read through to make its index (M6.429).
+    if disccraft_transcode::ts_stream_types(path)
+        .is_some_and(|types| !types.iter().any(|kind| matches!(kind, 0x01 | 0x02)))
+    {
+        return None;
+    }
     crate::demux::probe(path, standard, DiscKind::Dvd)?
         .video
         .clone()
@@ -2212,8 +2219,12 @@ fn audio_clip_sequence(
                 path.display()
             )));
         }
-        // The track's sound stream of its own file (M6.418); another file's clips play their first.
-        let stream = if clip.asset == track.asset {
+        // The track's sound stream (M6.418) of each of its clips' files (M6.429: a Blu-ray's commentary runs on
+        // through its clips); a file with fewer streams plays its first.
+        let stream = if track.stream == 0
+            || clip.asset == track.asset
+            || disccraft_transcode::audio_stream_count(path) > track.stream as usize
+        {
             track.stream as usize
         } else {
             0

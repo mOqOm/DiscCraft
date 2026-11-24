@@ -36,10 +36,14 @@ pub struct Hli {
     pub start_ptm: u32,
     /// Buttons in order.
     pub buttons: Vec<HliButton>,
+    /// The same buttons where a 4:3 television shows a 16:9 menu letterboxed: a second button group (display
+    /// type letterbox; the first is then wide), at most 18 a group, as Encore writes a 16:9 menu. Empty for one
+    /// group.
+    pub letterbox: Vec<HliButton>,
     /// Default button, 1-based, 0 = none.
     pub default_button: u8,
-    /// Button number offset (Encore's menu Offset): the first button is number `button_offset + 1` on the
-    /// remote's number keys (BTN_OFN). 0 for most menus.
+    /// Button number offset (Encore's menu Offset, BTN_OFN as Encore writes it): the first button is number
+    /// `button_offset + 1` on the remote's number keys. 0 for most menus.
     pub button_offset: u8,
     /// Three SL_COLI entries.
     pub color_sets: [[u8; 8]; 3],
@@ -63,10 +67,16 @@ const BTN_IT_OFFSET: usize = 0x8E;
 
 const STATUS_VALUE: u16 = 0x0001;
 const END_PTM_VALUE: u32 = 0xFFFF_FFFF;
-const BUTTON_MODE_VALUE: u16 = 0x1100;
+/// BTN_MD: the number of button groups (bits 13..12) and each group's display type (bits 10..8, 6..4, 2..0;
+/// 1 = normal / wide, 2 = letterbox). One group of type 1.
+const BUTTON_MODE_ONE_GROUP: u16 = 0x1100;
+/// Two groups, wide and letterbox (Encore's 16:9 menu).
+const BUTTON_MODE_WIDE_LETTERBOX: u16 = 0x2120;
 const SL_COLI_LEN: usize = 8;
 const BTN_IT_LEN: usize = 18;
 const BTN_IT_COUNT: usize = 36;
+/// The entries of each group when there are two: the second group starts at entry 19.
+const TWO_GROUP_LEN: usize = 18;
 const HLI_TOTAL_LEN: usize = BTN_IT_OFFSET + BTN_IT_COUNT * BTN_IT_LEN;
 const MAX_X: u16 = 720;
 const MAX_Y: u16 = 576;
@@ -109,11 +119,17 @@ pub fn read_hli(pci: &[u8]) -> Result<Option<Hli>, MuxError> {
         None => return Ok(None),
     };
     let color_sets = read_color_sets(pci)?;
-    let buttons = read_buttons(pci, header.button_count)?;
+    let buttons = read_buttons(pci, 0, header.button_count)?;
+    let letterbox = if header.letterbox {
+        read_buttons(pci, TWO_GROUP_LEN, header.button_count)?
+    } else {
+        Vec::new()
+    };
 
     Ok(Some(Hli {
         start_ptm: header.start_ptm,
         buttons,
+        letterbox,
         default_button: header.default_button,
         button_offset: header.button_offset,
         color_sets,
@@ -125,12 +141,21 @@ struct HliHeader {
     default_button: u8,
     button_offset: u8,
     button_count: usize,
+    letterbox: bool,
 }
 
 fn validate_hli(hli: &Hli) -> Result<(), MuxError> {
     let count = hli.buttons.len();
-    if count == 0 || count > BTN_IT_COUNT {
+    let most = if hli.letterbox.is_empty() {
+        BTN_IT_COUNT
+    } else {
+        TWO_GROUP_LEN
+    };
+    if count == 0 || count > most {
         return Err(invalid("button count out of range"));
+    }
+    if !hli.letterbox.is_empty() && hli.letterbox.len() != count {
+        return Err(invalid("letterbox button count differs"));
     }
     if usize::from(hli.button_offset).saturating_add(count) > BTN_IT_COUNT {
         return Err(invalid("button number offset too large"));
@@ -139,7 +164,7 @@ fn validate_hli(hli: &Hli) -> Result<(), MuxError> {
         return Err(invalid("default button out of range"));
     }
 
-    for button in &hli.buttons {
+    for button in hli.buttons.iter().chain(&hli.letterbox) {
         validate_button(button, count)?;
     }
 
@@ -179,12 +204,14 @@ fn write_hli_header(hli: &Hli, pci: &mut [u8]) -> Result<(), MuxError> {
     put_u32_be(pci, START_PTM_OFFSET, hli.start_ptm)?;
     put_u32_be(pci, END_PTM_OFFSET, END_PTM_VALUE)?;
     put_u32_be(pci, BUTTON_SEL_END_OFFSET, END_PTM_VALUE)?;
-    put_u16_be(pci, BUTTON_MODE_OFFSET, BUTTON_MODE_VALUE)?;
-    put_u8(
-        pci,
-        STARTING_BUTTON_OFFSET,
-        hli.button_offset.saturating_add(1),
-    )?;
+    let mode = if hli.letterbox.is_empty() {
+        BUTTON_MODE_ONE_GROUP
+    } else {
+        BUTTON_MODE_WIDE_LETTERBOX
+    };
+    put_u16_be(pci, BUTTON_MODE_OFFSET, mode)?;
+    // Encore writes the menu's Offset as it is (0 for most menus).
+    put_u8(pci, STARTING_BUTTON_OFFSET, hli.button_offset)?;
     put_u8(pci, NUM_BUTTONS_OFFSET, count)?;
     put_u8(pci, NUM_SELECTABLE_OFFSET, count)?;
     put_u8(pci, FORCED_SELECT_OFFSET, hli.default_button)?;
@@ -200,19 +227,24 @@ fn read_hli_header(pci: &[u8]) -> Result<Option<HliHeader>, MuxError> {
         return Err(invalid("bad HLI status"));
     }
 
-    let mode = get_u16_be(pci, BUTTON_MODE_OFFSET)?;
-    if mode != BUTTON_MODE_VALUE {
-        return Err(invalid("bad HLI button mode"));
+    let letterbox = match get_u16_be(pci, BUTTON_MODE_OFFSET)? {
+        BUTTON_MODE_ONE_GROUP => false,
+        BUTTON_MODE_WIDE_LETTERBOX => true,
+        _ => return Err(invalid("bad HLI button mode")),
+    };
+
+    let button_offset = get_u8(pci, STARTING_BUTTON_OFFSET)?;
+    if usize::from(button_offset) >= BTN_IT_COUNT {
+        return Err(invalid("bad HLI button offset"));
     }
 
-    let starting = get_u8(pci, STARTING_BUTTON_OFFSET)?;
-    if starting == 0 || usize::from(starting) > BTN_IT_COUNT {
-        return Err(invalid("bad HLI starting button"));
-    }
-    let button_offset = starting.saturating_sub(1);
-
+    let most = if letterbox {
+        TWO_GROUP_LEN
+    } else {
+        BTN_IT_COUNT
+    };
     let button_count = usize::from(get_u8(pci, NUM_BUTTONS_OFFSET)?);
-    if button_count == 0 || button_count > BTN_IT_COUNT {
+    if button_count == 0 || button_count > most {
         return Err(invalid("bad HLI button count"));
     }
 
@@ -247,6 +279,7 @@ fn read_hli_header(pci: &[u8]) -> Result<Option<HliHeader>, MuxError> {
         default_button,
         button_offset,
         button_count,
+        letterbox,
     }))
 }
 
@@ -269,18 +302,26 @@ fn read_color_sets(pci: &[u8]) -> Result<[[u8; 8]; 3], MuxError> {
 }
 
 fn write_btn_it(hli: &Hli, pci: &mut [u8]) -> Result<(), MuxError> {
-    for (index, button) in hli.buttons.iter().enumerate() {
-        let base = entry_offset(index)?;
-        write_btn_entry(button, pci, base)?;
+    let groups = [(0, &hli.buttons), (TWO_GROUP_LEN, &hli.letterbox)];
+    for (first, buttons) in groups {
+        for (index, button) in buttons.iter().enumerate() {
+            let entry = first
+                .checked_add(index)
+                .ok_or_else(|| invalid("button index overflow"))?;
+            write_btn_entry(button, pci, entry_offset(entry)?)?;
+        }
     }
     Ok(())
 }
 
-fn read_buttons(pci: &[u8], count: usize) -> Result<Vec<HliButton>, MuxError> {
+/// The `count` buttons of the group whose entries start at `first` (0, or 18 for a second group).
+fn read_buttons(pci: &[u8], first: usize, count: usize) -> Result<Vec<HliButton>, MuxError> {
     let mut buttons = Vec::with_capacity(count);
     for index in 0..count {
-        let base = entry_offset(index)?;
-        buttons.push(read_btn_entry(pci, base, count)?);
+        let entry = first
+            .checked_add(index)
+            .ok_or_else(|| invalid("button index overflow"))?;
+        buttons.push(read_btn_entry(pci, entry_offset(entry)?, count)?);
     }
     Ok(buttons)
 }
@@ -486,6 +527,7 @@ mod tests {
                 button_with_adj(3, 1, 2, 2),
                 button_with_adj(1, 2, 3, 3),
             ],
+            letterbox: Vec::new(),
             default_button: 2,
             button_offset: 0,
             color_sets: [
@@ -525,6 +567,7 @@ mod tests {
             start_ptm: 0,
             // Buttons 2 and 3 exist so the adjacency numbers of button 1 are valid.
             buttons: vec![button.clone(), button.clone(), button],
+            letterbox: Vec::new(),
             default_button: 1,
             button_offset: 0,
             color_sets: [[0u8; 8]; 3],
@@ -551,6 +594,57 @@ mod tests {
         Ok(())
     }
 
+    /// Encore CS6's 16:9 menu (2026-11-23, the Gray menu set to 16:9, 18 buttons, Offset 5): BTN_MD `0x2120` (two
+    /// groups, wide then letterbox), BTN_OFN 5, BTN_NS 18, the letterbox group from entry 19 with the same routes
+    /// and commands. A 4:3 menu's Offset 0 is BTN_OFN 0.
+    #[test]
+    fn a_wide_menu_has_a_letterbox_group_as_encore_writes_it() -> Result<(), MuxError> {
+        let wide = HliButton {
+            x1: 196,
+            y1: 303,
+            x2: 262,
+            y2: 312,
+            ..button_with_adj(2, 2, 2, 2)
+        };
+        let letterbox = HliButton {
+            y1: 287,
+            y2: 294,
+            ..wide.clone()
+        };
+        let mut hli = Hli {
+            start_ptm: 0,
+            buttons: vec![wide.clone(), wide],
+            letterbox: vec![letterbox.clone(), letterbox],
+            default_button: 0,
+            button_offset: 5,
+            color_sets: [[0u8; 8]; 3],
+        };
+        let mut pci = vec![0u8; 979];
+        write_hli(&hli, &mut pci)?;
+        let header = pci.get(0x6E..0x72).map(<[u8]>::to_vec);
+        assert_eq!(header, Some(vec![0x21, 0x20, 5, 2]));
+        // Entry 19 (0x8E + 18 x 18): x 196..262, y 287..294.
+        let entry = pci.get(0x1D2..0x1D8).map(<[u8]>::to_vec);
+        assert_eq!(entry, Some(vec![0x4C, 0x41, 0x06, 0x11, 0xF1, 0x26]));
+        assert_eq!(read_hli(&pci)?.as_ref(), Some(&hli));
+
+        hli.letterbox.clear();
+        hli.button_offset = 0;
+        write_hli(&hli, &mut pci)?;
+        assert_eq!(pci.get(0x6E..0x71), Some(&[0x11, 0x00, 0][..]));
+        assert_eq!(pci.get(0x1D2..0x1D8), Some(&[0u8; 6][..]));
+        assert_eq!(read_hli(&pci)?.as_ref(), Some(&hli));
+
+        // A second group holds 18 buttons at most, as many as the first.
+        hli.buttons = vec![button_with_adj(1, 1, 1, 1); 19];
+        hli.letterbox = hli.buttons.clone();
+        assert!(write_hli(&hli, &mut pci).is_err());
+        hli.buttons.truncate(3);
+        hli.letterbox.truncate(2);
+        assert!(write_hli(&hli, &mut pci).is_err());
+        Ok(())
+    }
+
     #[test]
     fn too_many_buttons_is_error() -> Result<(), MuxError> {
         let mut buttons = Vec::new();
@@ -560,6 +654,7 @@ mod tests {
         let hli = Hli {
             start_ptm: 0,
             buttons,
+            letterbox: Vec::new(),
             default_button: 1,
             button_offset: 0,
             color_sets: [[0u8; 8]; 3],
@@ -603,6 +698,7 @@ mod tests {
         let hli = Hli {
             start_ptm: 0,
             buttons: vec![button_with_adj(1, 1, 1, 1)],
+            letterbox: Vec::new(),
             default_button: 1,
             button_offset: 0,
             color_sets: [[0u8; 8]; 3],

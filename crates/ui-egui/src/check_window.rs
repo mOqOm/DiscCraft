@@ -3,7 +3,7 @@
 //! 上にチェックする項目のチェックボックスと「開始」、下に結果の表（種類 / 問題）と件数を出す。
 
 use crate::DiscCraftApp;
-use crate::build_panel::{ProblemView, problem_color};
+use crate::build_panel::{ProblemView, problem_label};
 use crate::i18n::{tl, tlf};
 
 /// Kinds of problems the window can look for.
@@ -120,7 +120,9 @@ impl CheckCategory {
             | "tooManyEntries" => Self::Playlists,
             "menuRemoteNotMenu" => Self::RemoteMenus,
             "buttonsOverlap" | "tooManyButtons" => Self::OverlappingButtons,
-            "menuWithoutButtons" | "menuDuration" | "menuAspectMix" => Self::MenuSize,
+            "menuWithoutButtons" | "menuDuration" | "menuAspectMix" | "wideMenuButtons" => {
+                Self::MenuSize
+            }
             "chapterOrder" | "firstChapter" | "tooManyChapters" => Self::Chapters,
             "timelineBitrateTooHigh" => Self::TimelineBitrate,
             "subtitleTextOverflow" => Self::SubtitleOverflow,
@@ -182,7 +184,7 @@ pub(crate) fn visible_problems<'a>(
 /// Severity text for the table.
 #[must_use]
 pub(crate) fn severity_label(severity: &str) -> &'static str {
-    // Same matching as `problem_color` (the engine may send "Error" or "error").
+    // Same matching as `theme::Status::of_severity` (the engine may send "Error" or "error").
     let lower = severity.to_lowercase();
     if lower.contains("error") {
         tl!("Error")
@@ -290,8 +292,7 @@ impl DiscCraftApp {
                     let _ = ui.label(row.name.as_str());
                     match row.problems.as_slice() {
                         [(severity, text)] => {
-                            let _ = ui
-                                .colored_label(problem_color(severity), text.as_str())
+                            let _ = problem_label(ui, severity, text.as_str())
                                 .on_hover_text(severity_label(severity));
                         }
                         problems => {
@@ -301,11 +302,7 @@ impl DiscCraftApp {
                                     .id_salt(("check_row", index))
                                     .show(ui, |ui| {
                                         for (severity, text) in problems {
-                                            let _ = ui
-                                                .colored_label(
-                                                    problem_color(severity),
-                                                    text.as_str(),
-                                                )
+                                            let _ = problem_label(ui, severity, text.as_str())
                                                 .on_hover_text(severity_label(severity));
                                         }
                                     });
@@ -391,6 +388,10 @@ fn problem_text(problem: &ProblemView) -> String {
         "buttonOutOfFrame" => tl!("The button lies outside the frame.").to_owned(),
         "badDefaultButton" => tl!("The default button does not exist.").to_owned(),
         "tooManyButtons" => tl!("There are too many buttons.").to_owned(),
+        "wideMenuButtons" => tl!(
+            "The 16:9 menu has more than 18 buttons, so on a 4:3 television the highlights are not on the buttons."
+        )
+        .to_owned(),
         "graphicOutOfFrame" => tl!("A layer lies outside the frame.").to_owned(),
         "emptySlideshow" => tl!("The slideshow has no slides.").to_owned(),
         "emptyPlaylist" => tl!("The playlist has no items.").to_owned(),

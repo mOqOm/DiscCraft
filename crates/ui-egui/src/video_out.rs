@@ -62,6 +62,25 @@ fn fitted(area: egui::Rect, aspect: f32) -> egui::Rect {
     egui::Rect::from_center_size(area.center(), size)
 }
 
+/// How often the video output on a display is put back above the taskbar.
+const RAISE_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Puts the video output window (titled `title`) back above the other windows and the taskbar, at most every
+/// [`RAISE_EVERY`], and asks to be drawn again by then. The system raises a display's taskbar over a window that
+/// covers the display whenever that window is not the active one (DiscCraft's own window is, while it is used).
+fn keep_above_the_taskbar(ctx: &egui::Context, title: &str) {
+    let id = egui::Id::unique("disccraft_video_output_raised");
+    let now = std::time::Instant::now();
+    let due = ctx
+        .data(|data| data.get_temp::<std::time::Instant>(id))
+        .is_none_or(|last| now.duration_since(last) >= RAISE_EVERY);
+    if due {
+        let _ = disccraft_platform::keep_on_top(title);
+        ctx.data_mut(|data| data.insert_temp(id, now));
+    }
+    ctx.request_repaint_after(RAISE_EVERY);
+}
+
 impl DiscCraftApp {
     /// Draws the video output window while the output is on. Called once a frame, after the panels.
     pub(crate) fn video_output_window(&mut self, ctx: &egui::Context) {
@@ -80,13 +99,15 @@ impl DiscCraftApp {
         if !self.video_output_in_background && !in_front {
             return;
         }
+        let title = tl!("Video Output");
         let mut builder = ViewportBuilder::default()
-            .with_title(tl!("Video Output"))
+            .with_title(title)
             .with_inner_size([960.0, 540.0]);
         // A display was chosen and is there: a window without a frame that covers it exactly (in points). The
         // window system's own full screen is not used: asked for together with a position, it was not taken
         // (seen on Windows: the window stayed at its first size on the chosen display).
         let mut cover: Option<(egui::Pos2, egui::Vec2)> = None;
+        let mut on_top = false;
         if let VideoOutput::Display(number) = output {
             let displays = disccraft_platform::displays();
             let found = usize::try_from(number)
@@ -102,7 +123,16 @@ impl DiscCraftApp {
                     .with_inner_size(size)
                     .with_decorations(false);
                 cover = Some((position, size));
+                // Above the other windows and the display's taskbar (M6.426), unless DiscCraft's own window is
+                // on that display: the picture would then hide it for good.
+                let main = ctx.input(|input| input.viewport().outer_rect);
+                on_top = !main.is_some_and(|main| {
+                    egui::Rect::from_min_size(position, size).contains(main.center())
+                });
             }
+        }
+        if on_top {
+            builder = builder.with_window_level(egui::WindowLevel::AlwaysOnTop);
         }
         let frame = self.video_out_frame.clone();
         let turn_off = ctx.show_viewport_immediate(
@@ -152,6 +182,8 @@ impl DiscCraftApp {
         if turn_off {
             self.set_video_output(VideoOutput::Off);
             self.status = tl!("Video output turned off").to_owned();
+        } else if on_top {
+            keep_above_the_taskbar(ctx, title);
         }
     }
 

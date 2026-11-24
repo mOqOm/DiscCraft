@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 
 /// Maximum number of buttons on one menu.
 pub const MAX_BUTTONS: usize = 36;
+/// The most buttons a 16:9 DVD menu has for a 4:3 television's letterboxed picture: its second button group shares
+/// the highlight's 36 entries with the first (Encore keeps 18 buttons of a 16:9 menu).
+pub const LETTERBOX_MOST_BUTTONS: usize = 18;
 
 /// Longest time a still menu can stay before its end action, in seconds (a DVD cell's still time).
 pub const MAX_MENU_SECONDS: u32 = 254;
@@ -1483,12 +1486,10 @@ impl Menu {
                 if *chapter == 0 {
                     return Some(timeline.name.clone());
                 }
-                let point = timeline.chapters.get(usize::try_from(*chapter).ok()?)?;
-                Some(if point.name.trim().is_empty() {
-                    format!("Chapter {}", chapter.saturating_add(1))
-                } else {
-                    point.name.clone()
-                })
+                let index = usize::try_from(*chapter).ok()?;
+                let point = timeline.chapters.get(index)?;
+                // A chapter without a name of its own: "Chapter N" in the display language (M6.433).
+                Some(project.words.chapter_name(&point.name, index))
             }
             Link::Menu { id, .. } => project.menus.get(id).map(|menu| menu.name.clone()),
             Link::Slideshow { id } => project.slideshows.get(id).map(|show| show.name.clone()),
@@ -1808,7 +1809,7 @@ impl Project {
     /// Adds a menu.
     pub fn add_menu(&mut self, name: Option<String>) -> Result<MenuId, ProjectError> {
         let id = MenuId(self.alloc_id()?);
-        let name = name.unwrap_or_else(|| format!("Menu {}", id.0));
+        let name = name.unwrap_or_else(|| self.words.menu(id.0));
         self.menus.insert(
             id,
             Menu {
@@ -1870,7 +1871,7 @@ impl Project {
             .flatten();
         let name = match linked {
             Some(name) => name,
-            None if label.trim().is_empty() => format!("Button {}", index.saturating_add(1)),
+            None if label.trim().is_empty() => self.words.button(index.saturating_add(1)),
             None => label.clone(),
         };
 

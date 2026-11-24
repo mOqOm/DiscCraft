@@ -1,7 +1,7 @@
 //! ビルドパネル（Encore と同じ形。docs/ui-parity.md §3.4）。
 
 use crate::app::DiscCraftApp;
-use crate::build_panel::{format_bytes, problem_color, usage_fraction};
+use crate::build_panel::{format_bytes, problem_label, usage_fraction};
 use crate::i18n::{tl, tlf};
 
 use disccraft_build::OutputKind;
@@ -37,13 +37,111 @@ pub(crate) fn region_label(region: u8) -> &'static str {
         1 => tl!("1 - United States, Canada"),
         2 => tl!("2 - Japan, Europe, South Africa, Middle East"),
         3 => tl!("3 - Southeast Asia, Korea, Hong Kong"),
-        4 => tl!("4 - Australia, Central and South America"),
-        5 => tl!("5 - Russia, South Asia, Africa"),
+        4 => tl!("4 - Australia, Mexico, Central and South America"),
+        5 => tl!("5 - Russia, South Asia, Africa, North Korea"),
         6 => tl!("6 - China"),
-        7 => tl!("7 - Reserved"),
-        8 => tl!("8 - International venues (aircraft, ships)"),
+        7 => tl!("7 - Reserved (undefined)"),
+        8 => tl!("8 - Special venues such as aircraft"),
         _ => "",
     }
+}
+
+/// Whether `region`'s box shows checked for the disc's `regions` (empty: all regions). All regions shows every region
+/// checked but 7, greyed (Encore, M6.463: 7 is reserved and left out, as in the custom list's start).
+pub(crate) fn shown_checked(regions: &[u8], region: u8) -> bool {
+    if regions.is_empty() {
+        region != 7
+    } else {
+        regions.contains(&region)
+    }
+}
+
+/// The width of a build group's label column: its labels end there, right-aligned (Encore, M6.470).
+const LABEL_COLUMN: f32 = 130.0;
+/// The Region Code group's (Encore's 有効 : ends nearer the edge).
+const REGION_LABEL_COLUMN: f32 = 95.0;
+/// The disc usage bar (Encore: 24 high with round ends in a dark edge, the used part shaded from (77, 121, 151) down
+/// to (107, 158, 202)), its empty part, and the swatches under it (the used part's and the DVD-ROM content's).
+const USAGE_HEIGHT: f32 = 24.0;
+const USAGE_EDGE: crate::theme::Shade =
+    crate::theme::Shade::new(egui::Color32::from_gray(6), egui::Color32::from_gray(140));
+const USAGE_EMPTY: crate::theme::Shade =
+    crate::theme::Shade::new(egui::Color32::from_gray(40), egui::Color32::from_gray(210));
+const USAGE_TOP: egui::Color32 = egui::Color32::from_rgb(77, 121, 151);
+const USAGE_BOTTOM: egui::Color32 = egui::Color32::from_rgb(107, 158, 202);
+const USED_COLOR: egui::Color32 = egui::Color32::from_rgb(103, 161, 198);
+const ROM_COLOR: egui::Color32 = egui::Color32::from_rgb(69, 234, 142);
+
+/// A label right-aligned in a column `width` wide (a build group's labels line up on the right, as in Encore).
+fn group_label(ui: &mut Ui, text: &str, width: f32) {
+    // The cell takes the whole width (a grid sizes its column by what its cells take) and the text sits at its end.
+    let color = ui.visuals().text_color();
+    let galley = ui.painter().layout_no_wrap(
+        text.to_owned(),
+        egui::TextStyle::Body.resolve(ui.style()),
+        color,
+    );
+    let size = egui::vec2(width.max(galley.size().x), ui.spacing().interact_size.y);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let at = egui::pos2(
+        rect.max.x - galley.size().x,
+        rect.center().y - galley.size().y / 2.0,
+    );
+    ui.painter().galley(at, galley, color);
+}
+
+/// A 12 by 12 swatch of `color` in a black edge (Encore's, before each part of the usage sentence).
+fn swatch(ui: &mut Ui, color: egui::Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, egui::Color32::BLACK);
+    ui.painter().rect_filled(rect.shrink(1.0), 0.0, color);
+}
+
+/// Encore's disc usage bar across the group: a round-ended bar, its used part (`fraction` of it) shaded blue, the
+/// DVD-ROM content's share (`rom_fraction`) green at the end of the used part.
+fn draw_usage_bar(ui: &mut Ui, fraction: f32, rom_fraction: f32) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), USAGE_HEIGHT),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    painter.rect_filled(rect, USAGE_HEIGHT / 2.0, USAGE_EDGE.get());
+    let inner = rect.shrink(1.0);
+    let radius = inner.height() / 2.0;
+    let used_x = inner.min.x + inner.width() * fraction.clamp(0.0, 1.0);
+    let rom_x = (used_x - inner.width() * rom_fraction.clamp(0.0, 1.0)).max(inner.min.x);
+    // Row by row, each as wide as the round ends let it be.
+    let rows = inner.height().max(0.0) as usize;
+    for row in 0..rows {
+        let y = inner.min.y + row as f32 + 0.5;
+        let dy = (y - inner.center().y).abs();
+        let chord = (radius * radius - dy * dy).max(0.0).sqrt();
+        let left = inner.min.x + radius - chord;
+        let right = inner.max.x - radius + chord;
+        if right <= left {
+            continue;
+        }
+        let shade = row as f32 / rows.max(1) as f32;
+        let used = lerp_color(USAGE_TOP, USAGE_BOTTOM, shade);
+        for (from, to, color) in [
+            (left, right, USAGE_EMPTY.get()),
+            (left, used_x.min(right), used),
+            (rom_x.max(left), used_x.min(right), ROM_COLOR),
+        ] {
+            if to > from {
+                painter.hline(from..=to, y, egui::Stroke::new(1.0, color));
+            }
+        }
+    }
+}
+
+/// `a` to `b` by `t` (0 to 1).
+fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
+    let mix = |x: u8, y: u8| {
+        let value = f32::from(x) + (f32::from(y) - f32::from(x)) * t.clamp(0.0, 1.0);
+        value.round().clamp(0.0, 255.0) as u8
+    };
+    egui::Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
 }
 
 /// The region list after toggling `region` on or off.
@@ -376,7 +474,7 @@ impl DiscCraftApp {
                 .num_columns(2)
                 .spacing([8.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label(tl!("Source:"));
+                    group_label(ui, tl!("Source:"), LABEL_COLUMN);
                     let _ = egui::ComboBox::from_id_salt("build_source")
                         .selected_text(tl!("Current project"))
                         .show_ui(ui, |ui| {
@@ -384,7 +482,7 @@ impl DiscCraftApp {
                         });
                     ui.end_row();
 
-                    ui.label("");
+                    group_label(ui, "", LABEL_COLUMN);
                     ui.horizontal(|ui| {
                         let width = (ui.available_width() - 80.0).max(120.0);
                         let mut folder = String::new();
@@ -409,7 +507,7 @@ impl DiscCraftApp {
                 .num_columns(2)
                 .spacing([8.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label(tl!("Location:"));
+                    group_label(ui, tl!("Location:"), LABEL_COLUMN);
 
                     ui.horizontal(|ui| {
                         let width = (ui.available_width() - 80.0).max(120.0);
@@ -440,7 +538,7 @@ impl DiscCraftApp {
                 .num_columns(2)
                 .spacing([8.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label(tl!("Name:"));
+                    group_label(ui, tl!("Name:"), LABEL_COLUMN);
                     ui.horizontal(|ui| {
                         ui.set_max_width(240.0);
                         changed_name =
@@ -449,7 +547,7 @@ impl DiscCraftApp {
                     });
                     ui.end_row();
 
-                    ui.label(tl!("Size:"));
+                    group_label(ui, tl!("Size:"), LABEL_COLUMN);
                     ui.horizontal(|ui| {
                         self.capacity_combo(ui);
 
@@ -462,11 +560,12 @@ impl DiscCraftApp {
                     // Encore: DVD-ROM コンテンツ / BD-ROM コンテンツ [参照…]. A folder of files for a computer,
                     // put in the disc's root beside the video.
                     let dvd = self.session.project.settings.kind == DiscKind::Dvd;
-                    ui.label(if dvd {
+                    let label = if dvd {
                         tl!("DVD-ROM content:")
                     } else {
                         tl!("BD-ROM content:")
-                    });
+                    };
+                    group_label(ui, label, LABEL_COLUMN);
                     ui.horizontal(|ui| {
                         let folder = self.session.project.settings.rom_content.clone();
                         let width = (ui.available_width() - 150.0).max(120.0);
@@ -500,20 +599,23 @@ impl DiscCraftApp {
             let used = format_bytes(usage.estimated_bytes);
             let free = format_bytes(usage.capacity_bytes.saturating_sub(usage.estimated_bytes));
 
-            ui.add(egui::ProgressBar::new(fraction));
-            ui.horizontal(|ui| {
-                let (swatch, _) =
-                    ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                ui.painter()
-                    .rect_filled(swatch, 1.0, ui.visuals().selection.bg_fill);
-                ui.label(tlf!("{used} used. {free} free.", used = used, free = free));
-            });
-            // Encore's second line, always there: 「0 バイト が DVD-ROM コンテンツに使用されています。」
-            let rom = format_bytes(usage.rom_bytes);
-            ui.label(if self.session.project.settings.kind == DiscKind::Dvd {
-                tlf!("{size} used for DVD-ROM content.", size = rom)
+            let rom_fraction = if usage.capacity_bytes > 0 {
+                (usage.rom_bytes as f64 / usage.capacity_bytes as f64).clamp(0.0, 1.0) as f32
             } else {
-                tlf!("{size} used for BD-ROM content.", size = rom)
+                0.0
+            };
+            draw_usage_bar(ui, fraction, rom_fraction);
+            // Encore: one line under the bar, each part after a swatch of its colour in the bar.
+            let rom = format_bytes(usage.rom_bytes);
+            ui.horizontal(|ui| {
+                swatch(ui, USED_COLOR);
+                ui.label(tlf!("{used} used. {free} free.", used = used, free = free));
+                swatch(ui, ROM_COLOR);
+                ui.label(if self.session.project.settings.kind == DiscKind::Dvd {
+                    tlf!("{size} used for DVD-ROM content.", size = rom)
+                } else {
+                    tlf!("{size} used for BD-ROM content.", size = rom)
+                });
             });
         } else {
             ui.label(tl!("No usage information"));
@@ -557,7 +659,7 @@ impl DiscCraftApp {
                 .num_columns(2)
                 .spacing([8.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label(tl!("Valid:"));
+                    group_label(ui, tl!("Valid:"), REGION_LABEL_COLUMN);
 
                     ui.horizontal(|ui| {
                         self.region_mode_controls(ui);
@@ -623,7 +725,7 @@ impl DiscCraftApp {
             .spacing([8.0, 6.0])
             .show(ui, |ui| {
                 for region in 1..=8 {
-                    let mut checked = self.session.project.settings.regions.contains(&region);
+                    let mut checked = shown_checked(&self.session.project.settings.regions, region);
 
                     let response = ui.add_enabled(
                         is_custom,
@@ -660,10 +762,7 @@ impl DiscCraftApp {
                             self.problems.iter().collect();
                         for row in crate::check_window::check_rows(&self.session.project, &all) {
                             for (severity, text) in &row.problems {
-                                ui.colored_label(
-                                    problem_color(severity),
-                                    format!("{}: {text}", row.name),
-                                );
+                                problem_label(ui, severity, format!("{}: {text}", row.name));
                             }
                         }
                     });
@@ -682,7 +781,7 @@ impl DiscCraftApp {
                 .cloned();
 
             if let Some(error) = error {
-                ui.colored_label(egui::Color32::RED, error);
+                crate::theme::status_label(ui, crate::theme::Status::Error, error);
             }
 
             let summary = self.last_build.as_ref().map(|report| {
@@ -718,10 +817,23 @@ impl DiscCraftApp {
 /// Unit tests for pure build view helpers.
 #[cfg(test)]
 mod tests {
-    use super::{capacity_choices, capacity_list, output_label, toggle_region};
+    use super::{capacity_choices, capacity_list, output_label, shown_checked, toggle_region};
     use crate::i18n::{Language, set_current};
     use disccraft_build::OutputKind;
     use disccraft_project::{Capacity, DiscKind};
+
+    #[test]
+    /// All regions shows 1–6 and 8 checked, 7 not (Encore); a custom list shows its own.
+    fn all_regions_show_checked_but_the_reserved_one() {
+        let all: Vec<u8> = (1..=8)
+            .filter(|region| shown_checked(&[], *region))
+            .collect();
+        assert_eq!(all, vec![1, 2, 3, 4, 5, 6, 8]);
+        let custom: Vec<u8> = (1..=8)
+            .filter(|region| shown_checked(&[2, 7], *region))
+            .collect();
+        assert_eq!(custom, vec![2, 7]);
+    }
 
     #[test]
     /// Adding a region keeps the list sorted.

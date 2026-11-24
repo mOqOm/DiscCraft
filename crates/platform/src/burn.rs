@@ -8,6 +8,16 @@
 //! much has been read and stops when asked. The IMAPI2 work runs on a thread of its own, in the multithreaded
 //! apartment, whatever thread asks. Other systems: no recorders yet.
 //!
+//! A dual-layer DVD (M9.42): the image's layer break (the sectors it puts on layer 0, as the build notes it beside
+//! the image) is given to the drive before writing. A blank DVD+R DL's layer 0 holds as much as the disc allows
+//! unless the host makes it smaller, once, with SEND DISC STRUCTURE format 20h (the L0 Data Area Capacity, a
+//! multiple of 16 sectors); READ DISC STRUCTURE format 20h tells it, and whether it is fixed already (its Init
+//! Status; a DVD-R DL's is always fixed). Written as the drive likes, the disc would change layers wherever its
+//! layer 0 is full, mostly not where the image's break cell starts. After writing, the physical format information
+//! (format 00h: the last sector in layer 0) tells where the layers really meet. SCSI Multi-Media Commands - 5,
+//! T10/1675-D revision 4 (24 October 2006), 6.23.3.2.1 (Table 399), 6.23.3.2.22 (Table 430) and 6.34.3.2.4
+//! (Table 580); sent as they are through IMAPI2's `IDiscRecorder2Ex`.
+//!
 //! Verifying (M9.38, DiscCraft's own: Encore's panel has no such box): after the disc is closed, and before it comes
 //! out, the disc is read back through its drive letter's volume (`\\.\E:`, unbuffered, and past the end its file
 //! system gives: `FSCTL_ALLOW_EXTENDED_DASD_IO`, for the UDF anchor in the image's last sector lies outside the UDF
@@ -130,6 +140,15 @@ impl MediaKind {
         matches!(self, Self::CdRom | Self::DvdRom | Self::BdRom)
     }
 
+    /// Whether it has two recordable layers (M9.42).
+    #[must_use]
+    pub fn dual_layer(self) -> bool {
+        matches!(
+            self,
+            Self::DvdPlusRDualLayer | Self::DvdMinusRDualLayer | Self::DvdPlusRwDualLayer
+        )
+    }
+
     /// Whether a written disc of this kind is blanked before it is written again (the others are written over).
     #[must_use]
     pub fn erased_first(self) -> bool {
@@ -194,6 +213,17 @@ pub struct Media {
     pub total_bytes: u64,
     /// The write speeds offered for it, in sectors a second, fastest first.
     pub write_speeds: Vec<u32>,
+    /// A dual-layer DVD's layer 0 as the drive reports it (M9.42).
+    pub layer_boundary: Option<LayerBoundary>,
+}
+
+/// Where a recordable dual-layer DVD's first layer ends (M9.42).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayerBoundary {
+    /// The sectors of the data area on layer 0.
+    pub layer0_sectors: u32,
+    /// Whether it is fixed: set already, or not changeable (a DVD-R DL's); else the host may make it smaller once.
+    pub fixed: bool,
 }
 
 /// What [`burn`] writes, and how.
@@ -211,6 +241,9 @@ pub struct BurnRequest {
     pub eject: bool,
     /// Whether the disc is read back after it is closed and compared with the image (M9.38), before it comes out.
     pub verify: bool,
+    /// The sectors the image puts on layer 0 of a dual-layer disc (its layer break: `LayerBreak=` of the
+    /// `<name>.layerbreak.txt` the build writes beside it, M9.42); `None` for an image of one layer.
+    pub layer_break: Option<u32>,
 }
 
 /// What [`burn`] is doing, for its progress.
@@ -261,6 +294,22 @@ pub enum BurnError {
     },
     /// The disc could not be read back to verify it (M9.38).
     VerifyRead(String),
+    /// The image's layer break cannot be given to the dual-layer disc (M9.42).
+    LayerBreak {
+        /// The sectors the image puts on layer 0.
+        wanted: u32,
+        /// The sectors of the disc's layer 0 (0 when the drive does not tell).
+        disc: u32,
+        /// The disc's layer 0 is fixed (set already, or a DVD-R DL's), rather than too small.
+        fixed: bool,
+    },
+    /// The written disc's layer 0 does not end where the image's layer break is (M9.42).
+    LayerBreakMoved {
+        /// The sectors the image puts on layer 0.
+        wanted: u32,
+        /// The sectors on the written disc's layer 0.
+        written: u32,
+    },
     /// Anything else the system reported, with its code.
     System {
         /// The `HRESULT`.
@@ -298,6 +347,32 @@ impl fmt::Display for BurnError {
             Self::VerifyRead(message) => {
                 write!(f, "the disc cannot be read back to verify it: {message}")
             }
+            Self::LayerBreak {
+                wanted, disc: 0, ..
+            } => write!(
+                f,
+                "the drive does not tell where the dual-layer disc's first layer ends, so the layer break                  (sector {wanted}) cannot be placed"
+            ),
+            Self::LayerBreak {
+                wanted,
+                disc,
+                fixed: true,
+            } => write!(
+                f,
+                "the disc's first layer is fixed at {disc} sectors; the image's layer break is at sector {wanted}                  (use a blank DVD+R DL)"
+            ),
+            Self::LayerBreak {
+                wanted,
+                disc,
+                fixed: false,
+            } => write!(
+                f,
+                "the image's first layer ({wanted} sectors) is larger than the disc's ({disc} sectors)"
+            ),
+            Self::LayerBreakMoved { wanted, written } => write!(
+                f,
+                "the written disc's first layer ends after {written} sectors, not at the image's layer break                  ({wanted})"
+            ),
             Self::System { code, message } => write!(f, "{message} (0x{code:08X})"),
         }
     }
@@ -494,7 +569,7 @@ mod imp {
 #[allow(unsafe_code)]
 mod imp {
     use super::{
-        BurnError, BurnRequest, BurnStep, Media, MediaKind, Recorder, SECTOR_BYTES,
+        BurnError, BurnRequest, BurnStep, LayerBoundary, Media, MediaKind, Recorder, SECTOR_BYTES,
         compare_with_image,
     };
     use std::fs::File;
@@ -504,7 +579,7 @@ mod imp {
     use std::sync::{Arc, Mutex};
     use windows::Win32::Foundation::{E_ABORT, E_NOTIMPL, E_POINTER, S_FALSE, S_OK, VARIANT_BOOL};
     use windows::Win32::Storage::Imapi::{
-        IDiscFormat2Data, IDiscFormat2Erase, IDiscMaster2, IDiscRecorder2,
+        IDiscFormat2Data, IDiscFormat2Erase, IDiscMaster2, IDiscRecorder2, IDiscRecorder2Ex,
         IMAPI_MEDIA_PHYSICAL_TYPE, IMAPI_MEDIA_TYPE_BDR, IMAPI_MEDIA_TYPE_BDRE,
         IMAPI_MEDIA_TYPE_BDROM, IMAPI_MEDIA_TYPE_CDR, IMAPI_MEDIA_TYPE_CDROM,
         IMAPI_MEDIA_TYPE_CDRW, IMAPI_MEDIA_TYPE_DVDDASHR, IMAPI_MEDIA_TYPE_DVDDASHR_DUALLAYER,
@@ -682,6 +757,144 @@ mod imp {
         Ok(recorder)
     }
 
+    /// READ DISC STRUCTURE (MMC-5 6.23).
+    const READ_DISC_STRUCTURE: u8 = 0xAD;
+    /// SEND DISC STRUCTURE (MMC-5 6.34).
+    const SEND_DISC_STRUCTURE: u8 = 0xBF;
+    /// The disc structure format of the physical format information (Table 399).
+    const PHYSICAL_FORMAT: u8 = 0x00;
+    /// The disc structure format of a dual-layer DVD±R's layer boundary (Tables 430 and 580).
+    const LAYER_BOUNDARY: u8 = 0x20;
+    /// The first physical sector of a DVD's data area (Table 405).
+    const DATA_AREA_START: u32 = 0x3_0000;
+    /// How long a disc structure command may take, seconds.
+    const COMMAND_SECONDS: u32 = 30;
+
+    /// The disc structure of `format` (media type DVD, layer 0): `length` bytes, its four-byte header first.
+    fn read_disc_structure(recorder: &IDiscRecorder2, format: u8, length: u16) -> Option<Vec<u8>> {
+        let device: IDiscRecorder2Ex = recorder.cast().ok()?;
+        let [high, low] = length.to_be_bytes();
+        let cdb = [
+            READ_DISC_STRUCTURE,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            format,
+            high,
+            low,
+            0,
+            0,
+        ];
+        let mut sense = [0u8; 18];
+        let mut data = vec![0u8; usize::from(length)];
+        let mut fetched = 0u32;
+        // SAFETY: the CDB, sense buffer and data buffer are live and as long as the call is told; the drive writes
+        // at most `length` bytes into `data` and the count into `fetched`.
+        unsafe {
+            device.SendCommandGetDataFromDevice(
+                &cdb,
+                &mut sense,
+                COMMAND_SECONDS,
+                &mut data,
+                &raw mut fetched,
+            )
+        }
+        .ok()?;
+        data.truncate(usize::try_from(fetched).ok()?);
+        Some(data)
+    }
+
+    /// A big-endian `u32` at `at` of `data`.
+    fn be32(data: &[u8], at: usize) -> Option<u32> {
+        Some(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?))
+    }
+
+    /// A dual-layer DVD±R's layer boundary (format 20h): Init Status (byte 4, bit 7) and the L0 Data Area Capacity
+    /// (bytes 8 to 11).
+    fn layer_boundary(recorder: &IDiscRecorder2) -> Option<LayerBoundary> {
+        let data = read_disc_structure(recorder, LAYER_BOUNDARY, 12)?;
+        Some(LayerBoundary {
+            layer0_sectors: be32(&data, 8)?,
+            fixed: data.get(4)? & 0x80 != 0,
+        })
+    }
+
+    /// Makes a blank DVD+R DL's layer 0 `sectors` long (format 20h): the parameter list is its length (10), two
+    /// reserved bytes, four reserved bytes and the L0 Data Area Capacity. The recorder is held for it alone.
+    fn set_layer_boundary(recorder: &IDiscRecorder2, sectors: u32) -> Result<(), BurnError> {
+        let device: IDiscRecorder2Ex = recorder.cast().map_err(|failure| error(&failure))?;
+        let cdb = [
+            SEND_DISC_STRUCTURE,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            LAYER_BOUNDARY,
+            0,
+            12,
+            0,
+            0,
+        ];
+        let mut list = [0u8; 12];
+        list[1] = 10;
+        list[8..12].copy_from_slice(&sectors.to_be_bytes());
+        let mut sense = [0u8; 18];
+        // SAFETY: plain COM calls on the live recorder; the CDB, sense buffer and parameter list are live and as long
+        // as the call is told.
+        unsafe {
+            recorder
+                .AcquireExclusiveAccess(variant_bool(false), &BSTR::from(CLIENT))
+                .map_err(|failure| error(&failure))?;
+            let sent = device.SendCommandSendDataToDevice(&cdb, &mut sense, COMMAND_SECONDS, &list);
+            let _ = recorder.ReleaseExclusiveAccess();
+            sent.map_err(|failure| error(&failure))
+        }
+    }
+
+    /// Gives a blank dual-layer disc the image's layer break, `wanted` sectors on layer 0, and checks it took it.
+    fn place_layer_break(recorder: &IDiscRecorder2, wanted: u32) -> Result<(), BurnError> {
+        let refused = |disc: u32, fixed: bool| BurnError::LayerBreak {
+            wanted,
+            disc,
+            fixed,
+        };
+        let current = layer_boundary(recorder).ok_or_else(|| refused(0, true))?;
+        if current.layer0_sectors == wanted {
+            return Ok(());
+        }
+        if current.fixed {
+            return Err(refused(current.layer0_sectors, true));
+        }
+        if wanted > current.layer0_sectors {
+            return Err(refused(current.layer0_sectors, false));
+        }
+        set_layer_boundary(recorder, wanted)?;
+        match layer_boundary(recorder) {
+            Some(now) if now.layer0_sectors == wanted => Ok(()),
+            Some(now) => Err(refused(now.layer0_sectors, true)),
+            None => Err(refused(0, true)),
+        }
+    }
+
+    /// The sectors on a written dual-layer disc's layer 0, from its physical format information (format 00h): the
+    /// last sector in layer 0 (bytes 16 to 19) after the first of the data area (bytes 8 to 11), for a disc of two
+    /// layers (byte 6, bits 6 and 5).
+    fn written_layer0(recorder: &IDiscRecorder2) -> Option<u32> {
+        let data = read_disc_structure(recorder, PHYSICAL_FORMAT, 24)?;
+        let layers = (data.get(6)? >> 5) & 0b11;
+        if layers != 1 {
+            return None;
+        }
+        let start = be32(&data, 8)? & 0x00FF_FFFF;
+        let end = be32(&data, 16)? & 0x00FF_FFFF;
+        (start == DATA_AREA_START && end >= start).then(|| end - start + 1)
+    }
+
     /// The data writer for `recorder`.
     fn writer(recorder: &IDiscRecorder2) -> Result<IDiscFormat2Data, BurnError> {
         let format: IDiscFormat2Data = create(&MsftDiscFormat2Data)?;
@@ -801,6 +1014,7 @@ mod imp {
                     free_bytes: 0,
                     total_bytes: 0,
                     write_speeds: Vec::new(),
+                    layer_boundary: None,
                 }));
             }
             // SAFETY: plain COM calls on the live writer; the SAFEARRAY is handed to `variants`, which owns it.
@@ -831,6 +1045,10 @@ mod imp {
                 free_bytes: bytes(free),
                 total_bytes: bytes(total),
                 write_speeds,
+                layer_boundary: physical
+                    .dual_layer()
+                    .then(|| layer_boundary(&recorder))
+                    .flatten(),
             }))
         })
     }
@@ -925,6 +1143,16 @@ mod imp {
                 free: room,
             });
         }
+        // M9.42: the image's layer break, when it has one past which it goes on, given to a dual-layer disc first.
+        let image_sectors = size / SECTOR_BYTES;
+        let layer_break = request
+            .layer_break
+            .filter(|sectors| *sectors > 0 && u64::from(*sectors) < image_sectors);
+        if let Some(wanted) = layer_break
+            && physical.dual_layer()
+        {
+            place_layer_break(&recorder, wanted)?;
+        }
         // SAFETY: plain COM calls on the live writer with valid arguments.
         unsafe {
             format
@@ -960,6 +1188,18 @@ mod imp {
             other => other,
         })?;
         progress(BurnStep::Closing, 1.0);
+        // M9.42: where the written disc's layers meet; it is not verified further when that is not the image's break.
+        if let Some(wanted) = layer_break
+            && physical.dual_layer()
+            && let Some(written) = written_layer0(&recorder)
+            && written != wanted
+        {
+            if request.eject {
+                // SAFETY: a plain COM call on the live recorder.
+                let _ = unsafe { recorder.EjectMedia() };
+            }
+            return Err(BurnError::LayerBreakMoved { wanted, written });
+        }
         // M9.38: read back before the disc comes out (a tray the system cannot close would need a hand to put it back).
         let verified = if request.verify {
             let report = Arc::clone(progress);
@@ -1336,6 +1576,46 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::{BurnError, MediaKind, Recorder, SECTOR_BYTES, compare_with_image};
+
+    /// M9.42: the dual-layer kinds, and what a misplaced layer break says.
+    #[test]
+    fn dual_layer_discs_and_their_layer_break_errors() {
+        for kind in [
+            MediaKind::DvdPlusRDualLayer,
+            MediaKind::DvdMinusRDualLayer,
+            MediaKind::DvdPlusRwDualLayer,
+        ] {
+            assert!(kind.dual_layer(), "{kind:?}");
+        }
+        assert!(!MediaKind::DvdPlusR.dual_layer());
+        assert!(!MediaKind::BdR.dual_layer());
+        let fixed = BurnError::LayerBreak {
+            wanted: 2_030_528,
+            disc: 2_084_960,
+            fixed: true,
+        }
+        .to_string();
+        assert!(
+            fixed.contains("fixed at 2084960") && fixed.contains("2030528"),
+            "{fixed}"
+        );
+        let small = BurnError::LayerBreak {
+            wanted: 2_090_000,
+            disc: 2_086_912,
+            fixed: false,
+        }
+        .to_string();
+        assert!(small.contains("larger"), "{small}");
+        let moved = BurnError::LayerBreakMoved {
+            wanted: 2_030_528,
+            written: 2_086_912,
+        }
+        .to_string();
+        assert!(
+            moved.contains("2086912") && moved.contains("2030528"),
+            "{moved}"
+        );
+    }
     use std::io::Cursor;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;

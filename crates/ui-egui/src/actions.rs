@@ -62,6 +62,8 @@ pub(crate) enum Action {
     ImportMenuPage,
     /// Import video files, each as an asset and a timeline (File ▸ Import ▸ Timeline…).
     ImportTimeline,
+    /// Import a playlist of a Blu-ray as a timeline (M6.429).
+    ImportBluray,
     /// Import images as the slides of a new slideshow (File ▸ Import ▸ Slideshow…).
     ImportSlideshow,
     /// Edit the authoring mode, aspect ratio and capacity of the open project.
@@ -172,6 +174,12 @@ pub(crate) enum Action {
     AddChapterPointsAtInterval,
     /// Play or stop the timeline in the Timeline Viewer.
     Play,
+    /// Play the timeline faster (M6.427, L): from stopped at real time, then a step faster each time.
+    PlayFaster,
+    /// Play the timeline slower (M6.427, J): a step slower each time.
+    PlaySlower,
+    /// Stop playing the timeline (M6.427, K).
+    StopPlayback,
     /// Add an audio track to the selected timeline.
     AddAudioTrack,
     /// Add a subtitle track to the selected timeline.
@@ -190,6 +198,9 @@ pub(crate) enum Action {
     LocateTranscodedBluray,
     /// Timeline ▸ Import Subtitles ▸ Image Script…: picture subtitles in one place, from a folder the script names.
     ImportImageScript,
+    /// Timeline ▸ Import Subtitles ▸ Subtitles in the Video (M6.422, DiscCraft's own): the subtitle tracks inside the
+    /// timeline's video file as subtitle tracks.
+    ImportSourceSubtitles,
     /// Read a FilmCraft project and turn a sequence's markers into chapter points.
     ImportFilmCraftMarkers,
     /// Take the chapters the timeline's video files carry as chapter points.
@@ -326,7 +337,7 @@ pub(crate) enum Trigger {
 
 impl Action {
     /// Every action, in menu order.
-    pub(crate) const ALL: [Action; 149] = [
+    pub(crate) const ALL: [Action; 154] = [
         Action::NewProject,
         Action::NewMenu,
         Action::NewTimeline,
@@ -353,6 +364,7 @@ impl Action {
         Action::ImportPopupMenu,
         Action::ImportMenuPage,
         Action::ImportTimeline,
+        Action::ImportBluray,
         Action::ImportSlideshow,
         Action::ProjectSettings,
         Action::SetFirstPlay,
@@ -408,6 +420,9 @@ impl Action {
         Action::AddChapterPoint,
         Action::AddChapterPointsAtInterval,
         Action::Play,
+        Action::PlayFaster,
+        Action::PlaySlower,
+        Action::StopPlayback,
         Action::AddAudioTrack,
         Action::AddSubtitleTrack,
         Action::RemoveAudioTrack,
@@ -415,6 +430,7 @@ impl Action {
         Action::ImportSubtitles,
         Action::ImportFabImageScript,
         Action::ImportImageScript,
+        Action::ImportSourceSubtitles,
         Action::LocateTranscodedDvd,
         Action::LocateTranscodedBluray,
         Action::ImportFilmCraftMarkers,
@@ -511,6 +527,7 @@ impl Action {
             Self::ImportPopupMenu => tl!("Pop-up Menu…"),
             Self::ImportMenuPage => tl!("Menu Page…"),
             Self::ImportTimeline => tl!("Timeline…"),
+            Self::ImportBluray => tl!("Blu-ray…"),
             Self::ImportSlideshow => tl!("Slideshow…"),
             Self::CheckProject => tl!("Check Project…"),
             Self::Preview => tl!("Preview"),
@@ -563,6 +580,9 @@ impl Action {
             Self::AddChapterPoint => tl!("Add Chapter Point"),
             Self::AddChapterPointsAtInterval => tl!("Add Chapter Points at Interval…"),
             Self::Play => tl!("Play"),
+            Self::PlayFaster => tl!("Play Faster"),
+            Self::PlaySlower => tl!("Play Slower"),
+            Self::StopPlayback => tl!("Stop"),
             Self::AddAudioTrack => tl!("Add Audio Track…"),
             Self::AddSubtitleTrack => tl!("Add Subtitle Track…"),
             Self::RemoveAudioTrack => tl!("Delete Audio Track"),
@@ -572,6 +592,7 @@ impl Action {
             Self::LocateTranscodedDvd => tl!("Locate Transcoded File for DVD…"),
             Self::LocateTranscodedBluray => tl!("Locate Transcoded File for Blu-ray…"),
             Self::ImportImageScript => tl!("Image Script…"),
+            Self::ImportSourceSubtitles => tl!("Subtitles in the Video"),
             Self::ImportFilmCraftMarkers => tl!("Import FilmCraft Markers…"),
             Self::ImportSourceChapters => tl!("Import Chapters from Source"),
             Self::NewTimelineFromFilmCraft => tl!("New Timeline from FilmCraft Sequence…"),
@@ -673,6 +694,7 @@ impl Action {
             | Self::ImportSubtitles
             | Self::ImportFabImageScript
             | Self::ImportImageScript
+            | Self::ImportSourceSubtitles
             | Self::LocateTranscodedDvd
             | Self::LocateTranscodedBluray
             | Self::ImportFilmCraftMarkers
@@ -705,6 +727,7 @@ impl Action {
             }
             Self::ImportMenuPage => key_shortcut(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::U),
             Self::ImportTimeline => key_shortcut(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::T),
+            Self::ImportBluray => None,
             Self::ImportSlideshow => {
                 key_shortcut(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::G)
             }
@@ -776,6 +799,9 @@ impl Action {
             Self::AddChapterPoint => Some(Trigger::Text("*")),
             Self::SetPosterFrame => Some(Trigger::KeypadShifted("*")),
             Self::Play => key_shortcut(Modifiers::NONE, Key::Space),
+            Self::PlayFaster => key_shortcut(Modifiers::NONE, Key::L),
+            Self::PlaySlower => key_shortcut(Modifiers::NONE, Key::J),
+            Self::StopPlayback => key_shortcut(Modifiers::NONE, Key::K),
             Self::ZoomIn => key_shortcut(Modifiers::NONE, Key::Plus),
             Self::ZoomOut => key_shortcut(Modifiers::NONE, Key::Minus),
             Self::FitInWindow => key_shortcut(Modifiers::NONE, Key::Backslash),
@@ -1122,6 +1148,22 @@ pub(crate) fn menu_check(ui: &mut Ui, action: Action, checked: bool) -> bool {
 pub(crate) fn menu_item_indented(ui: &mut Ui, action: Action, enabled: bool) -> bool {
     ui.add_enabled(enabled, check_column_button(ui, action))
         .clicked()
+}
+
+/// The label of a menu item or submenu that is not an action, in a menu with checkable items: behind the check
+/// mark column, where theirs start (Encore lines every label of such a menu up).
+pub(crate) fn indented(label: String) -> (egui::Atom<'static>, egui::Atom<'static>) {
+    ("".atom_size(egui::vec2(CHECK_WIDTH, 0.0)), label.into())
+}
+
+/// A checkable menu item that is not an action (a flowchart node's ボタンを表示): its label behind the check mark
+/// column, the mark there when `checked`. Returns whether it was clicked.
+pub(crate) fn menu_check_label(ui: &mut Ui, label: String, checked: bool) -> bool {
+    let response = ui.add(egui::Button::new(indented(label)));
+    if checked {
+        paint_check(ui, &response, true);
+    }
+    response.clicked()
 }
 
 /// The button of a menu item whose label is behind the check mark column.

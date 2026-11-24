@@ -15,6 +15,9 @@ pub struct MenuVobInput<'a> {
     pub video_data: &'a [u8],
     /// One subpicture unit for private stream 1 sub stream 0x20.
     pub spu: &'a [u8],
+    /// For a 16:9 menu shown letterboxed on a 4:3 television, the highlights placed on its letterboxed picture:
+    /// one subpicture unit for sub stream 0x21 (the PGC's letterbox stream), with the HLI's letterbox group.
+    pub letterbox_spu: Option<&'a [u8]>,
     /// Highlight information to write into the NAV pack.
     pub hli: &'a Hli,
     /// VOB id written into NAV packs.
@@ -82,6 +85,7 @@ const MAX_SPU_PAYLOAD: usize = 1800;
 const VIDEO_STREAM_ID: u8 = 0xE0;
 const PRIVATE_STREAM_ID: u8 = 0xBD;
 const SPU_SUB_STREAM: u8 = 0x20;
+const LETTERBOX_SUB_STREAM: u8 = 0x21;
 
 const PES_FLAGS_NONE: u8 = 0x00;
 const PES_FLAGS_PTS: u8 = 0x80;
@@ -111,9 +115,14 @@ pub fn mux_menu_vob(
 
     let video_packs = pack_count(input.video_data.len(), MAX_VIDEO_PAYLOAD)?;
     let spu_packs = pack_count(input.spu.len(), MAX_SPU_PAYLOAD)?;
+    let letterbox_packs = match input.letterbox_spu {
+        Some(spu) => pack_count(spu.len(), MAX_SPU_PAYLOAD)?,
+        None => 0,
+    };
     let sectors = 1u32
         .checked_add(video_packs)
         .and_then(|v| v.checked_add(spu_packs))
+        .and_then(|v| v.checked_add(letterbox_packs))
         .ok_or_else(|| invalid("sector count overflow"))?;
 
     check_timing(picture.dts, video_packs)?;
@@ -124,9 +133,31 @@ pub fn mux_menu_vob(
     let first_spu = 1u32
         .checked_add(video_packs)
         .ok_or_else(|| invalid("pack index overflow"))?;
-    write_spu_packs(input, picture.pts, first_spu, spu_packs, sink)?;
+    let spu = SpuPacks {
+        data: input.spu,
+        sub_stream: SPU_SUB_STREAM,
+        first: first_spu,
+        packs: spu_packs,
+    };
+    write_spu_packs(&spu, picture.pts, sink)?;
+    let first_letterbox = first_spu
+        .checked_add(spu_packs)
+        .ok_or_else(|| invalid("pack index overflow"))?;
+    if let Some(data) = input.letterbox_spu {
+        let letterbox = SpuPacks {
+            data,
+            sub_stream: LETTERBOX_SUB_STREAM,
+            first: first_letterbox,
+            packs: letterbox_packs,
+        };
+        write_spu_packs(&letterbox, picture.pts, sink)?;
+    }
+    let synca = [
+        Some(first_spu),
+        input.letterbox_spu.map(|_| first_letterbox),
+    ];
 
-    let nav_sector = build_nav(input, pts, e_ptm, sectors, video_packs, first_spu)?;
+    let nav_sector = build_nav(input, pts, e_ptm, sectors, video_packs, synca)?;
     sink.overwrite_sector(input.first_sector, &nav_sector)?;
     sink.finish()?;
 
@@ -315,16 +346,23 @@ fn write_video_first(
     )
 }
 
+/// One subpicture unit's packs: its bytes, sub stream and first pack index in the VOBU.
+struct SpuPacks<'a> {
+    data: &'a [u8],
+    sub_stream: u8,
+    first: u32,
+    packs: u32,
+}
+
 fn write_spu_packs(
-    input: &MenuVobInput<'_>,
+    spu: &SpuPacks<'_>,
     pts: i64,
-    first_index: u32,
-    spu_packs: u32,
     sink: &mut dyn SectorSink,
 ) -> Result<(), MuxError> {
+    let first_index = spu.first;
     let mut index = first_index;
     let mut offset = 0usize;
-    let total = input.spu.len();
+    let total = spu.data.len();
 
     while offset < total {
         let remaining = total
@@ -338,8 +376,8 @@ fn write_spu_packs(
         let end = offset
             .checked_add(chunk)
             .ok_or_else(|| invalid("offset overflow"))?;
-        let spu_chunk = input
-            .spu
+        let spu_chunk = spu
+            .data
             .get(offset..end)
             .ok_or_else(|| invalid("SPU payload out of range"))?;
 
@@ -348,7 +386,7 @@ fn write_spu_packs(
                 .checked_add(1)
                 .ok_or_else(|| invalid("payload overflow"))?,
         );
-        payload.push(SPU_SUB_STREAM);
+        payload.push(spu.sub_stream);
         payload.extend_from_slice(spu_chunk);
 
         let scr = scr_for_pack(index)?;
@@ -384,7 +422,7 @@ fn write_spu_packs(
     }
 
     let expected = first_index
-        .checked_add(spu_packs)
+        .checked_add(spu.packs)
         .ok_or_else(|| invalid("pack count overflow"))?;
     if index != expected {
         return Err(invalid("SPU pack count mismatch"));
@@ -398,7 +436,7 @@ fn build_nav(
     e_ptm: u32,
     sectors: u32,
     video_packs: u32,
-    first_spu: u32,
+    synca: [Option<u32>; 2],
 ) -> Result<[u8; SECTOR], MuxError> {
     let mut sector = [0u8; SECTOR];
     pack::write_pack_header(&mut sector, 0)?;
@@ -414,7 +452,7 @@ fn build_nav(
         e_ptm,
         sectors,
         video_packs,
-        first_spu,
+        synca,
     )?;
 
     Ok(sector)
@@ -450,6 +488,7 @@ fn write_pci_gi(
     let hli = Hli {
         start_ptm: s_ptm,
         buttons: input.hli.buttons.clone(),
+        letterbox: input.hli.letterbox.clone(),
         default_button: input.hli.default_button,
         button_offset: input.hli.button_offset,
         color_sets: input.hli.color_sets,
@@ -464,7 +503,7 @@ fn write_dsi(
     e_ptm: u32,
     sectors: u32,
     video_packs: u32,
-    first_spu: u32,
+    synca: [Option<u32>; 2],
 ) -> Result<(), MuxError> {
     pack::put_u32_be(sector, DSI_SCR, 0)?;
     pack::put_u32_be(sector, DSI_LBN, input.first_sector)?;
@@ -488,7 +527,7 @@ fn write_dsi(
 
     write_sri(sector)?;
     write_a_synca(sector)?;
-    write_sp_synca(sector, first_spu)
+    write_sp_synca(sector, synca)
 }
 
 fn write_sri(sector: &mut [u8; SECTOR]) -> Result<(), MuxError> {
@@ -517,13 +556,25 @@ fn write_a_synca(sector: &mut [u8; SECTOR]) -> Result<(), MuxError> {
     Ok(())
 }
 
-fn write_sp_synca(sector: &mut [u8; SECTOR], first_spu: u32) -> Result<(), MuxError> {
-    pack::put_u32_be(sector, DSI_SP_SYNCA, first_spu)
+/// SP_SYNCA of sub streams 0x20 and 0x21: the first pack of each one's unit, relative to the NAV pack.
+fn write_sp_synca(sector: &mut [u8; SECTOR], synca: [Option<u32>; 2]) -> Result<(), MuxError> {
+    for (index, first) in synca.into_iter().enumerate() {
+        if let Some(first) = first {
+            let offset = index
+                .checked_mul(4)
+                .and_then(|delta| DSI_SP_SYNCA.checked_add(delta))
+                .ok_or_else(|| invalid("SP_SYNCA offset overflow"))?;
+            pack::put_u32_be(sector, offset, first)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{MenuVobInput, MenuVobLayout, MuxError, PCI_DATA, PCI_DATA_LEN, mux_menu_vob};
+    use super::{
+        DSI_DATA, MenuVobInput, MenuVobLayout, MuxError, PCI_DATA, PCI_DATA_LEN, mux_menu_vob,
+    };
     use crate::es::{parse_video, to_90k};
     use crate::mux::hli::{Hli, HliButton, read_hli};
     use crate::sink::{MemorySink, SECTOR};
@@ -720,6 +771,7 @@ mod tests {
                 test_button(3, 1, 2, 2),
                 test_button(1, 2, 3, 3),
             ],
+            letterbox: Vec::new(),
             default_button: 1,
             button_offset: 0,
             color_sets: [[0u8; 8]; 3],
@@ -759,6 +811,7 @@ mod tests {
             video: &video,
             video_data: &video_data,
             spu: &spu,
+            letterbox_spu: None,
             hli: &hli,
             vob_id: 1,
             ntsc: true,
@@ -873,6 +926,68 @@ mod tests {
         Ok(())
     }
 
+    /// The bytes of private stream 1 sub stream `sub` in the VOB and the index of its first pack.
+    fn sub_stream(sink: &MemorySink, sub: u8) -> Option<(Vec<u8>, usize)> {
+        let mut bytes = Vec::new();
+        let mut first = None;
+        for (index, sector) in sink.sectors.iter().enumerate().skip(1) {
+            if sector.get(17) != Some(&0xBD) {
+                continue;
+            }
+            let packet_len = usize::from(read_u16(sector, 18)?);
+            let hdr_len = usize::from(*sector.get(22)?);
+            let end = 20usize.checked_add(packet_len)?;
+            let payload = sector.get(23usize.checked_add(hdr_len)?..end)?;
+            if payload.first() == Some(&sub) {
+                first.get_or_insert(index);
+                bytes.extend_from_slice(payload.get(1..)?);
+            }
+        }
+        Some((bytes, first?))
+    }
+
+    #[test]
+    fn a_letterbox_subpicture_goes_on_its_own_sub_stream() -> Result<(), MuxError> {
+        let video_data = build_menu_video();
+        let video = parse_menu_video(&video_data)?;
+        let spu: Vec<u8> = (0u8..100).collect();
+        let letterbox: Vec<u8> = (0u8..=255).cycle().take(2000).collect();
+        let mut hli = test_hli(0);
+        hli.letterbox = hli.buttons.clone();
+        let input = MenuVobInput {
+            video: &video,
+            video_data: &video_data,
+            spu: &spu,
+            letterbox_spu: Some(&letterbox),
+            hli: &hli,
+            vob_id: 1,
+            ntsc: true,
+            first_sector: 0,
+        };
+        let mut sink = MemorySink::default();
+        let layout = mux_menu_vob(&input, &mut sink)?;
+        assert_eq!(
+            usize::try_from(layout.sectors).ok(),
+            Some(sink.sectors.len())
+        );
+
+        let (wide, wide_first) = sub_stream(&sink, 0x20).unwrap_or_default();
+        let (boxed, boxed_first) = sub_stream(&sink, 0x21).unwrap_or_default();
+        assert_eq!(wide, spu);
+        assert_eq!(boxed, letterbox);
+        // SP_SYNCA of streams 0 and 1 point at each unit's first pack.
+        let nav = sink.sectors.first().map(|s| s.to_vec()).unwrap_or_default();
+        let synca = DSI_DATA + 0x1A2;
+        assert_eq!(read_u32(&nav, synca), u32::try_from(wide_first).ok());
+        assert_eq!(read_u32(&nav, synca + 4), u32::try_from(boxed_first).ok());
+        assert!(boxed_first > wide_first);
+        let pci = nav
+            .get(PCI_DATA..PCI_DATA + PCI_DATA_LEN)
+            .unwrap_or_default();
+        assert_eq!(read_hli(pci)?.map(|got| got.letterbox), Some(hli.letterbox));
+        Ok(())
+    }
+
     #[test]
     fn two_pictures_is_error() -> Result<(), MuxError> {
         let video_data = build_two_picture_video();
@@ -883,6 +998,7 @@ mod tests {
             video: &video,
             video_data: &video_data,
             spu: &spu,
+            letterbox_spu: None,
             hli: &hli,
             vob_id: 1,
             ntsc: true,

@@ -6,10 +6,19 @@
 //! writes one button per group). Effect sequences are read past; their windows and objects are not kept.
 
 use crate::PgsError;
-use crate::ig::{IgButton, IgPage, InteractiveComposition};
+use crate::ig::{IgButton, IgObject, IgPage, InteractiveComposition};
+use crate::segment::PaletteEntry;
 
 /// Segment type of an interactive composition segment.
 const ICS_TYPE: u8 = 0x18;
+/// Segment type of an object definition segment.
+const ODS_TYPE: u8 = 0x15;
+/// Segment type of a palette definition segment.
+const PDS_TYPE: u8 = 0x14;
+/// The most objects read from one stream (a menu's buttons' states and their animations).
+const MAX_OBJECTS: usize = 4096;
+/// The most bytes of run-length data one object may hold.
+const MAX_OBJECT_DATA: usize = 4 * 1024 * 1024;
 /// The first fragment of a composition's data.
 const FIRST_IN_SEQUENCE: u8 = 0x80;
 /// The last fragment of a composition's data.
@@ -39,6 +48,91 @@ pub fn segments(data: &[u8]) -> Vec<(u8, &[u8])> {
         };
         out.push((kind, segment));
         rest = next;
+    }
+    out
+}
+
+/// The graphics objects of a graphics stream (M6.430: a Blu-ray menu's buttons' pictures), each id's first,
+/// decoded to palette indices. An object is an ODS with its id (2), version (1), sequence flags (1) and, in its first
+/// fragment, the data's length (3), width (2) and height (2) before the run-length data; later fragments carry
+/// more of the data after the first four bytes. An object whose data does not decode is left out.
+#[must_use]
+pub fn objects(stream: &[u8]) -> Vec<IgObject> {
+    let mut out: Vec<IgObject> = Vec::new();
+    // The object being joined: its id, size and data so far.
+    let mut open: Option<(u16, u16, u16, Vec<u8>)> = None;
+    for (kind, body) in segments(stream) {
+        if kind != ODS_TYPE || out.len() >= MAX_OBJECTS {
+            continue;
+        }
+        let Some((&[id_high, id_low, _version, flags], rest)) = body.split_first_chunk::<4>()
+        else {
+            continue;
+        };
+        let id = u16::from_be_bytes([id_high, id_low]);
+        if flags & FIRST_IN_SEQUENCE != 0 {
+            let Some((&[_, _, _, w_high, w_low, h_high, h_low], data)) =
+                rest.split_first_chunk::<7>()
+            else {
+                open = None;
+                continue;
+            };
+            open = Some((
+                id,
+                u16::from_be_bytes([w_high, w_low]),
+                u16::from_be_bytes([h_high, h_low]),
+                data.to_vec(),
+            ));
+        } else if let Some((open_id, _, _, data)) = open.as_mut()
+            && *open_id == id
+            && data.len().saturating_add(rest.len()) <= MAX_OBJECT_DATA
+        {
+            data.extend_from_slice(rest);
+        } else {
+            open = None;
+            continue;
+        }
+        if flags & LAST_IN_SEQUENCE != 0
+            && let Some((id, width, height, data)) = open.take()
+            && !out.iter().any(|object| object.id == id)
+            && let Ok(pixels) = crate::rle::rle_decode(width, height, &data)
+        {
+            out.push(IgObject {
+                id,
+                width,
+                height,
+                pixels,
+            });
+        }
+    }
+    out
+}
+
+/// The palettes of a graphics stream (M6.430), each id's first: a PDS is its id (1), version (1) and entries of five
+/// bytes (entry id, Y, Cr, Cb, alpha).
+#[must_use]
+pub fn palettes(stream: &[u8]) -> Vec<(u8, Vec<PaletteEntry>)> {
+    let mut out: Vec<(u8, Vec<PaletteEntry>)> = Vec::new();
+    for (kind, body) in segments(stream) {
+        let Some((&[id, _version], entries)) = body.split_first_chunk::<2>() else {
+            continue;
+        };
+        if kind != PDS_TYPE || out.iter().any(|(known, _)| *known == id) {
+            continue;
+        }
+        let entries = entries
+            .as_chunks::<5>()
+            .0
+            .iter()
+            .map(|&[id, y, cr, cb, alpha]| PaletteEntry {
+                id,
+                y,
+                cr,
+                cb,
+                alpha,
+            })
+            .collect();
+        out.push((id, entries));
     }
     out
 }
@@ -268,6 +362,54 @@ fn err(message: &str) -> PgsError {
 
 #[cfg(test)]
 mod tests {
+    /// M6.430: objects (one small, one split over several segments) and palettes read back as written.
+    #[test]
+    fn objects_and_palettes_read_back() {
+        use crate::rle::rle_encode;
+        use crate::segment::{PaletteEntry, ods, pds};
+        let small: Vec<u8> = (0..40 * 12).map(|n| (n % 3) as u8).collect();
+        // Noisy enough not to shrink below one segment's size.
+        let large: Vec<u8> = (0..600 * 200)
+            .map(|n: u32| ((n * 7919) % 251) as u8)
+            .collect();
+        let mut stream = Vec::new();
+        for (id, (width, height, pixels)) in [(40u16, 12u16, &small), (600, 200, &large)]
+            .into_iter()
+            .enumerate()
+        {
+            let rle = rle_encode(width, height, pixels).unwrap();
+            for segment in ods(id as u16, 0, width, height, &rle).unwrap() {
+                stream.extend(segment);
+            }
+        }
+        let entries = [PaletteEntry {
+            id: 1,
+            y: 235,
+            cr: 128,
+            cb: 128,
+            alpha: 255,
+        }];
+        stream.extend(pds(3, 0, &entries).unwrap());
+        // The same id again later is not read twice.
+        for segment in ods(0, 1, 40, 12, &rle_encode(40, 12, &small).unwrap()).unwrap() {
+            stream.extend(segment);
+        }
+        let objects = super::objects(&stream);
+        assert_eq!(objects.len(), 2);
+        assert_eq!(
+            (objects[0].id, objects[0].width, objects[0].height),
+            (0, 40, 12)
+        );
+        assert_eq!(objects[0].pixels, small);
+        assert_eq!(objects[1].pixels, large);
+        assert_eq!(super::palettes(&stream), [(3, entries.to_vec())]);
+        // Cut short anywhere: no panic.
+        for cut in (0..stream.len()).step_by(97) {
+            let _ = super::objects(&stream[..cut]);
+            let _ = super::palettes(&stream[..cut]);
+        }
+    }
+
     use super::{interactive_compositions, segments};
     use crate::ig::{IgButton, IgPage, InteractiveComposition, ics};
 

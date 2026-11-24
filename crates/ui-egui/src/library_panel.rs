@@ -2,8 +2,9 @@
 //!
 //! DiscCraft 独自のプリセット（メニュー、ボタン、背景。どれもコードで作った色と四角だけ）と、メニューに置ける
 //! 画像（プロジェクトの画像アセット）とシェイプ（長方形 / 角丸長方形 / 楕円）を一覧にする。
-//! 上に「セット」とプレビュー、種類ごとの表示の切り替え、一覧、下に「配置」「新規メニュー」「背景を設定」。
-//! 一覧の項目をダブルクリックすると、その種類のいちばんよく使う操作をする。
+//! 上に「セット」とプレビュー、種類ごとの表示の切り替え（絵のボタン）、枠で囲んだ一覧（行の頭に種類の絵）、
+//! 下の右に操作の絵のボタン（配置 / 置換 / 背景を設定 / 新規メニュー / 項目を追加 / 項目を削除）。どれも Encore の
+//! ライブラリの並びと形（M6.485）。一覧の項目をダブルクリックすると、その種類のいちばんよく使う操作をする。
 
 use crate::DiscCraftApp;
 use crate::app::Selection;
@@ -102,19 +103,7 @@ impl LibraryGroup {
         }
     }
 
-    fn label(self) -> &'static str {
-        match self {
-            LibraryGroup::Menus => tl!("Menus"),
-            LibraryGroup::Buttons => tl!("Buttons"),
-            LibraryGroup::Images => tl!("Images"),
-            LibraryGroup::Backgrounds => tl!("Backgrounds"),
-            LibraryGroup::LayerSets => tl!("Layer Sets"),
-            LibraryGroup::Texts => tl!("Text Items"),
-            LibraryGroup::Shapes => tl!("Shapes"),
-            LibraryGroup::Replacements => tl!("Replacement Layers"),
-        }
-    }
-
+    /// The kind toggle's tip (Encore's words).
     fn hint(self) -> &'static str {
         match self {
             LibraryGroup::Menus => tl!("Toggle menu display"),
@@ -164,19 +153,31 @@ fn preview_height(ui: &Ui) -> f32 {
 struct LibraryRow {
     pick: LibraryPick,
     name: String,
+    /// 種類の名前（行の上にマウスを置くと出る）。
     kind: &'static str,
+    /// 種類（行の頭の絵）。
+    group: LibraryGroup,
+}
+
+/// The kinds shown after a click on the toggle of kind `index` (Encore's library, M6.485): a click shows that kind
+/// alone; a Ctrl+click (⌘ on a Mac) shows or hides it and leaves the others as they are. A click on the only kind
+/// shown shows every kind again (DiscCraft's way back to all of them in one click).
+fn kinds_after_click(show: [bool; GROUPS], index: usize, add: bool) -> [bool; GROUPS] {
+    let mut next = show;
+    if add {
+        if let Some(shown) = next.get_mut(index) {
+            *shown = !*shown;
+        }
+        return next;
+    }
+    let alone: [bool; GROUPS] = std::array::from_fn(|kind| kind == index);
+    if show == alone { [true; GROUPS] } else { alone }
 }
 
 impl DiscCraftApp {
     /// ライブラリのタブ。
     pub(crate) fn library_tab(&mut self, ui: &mut Ui) {
         self.poll_library_import(ui.ctx());
-        let mut set_action = None;
-        let mut add_layers = false;
-        let mut add_files = false;
-        let mut import_folder = false;
-        let importing = self.library_import.is_some();
-        let has_menu = self.viewer_menu().is_some();
         ui.horizontal(|ui| {
             ui.label(tl!("Set:"));
             let mut sets = vec![
@@ -212,131 +213,42 @@ impl DiscCraftApp {
                 self.library.set = set;
                 self.library.selected = None;
             }
-            // Encore's Library menu: New Set… / Rename Set… / Delete Set.
-            let own = match self.library.set {
-                LibrarySet::Own(index) => Some(index),
-                _ => None,
-            };
-            let _ = ui.menu_button("≡", |ui| {
-                // M6.403: Encore's Library ▸ Add Item… (files), and DiscCraft's Import Folder….
-                if ui
-                    .add_enabled(
-                        !importing,
-                        egui::Button::new(tl!("Add Items from Files…")),
-                    )
-                    .on_hover_text(tl!(
-                        "Copy files into the set shown: each is a menu, a button, a picture, a layer set or a replacement layer by its contents"
-                    ))
-                    .clicked()
-                {
-                    add_files = true;
-                    ui.close();
-                }
-                if ui
-                    .add_enabled(!importing, egui::Button::new(tl!("Import Folder…")))
-                    .on_hover_text(tl!(
-                        "Make a set of the folder chosen and of each folder under it that has PSDs or pictures"
-                    ))
-                    .clicked()
-                {
-                    import_folder = true;
-                    ui.close();
-                }
-                ui.separator();
-                if ui.button(tl!("New Set…")).clicked() {
-                    set_action = Some(SetAction::New);
-                    ui.close();
-                }
-                if ui
-                    .add_enabled(own.is_some(), egui::Button::new(tl!("Rename Set…")))
-                    .clicked()
-                {
-                    set_action = own.map(SetAction::Rename);
-                    ui.close();
-                }
-                if ui
-                    .add_enabled(own.is_some(), egui::Button::new(tl!("Delete Set")))
-                    .on_hover_text(tl!("Its items move to the User set"))
-                    .clicked()
-                {
-                    set_action = own.map(SetAction::Delete);
-                    ui.close();
-                }
-                ui.separator();
-                // M6.331: the open menu's image and shape layers as one layer set.
-                if ui
-                    .add_enabled(
-                        has_menu,
-                        egui::Button::new(tl!("Add the Menu's Layers as a Layer Set")),
-                    )
-                    .clicked()
-                {
-                    add_layers = true;
-                    ui.close();
-                }
-            });
         });
-        if add_layers {
-            self.add_menu_layers_item();
-        }
-        if add_files {
-            self.library_add_files();
-        }
-        if import_folder {
-            self.library_import_folder();
-        }
-        match set_action {
-            Some(SetAction::New) => {
-                self.library_set_dialog = Some(SetNameDraft {
-                    renaming: None,
-                    name: String::new(),
-                });
-            }
-            Some(SetAction::Rename(index)) => {
-                self.library_set_dialog = Some(SetNameDraft {
-                    renaming: Some(index),
-                    name: self
-                        .user_library
-                        .sets
-                        .get(index)
-                        .cloned()
-                        .unwrap_or_default(),
-                });
-            }
-            Some(SetAction::Delete(index)) => {
-                let moved = self.user_library.remove_set(index);
-                self.library.set = LibrarySet::User;
-                self.library.selected = None;
-                match self.user_library.save() {
-                    Ok(()) => {
-                        self.status =
-                            tlf!("Set deleted; {n} items moved to the User set", n = moved);
-                    }
-                    Err(error) => {
-                        self.status = tlf!("Could not save the library: {error}", error = error);
-                    }
-                }
-            }
-            None => {}
-        }
 
         let selected = self.library.selected;
         self.library_preview(ui, selected);
 
-        // 狭いパネルでは折り返す（種類のボタンが右に切れて押せなくならない。M9.37）。
+        // Encore: the eight kinds as picture toggles in a row in the middle (M6.485). A narrow panel wraps them, so
+        // that none is cut off (M9.37).
         ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = crate::library_icons::TOGGLE_GAP;
+            let spare = ui.available_width() - crate::library_icons::TOGGLES_WIDTH;
+            if spare > 0.0 {
+                ui.add_space(spare / 2.0);
+            }
+            let add = ui.input(|input| input.modifiers.command);
             for group in LibraryGroup::ALL {
-                if let Some(show) = self.library.show.get_mut(group.index()) {
-                    let _ = ui
-                        .toggle_value(show, group.label())
-                        .on_hover_text(group.hint());
+                let response = crate::library_icons::kind_toggle(
+                    ui,
+                    group,
+                    self.library_shows(group),
+                )
+                .on_hover_text(format!(
+                    "{}\n{}",
+                    group.hint(),
+                    tl!("Click: this kind only (again: every kind). Ctrl+click: add or remove it.")
+                ));
+                if response.clicked() {
+                    self.library.show = kinds_after_click(self.library.show, group.index(), add);
                 }
             }
         });
-        ui.separator();
+        ui.add_space(2.0);
 
-        self.library_list(ui);
-        ui.separator();
+        // The list fills the panel down to the row of actions.
+        let spacing = ui.spacing().item_spacing.y;
+        let list_height = ui.available_height() - crate::library_icons::TOOLS_HEIGHT - spacing;
+        self.library_list(ui, list_height);
         self.library_tools(ui, selected);
     }
 
@@ -405,17 +317,20 @@ impl DiscCraftApp {
                         pick: LibraryPick::User(index),
                         name: item.name.clone(),
                         kind,
+                        group,
                     });
                 }
             }
             return rows;
         }
         for item in LIBRARY {
-            if self.library_shows(LibraryGroup::of_kind(item.kind)) {
+            let group = LibraryGroup::of_kind(item.kind);
+            if self.library_shows(group) {
                 rows.push(LibraryRow {
                     pick: LibraryPick::Preset(item.id),
                     name: item_name(item.id).to_owned(),
                     kind: kind_label(item.kind),
+                    group,
                 });
             }
         }
@@ -426,6 +341,7 @@ impl DiscCraftApp {
                         pick: LibraryPick::Image(asset.id),
                         name: asset.name.clone(),
                         kind: tl!("Image"),
+                        group: LibraryGroup::Images,
                     });
                 }
             }
@@ -436,6 +352,7 @@ impl DiscCraftApp {
                     pick: LibraryPick::Shape(shape),
                     name: crate::menu_graphic::shape_label(shape).to_owned(),
                     kind: tl!("Shape"),
+                    group: LibraryGroup::Shapes,
                 });
             }
         }
@@ -451,28 +368,74 @@ impl DiscCraftApp {
                     pick: LibraryPick::Layers(preset.id),
                     name: layer_preset_name(preset.id).to_owned(),
                     kind,
+                    group,
                 });
             }
         }
         rows
     }
 
-    /// 項目の一覧（名前と種類）。
-    fn library_list(&mut self, ui: &mut Ui) {
+    /// 項目の一覧。Encore（M6.485）: パネルの地に暗い線の箱、行の頭に種類の絵、行の間に線（種類の列はない。
+    /// 種類の名前は行の上にマウスを置くと出る）。箱は `height` の高さで、行が多いと中だけがスクロールする。
+    fn library_list(&mut self, ui: &mut Ui, height: f32) {
         let rows = self.library_rows();
-        let selected = rows
-            .iter()
-            .position(|row| self.library.selected == Some(row.pick));
+        let (frame, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), height.max(48.0)),
+            egui::Sense::hover(),
+        );
+        ui.painter().rect_stroke(
+            frame,
+            0.0,
+            egui::Stroke::new(1.0, crate::theme::LIST_EDGE),
+            egui::StrokeKind::Inside,
+        );
         let mut clicked = None;
         let mut double_clicked = None;
         let mut menu_action = None;
-        crate::theme::list("library_grid", selected)
-            .num_columns(2)
-            .show(ui, |ui| {
+        let mut inside = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(frame.shrink(1.0))
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        egui::ScrollArea::vertical()
+            .id_salt("library_rows")
+            .auto_shrink([false, false])
+            .show(&mut inside, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let row_height = ui.spacing().interact_size.y.max(18.0);
+                let font = egui::TextStyle::Body.resolve(ui.style());
                 for row in &rows {
-                    let response = ui
-                        .selectable_label(self.library.selected == Some(row.pick), &row.name)
-                        .interact(egui::Sense::drag());
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), row_height),
+                        egui::Sense::click_and_drag(),
+                    );
+                    let chosen = self.library.selected == Some(row.pick);
+                    if ui.is_rect_visible(rect) {
+                        let painter = ui.painter();
+                        if chosen {
+                            painter.rect_filled(rect, 0.0, crate::theme::SELECTION_ROW);
+                        }
+                        painter.hline(
+                            rect.x_range(),
+                            rect.max.y - 0.5,
+                            egui::Stroke::new(1.0, crate::theme::LIST_ROW_LINE),
+                        );
+                        let text = crate::theme::TEXT.get();
+                        crate::library_icons::row_picture(
+                            painter,
+                            egui::pos2(rect.min.x + 14.0, rect.center().y),
+                            row.group,
+                            text,
+                        );
+                        painter.text(
+                            egui::pos2(rect.min.x + 28.0, rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            &row.name,
+                            font.clone(),
+                            text,
+                        );
+                    }
+                    let response = response.on_hover_text(row.kind);
                     // Encore: an item dragged into the menu viewer is placed where it is dropped.
                     if response.drag_started() {
                         egui::DragAndDrop::set_payload(ui.ctx(), LibraryDrag(row.pick));
@@ -488,8 +451,6 @@ impl DiscCraftApp {
                             menu_action = Some((row.pick, action));
                         }
                     });
-                    ui.label(row.kind);
-                    ui.end_row();
                 }
             });
         if let Some(pick) = clicked {
@@ -533,60 +494,78 @@ impl DiscCraftApp {
         }
     }
 
-    /// 下のボタン（Encore と同じ並び: 配置 / 置き換え / 背景を設定 / 新規メニュー / 項目を追加 / 削除）。
+    /// 下の右の絵のボタン（Encore と同じ並びと名前: 配置 / 置換 / 背景を設定 / 新規メニュー / 項目を追加 /
+    /// 項目を削除。M6.485）。使えないものは淡く、ヒントの 1 行目が名前、2 行目が説明。
     fn library_tools(&mut self, ui: &mut Ui, selected: Option<LibraryPick>) {
+        use crate::library_icons::Tool;
         let menu = self.viewer_menu();
         let kind = self.pick_kind(selected);
         let placeable = kind == Some(LibraryKind::Button);
         let is_menu = kind == Some(LibraryKind::Menu);
         let is_background = kind == Some(LibraryKind::Background);
         let is_user = matches!(selected, Some(LibraryPick::User(_)));
-        let mut action = None;
-        ui.horizontal_wrapped(|ui| {
-            let place = ui
-                .add_enabled(placeable && menu.is_some(), egui::Button::new(tl!("Place")))
-                .on_hover_text(tl!("Place the selected item in the open menu"));
-            let replace = ui
-                .add_enabled(is_menu && menu.is_some(), egui::Button::new(tl!("Replace")))
-                .on_hover_text(tl!(
-                    "Replace the open menu with the selected menu, keeping its links"
-                ));
-            let background = ui
-                .add_enabled(
-                    is_background && menu.is_some(),
-                    egui::Button::new(tl!("Set Background")),
-                )
-                .on_hover_text(tl!("Use the selected background in the open menu"));
-            let new_menu = ui
-                .add_enabled(is_menu, egui::Button::new(tl!("New Menu")))
-                .on_hover_text(tl!("Create a new menu from the selected menu"));
-            if place.clicked() {
-                action = Some(LibraryAction::Place);
-            }
-            if replace.clicked() {
-                action = Some(LibraryAction::Replace);
-            }
-            if background.clicked() {
-                action = Some(LibraryAction::SetBackground);
-            }
-            if new_menu.clicked() {
-                action = Some(LibraryAction::NewMenu);
-            }
-            let add = ui
-                .add_enabled(menu.is_some(), egui::Button::new(tl!("Add Item")))
-                .on_hover_text(tl!(
+        let tools = [
+            (
+                Tool::Place,
+                LibraryAction::Place,
+                placeable && menu.is_some(),
+                tl!("Place"),
+                tl!("Place the selected item in the open menu"),
+            ),
+            (
+                Tool::Replace,
+                LibraryAction::Replace,
+                is_menu && menu.is_some(),
+                tl!("Replace"),
+                tl!("Replace the open menu with the selected menu, keeping its links"),
+            ),
+            (
+                Tool::SetBackground,
+                LibraryAction::SetBackground,
+                is_background && menu.is_some(),
+                tl!("Set Background"),
+                tl!("Use the selected background in the open menu"),
+            ),
+            (
+                Tool::NewMenu,
+                LibraryAction::NewMenu,
+                is_menu,
+                tl!("New Menu"),
+                tl!("Create a new menu from the selected menu"),
+            ),
+            (
+                Tool::AddItem,
+                LibraryAction::AddItem,
+                menu.is_some(),
+                tl!("Add Item"),
+                tl!(
                     "Save the open menu (or its selected button, text, image or shape) to the User set of the library"
-                ));
-            let delete = ui
-                .add_enabled(is_user, egui::Button::new(tl!("Delete")))
-                .on_hover_text(tl!("Remove the selected item from the library"));
-            if add.clicked() {
-                action = Some(LibraryAction::AddItem);
-            }
-            if delete.clicked() {
-                action = Some(LibraryAction::Remove);
-            }
-        });
+                ),
+            ),
+            (
+                Tool::Delete,
+                LibraryAction::Remove,
+                is_user,
+                tl!("Delete Item"),
+                tl!("Remove the selected item from the library"),
+            ),
+        ];
+        let mut action = None;
+        let _ = ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), crate::library_icons::TOOLS_HEIGHT),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                // Right to left: the last first.
+                for (tool, tool_action, enabled, name, hint) in tools.into_iter().rev() {
+                    let response = crate::library_icons::tool_button(ui, tool, enabled)
+                        .on_hover_text(format!("{name}\n{hint}"));
+                    if enabled && response.clicked() {
+                        action = Some(tool_action);
+                    }
+                }
+            },
+        );
         match action {
             Some(LibraryAction::AddItem) => self.add_library_item(),
             Some(action) => {
@@ -1423,6 +1402,111 @@ enum SetAction {
 }
 
 impl DiscCraftApp {
+    /// The Library's own items of its panel menu (and of its tab's right-click menu), in Encore's order: Add Item…
+    /// (files; M6.403) with DiscCraft's Import Folder…, then New Set… / Delete Set / Rename Set…, then DiscCraft's
+    /// Add the Menu's Layers as a Layer Set (M6.331).
+    pub(crate) fn library_menu(&mut self, ui: &mut Ui) {
+        let importing = self.library_import.is_some();
+        let own = match self.library.set {
+            LibrarySet::Own(index) => Some(index),
+            _ => None,
+        };
+        let mut set_action = None;
+        // Behind the check mark column, as the panel menu's other items (Encore lines them all up).
+        let label = |text: &str| egui::Button::new(crate::actions::indented(text.to_owned()));
+        if ui
+            .add_enabled(!importing, label(tl!("Add Items from Files…")))
+            .on_hover_text(tl!(
+                "Copy files into the set shown: each is a menu, a button, a picture, a layer set or a replacement layer by its contents"
+            ))
+            .clicked()
+        {
+            ui.close();
+            self.library_add_files();
+        }
+        if ui
+            .add_enabled(!importing, label(tl!("Import Folder…")))
+            .on_hover_text(tl!(
+                "Make a set of the folder chosen and of each folder under it that has PSDs or pictures"
+            ))
+            .clicked()
+        {
+            ui.close();
+            self.library_import_folder();
+        }
+        ui.separator();
+        if ui.add(label(tl!("New Set…"))).clicked() {
+            set_action = Some(SetAction::New);
+            ui.close();
+        }
+        if ui
+            .add_enabled(own.is_some(), label(tl!("Delete Set")))
+            .on_hover_text(tl!("Its items move to the User set"))
+            .clicked()
+        {
+            set_action = own.map(SetAction::Delete);
+            ui.close();
+        }
+        if ui
+            .add_enabled(own.is_some(), label(tl!("Rename Set…")))
+            .clicked()
+        {
+            set_action = own.map(SetAction::Rename);
+            ui.close();
+        }
+        ui.separator();
+        if ui
+            .add_enabled(
+                self.viewer_menu().is_some(),
+                label(tl!("Add the Menu's Layers as a Layer Set")),
+            )
+            .clicked()
+        {
+            ui.close();
+            self.add_menu_layers_item();
+        }
+        if let Some(action) = set_action {
+            self.library_set_action(action);
+        }
+    }
+
+    /// New Set… and Rename Set… open the name dialog; Delete Set moves the set's items to the User set.
+    fn library_set_action(&mut self, action: SetAction) {
+        match action {
+            SetAction::New => {
+                self.library_set_dialog = Some(SetNameDraft {
+                    renaming: None,
+                    name: String::new(),
+                });
+            }
+            SetAction::Rename(index) => {
+                self.library_set_dialog = Some(SetNameDraft {
+                    renaming: Some(index),
+                    name: self
+                        .user_library
+                        .sets
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_default(),
+                });
+            }
+            SetAction::Delete(index) => {
+                let moved = self.user_library.remove_set(index);
+                self.library.set = LibrarySet::User;
+                self.library.selected = None;
+                match self.user_library.save() {
+                    Ok(()) => {
+                        self.status =
+                            tlf!("Set deleted; {n} items moved to the User set", n = moved);
+                    }
+                    Err(error) => {
+                        self.status = tlf!("Could not save the library: {error}", error = error);
+                    }
+                }
+            }
+        }
+    }
+
     /// The New Set / Rename Set dialog while it is open (Encore's Library ▸ New Set…): a name, OK and Cancel.
     pub(crate) fn library_set_window(&mut self, ctx: &egui::Context) {
         let Some(mut draft) = self.library_set_dialog.clone() else {
@@ -1793,8 +1877,37 @@ fn label_text(label: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{item_name, label_text};
+    use super::{GROUPS, item_name, kinds_after_click, label_text};
     use disccraft_project::LIBRARY;
+
+    /// Encore's kind toggles (M6.485): a click shows that kind alone, a Ctrl+click shows or hides it beside the
+    /// others; a click on the only kind shown shows them all again.
+    #[test]
+    fn a_kind_click_shows_that_kind_alone_and_ctrl_adds_it() {
+        let all = [true; GROUPS];
+        let menus_only = [true, false, false, false, false, false, false, false];
+        assert_eq!(kinds_after_click(all, 0, false), menus_only);
+        // Again on the only one: every kind.
+        assert_eq!(kinds_after_click(menus_only, 0, false), all);
+        // Another kind: that one alone.
+        assert_eq!(
+            kinds_after_click(menus_only, 2, false),
+            [false, false, true, false, false, false, false, false]
+        );
+        // Ctrl+click adds and removes, the others kept.
+        let menus_and_images = [true, false, true, false, false, false, false, false];
+        assert_eq!(kinds_after_click(menus_only, 2, true), menus_and_images);
+        assert_eq!(
+            kinds_after_click(menus_and_images, 0, true),
+            [false, false, true, false, false, false, false, false]
+        );
+        let mut all_but_shapes = all;
+        all_but_shapes[6] = false;
+        assert_eq!(kinds_after_click(all, 6, true), all_but_shapes);
+        // A kind out of range changes nothing with Ctrl, and hides every kind without it.
+        assert_eq!(kinds_after_click(all, GROUPS, true), all);
+        assert_eq!(kinds_after_click(all, GROUPS, false), [false; GROUPS]);
+    }
 
     #[test]
     fn every_library_item_has_a_display_name() {
