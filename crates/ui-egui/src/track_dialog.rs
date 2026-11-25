@@ -281,12 +281,15 @@ impl DiscCraftApp {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(state.asset.is_some(), egui::Button::new(tl!("OK")))
+                    .add_enabled(
+                        state.asset.is_some(),
+                        crate::theme::default_button(tl!("OK")),
+                    )
                     .clicked()
                 {
                     done = Some(true);
                 }
-                if ui.button(tl!("Cancel")).clicked() {
+                if ui.add(crate::theme::dialog_button(tl!("Cancel"))).clicked() {
                     done = Some(false);
                 }
             });

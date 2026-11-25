@@ -36,6 +36,17 @@ pub(crate) fn opt_str(params: &Value, name: &str) -> Result<Option<String>, Stri
     }
 }
 
+/// Returns an optional boolean parameter.
+pub(crate) fn opt_bool(params: &Value, name: &str) -> Result<Option<bool>, String> {
+    match params.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| format!("parameter \"{name}\" must be true or false"))
+            .map(Some),
+    }
+}
+
 /// Returns a required index parameter.
 pub(crate) fn req_usize(params: &Value, name: &str) -> Result<usize, String> {
     let value = req_u64(params, name)?;

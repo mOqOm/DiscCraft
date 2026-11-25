@@ -46,10 +46,17 @@ const MAX_RAISED: usize = 8;
 /// with `HWND_TOPMOST` (user32, the Windows API documentation). Other systems: nothing is raised.
 #[must_use]
 pub fn keep_on_top(title: &str) -> usize {
+    imp::keep_on_top(&windows_titled(title))
+}
+
+/// This program's visible top-level windows titled `title` (at most [`MAX_RAISED`]); none for an empty title, and
+/// none on other systems. [`keep_on_top`] raises them; [`crate::taskbar`] shows a job's progress on the first one's
+/// taskbar button (M6.505).
+pub(crate) fn windows_titled(title: &str) -> Vec<isize> {
     if title.is_empty() {
-        return 0;
+        return Vec::new();
     }
-    imp::keep_on_top(title)
+    imp::windows_titled(title)
 }
 
 #[cfg(windows)]
@@ -150,10 +157,10 @@ mod imp {
         1
     }
 
-    pub(super) fn keep_on_top(title: &str) -> usize {
+    pub(super) fn windows_titled(title: &str) -> Vec<isize> {
         let title: Vec<u16> = title.encode_utf16().collect();
         if title.len() >= TITLE_UNITS {
-            return 0;
+            return Vec::new();
         }
         let mut search = Search {
             process: std::process::id(),
@@ -166,8 +173,12 @@ mod imp {
         // allocated for `MAX_RAISED` entries and `matching` adds no more, so pushing does not reallocate inside
         // the callback.
         let _ = unsafe { EnumWindows(Some(matching), data) };
+        search.found
+    }
+
+    pub(super) fn keep_on_top(windows: &[isize]) -> usize {
         let mut raised = 0;
-        for window in search.found {
+        for &window in windows {
             // SAFETY: `window` is a top-level window of this process that `EnumWindows` just listed; the flags
             // change only its place in the order (not its size, position or activation). A window closed since
             // makes the call fail, which is ignored.
@@ -245,7 +256,11 @@ mod imp {
         Vec::new()
     }
 
-    pub(super) fn keep_on_top(_title: &str) -> usize {
+    pub(super) fn windows_titled(_title: &str) -> Vec<isize> {
+        Vec::new()
+    }
+
+    pub(super) fn keep_on_top(_windows: &[isize]) -> usize {
         0
     }
 }

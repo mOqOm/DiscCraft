@@ -16,10 +16,11 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::bluray::{
-    Layout, clip_file, disc_title, import_playlist, layout, mark_frame, open_disc, outline_of,
+    Layout, answer_subtitles, clip_file, disc_title, import_playlist, layout, mark_frame,
+    open_disc, outline_of,
 };
 use super::{always_enabled, object};
-use crate::params::req_str;
+use crate::params::{opt_bool, req_str};
 use crate::{CommandResult, CommandSpec, Session};
 use disccraft_bdmv::outline::Outline;
 use disccraft_pgs::ig::{IgButton, IgObject};
@@ -43,7 +44,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[CommandSpec {
     label: "Blu-ray のメニューを読み込む",
     menu: &["ファイル", "読み込み"],
     shortcut: None,
-    params: r#"{"path": string} → {"menu", "buttons", "timelines": [id], "leftOut": [string], "assets": [id]}"#,
+    params: r#"{"path": string, "subtitlesLater"?: bool (true: 字幕を取り出さず subtitleJobs で返す)} → {"menu", "buttons", "timelines": [id], "leftOut": [string], "assets": [id], "subtitleTracks", "subtitlesLeftOut": [string], "subtitleJobs": [job]}"#,
     enabled: always_enabled,
     run: run_import_menu,
     journal: true,
@@ -152,6 +153,7 @@ fn route(
 /// `menu.importBluray`: the first menu the disc at `path` shows, as a DVD menu of the project.
 fn run_import_menu(session: &mut Session, params: &Value) -> CommandResult {
     let path = req_str(params, "path")?;
+    let later = opt_bool(params, "subtitlesLater")?.unwrap_or(false);
     let disc = open_disc(&path)?;
     let navigation = disccraft_vm::load_bdmv(&disc.bdmv)
         .map_err(|error| format!("the disc's navigation cannot be read: {error}"))?;
@@ -206,6 +208,9 @@ fn run_import_menu(session: &mut Session, params: &Value) -> CommandResult {
     let mut targets: HashMap<u32, Target> = HashMap::new();
     let mut assets: Vec<u64> = Vec::new();
     let mut left_out: Vec<String> = Vec::new();
+    // M6.491: the subtitles of the timelines imported.
+    let mut subtitle_jobs = Vec::new();
+    let mut subtitles_left_out: Vec<String> = Vec::new();
     for (_, target) in &pressed {
         let Some((playlist, _)) = target else {
             continue;
@@ -216,6 +221,8 @@ fn run_import_menu(session: &mut Session, params: &Value) -> CommandResult {
         match import_playlist(session, &disc, *playlist, None) {
             Ok(imported) => {
                 assets.extend(imported.assets.iter().copied());
+                subtitle_jobs.extend(imported.subtitle_jobs);
+                subtitles_left_out.extend(imported.subtitles_left_out);
                 let outline = outline_of(&disc, *playlist)?;
                 let layout = layout(rate, &disc, &outline, false)?;
                 let _ = targets.insert(
@@ -422,6 +429,8 @@ fn run_import_menu(session: &mut Session, params: &Value) -> CommandResult {
     timelines.sort_unstable();
     assets.sort_unstable();
     assets.dedup();
+    let (subtitle_tracks, subtitles_left_out, subtitle_jobs) =
+        answer_subtitles(session, later, &subtitle_jobs, subtitles_left_out);
     Ok(object(&[
         ("menu", Value::from(menu_id.0)),
         ("buttons", Value::from(kept.len())),
@@ -430,6 +439,9 @@ fn run_import_menu(session: &mut Session, params: &Value) -> CommandResult {
         ("assets", Value::from(assets)),
         ("background", Value::from(background.0)),
         ("seconds", Value::from(seconds)),
+        ("subtitleTracks", subtitle_tracks),
+        ("subtitlesLeftOut", subtitles_left_out),
+        ("subtitleJobs", subtitle_jobs),
     ]))
 }
 

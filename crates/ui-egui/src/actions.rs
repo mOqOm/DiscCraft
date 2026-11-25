@@ -80,6 +80,10 @@ pub(crate) enum Action {
     BuildFolder,
     /// Build an image.
     BuildImage,
+    /// Make the disc's label for PhotoCraft to print on a printable disc (M6.506, DiscCraft's own).
+    CreateDiscLabel,
+    /// Open the label linked to the project in the app that edits it (M6.509, DiscCraft's own).
+    OpenDiscLabel,
     /// Exit the application.
     Exit,
     /// Undo the last change.
@@ -337,7 +341,7 @@ pub(crate) enum Trigger {
 
 impl Action {
     /// Every action, in menu order.
-    pub(crate) const ALL: [Action; 154] = [
+    pub(crate) const ALL: [Action; 156] = [
         Action::NewProject,
         Action::NewMenu,
         Action::NewTimeline,
@@ -373,6 +377,8 @@ impl Action {
         Action::Preview,
         Action::BuildFolder,
         Action::BuildImage,
+        Action::CreateDiscLabel,
+        Action::OpenDiscLabel,
         Action::Exit,
         Action::Undo,
         Action::Redo,
@@ -533,6 +539,8 @@ impl Action {
             Self::Preview => tl!("Preview"),
             Self::BuildFolder => tl!("Folder…"),
             Self::BuildImage => tl!("Image…"),
+            Self::CreateDiscLabel => tl!("Create Disc Label…"),
+            Self::OpenDiscLabel => tl!("Open Disc Label"),
             Self::Exit => tl!("Exit"),
             Self::Undo => tl!("Undo"),
             Self::Redo => tl!("Redo"),
@@ -681,6 +689,8 @@ impl Action {
             | Self::WindowMetadata
             | Self::BuildFolder
             | Self::BuildImage
+            | Self::CreateDiscLabel
+            | Self::OpenDiscLabel
             | Self::AddButton
             | Self::CreateChapterIndex
             | Self::CreateMultiPageChapterIndex

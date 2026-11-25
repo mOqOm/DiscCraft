@@ -25,6 +25,8 @@ mod file_chapters;
 pub use file_chapters::file_chapters;
 mod stream_languages;
 pub use stream_languages::audio_stream_languages;
+mod bd_subtitles;
+pub use bd_subtitles::{BdSubtitlePart, extract_bd_subtitle};
 mod embedded_subtitles;
 pub use embedded_subtitles::{
     EmbeddedFormat, EmbeddedSubtitle, embedded_subtitles, extract_embedded_subtitle,
@@ -588,7 +590,7 @@ pub const BRIGHT_SEARCH_SECONDS: f64 = 10.0;
 pub const POSTER_STEP_SECONDS: f64 = 0.5;
 
 /// Whether an RGB24 picture shows something to stand for a new timeline (Encore's first-chapter poster frame): more
-/// than 0.1 % of its pixels have a channel above 180. Measured on Encore CS6's own picks (2026-11-23, the Gray
+/// than 0.1 % of its pixels have a channel above 180. Measured on Encore CS6's own picks (2026-11-23, a test
 /// disc's clips): a fade from black whose brightest part has reached 165 is still passed over, one at 199 is taken,
 /// whatever the average (a dim picture with a bright title counts; a mid-grey fade does not).
 pub fn is_poster_lit(rgb: &[u8]) -> bool {
@@ -690,7 +692,7 @@ impl AudioReader {
 }
 
 /// How much later than asked a picture is taken (M6.449). A time carried in seconds (f64) can land a hair before
-/// the frame it names: the Gray disc's chapter 7, tick 264 762 891 993 600 (frame 31 238 at 29.97), comes back as
+/// the frame it names: a test disc's chapter 7, tick 264 762 891 993 600 (frame 31 238 at 29.97), comes back as
 /// tick …599.97, and the frame before a cut there was shown in its place (about 1 frame start in 40 at 29.97). A
 /// microsecond is far past such error and far inside any frame.
 pub const FRAME_SNAP_SECONDS: f64 = 1e-6;
@@ -895,8 +897,8 @@ mod tests {
 
     #[test]
     fn a_frame_start_in_seconds_shows_that_frame() {
-        // Every frame start of three hours at 29.97 and 23.976, carried as seconds, lands inside its own frame (the
-        // Gray disc's chapter 7, frame 31 238, showed the frame before a cut).
+        // Every frame start of three hours at 29.97 and 23.976, carried as seconds, lands inside its own frame (a
+        // test disc's chapter 7, frame 31 238, showed the frame before a cut).
         for (numerator, denominator) in [(30_000_i64, 1001_i64), (24_000, 1001)] {
             let frame_ticks = TICKS_PER_SECOND / numerator * denominator;
             for frame in 0..(3 * 3600 * numerator / denominator) {
@@ -953,7 +955,7 @@ mod tests {
         assert!(!is_bright(&[]));
     }
 
-    /// Encore's first-chapter poster takes a picture with something near white in it, not a dim one (the Gray
+    /// Encore's first-chapter poster takes a picture with something near white in it, not a dim one (a test disc's
     /// clips: brightest 165 passed over, 199 taken), and not a speck.
     #[test]
     fn a_poster_needs_something_near_white() {

@@ -1,7 +1,8 @@
 //! M12.40: a registered hardware H.264 encoder makes an HD transcode's progressive one-pass H.264: it gets every
 //! picture as NV12 with its time and the Blu-ray settings (4 slices, a one-second GOP, 90 % of the target as the
-//! average), and its access units are the stream and its index. A two-pass encode stays on the CPU, and so does a
-//! video whose encoder cannot start or fails on the way (encoded again on the CPU). M12.44: the same encoder makes
+//! average), and its access units are the stream and its index. M12.47: a two-pass encode is its one pass, and when
+//! the size came out off the target a second at a corrected average, which replaces the first. A video whose encoder
+//! cannot start or fails on the way is encoded again on the CPU. M12.44: the same encoder makes
 //! HEVC Main 10 from P010 pictures, also when two passes were asked for (HEVC is made in one), and every access unit
 //! gets a delimiter and every IDR picture the parameter sets. A fake encoder stands for the hardware; ffmpeg makes
 //! the source (skipped without it).
@@ -10,7 +11,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicUsize, Ordering};
 
 use disccraft_transcode::RateMode;
 use disccraft_transcode::hd::{
@@ -93,6 +94,46 @@ fn fake(config: &HardwareConfig) -> Result<Box<dyn HardwareVideo>, String> {
     }))
 }
 
+/// The averages the sized fake was opened at, the last.
+static SIZED_MEAN: AtomicU32 = AtomicU32::new(0);
+
+/// A fake whose pictures make a stream 10 % over a 6 Mbit/s target at the first average (filled with 0xAA), and the
+/// target's size at any other (0xBB).
+struct Sized {
+    first: bool,
+}
+
+/// The bytes of one picture at 6 Mbit/s and 23.976 frames a second.
+const PICTURE_AT_TARGET: usize = 6_000_000 / 8 * 1001 / 24_000;
+
+impl HardwareVideo for Sized {
+    fn encode(&mut self, _picture: &[u8], pts: i64) -> Result<Vec<HardwarePacket>, String> {
+        let (fill, len) = if self.first {
+            (0xAA, PICTURE_AT_TARGET * 11 / 10)
+        } else {
+            (0xBB, PICTURE_AT_TARGET)
+        };
+        let mut data = UNIT[..6].to_vec();
+        data.resize(len, fill);
+        Ok(vec![HardwarePacket {
+            data,
+            pts,
+            key: pts == 0,
+        }])
+    }
+
+    fn finish(&mut self) -> Result<Vec<HardwarePacket>, String> {
+        Ok(Vec::new())
+    }
+}
+
+fn sized(config: &HardwareConfig) -> Result<Box<dyn HardwareVideo>, String> {
+    SIZED_MEAN.store(config.bitrate, Ordering::SeqCst);
+    Ok(Box::new(Sized {
+        first: config.bitrate == 5_400_000,
+    }))
+}
+
 fn refusing(_config: &HardwareConfig) -> Result<Box<dyn HardwareVideo>, String> {
     Err("no hardware encoder".to_string())
 }
@@ -106,6 +147,36 @@ fn ffmpeg() -> Option<PathBuf> {
         .ok()
         .filter(|output| output.status.success())
         .map(|_| path)
+}
+
+/// The output of one transcode: its pictures, its index and its stream.
+type Made = (u64, Vec<disccraft_transcode::hd::AccessUnit>, Vec<u8>);
+
+/// M12.47: two passes on the hardware, run on `options` with `run` (the fake registered, `pictures` pictures counted
+/// so far). The fake's units are far under the target (an easy video): its one pass is kept, no second. A first pass
+/// 10 % over the target: a second pass at an average 1000 / 1100 as high takes its place, nothing left beside it.
+fn two_passes_on_the_hardware(
+    options: &HdOptions,
+    pictures: usize,
+    dir: &std::path::Path,
+    run: &dyn Fn(&HdOptions) -> Made,
+) {
+    let two_pass = HdOptions {
+        mode: RateMode::Vbr2Pass,
+        ..options.clone()
+    };
+    let (_, units, bytes) = run(&two_pass);
+    assert_eq!(PICTURES.load(Ordering::SeqCst), 2 * pictures);
+    assert_eq!(units.len(), pictures);
+    assert_eq!(bytes, UNIT.repeat(pictures));
+    set_hardware_encoder(Some(sized));
+    let (_, units, bytes) = run(&two_pass);
+    assert_eq!(units.len(), pictures);
+    assert!(bytes.contains(&0xBB) && !bytes.contains(&0xAA));
+    let mean = SIZED_MEAN.load(Ordering::SeqCst);
+    assert!((4_850_000..4_950_000).contains(&mean), "{mean}");
+    assert!(!dir.join("out.h264.second").exists() && !dir.join("out.idx.second").exists());
+    set_hardware_encoder(Some(fake));
 }
 
 #[test]
@@ -178,19 +249,7 @@ fn a_registered_hardware_encoder_makes_progressive_hd_h264() {
         pictures.div_ceil(24)
     );
 
-    // Two passes: the CPU's encoder (real H.264, with its sequence parameter set).
-    let two_pass = HdOptions {
-        mode: RateMode::Vbr2Pass,
-        ..options.clone()
-    };
-    let (_, units, bytes) = run(&two_pass);
-    assert_eq!(PICTURES.load(Ordering::SeqCst), pictures);
-    assert_eq!(units.len(), pictures);
-    assert!(
-        bytes
-            .windows(5)
-            .any(|window| window == [0, 0, 0, 1, 0x67] || window[1..] == [0, 0, 1, 0x67])
-    );
+    two_passes_on_the_hardware(&options, pictures, &dir, &run);
 
     // An encoder that does not start, and one that fails on picture 5: the CPU encodes the video.
     set_hardware_encoder(Some(refusing));
@@ -198,9 +257,10 @@ fn a_registered_hardware_encoder_makes_progressive_hd_h264() {
     assert_eq!(units.len(), pictures);
     assert_ne!(bytes, UNIT.repeat(pictures));
     set_hardware_encoder(Some(fake));
-    FAIL_AT.store(i64::try_from(pictures + 5).unwrap(), Ordering::SeqCst);
+    let before = PICTURES.load(Ordering::SeqCst);
+    FAIL_AT.store(i64::try_from(before + 5).unwrap(), Ordering::SeqCst);
     let (_, units, bytes) = run(&options);
-    assert_eq!(PICTURES.load(Ordering::SeqCst), pictures + 6);
+    assert_eq!(PICTURES.load(Ordering::SeqCst), before + 6);
     assert_eq!(units.len(), pictures);
     assert_ne!(bytes, UNIT.repeat(pictures));
 

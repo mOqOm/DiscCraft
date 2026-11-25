@@ -71,6 +71,8 @@ const USAGE_TOP: egui::Color32 = egui::Color32::from_rgb(77, 121, 151);
 const USAGE_BOTTOM: egui::Color32 = egui::Color32::from_rgb(107, 158, 202);
 const USED_COLOR: egui::Color32 = egui::Color32::from_rgb(103, 161, 198);
 const ROM_COLOR: egui::Color32 = egui::Color32::from_rgb(69, 234, 142);
+/// M6.501: what multiplexing adds (orange: told apart from the blue and the green whatever the colour vision).
+const MUX_COLOR: egui::Color32 = egui::Color32::from_rgb(230, 159, 0);
 
 /// A label right-aligned in a column `width` wide (a build group's labels line up on the right, as in Encore).
 fn group_label(ui: &mut Ui, text: &str, width: f32) {
@@ -98,8 +100,9 @@ fn swatch(ui: &mut Ui, color: egui::Color32) {
 }
 
 /// Encore's disc usage bar across the group: a round-ended bar, its used part (`fraction` of it) shaded blue, the
-/// DVD-ROM content's share (`rom_fraction`) green at the end of the used part.
-fn draw_usage_bar(ui: &mut Ui, fraction: f32, rom_fraction: f32) {
+/// DVD-ROM content's share (`rom_fraction`) green at the end of the used part, and (M6.501) what multiplexing adds
+/// (`mux_fraction`) orange before it.
+fn draw_usage_bar(ui: &mut Ui, fraction: f32, (mux_fraction, rom_fraction): (f32, f32)) {
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), USAGE_HEIGHT),
         egui::Sense::hover(),
@@ -110,6 +113,7 @@ fn draw_usage_bar(ui: &mut Ui, fraction: f32, rom_fraction: f32) {
     let radius = inner.height() / 2.0;
     let used_x = inner.min.x + inner.width() * fraction.clamp(0.0, 1.0);
     let rom_x = (used_x - inner.width() * rom_fraction.clamp(0.0, 1.0)).max(inner.min.x);
+    let mux_x = (rom_x - inner.width() * mux_fraction.clamp(0.0, 1.0)).max(inner.min.x);
     // Row by row, each as wide as the round ends let it be.
     let rows = inner.height().max(0.0) as usize;
     for row in 0..rows {
@@ -126,6 +130,7 @@ fn draw_usage_bar(ui: &mut Ui, fraction: f32, rom_fraction: f32) {
         for (from, to, color) in [
             (left, right, USAGE_EMPTY.get()),
             (left, used_x.min(right), used),
+            (mux_x.max(left), rom_x.min(right), MUX_COLOR),
             (rom_x.max(left), used_x.min(right), ROM_COLOR),
         ] {
             if to > from {
@@ -191,7 +196,9 @@ pub(crate) fn custom_capacity_box(
 ) -> Option<u64> {
     let id = ui.make_persistent_id(salt);
     let range = Capacity::custom_range(kind);
-    let gigabytes = |bytes: u64| bytes as f64 / 1e9;
+    // In GiB, as every size is shown (M6.494).
+    const GIB: f64 = 1_073_741_824.0;
+    let gigabytes = |bytes: u64| bytes as f64 / GIB;
     let mut size = ui
         .data(|data| data.get_temp::<f64>(id))
         .unwrap_or_else(|| gigabytes(bytes));
@@ -201,17 +208,17 @@ pub(crate) fn custom_capacity_box(
                 .speed(0.01)
                 .range(gigabytes(*range.start())..=gigabytes(*range.end()))
                 .fixed_decimals(2)
-                .suffix(" GB"),
+                .suffix(" GiB"),
         )
         .on_hover_text(tl!(
-            "The disc's size, in gigabytes (1 GB = 1,000,000,000 bytes)"
+            "The disc's size, in gibibytes (1 GiB = 1,073,741,824 bytes)"
         ));
     if response.dragged() {
         ui.data_mut(|data| data.insert_temp(id, size));
         return None;
     }
     ui.data_mut(|data| data.remove::<f64>(id));
-    let wanted = ((size * 1e9).round() as u64).clamp(*range.start(), *range.end());
+    let wanted = ((size * GIB).round() as u64).clamp(*range.start(), *range.end());
     ((response.changed() || response.drag_stopped()) && wanted != bytes).then_some(wanted)
 }
 
@@ -251,7 +258,7 @@ impl DiscCraftApp {
         }
         self.build_top_row(ui);
         self.build_description_row(ui);
-        self.build_progress_section(ui);
+        // M6.505: what a running build or writing does is in the Build Progress dialog over the window.
 
         ui.strong(tlf!(
             "{kind} Settings",
@@ -307,25 +314,6 @@ impl DiscCraftApp {
         {
             self.request_build();
         }
-    }
-
-    /// While a build runs: what it is doing, a progress bar and the time so far (Encore's build progress).
-    fn build_progress_section(&mut self, ui: &mut Ui) {
-        self.writing_progress_section(ui);
-        if !self.build_job.is_running() {
-            return;
-        }
-        let (step, fraction) = self.build_step();
-        let elapsed = crate::build_panel::elapsed_text(self.build_job.elapsed_seconds());
-        crate::theme::group_box(ui, "build_progress", tl!("Building…"), |ui| {
-            ui.label(step);
-            ui.add(
-                egui::ProgressBar::new(fraction)
-                    .show_percentage()
-                    .animate(true),
-            );
-            ui.label(tlf!("Elapsed: {time}", time = elapsed));
-        });
     }
 
     /// Draws the output description with the Check Project button at the right (Encore's layout).
@@ -466,34 +454,74 @@ impl DiscCraftApp {
         }
     }
 
-    /// Draws the source section (Encore: 使用するソース のコンボ。DiscCraft は今のプロジェクトだけなので、
-    /// フォルダーの欄と 参照 は使えない).
-    fn source_section(&self, ui: &mut Ui) {
+    /// Draws the source section (Encore: 使用するソース のコンボ). With the disc output the list also has Disc image
+    /// (M6.504): an image made before, written to the disc as it is, named in the box under the list. Otherwise the
+    /// source is the current project, and the box and Browse are unavailable.
+    fn source_section(&mut self, ui: &mut Ui) {
+        let disc = self.disc.chosen;
+        let from_image = disc && self.disc.from_image;
+        let idle = !self.disc.is_busy() && !self.build_job.is_running();
+        let mut chosen = None;
+        let mut browse = false;
         crate::theme::group_box(ui, "build_source", tl!("Source"), |ui| {
             egui::Grid::new("build_source_grid")
                 .num_columns(2)
                 .spacing([8.0, 6.0])
                 .show(ui, |ui| {
                     group_label(ui, tl!("Source:"), LABEL_COLUMN);
-                    let _ = egui::ComboBox::from_id_salt("build_source")
-                        .selected_text(tl!("Current project"))
-                        .show_ui(ui, |ui| {
-                            let _ = ui.selectable_label(true, tl!("Current project"));
-                        });
+                    ui.add_enabled_ui(idle, |ui| {
+                        egui::ComboBox::from_id_salt("build_source")
+                            .selected_text(if from_image {
+                                tl!("Disc image")
+                            } else {
+                                tl!("Current project")
+                            })
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(!from_image, tl!("Current project"))
+                                    .clicked()
+                                {
+                                    chosen = Some(false);
+                                }
+                                if disc
+                                    && ui.selectable_label(from_image, tl!("Disc image")).clicked()
+                                {
+                                    chosen = Some(true);
+                                }
+                            });
+                    });
                     ui.end_row();
 
                     group_label(ui, "", LABEL_COLUMN);
                     ui.horizontal(|ui| {
                         let width = (ui.available_width() - 80.0).max(120.0);
-                        let mut folder = String::new();
-                        let _ = ui.add_enabled(
-                            false,
-                            egui::TextEdit::singleline(&mut folder).desired_width(width),
-                        );
-                        let _ = ui.add_enabled(false, egui::Button::new(tl!("Browse…")));
+                        if from_image {
+                            ui.add_enabled(
+                                idle,
+                                egui::TextEdit::singleline(&mut self.disc.source_image)
+                                    .desired_width(width)
+                                    .hint_text(tl!("The disc image (.iso) to write")),
+                            );
+                            browse = ui
+                                .add_enabled(idle, egui::Button::new(tl!("Browse…")))
+                                .clicked();
+                        } else {
+                            let mut folder = String::new();
+                            let _ = ui.add_enabled(
+                                false,
+                                egui::TextEdit::singleline(&mut folder).desired_width(width),
+                            );
+                            let _ = ui.add_enabled(false, egui::Button::new(tl!("Browse…")));
+                        }
                     });
                 });
         });
+        if let Some(image) = chosen {
+            self.disc.from_image = image;
+        }
+        if browse {
+            self.pick_source_image();
+        }
     }
 
     /// Draws the destination section.
@@ -599,17 +627,47 @@ impl DiscCraftApp {
             let used = format_bytes(usage.estimated_bytes);
             let free = format_bytes(usage.capacity_bytes.saturating_sub(usage.estimated_bytes));
 
-            let rom_fraction = if usage.capacity_bytes > 0 {
-                (usage.rom_bytes as f64 / usage.capacity_bytes as f64).clamp(0.0, 1.0) as f32
-            } else {
-                0.0
+            let share = |bytes: u64| {
+                if usage.capacity_bytes > 0 {
+                    (bytes as f64 / usage.capacity_bytes as f64).clamp(0.0, 1.0) as f32
+                } else {
+                    0.0
+                }
             };
-            draw_usage_bar(ui, fraction, rom_fraction);
+            draw_usage_bar(
+                ui,
+                fraction,
+                (share(usage.mux_bytes), share(usage.rom_bytes)),
+            );
             // Encore: one line under the bar, each part after a swatch of its colour in the bar.
             let rom = format_bytes(usage.rom_bytes);
+            // M6.498: what the used part is made of (the streams and what multiplexing adds).
+            let made_of = tlf!(
+                "Video and sound {streams}, multiplexing {mux}, ROM content {rom}",
+                streams = format_bytes(
+                    usage
+                        .estimated_bytes
+                        .saturating_sub(usage.mux_bytes)
+                        .saturating_sub(usage.rom_bytes)
+                ),
+                mux = format_bytes(usage.mux_bytes),
+                rom = format_bytes(usage.rom_bytes)
+            );
             ui.horizontal(|ui| {
                 swatch(ui, USED_COLOR);
-                ui.label(tlf!("{used} used. {free} free.", used = used, free = free));
+                ui.label(tlf!("{used} used. {free} free.", used = used, free = free))
+                    .on_hover_text(made_of);
+                // M6.501: what multiplexing adds, as a part of its own (it took room the bar showed free before).
+                if usage.mux_bytes > 0 {
+                    swatch(ui, MUX_COLOR);
+                    ui.label(tlf!(
+                        "{size} used for multiplexing.",
+                        size = format_bytes(usage.mux_bytes)
+                    ))
+                    .on_hover_text(tl!(
+                        "What the disc adds to the video and sound: the headers of its packs and a navigation pack every half second"
+                    ));
+                }
                 swatch(ui, ROM_COLOR);
                 ui.label(if self.session.project.settings.kind == DiscKind::Dvd {
                     tlf!("{size} used for DVD-ROM content.", size = rom)
@@ -617,6 +675,30 @@ impl DiscCraftApp {
                     tlf!("{size} used for BD-ROM content.", size = rom)
                 });
             });
+            // M6.498: a DVD9 with a manual layer break: each layer, and where the free space can go (layer 1 holds no
+            // more than layer 0).
+            if let Some((layer0, most, layer1)) = usage.layers {
+                let status = if layer0 > most || layer1 > layer0 {
+                    crate::theme::Status::Warning
+                } else {
+                    crate::theme::Status::Good
+                };
+                crate::theme::status_label(
+                    ui,
+                    status,
+                    tlf!(
+                        "Layer 0 (up to the layer break): about {layer0} of {most}. Layer 1: about {layer1}, at most as much as layer 0.",
+                        layer0 = format_bytes(layer0),
+                        most = format_bytes(most),
+                        layer1 = format_bytes(layer1)
+                    ),
+                );
+                ui.label(tlf!(
+                    "Room left: {room0} on layer 0, {room1} on layer 1.",
+                    room0 = format_bytes(most.saturating_sub(layer0)),
+                    room1 = format_bytes(layer0.min(most).saturating_sub(layer1))
+                ));
+            }
         } else {
             ui.label(tl!("No usage information"));
         }

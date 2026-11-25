@@ -37,10 +37,13 @@ fn a_build_stops_when_asked_and_the_next_one_runs() {
         audio_language: None,
     };
 
-    // Asked to stop once the transcode is a tenth done.
+    // Asked to stop once the transcode is a tenth done. (A job's end, stopped or not, is told as 1 (M6.497: so
+    // the list of running steps lets it go); how far it got is what came before.)
     let mut furthest = 0.0_f32;
     let stopped = build_with_progress(&project, &options, &mut |_, fraction| {
-        furthest = furthest.max(fraction);
+        if fraction < 1.0 {
+            furthest = furthest.max(fraction);
+        }
         if fraction > 0.1 {
             request_stop();
         }

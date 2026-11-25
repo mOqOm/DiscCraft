@@ -132,7 +132,9 @@ impl CheckCategory {
                 Self::Media
             }
             "tooManyAudio" | "tooManySubtitles" | "tooManyTitles" => Self::StreamLimits,
-            "capacityExceeded" | "lowBitrate" => Self::Capacity,
+            "capacityExceeded" | "lowBitrate" | "layer0TooLarge" | "layer1LargerThanLayer0" => {
+                Self::Capacity
+            }
             _ => Self::Other,
         }
     }
@@ -256,7 +258,7 @@ impl DiscCraftApp {
     fn draw_start_button(&mut self, ui: &mut egui::Ui) {
         let _ = ui.vertical(|ui| {
             if ui
-                .add_sized([88.0, 28.0], egui::Button::new(tl!("Start")))
+                .add_sized([88.0, 28.0], crate::theme::default_button(tl!("Start")))
                 .clicked()
             {
                 self.check_project();
@@ -380,6 +382,14 @@ fn problem_text(problem: &ProblemView) -> String {
     match problem.code.as_str() {
         "buttonLinkNotSet" => tl!("The link is not set.").to_owned(),
         "endActionNotSet" => tl!("The end action is not set.").to_owned(),
+        // M6.498: a DVD9's layers at a manual layer break.
+        "layer0TooLarge" => {
+            tl!("More comes before the layer break than layer 0 holds.").to_owned()
+        }
+        "layer1LargerThanLayer0" => tl!(
+            "More comes after the layer break than before it (layer 1 holds no more than layer 0)."
+        )
+        .to_owned(),
         "unreachableTimeline" => tl!("Orphaned timeline").to_owned(),
         "unreachableMenu" => tl!("Orphaned menu").to_owned(),
         "firstPlayNotSet" => tl!("First Play is not set.").to_owned(),

@@ -2610,6 +2610,11 @@ fn ensure_system_fonts() {
 }
 
 /// The family to draw with: `requested` when this computer has it, otherwise the default Japanese font.
+/// The font family a text without one of its own is set in (M6.507: a disc label's, in DesignCraft too).
+pub(crate) fn default_family() -> String {
+    family_for(None)
+}
+
 fn family_for(requested: Option<&str>) -> String {
     if let Some(requested) = requested.map(str::trim).filter(|name| !name.is_empty()) {
         ensure_system_fonts();

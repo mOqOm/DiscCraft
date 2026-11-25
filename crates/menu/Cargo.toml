@@ -14,7 +14,14 @@ encoding_rs.workspace = true
 filmcraft-text.workspace = true
 skrifa.workspace = true
 png.workspace = true
+# M6.507: the disc label's DesignCraft script and its result.
+serde_json.workspace = true
 thiserror.workspace = true
+
+# M6.506: the disc label's test reads its PSD back as PhotoCraft does (resolution, layer mask, type).
+[dev-dependencies]
+photocraft-io.workspace = true
+photocraft-doc.workspace = true
 
 [lints]
 workspace = true

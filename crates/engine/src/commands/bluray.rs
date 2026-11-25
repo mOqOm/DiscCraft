@@ -5,7 +5,9 @@
 //! (`BDMV/STREAM/*.m2ts`) trimmed to the play item's IN and OUT times (on the clip's time line, which starts at the
 //! presentation start of its clip information file). Each primary audio stream DiscCraft decodes (LPCM, AC-3)
 //! becomes an audio track of the clips' sound in that stream, in the language the playlist gives it; the others
-//! (DTS, Dolby TrueHD) are listed as left out. What the playlist and the clip information say of each clip (its
+//! (DTS, Dolby TrueHD) are listed as left out. In a Blu-ray project each presentation graphics subtitle stream
+//! becomes a subtitle track (M6.491: a `.sup` taken out of the clips, at once or by the caller later). What the
+//! playlist and the clip information say of each clip (its
 //! length, picture and sound) is remembered as its probe, so the new timeline shows at once instead of after every
 //! clip file has been read through. The entry marks become the chapter points, each
 //! placed by its play item and its time in it, so the frames of the clips do not add up rounding. Encrypted discs
@@ -14,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::params::{opt_str, opt_u64, req_str};
+use crate::params::{opt_bool, opt_str, opt_u64, req_str};
 use crate::{CommandResult, CommandSpec, Session};
 use disccraft_bdmv::outline::{
     Outline, OutlineItem, OutlineMark, OutlineStream, clip_presentation, read_outline, video_format,
@@ -53,9 +55,19 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "Blu-ray から読み込む",
         menu: &["ファイル", "読み込み"],
         shortcut: None,
-        params: r#"{"path": string, "playlist"?: number (既定: いちばん長いもの), "name"?: string} → {"timeline", "playlist", "clips", "chapters", "audioTracks", "audioLeftOut": [string], "assets": [id], "existing": bool (同じクリップのタイムラインがすでにあった)}"#,
+        params: r#"{"path": string, "playlist"?: number (既定: いちばん長いもの), "name"?: string, "subtitlesLater"?: bool (true: 字幕を取り出さず subtitleJobs で返す)} → {"timeline", "playlist", "clips", "chapters", "audioTracks", "audioLeftOut": [string], "subtitleTracks", "subtitlesLeftOut": [string], "subtitleJobs": [job], "assets": [id], "existing": bool (同じクリップのタイムラインがすでにあった)}"#,
         enabled: always_enabled,
         run: run_import,
+        journal: true,
+    },
+    CommandSpec {
+        id: "timeline.addBluraySubtitle",
+        label: "Blu-ray の字幕を字幕トラックに",
+        menu: &["タイムライン"],
+        shortcut: None,
+        params: r#"{"job": job (subtitleJobs の 1 つ。取り出した後で)} → {"asset", "track"}"#,
+        enabled: always_enabled,
+        run: run_add_subtitle,
         journal: true,
     },
 ];
@@ -457,6 +469,9 @@ pub(crate) struct Imported {
     pub(crate) chapters: usize,
     pub(crate) tracks: usize,
     pub(crate) left_out: Vec<String>,
+    /// M6.491: the subtitle streams to take out (each a subtitle track then), and those left out.
+    pub(crate) subtitle_jobs: Vec<SubtitleJob>,
+    pub(crate) subtitles_left_out: Vec<String>,
     pub(crate) assets: Vec<u64>,
     /// The project had a timeline of the playlist already: it is that one.
     pub(crate) existing: bool,
@@ -482,6 +497,8 @@ pub(crate) fn import_playlist(
             chapters: found.map_or(0, |timeline| timeline.chapters.len()),
             tracks: found.map_or(0, |timeline| timeline.audio.len()),
             left_out: Vec::new(),
+            subtitle_jobs: Vec::new(),
+            subtitles_left_out: Vec::new(),
             assets,
             existing: true,
         });
@@ -603,15 +620,312 @@ pub(crate) fn import_playlist(
         }
     }
     session.project.adopt_first_play(timeline);
+    let (subtitle_jobs, subtitles_left_out) =
+        subtitle_jobs(session, timeline, disc, &outline, (&layout, rate));
     Ok(Imported {
         timeline,
         clips: clips.len(),
         chapters,
         tracks: tracks.len(),
         left_out,
+        subtitle_jobs,
+        subtitles_left_out,
         assets,
         existing: false,
     })
+}
+
+/// Ticks (254 016 000 000 a second) in a 90 kHz tick.
+const TICKS_PER_90K: i64 = 2_822_400;
+
+/// M6.491: a presentation graphics subtitle stream of an imported playlist, to be taken out of the disc's clips into
+/// a `.sup` and laid as a subtitle track of the playlist's timeline. Taking it out reads the clips' transport stream
+/// indexes, which the first time means reading the clips through (minutes from a disc drive), so the window takes it
+/// out on a thread of its own ([`take_bluray_subtitle`]) and adds it then (`timeline.addBluraySubtitle`); the
+/// command line takes it out during the import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SubtitleJob {
+    timeline: TimelineId,
+    pid: u16,
+    /// The track's language (ISO 639-1; empty when the disc's code has none).
+    language: String,
+    /// The stream as a list of those left out names it (`jpn PG`).
+    name: String,
+    /// The `.sup` it goes into.
+    file: PathBuf,
+    parts: Vec<disccraft_transcode::BdSubtitlePart>,
+}
+
+impl SubtitleJob {
+    fn to_json(&self) -> Value {
+        let parts: Vec<Value> = self
+            .parts
+            .iter()
+            .map(|part| {
+                object(&[
+                    (
+                        "file",
+                        Value::from(part.file.to_string_lossy().into_owned()),
+                    ),
+                    ("from", Value::from(part.from)),
+                    ("to", Value::from(part.to)),
+                    ("at", Value::from(part.at)),
+                ])
+            })
+            .collect();
+        object(&[
+            ("timeline", Value::from(self.timeline.0)),
+            ("pid", Value::from(self.pid)),
+            ("language", Value::from(self.language.clone())),
+            ("name", Value::from(self.name.clone())),
+            (
+                "file",
+                Value::from(self.file.to_string_lossy().into_owned()),
+            ),
+            ("parts", Value::from(parts)),
+        ])
+    }
+
+    fn from_json(job: &Value) -> Result<Self, String> {
+        let text = |value: &Value, key: &str| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| format!("the subtitle job has no {key}"))
+        };
+        let number = |value: &Value, key: &str| {
+            value
+                .get(key)
+                .and_then(Value::as_i64)
+                .ok_or_else(|| format!("the subtitle job has no {key}"))
+        };
+        let parts = job
+            .get("parts")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "the subtitle job has no parts".to_string())?;
+        if parts.len() > MAX_TIMELINE_CLIPS {
+            return Err("the subtitle job has too many parts".to_string());
+        }
+        let parts = parts
+            .iter()
+            .map(|part| {
+                Ok(disccraft_transcode::BdSubtitlePart {
+                    file: PathBuf::from(text(part, "file")?),
+                    from: number(part, "from")?,
+                    to: number(part, "to")?,
+                    at: number(part, "at")?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let timeline = job
+            .get("timeline")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "the subtitle job has no timeline".to_string())?;
+        let pid = u16::try_from(number(job, "pid")?)
+            .map_err(|_| "the subtitle job's stream is not a PID".to_string())?;
+        Ok(Self {
+            timeline: TimelineId(timeline),
+            pid,
+            language: text(job, "language")?,
+            name: text(job, "name")?,
+            file: PathBuf::from(text(job, "file")?),
+            parts,
+        })
+    }
+
+    fn take(&self, go_on: &dyn Fn() -> bool) -> Result<(), String> {
+        // The folder beside the project, the first time.
+        if let Some(folder) = self.file.parent() {
+            std::fs::create_dir_all(folder).map_err(|error| error.to_string())?;
+        }
+        disccraft_transcode::extract_bd_subtitle(&self.parts, self.pid, &self.file, go_on)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// Takes the subtitle stream of `job` (one of the `subtitleJobs` that `timeline.importBluray` and `menu.importBluray`
+/// give with `"subtitlesLater": true`) out of the disc into its `.sup`, for `timeline.addBluraySubtitle` to add then
+/// (M6.491). Slow (the clips' indexes are made the first time), so the window runs it on a thread of its own; `go_on`
+/// is asked as it goes, and stops it when it says no.
+///
+/// # Errors
+///
+/// When `job` is not such a job, a clip cannot be read, the stream holds nothing, or `go_on` stopped it.
+pub fn take_bluray_subtitle(job: &Value, go_on: &dyn Fn() -> bool) -> Result<(), String> {
+    SubtitleJob::from_json(job)?.take(go_on)
+}
+
+/// M6.491: the playlist's presentation graphics subtitle streams (those of the main clips, as its first play item lists
+/// them) as jobs to take each out of the play items' clips into a `.sup` beside the project, its display sets moved to
+/// where each play item falls on the timeline, for a subtitle track in the disc's language; a Blu-ray project's only
+/// (a DVD takes no PGS). Gives the jobs and the streams left out (language and kind).
+fn subtitle_jobs(
+    session: &Session,
+    timeline: TimelineId,
+    disc: &Disc,
+    outline: &Outline,
+    (layout, rate): (&Layout, FrameRate),
+) -> (Vec<SubtitleJob>, Vec<String>) {
+    let streams: Vec<OutlineStream> = outline
+        .items
+        .first()
+        .map(|item| item.subtitles.clone())
+        .unwrap_or_default();
+    let kind = |stream: &OutlineStream| if stream.coding == 0x92 { "text" } else { "PG" };
+    let mut left_out = Vec::new();
+    if session.project.settings.kind != disccraft_project::DiscKind::BluRay {
+        left_out.extend(
+            streams
+                .iter()
+                .map(|stream| format!("{} {}", stream.language_code(), kind(stream))),
+        );
+        return (Vec::new(), left_out);
+    }
+    let parts: Vec<disccraft_transcode::BdSubtitlePart> = outline
+        .items
+        .iter()
+        .zip(&layout.starts)
+        .map(|(item, start)| disccraft_transcode::BdSubtitlePart {
+            file: clip_file(&disc.bdmv, &item.clip),
+            from: i64::from(item.in_time) * 2,
+            to: i64::from(item.out_time) * 2,
+            at: rate.tick_of(i64::from(*start)).0 / TICKS_PER_90K,
+        })
+        .collect();
+    let folder = super::timeline::subtitle_folder(session);
+    let stem: String = session
+        .project
+        .timeline(timeline)
+        .map(|found| found.name.clone())
+        .unwrap_or_default()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(48)
+        .collect();
+    let mut room = session.project.timeline(timeline).map_or(0, |found| {
+        super::timeline::MAX_SUBTITLE_TRACKS.saturating_sub(found.subtitles.len())
+    });
+    let mut jobs: Vec<SubtitleJob> = Vec::new();
+    for stream in &streams {
+        let language = stream.language_code();
+        let name = format!("{language} {}", kind(stream));
+        let (0x90, Some(pid)) = (stream.coding, stream.pid) else {
+            left_out.push(name);
+            continue;
+        };
+        if room == 0 {
+            left_out.push(name);
+            continue;
+        }
+        room -= 1;
+        let safe: String = language
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect();
+        let base = format!("{stem}.{pid:04x}.{safe}");
+        // A name no other file and no other job has (a project's earlier import, another unsaved project's).
+        let file = (1..100u32)
+            .map(|n| {
+                folder.join(if n == 1 {
+                    format!("{base}.sup")
+                } else {
+                    format!("{base}-{n}.sup")
+                })
+            })
+            .find(|file| !file.exists() && jobs.iter().all(|job| job.file != *file))
+            .unwrap_or_else(|| folder.join(format!("{base}.sup")));
+        jobs.push(SubtitleJob {
+            timeline,
+            pid,
+            language: disccraft_bdmv::iso639_1(&language)
+                .unwrap_or_default()
+                .to_owned(),
+            name,
+            file,
+            parts: parts.clone(),
+        });
+    }
+    (jobs, left_out)
+}
+
+/// Lays the `.sup` that `job` took out as a subtitle track of its timeline: the asset made of it and the track.
+fn add_taken(session: &mut Session, job: &SubtitleJob) -> Result<(AssetId, usize), String> {
+    let missing = || format!("timeline {} does not exist", job.timeline.0);
+    let found = session.project.timeline(job.timeline).ok_or_else(missing)?;
+    if found.subtitles.len() >= super::timeline::MAX_SUBTITLE_TRACKS {
+        return Err("the timeline has as many subtitle tracks as a disc takes".to_string());
+    }
+    let asset = session
+        .project
+        .add_asset(&job.file)
+        .map_err(|error| error.to_string())?;
+    let found = session
+        .project
+        .timeline_mut(job.timeline)
+        .ok_or_else(missing)?;
+    found.subtitles.push(disccraft_project::SubtitleTrack {
+        asset,
+        language: job.language.clone(),
+        group: 0,
+    });
+    Ok((asset, found.subtitles.len().saturating_sub(1)))
+}
+
+/// Takes `jobs` out now, each laid as a subtitle track: how many were, and the streams that could not be (to add to
+/// those left out).
+fn take_now(session: &mut Session, jobs: &[SubtitleJob]) -> (usize, Vec<String>) {
+    let mut added = 0usize;
+    let mut left_out = Vec::new();
+    for job in jobs {
+        match job.take(&|| true).and_then(|()| add_taken(session, job)) {
+            Ok(_) => added += 1,
+            Err(_) => left_out.push(job.name.clone()),
+        }
+    }
+    (added, left_out)
+}
+
+/// The subtitles of an import, as a command answers them: taken out now (`subtitleTracks` added), or, with
+/// `"subtitlesLater": true`, as `subtitleJobs` for the caller to take out. Gives (tracks, left out, jobs).
+pub(crate) fn answer_subtitles(
+    session: &mut Session,
+    later: bool,
+    jobs: &[SubtitleJob],
+    mut left_out: Vec<String>,
+) -> (Value, Value, Value) {
+    if later {
+        let jobs: Vec<Value> = jobs.iter().map(SubtitleJob::to_json).collect();
+        return (Value::from(0), Value::from(left_out), Value::from(jobs));
+    }
+    let (added, failed) = take_now(session, jobs);
+    left_out.extend(failed);
+    (
+        Value::from(added),
+        Value::from(left_out),
+        Value::from(Vec::<Value>::new()),
+    )
+}
+
+/// `timeline.addBluraySubtitle`: lays the `.sup` of a subtitle job, once taken out, as a subtitle track.
+fn run_add_subtitle(session: &mut Session, params: &Value) -> CommandResult {
+    let job = SubtitleJob::from_json(
+        params
+            .get("job")
+            .ok_or_else(|| "job is missing".to_string())?,
+    )?;
+    let (asset, track) = add_taken(session, &job)?;
+    Ok(object(&[
+        ("asset", Value::from(asset.0)),
+        ("track", Value::from(track)),
+    ]))
 }
 
 /// `timeline.importBluray`: a timeline of playlist `playlist` (the longest when not given) of the disc at `path`; a
@@ -627,7 +941,14 @@ fn run_import(session: &mut Session, params: &Value) -> CommandResult {
             main_playlist(&disc).ok_or_else(|| "the disc has no readable playlist".to_string())?
         }
     };
+    let later = opt_bool(params, "subtitlesLater")?.unwrap_or(false);
     let imported = import_playlist(session, &disc, number, name)?;
+    let (subtitle_tracks, subtitles_left_out, subtitle_jobs) = answer_subtitles(
+        session,
+        later,
+        &imported.subtitle_jobs,
+        imported.subtitles_left_out,
+    );
     Ok(object(&[
         ("timeline", Value::from(imported.timeline.0)),
         ("playlist", Value::from(number)),
@@ -635,6 +956,9 @@ fn run_import(session: &mut Session, params: &Value) -> CommandResult {
         ("chapters", Value::from(imported.chapters)),
         ("audioTracks", Value::from(imported.tracks)),
         ("audioLeftOut", Value::from(imported.left_out)),
+        ("subtitleTracks", subtitle_tracks),
+        ("subtitlesLeftOut", subtitles_left_out),
+        ("subtitleJobs", subtitle_jobs),
         ("assets", Value::from(imported.assets)),
         ("existing", Value::from(imported.existing)),
     ]))

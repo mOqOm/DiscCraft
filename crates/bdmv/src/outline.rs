@@ -38,6 +38,9 @@ pub struct OutlineStream {
     pub coding: u8,
     /// The language, ISO 639-2 as the file gives it (`und` when it gives none).
     pub language: [u8; 3],
+    /// Its PID in the play item's clip (M6.491), for a stream of the main clip (stream entry type 1); `None` for one
+    /// in a sub-path.
+    pub pid: Option<u16>,
 }
 
 impl OutlineStream {
@@ -293,12 +296,17 @@ fn streams(body: &[u8], multi_angle: bool) -> Result<Streams, BdmvError> {
     if video > MAX_STREAMS || audio > MAX_STREAMS || pg > MAX_STREAMS {
         return Err(BdmvError("too many streams".to_string()));
     }
-    // One stream entry and its attributes: the attributes' bytes.
-    let stream = |r: &mut Reader<'_>| -> Result<Vec<u8>, BdmvError> {
+    // One stream entry and its attributes: the main clip's PID when the entry names one (type 1: the type, then the
+    // PID), and the attributes' bytes.
+    let stream = |r: &mut Reader<'_>| -> Result<(Option<u16>, Vec<u8>), BdmvError> {
         let entry = usize::from(r.u8()?);
-        r.skip(entry)?;
+        let bytes = r.bytes(entry)?;
+        let pid = match bytes {
+            [1, high, low, ..] => Some(u16::from_be_bytes([*high, *low])),
+            _ => None,
+        };
         let attributes = usize::from(r.u8()?);
-        Ok(r.bytes(attributes)?.to_vec())
+        Ok((pid, r.bytes(attributes)?.to_vec()))
     };
     let language = |bytes: Option<&[u8]>| -> [u8; 3] {
         bytes
@@ -307,7 +315,7 @@ fn streams(body: &[u8], multi_angle: bool) -> Result<Streams, BdmvError> {
     };
     let mut first_video = None;
     for _ in 0..video {
-        let attributes = stream(&mut r)?;
+        let (_, attributes) = stream(&mut r)?;
         if first_video.is_none()
             && let (Some(coding), Some(format)) = (attributes.first(), attributes.get(1))
         {
@@ -316,20 +324,22 @@ fn streams(body: &[u8], multi_angle: bool) -> Result<Streams, BdmvError> {
     }
     let mut audio_streams = Vec::with_capacity(usize::from(audio));
     for _ in 0..audio {
-        let attributes = stream(&mut r)?;
+        let (pid, attributes) = stream(&mut r)?;
         audio_streams.push(OutlineStream {
             coding: attributes.first().copied().unwrap_or(0),
             language: language(attributes.get(2..5)),
+            pid,
         });
     }
     let mut pg_streams = Vec::with_capacity(usize::from(pg));
     for _ in 0..pg {
-        let attributes = stream(&mut r)?;
+        let (pid, attributes) = stream(&mut r)?;
         let coding = attributes.first().copied().unwrap_or(0);
         let at = if coding == 0x92 { 2..5 } else { 1..4 };
         pg_streams.push(OutlineStream {
             coding,
             language: language(attributes.get(at)),
+            pid,
         });
     }
     Ok((first_video, audio_streams, pg_streams))
@@ -594,6 +604,15 @@ mod tests {
         );
         assert_eq!(item.subtitles[0].coding, 0x90);
         assert_eq!(item.subtitles[0].language_code(), "eng");
+        // M6.491: each stream's PID in the main clip.
+        assert_eq!(
+            item.audio
+                .iter()
+                .map(|stream| stream.pid)
+                .collect::<Vec<_>>(),
+            [Some(0x1100), Some(0x1101)]
+        );
+        assert_eq!(item.subtitles[0].pid, Some(0x1200));
         assert_eq!(item.video, Some((0x1B, 0x44)));
         assert_eq!(
             super::video_format(0x44),

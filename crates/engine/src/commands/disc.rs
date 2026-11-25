@@ -32,6 +32,16 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         journal: true,
     },
     CommandSpec {
+        id: "disc.setLabel",
+        label: "ディスクのレーベルを設定",
+        menu: &["ディスク"],
+        shortcut: None,
+        params: r#"{"path": string | null}"#,
+        enabled: always_enabled,
+        run: run_set_label,
+        journal: true,
+    },
+    CommandSpec {
         id: "disc.setDescription",
         label: "ディスクの説明を設定",
         menu: &["ディスク"],
@@ -199,6 +209,37 @@ fn run_set_rom_content(session: &mut Session, params: &Value) -> CommandResult {
         return Err(format!("the folder {path} does not exist"));
     }
     session.project.settings.rom_content = path;
+    Ok(empty_object())
+}
+
+/// The longest disc label path, in bytes.
+const MAX_LABEL_PATH: usize = 4096;
+
+/// The disc's label (M6.509, DiscCraft's own): the file File ▸ Create Disc Label… made (a DesignCraft document or a
+/// PSD), or another one linked to the project; `null` or an empty path for none. The file must exist; the project
+/// keeps it (and its path relative to the project file) when it is saved.
+fn run_set_label(session: &mut Session, params: &Value) -> CommandResult {
+    let path = match params.get("path") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(path)) if path.trim().is_empty() => None,
+        Some(Value::String(path)) => Some(path.trim().to_owned()),
+        Some(_) => return Err("parameter \"path\" must be a file path or null".to_string()),
+    };
+    if let Some(path) = &path {
+        if path.len() > MAX_LABEL_PATH {
+            return Err(format!(
+                "the label's path is longer than {MAX_LABEL_PATH} bytes"
+            ));
+        }
+        if !std::path::Path::new(path).is_file() {
+            return Err(format!("the file {path} does not exist"));
+        }
+    }
+    // The path as given, made absolute (a relative one would follow the current folder, not the project).
+    let path = path.map(|path| {
+        std::path::absolute(&path).map_or(path, |absolute| absolute.to_string_lossy().into_owned())
+    });
+    session.project.settings.disc_label = path;
     Ok(empty_object())
 }
 
@@ -697,6 +738,49 @@ mod tests {
         assert_eq!(
             session.project.settings.rom_content.as_deref(),
             Some(folder.as_str())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M6.509: the disc label is linked (the project then has changes to save), refused when the file is missing
+    /// or not a file, unlinked with null, and the change undoes.
+    #[test]
+    fn disc_label_is_linked_and_unlinked() -> Result<(), Box<dyn Error>> {
+        let dir = std::env::temp_dir().join(format!("disccraft-labelcmd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let label = dir.join("disc Disc Label.designcraft");
+        std::fs::write(&label, b"a label")?;
+        let mut session = Session::new();
+        assert!(!session.dirty);
+        let path = label.to_string_lossy().into_owned();
+        session.execute("disc.setLabel", &json!({"path": path}))?;
+        assert_eq!(
+            session.project.settings.disc_label.as_deref(),
+            Some(path.as_str())
+        );
+        assert!(session.dirty, "a linked label is a change to save");
+        for refused in [
+            json!({"path": dir.join("missing.designcraft")}),
+            json!({"path": dir}),
+            json!({"path": 3}),
+            json!({"path": "x".repeat(5000)}),
+        ] {
+            assert!(
+                session.execute("disc.setLabel", &refused).is_err(),
+                "{refused}"
+            );
+        }
+        assert_eq!(
+            session.project.settings.disc_label.as_deref(),
+            Some(path.as_str())
+        );
+        session.execute("disc.setLabel", &json!({"path": null}))?;
+        assert_eq!(session.project.settings.disc_label, None);
+        session.execute("edit.undo", &json!({}))?;
+        assert_eq!(
+            session.project.settings.disc_label.as_deref(),
+            Some(path.as_str())
         );
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::i18n::{tl, tlf};
 use disccraft_project::{BdCodec, BdVideo, Capacity, DiscKind, VideoStandard};
 use egui::text::{CCursor, CCursorRange};
-use egui::{Align, Button, Layout, Ui};
+use egui::{Align, Layout, Ui};
 
 /// Tabs of the New Project dialog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -295,7 +295,10 @@ fn draw_location_field(ui: &mut Ui, form: &mut NewProjectForm) {
             form.location = folder;
         }
 
-        if ui.button(tl!("Browse…")).clicked() {
+        if ui
+            .add(crate::theme::dialog_button(tl!("Browse…")))
+            .clicked()
+        {
             browse_location(form);
         }
     });
@@ -423,7 +426,7 @@ fn draw_buttons(ui: &mut Ui, form: &NewProjectForm) -> Option<FormAction> {
     ui.allocate_ui_with_layout(size, Layout::right_to_left(Align::Center), |ui| {
         // Right-to-left: Cancel is added first so that OK ends up on its left.
         if ui
-            .add_sized([80.0, 22.0], Button::new(tl!("Cancel")))
+            .add_sized([80.0, 22.0], crate::theme::dialog_button(tl!("Cancel")))
             .clicked()
         {
             action = Some(FormAction::Cancel);
@@ -431,7 +434,7 @@ fn draw_buttons(ui: &mut Ui, form: &NewProjectForm) -> Option<FormAction> {
         if ui
             .add_enabled(
                 form.is_valid(),
-                Button::new(tl!("OK")).min_size([80.0, 22.0].into()),
+                crate::theme::default_button(tl!("OK")).min_size([80.0, 22.0].into()),
             )
             .clicked()
         {

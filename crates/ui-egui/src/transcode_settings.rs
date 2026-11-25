@@ -1267,21 +1267,21 @@ impl DiscCraftApp {
                     ui.vertical(|ui| {
                         ui.set_width(200.0);
                         let wide = egui::vec2(200.0, 0.0);
-                        if ui.add(egui::Button::new(tl!("OK")).min_size(wide)).clicked() {
+                        if ui.add(crate::theme::default_button(tl!("OK")).min_size(wide)).clicked() {
                             done = Some(true);
                         }
-                        if ui.add(egui::Button::new(tl!("Cancel")).min_size(wide)).clicked() {
+                        if ui.add(crate::theme::dialog_button(tl!("Cancel")).min_size(wide)).clicked() {
                             done = Some(false);
                         }
                         ui.add_space(12.0);
                         if ui
-                            .add(egui::Button::new(tl!("Edit Quality Presets…")).min_size(wide))
+                            .add(crate::theme::dialog_button(tl!("Edit Quality Presets…")).min_size(wide))
                             .clicked()
                         {
                             edit_presets = true;
                         }
                         if ui
-                            .add(egui::Button::new(tl!("Transcode Defaults…")).min_size(wide))
+                            .add(crate::theme::dialog_button(tl!("Transcode Defaults…")).min_size(wide))
                             .on_hover_text(tl!(
                                 "The project's settings: its TV standard and Blu-ray format"
                             ))
@@ -1453,7 +1453,8 @@ fn preset_row(ui: &mut egui::Ui, index: usize, row: &mut PresetRow) -> bool {
         .on_hover_text(tl!(
             "How hard the encoder looks for movement, 1 to 5: lower is faster, and the picture is a little worse at the same bit rate"
         ));
-    ui.small_button(tl!("Delete")).clicked()
+    ui.add(crate::theme::dialog_button(tl!("Delete")).small())
+        .clicked()
 }
 
 impl DiscCraftApp {
@@ -1500,7 +1501,7 @@ impl DiscCraftApp {
                 }
                 let room = presets.len() < crate::workspace::MAX_QUALITY_PRESETS;
                 if ui
-                    .add_enabled(room, egui::Button::new(tl!("New Preset")))
+                    .add_enabled(room, crate::theme::dialog_button(tl!("New Preset")))
                     .clicked()
                 {
                     presets.push(PresetRow {
@@ -1515,10 +1516,10 @@ impl DiscCraftApp {
                 }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui.button(tl!("OK")).clicked() {
+                    if ui.add(crate::theme::default_button(tl!("OK"))).clicked() {
                         done = Some(true);
                     }
-                    if ui.button(tl!("Cancel")).clicked() {
+                    if ui.add(crate::theme::dialog_button(tl!("Cancel"))).clicked() {
                         done = Some(false);
                     }
                 });

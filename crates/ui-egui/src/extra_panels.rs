@@ -26,22 +26,25 @@ impl DiscCraftApp {
         } else {
             None
         };
+        // M6.497: a bar for each transcode that runs (they run side by side), not only the last one heard.
+        let steps = if self.build_job.is_running() {
+            self.build_steps()
+        } else if self.transcode_job.is_running() {
+            self.transcode_steps()
+        } else {
+            Vec::new()
+        };
         crate::theme::group_box(ui, "progress_transcode", tl!("Transcode"), |ui| {
-            let (step, fraction) = running.as_ref().map_or(
-                (tl!("Nothing is being transcoded").to_owned(), 0.0),
-                |run| (run.0.clone(), run.1),
-            );
-            let mut bar = egui::ProgressBar::new(fraction.clamp(0.0, 1.0));
-            if running.is_some() {
-                bar = bar.show_percentage();
-            }
-            let _ = ui.add(bar);
-            ui.horizontal(|ui| {
-                ui.label(step);
-                if let Some((_, _, seconds)) = &running {
+            match &running {
+                None => {
+                    let _ = ui.add(egui::ProgressBar::new(0.0));
+                    ui.label(tl!("Nothing is being transcoded"));
+                }
+                Some((_, _, seconds)) => {
+                    crate::build_panel::step_bars(ui, &steps);
                     ui.weak(crate::build_panel::elapsed_text(*seconds));
                 }
-            });
+            }
             // Encore's list of the transcodes: what the job still has to transcode (M6.340).
             let waiting = self.transcode_list(running.is_some());
             egui::Frame::group(ui.style()).show(ui, |ui| {

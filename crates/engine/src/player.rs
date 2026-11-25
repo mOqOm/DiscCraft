@@ -1176,7 +1176,7 @@ mod tests {
 
     #[test]
     fn a_play_from_a_frame_start_starts_on_that_frame() {
-        // Every frame start of three hours at 29.97 and 23.976, carried as seconds as a chapter's is (the Gray disc's
+        // Every frame start of three hours at 29.97 and 23.976, carried as seconds as a chapter's is (a test disc's
         // chapter 7, frame 31 238, started on 31 237).
         const TICKS_PER_SECOND: i64 = 254_016_000_000;
         for (numerator, denominator) in [(30_000_i64, 1001_i64), (24_000, 1001)] {

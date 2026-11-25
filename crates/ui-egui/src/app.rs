@@ -92,6 +92,8 @@ pub struct DiscCraftApp {
     pub(crate) pending_action: Option<crate::confirm::PendingAction>,
     /// ビルドの前のチェックで問題が見つかり、「表示 / 無視して続行 / キャンセル」を出しているか。
     pub(crate) build_prompt: bool,
+    /// 失敗したビルドのエラー。OK を押すまでダイアログに出す（M6.503）。
+    pub(crate) build_failure: Option<String>,
     /// タイムライン ▸ FilmCraft のマーカーを読み込み… のダイアログ（開いている間だけ）。
     pub(crate) film_marker_dialog: Option<crate::filmcraft::FilmMarkerDialog>,
     /// FilmCraft で書き出している最中のシーケンス（終わるとタイムラインになる）。
@@ -118,6 +120,8 @@ pub struct DiscCraftApp {
     /// Files being taken into the Library (M6.403: Add Items from Files… / Import Folder…), and the set the files
     /// chosen one by one go into.
     pub(crate) library_import: Option<(crate::library_files::LibraryImport, String)>,
+    /// M6.491: the Blu-ray's subtitles being taken out after an import.
+    pub(crate) bluray_subtitles: Option<crate::bluray_import::SubtitleTaking>,
     /// The previews of the Library's own files, by file (`None`: it could not be drawn).
     pub(crate) library_previews: std::collections::HashMap<String, Option<egui::TextureHandle>>,
     /// 「一定間隔でチャプターポイントを追加」ダイアログ。
@@ -427,6 +431,10 @@ pub struct DiscCraftApp {
     pub(crate) transcode_dirty: bool,
     /// The Build panel's disc output and the writing of discs (M9.35).
     pub(crate) disc: crate::disc_writer::DiscWriter,
+    /// The Build Progress dialog's timing and the taskbar button (M6.505).
+    pub(crate) progress_watch: crate::build_progress::ProgressWatch,
+    /// File ▸ Create Disc Label…'s dialog while it is open (M6.506).
+    pub(crate) disc_label: Option<crate::disc_label::DiscLabelDialog>,
 }
 
 impl DiscCraftApp {
@@ -484,6 +492,7 @@ impl DiscCraftApp {
             check_window: crate::check_window::CheckWindow::default(),
             pending_action: None,
             build_prompt: false,
+            build_failure: None,
             film_marker_dialog: None,
             film_export: None,
             allow_close: false,
@@ -496,6 +505,7 @@ impl DiscCraftApp {
             next_text: serde_json::Map::new(),
             library_set_dialog: None,
             library_import: None,
+            bluray_subtitles: None,
             library_previews: std::collections::HashMap::new(),
             chapter_interval: None,
             monitor_frame: None,
@@ -653,6 +663,8 @@ impl DiscCraftApp {
             transcode_for: None,
             transcode_dirty: true,
             disc: crate::disc_writer::DiscWriter::default(),
+            progress_watch: crate::build_progress::ProgressWatch::default(),
+            disc_label: None,
             check_dirty: true,
         }
     }
@@ -681,11 +693,14 @@ impl DiscCraftApp {
             self.handle_build_result(result);
         }
         self.poll_writing(ui.ctx());
+        // M6.505: while the Build Progress dialog is up, no key reaches the window under it.
+        self.hold_keys(ui.ctx());
 
         if self.build_job.is_running() {
             ui.ctx().request_repaint();
         }
         self.poll_transcode_now(ui.ctx());
+        self.poll_bluray_subtitles(ui.ctx());
 
         self.validate_selection();
 
@@ -720,12 +735,16 @@ impl DiscCraftApp {
         self.clip_thumbs.set_paused(playing);
         self.poll_external_edits(ui.ctx());
         self.draw_groups(ui);
-        self.accept_dropped_files(ui.ctx());
+        // Files dropped on the window while a build runs are not imported (the window waits for the build).
+        if !self.job_running() {
+            self.accept_dropped_files(ui.ctx());
+        }
         // パネルが矢印キーを使わなかったときだけ（メニュービューアのボタンを動かすのが先）。
         self.step_frames_by_keys(ui.ctx());
         self.check_window(ui.ctx());
         self.prefs_window(ui.ctx());
         self.chapter_interval_dialog(ui.ctx());
+        self.disc_label_window(ui.ctx());
         self.new_workspace_dialog(ui.ctx());
         self.project_preview_window(ui.ctx());
         self.track_dialog_window(ui.ctx());
@@ -752,7 +771,9 @@ impl DiscCraftApp {
         self.show_welcome(ui);
         self.show_confirm(ui.ctx());
         self.show_build_prompt(ui.ctx());
+        self.show_build_failure(ui.ctx());
         self.show_writer_prompt(ui.ctx());
+        self.show_build_progress(ui.ctx());
         self.show_film_marker_dialog(ui.ctx());
         self.poll_film_export(ui.ctx());
         self.intercept_close(ui.ctx());
@@ -992,12 +1013,15 @@ impl DiscCraftApp {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(!name.trim().is_empty(), egui::Button::new(tl!("OK")))
+                    .add_enabled(
+                        !name.trim().is_empty(),
+                        crate::theme::default_button(tl!("OK")),
+                    )
                     .clicked()
                 {
                     done = Some(true);
                 }
-                if ui.button(tl!("Cancel")).clicked() {
+                if ui.add(crate::theme::dialog_button(tl!("Cancel"))).clicked() {
                     done = Some(false);
                 }
             });
@@ -1142,6 +1166,7 @@ impl DiscCraftApp {
     }
 
     fn reset_state(&mut self) {
+        self.bluray_subtitles = None;
         self.selection = Selection::None;
         self.project_clipboard = Selection::None;
         self.last_menu = None;
@@ -1460,11 +1485,14 @@ impl DiscCraftApp {
                 self.transcode_dirty = true;
             }
             Err(error) => {
-                self.status = if disccraft_build::was_stopped(&error) {
-                    tl!("Build stopped").to_owned()
+                if disccraft_build::was_stopped(&error) {
+                    self.status = tl!("Build stopped").to_owned();
                 } else {
-                    error
-                };
+                    // M6.503: said in a dialog, as Encore does. The panel only went back to its settings, with the
+                    // error in the status bar and under Result, out of sight at the panel's foot.
+                    self.status = error.clone();
+                    self.build_failure = Some(error);
+                }
                 self.simulate = None;
             }
         }
@@ -2280,5 +2308,19 @@ mod refresh_tests {
             !app.transcode_dirty,
             "the transcode status was asked for again"
         );
+    }
+
+    /// M6.503: a build that fails says so in a dialog (the error kept until OK); one that was stopped does not.
+    #[test]
+    fn a_failed_build_opens_the_failure_dialog() {
+        let mut app = DiscCraftApp::new(&egui::Context::default());
+        let error = "mux error: invalid input: mux rate exceeded at 7302.428 s".to_owned();
+        app.handle_build_result(Err(error.clone()));
+        assert_eq!(app.build_failure.as_deref(), Some(error.as_str()));
+        assert_eq!(app.status, error);
+
+        let mut app = DiscCraftApp::new(&egui::Context::default());
+        app.handle_build_result(Err("the transcode was stopped".to_owned()));
+        assert_eq!(app.build_failure, None);
     }
 }

@@ -167,9 +167,20 @@ fn assets_mut(value: &mut Value) -> Vec<&mut Map<String, Value>> {
     }
 }
 
+/// The disc settings object of a project envelope.
+fn settings_mut(value: &mut Value) -> Option<&mut Map<String, Value>> {
+    value
+        .get_mut("project")?
+        .get_mut("settings")?
+        .as_object_mut()
+}
+
 /// Writes each asset's path relative to `folder` ("relativePath"; left out when there is none, such as a file on
-/// another drive).
+/// another drive), and the disc label's ("relativeDiscLabel", M6.509).
 fn add_relative_paths(value: &mut Value, folder: &Path) {
+    if let Some(settings) = settings_mut(value) {
+        set_relative(settings, "discLabel", "relativeDiscLabel", folder);
+    }
     for asset in assets_mut(value) {
         set_relative(asset, "path", "relativePath", folder);
         // The transcoded files located for the asset (Locate Transcoded File), likewise.
@@ -228,6 +239,10 @@ fn find_moved(object: &mut Map<String, Value>, key: &str, relative_key: &str, fo
 /// no longer offline): the project was moved together with its media. The pictures of its picture subtitles (an
 /// image script's) that are gone too are looked for in the same place relative to the moved file.
 fn find_moved_assets(value: &mut Value, folder: &Path) {
+    // The disc label (M6.509), likewise.
+    if let Some(settings) = settings_mut(value) {
+        find_moved(settings, "discLabel", "relativeDiscLabel", folder);
+    }
     for asset in assets_mut(value) {
         // Located transcoded files are looked for whether or not the source is (it is often gone on purpose).
         for key in LOCATED_KEYS {
@@ -491,6 +506,63 @@ mod tests {
         assert_eq!(
             copied.assets.get(&asset).map(|asset| asset.path.clone()),
             Some(found.path.clone())
+        );
+        fs::remove_dir_all(&root)?;
+        Ok(())
+    }
+
+    /// M6.509: the disc label is saved with its path relative to the project, and found again when the project is
+    /// moved together with it; a label on another drive (no relative path) or gone keeps the recorded path.
+    #[test]
+    fn a_moved_project_finds_its_disc_label() -> Result<(), Box<dyn Error>> {
+        let root = temp_folder("moved-label")?;
+        let first = root.join("sample");
+        fs::create_dir_all(first.join("Labels"))?;
+        let label = first.join("Labels").join("sample Disc Label.designcraft");
+        fs::write(&label, b"a label")?;
+        let mut project = Project::default();
+        project.settings.disc_label = Some(label.to_string_lossy().into_owned());
+        save(&project, &first.join("sample.dcproj"))?;
+        let text = fs::read_to_string(first.join("sample.dcproj"))?;
+        assert!(
+            text.contains("\"relativeDiscLabel\": \"Labels/sample Disc Label.designcraft\""),
+            "{text}"
+        );
+        let moved = root.join("elsewhere");
+        fs::rename(&first, &moved)?;
+        let loaded = load(&moved.join("sample.dcproj"))?;
+        assert_eq!(
+            loaded
+                .settings
+                .disc_label
+                .as_deref()
+                .map(std::path::Path::new),
+            Some(
+                moved
+                    .join("Labels")
+                    .join("sample Disc Label.designcraft")
+                    .as_path()
+            )
+        );
+        // Saved again: still relative, and nothing left over from the old folder.
+        save(&loaded, &moved.join("sample.dcproj"))?;
+        let again = fs::read_to_string(moved.join("sample.dcproj"))?;
+        assert!(
+            again.contains("\"relativeDiscLabel\": \"Labels/sample Disc Label.designcraft\""),
+            "{again}"
+        );
+
+        // Gone from the moved folder too: the recorded path stays (the menu says it is missing).
+        fs::remove_file(moved.join("Labels").join("sample Disc Label.designcraft"))?;
+        let gone = load(&moved.join("sample.dcproj"))?;
+        assert_eq!(gone.settings.disc_label, loaded.settings.disc_label);
+
+        // No label: nothing written.
+        save(&Project::default(), &moved.join("plain.dcproj"))?;
+        let plain = fs::read_to_string(moved.join("plain.dcproj"))?;
+        assert!(
+            !plain.contains("discLabel") && !plain.contains("DiscLabel"),
+            "{plain}"
         );
         fs::remove_dir_all(&root)?;
         Ok(())

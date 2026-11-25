@@ -374,6 +374,16 @@ pub(crate) fn prepare_all_of(
         }
         return Ok(());
     }
+    // M6.495: the clips of the timelines of several clips first, side by side (each on a core of its own, as the
+    // titles are); the timelines then join them from the cache. Before, a timeline's clips were made one after
+    // another on one core (a Blu-ray's playlist of 7 clips imported took as long as all of them in a row).
+    let clips = clips_to_transcode(project, budget, only);
+    let results = crate::parallel::run(&clips, progress, |(one, outer), report| {
+        prepare_title_video(project, one, cache_dir, outer, report).map(|_| ())
+    });
+    for result in results {
+        result?;
+    }
     enum Job<'a> {
         Timeline(&'a Timeline),
         Slideshow(&'a Slideshow),
@@ -407,6 +417,58 @@ pub(crate) fn prepare_all_of(
         result?;
     }
     Ok(())
+}
+
+/// The rate a timeline's video is made at: its first video's own transcode setting (M6.251) in the place of the rate
+/// that fits the disc, as [`prepare_title_video`] takes it.
+fn timeline_budget(project: &Project, timeline: &Timeline, budget: &Budget) -> Budget {
+    match fixed_video_bitrate(project, timeline.video) {
+        Some(fixed) => Budget {
+            video_bitrate: fixed.min(budget.max_bitrate),
+            ..*budget
+        },
+        None => *budget,
+    }
+}
+
+/// The clips [`joined_clips`] would transcode (M6.495), each as the timeline of that one video it transcodes it as,
+/// with the rate it is given: every clip of a timeline of several clips (or trimmed, or after a gap) that is not used
+/// as it is, each video and rate once. With `only`, that asset's clips.
+fn clips_to_transcode(
+    project: &Project,
+    budget: &Budget,
+    only: Option<AssetId>,
+) -> Vec<(Timeline, Budget)> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut clips = Vec::new();
+    for timeline in project.timelines.values() {
+        if timeline.more_video.is_empty()
+            && timeline.video_trims.is_empty()
+            && !timeline.has_video_gaps()
+        {
+            continue;
+        }
+        let outer = timeline_budget(project, timeline, budget);
+        for video in timeline.videos() {
+            if only.is_some_and(|asset| asset != video) {
+                continue;
+            }
+            let Ok(source) = asset_path(project, video) else {
+                continue;
+            };
+            if passes_through(project, &source) || !seen.insert((video, outer.video_bitrate)) {
+                continue;
+            }
+            // As `joined_clips` makes it: the clip alone, without the timeline's other clips, trims and gaps.
+            let mut one = timeline.clone();
+            one.video = video;
+            one.more_video.clear();
+            one.video_trims.clear();
+            one.video_gaps.clear();
+            clips.push((one, outer));
+        }
+    }
+    clips
 }
 
 /// File ▸ Render ▸ Slideshow: transcodes the slideshows (`only`: one of them) into `cache_dir` at the rate the
@@ -698,13 +760,7 @@ fn prepare_title_video(
         .get(&timeline.video)
         .ok_or_else(|| DvdError::Invalid("referenced asset does not exist".to_string()))?;
     // The asset's own transcode setting (M6.251) takes the place of the rate that fits the disc.
-    let budget = &match fixed_video_bitrate(project, timeline.video) {
-        Some(fixed) => Budget {
-            video_bitrate: fixed.min(budget.max_bitrate),
-            ..*budget
-        },
-        None => *budget,
-    };
+    let budget = &timeline_budget(project, timeline, budget);
     let media = asset.media_file();
     let input: &Path = &media;
     // Made beside this by `prepare_title_as_made`.
@@ -1375,6 +1431,9 @@ fn scan_passthrough(
 ) -> Result<(), DvdError> {
     let video_path = asset_path(project, timeline.video)?;
     let video_path: &Path = &video_path;
+    // M6.496: how long the timeline plays, for its sound.
+    let timeline_seconds = timeline_play_seconds(project, timeline, probe);
+    let mut transcodes = false;
     for (index, video) in timeline.videos().into_iter().enumerate() {
         let path = asset_path(project, video)?;
         let path: &Path = &path;
@@ -1387,17 +1446,42 @@ fn scan_passthrough(
             scan.passthrough_bits = add_bits(scan.passthrough_bits, video_bytes)?;
         } else {
             // A clip of a joined timeline that needs a transcode: its picture takes part of the bitrate budget (the
-            // part it is trimmed to: the rest of the transcode is not on the disc, M6.409).
-            scan.transcode_seconds += trimmed_seconds(
+            // part it is trimmed to: the rest of the transcode is not on the disc, M6.409). M6.496: one with a rate
+            // of its own (or the timeline's first video's, as the join gives it to every clip) takes that much of the
+            // disc, as a title of its own does; it was counted in the shared budget.
+            let seconds = trimmed_seconds(
                 positive_seconds(probe(path)?)?,
                 timeline.video_trim(index),
                 project.settings.standard,
             );
+            match fixed_video_bitrate(project, video)
+                .or_else(|| fixed_video_bitrate(project, timeline.video))
+            {
+                Some(fixed) => {
+                    // `as` saturates; bits of a clip.
+                    let bits = (seconds * f64::from(fixed)).ceil() as u64;
+                    scan.passthrough_bits = scan.passthrough_bits.saturating_add(bits);
+                }
+                None => scan.transcode_seconds += seconds,
+            }
             scan.transcode_count = scan
                 .transcode_count
                 .checked_add(1)
                 .ok_or_else(|| DvdError::Invalid("too many timelines".to_string()))?;
+            transcodes = true;
         }
+    }
+
+    // M6.502: transcoded clips share the mux rate with the timeline's sound, as a title of one video does: the
+    // encoder's maximum leaves it room. Without it, the clips were made for 9.8 Mbit/s beside the sound, more than
+    // the mux carries, and a long loud passage failed the build after the whole transcode.
+    if transcodes {
+        let secs = match timeline_seconds.filter(|secs| *secs > 0.0) {
+            Some(secs) => secs,
+            None => positive_seconds(probe(video_path)?)?,
+        };
+        let audio_bitrate = audio_bitrate_for_title(project, timeline, secs)?;
+        scan.largest_audio_bitrate = scan.largest_audio_bitrate.max(audio_bitrate);
     }
 
     let mut seconds: Option<f64> = None;
@@ -1416,7 +1500,8 @@ fn scan_passthrough(
                 scan.passthrough_bits = add_bits(scan.passthrough_bits, bytes)?;
             }
             AudioKind::Transcode => {
-                let secs = match seconds {
+                // The whole timeline's length (M6.496: it was its first clip's).
+                let secs = match seconds.or(timeline_seconds.filter(|secs| *secs > 0.0)) {
                     Some(secs) => secs,
                     None => {
                         let secs = positive_seconds(probe(video_path)?)?;
@@ -1425,13 +1510,53 @@ fn scan_passthrough(
                     }
                 };
 
+                // Bits already (M6.496: they were added as bytes, eight times over).
                 let bits = ac3_bits_for_seconds(secs)?;
-                scan.passthrough_bits = add_bits(scan.passthrough_bits, bits)?;
+                scan.passthrough_bits = scan
+                    .passthrough_bits
+                    .checked_add(bits)
+                    .ok_or_else(|| DvdError::Invalid("passthrough size overflow".to_string()))?;
             }
         }
     }
 
     Ok(())
+}
+
+/// How long `timeline` plays: its clips as trimmed and the gaps before them (M6.496); `None` when a clip's length
+/// cannot be read.
+fn timeline_play_seconds(
+    project: &Project,
+    timeline: &Timeline,
+    probe: &dyn Fn(&Path) -> Result<f64, DvdError>,
+) -> Option<f64> {
+    clip_spans(project, timeline, probe)
+        .map(|spans| spans.last().map_or(0.0, |span| span.1 + span.2))
+}
+
+/// Where each clip of `timeline` plays (M6.498): (the clip's video, its start on the timeline and its length, in
+/// seconds), the gaps before them counted; `None` when a clip's length cannot be read.
+fn clip_spans(
+    project: &Project,
+    timeline: &Timeline,
+    probe: &dyn Fn(&Path) -> Result<f64, DvdError>,
+) -> Option<Vec<(AssetId, f64, f64)>> {
+    let frame_seconds = frame_ticks(project.settings.standard) as f64 / 254_016_000_000.0;
+    let mut spans = Vec::new();
+    let mut at = 0.0_f64;
+    for (index, video) in timeline.videos().into_iter().enumerate() {
+        let path = asset_path(project, video).ok()?;
+        let seconds = probe(&path).ok().filter(|seconds| seconds.is_finite())?;
+        let start = at + f64::from(timeline.video_gap(index)) * frame_seconds;
+        let length = trimmed_seconds(
+            seconds,
+            timeline.video_trim(index),
+            project.settings.standard,
+        );
+        spans.push((video, start, length));
+        at = start + length;
+    }
+    Some(spans)
 }
 
 /// How long the part of a clip `seconds` long that `trim` keeps plays (its frames at the disc's rate).
@@ -3370,10 +3495,14 @@ pub(crate) fn layer_break_time(project: &Project, timeline: &Timeline) -> Option
         .map(|point| point.time)
 }
 
-/// The output frames where the transcode of video `path` must start a GOP: every chapter past the start of every
-/// timeline that plays it as its first clip, so each chapter's cell begins exactly at its frame (the GOPs otherwise
-/// fall every 15 or 12 frames, and a cell would start at the nearest of them), and the in and out points of every
-/// trimmed clip of it (M6.409: the clip is cut out of the transcode there).
+/// The output frames where the transcode of video `path` must start a GOP: every chapter that falls in a clip of it on
+/// a timeline, and the manual layer break of a dual-layer DVD there (it gets its own cell, so its own GOP), so each
+/// chapter's cell begins exactly at its frame (the GOPs otherwise fall every 15 or 12 frames, and a cell would start
+/// at the nearest of them); and the in and out points of every trimmed clip of it (M6.409: the clip is cut out of the
+/// transcode there). M6.493: in every clip of a timeline, not only its first (a Blu-ray's playlist imported is a
+/// timeline of several clips): where a clip starts on the timeline is the gaps and the trimmed lengths of the clips
+/// before it, each clip's length as the timeline lays it out (its probe at the disc's rate). Past a clip whose length
+/// cannot be read, the chapters fall on the nearest GOP.
 fn asset_gop_starts(project: &Project, path: &Path) -> Vec<u64> {
     let frame = frame_ticks(project.settings.standard);
     // A film transcode's pictures are 23.976 a second.
@@ -3382,45 +3511,65 @@ fn asset_gop_starts(project: &Project, path: &Path) -> Vec<u64> {
     } else {
         frame
     };
-    let ticks_of =
-        |frames: u32| i64::from(frames).saturating_mul(i64::try_from(frame).unwrap_or(i64::MAX));
+    let ticks_of = |frames: i64| frames.saturating_mul(i64::try_from(frame).unwrap_or(i64::MAX));
     let plays = |video: &AssetId| {
         project
             .assets
             .get(video)
             .is_some_and(|asset| asset.media_file().as_ref() == path)
     };
+    let rate = project.settings.frame_rate().as_f64();
+    let length_of = |video: &AssetId| -> Option<i64> {
+        let probe = disccraft_transcode::probe_video(&asset_path(project, *video).ok()?).ok()?;
+        // `as` saturates; a clip's length is far inside the range.
+        Some((probe.seconds * rate).round() as i64)
+    };
     let mut frames: Vec<u64> = Vec::new();
     for timeline in project.timelines.values() {
-        for (index, video) in timeline.videos().iter().enumerate() {
+        let videos = timeline.videos();
+        // The clips up to the last that plays the file are walked (the ones after it do not move it).
+        let Some(last) = videos.iter().rposition(plays) else {
+            continue;
+        };
+        let marks: Vec<Tick> = timeline
+            .chapters
+            .iter()
+            .map(|chapter| chapter.time)
+            .chain(layer_break_time(project, timeline))
+            .collect();
+        // Where the clip starts on the timeline, in frames.
+        let mut at: Option<i64> = Some(0);
+        for (index, video) in videos.iter().enumerate().take(last + 1) {
+            let trim = timeline.video_trim(index);
+            let begin = at.map(|at| at.saturating_add(i64::from(timeline.video_gap(index))));
+            let kept = trim
+                .end
+                .map(i64::from)
+                .or_else(|| length_of(video))
+                .map(|end| end.saturating_sub(i64::from(trim.start)).max(0));
+            at = begin
+                .zip(kept)
+                .map(|(begin, kept)| begin.saturating_add(kept));
             if !plays(video) {
                 continue;
             }
-            let trim = timeline.video_trim(index);
             frames.extend(
                 [Some(trim.start), trim.end]
                     .into_iter()
                     .flatten()
-                    .map(|cut| nearest_frame(ticks_of(cut), per_frame)),
+                    .map(|cut| nearest_frame(ticks_of(i64::from(cut)), per_frame)),
             );
-            if index > 0 {
+            let Some(begin) = begin.map(ticks_of) else {
                 continue;
-            }
-            // The first clip's chapters, and the manual layer break of a dual-layer DVD (it gets its own cell, so
-            // its own GOP): a time on the timeline is in the file the trimmed frames later, after the gap.
-            let layer_break = layer_break_time(project, timeline);
-            let gap = ticks_of(timeline.video_gap(0));
-            let (start, end) = (ticks_of(trim.start), trim.end.map(ticks_of));
+            };
+            // A time on the timeline is in the file the trimmed frames later, from where the clip starts.
+            let end = kept.map(|kept| begin.saturating_add(ticks_of(kept)));
+            let start = ticks_of(i64::from(trim.start));
             frames.extend(
-                timeline
-                    .chapters
+                marks
                     .iter()
-                    .map(|chapter| chapter.time)
-                    .chain(layer_break)
-                    .filter(|time| time.0 >= gap)
-                    .map(|time| time.0.saturating_sub(gap).saturating_add(start))
-                    .filter(|in_file| end.is_none_or(|end| *in_file < end))
-                    .map(|in_file| nearest_frame(in_file, per_frame)),
+                    .filter(|time| time.0 >= begin && end.is_none_or(|end| time.0 < end))
+                    .map(|time| nearest_frame(time.0 - begin + start, per_frame)),
             );
         }
     }
@@ -4084,7 +4233,7 @@ mod tests {
     use super::{
         AC3_STEREO_BITRATE, AudioKind, Budget, LPCM_STEREO_BITRATE, MAX_MUX_VIDEO_BITRATE,
         TICKS_PER_SECOND, TranscodeStatus, VideoStandard, audio_cache_key, audio_kind,
-        budget_with_probe, estimate_with_probe, fnv1a64, is_passthrough,
+        budget_with_probe, clips_to_transcode, estimate_with_probe, fnv1a64, is_passthrough,
         max_bitrate_for_audio_bitrate, passes_through, slideshow_cache_key, transcode_status,
         video_fits_as_is,
     };
@@ -4168,11 +4317,13 @@ mod tests {
         let estimate = estimate?;
 
         let sizes: Vec<_> = estimate.timelines.clone();
-        assert_eq!(sizes.first(), Some(&(as_is, size)));
+        // M6.498: each with what multiplexing adds to it.
+        let muxed = |bytes: u64| bytes + super::mux_bytes(bytes, 60.0);
+        assert_eq!(sizes.first(), Some(&(as_is, muxed(size))));
         // 60 seconds at the video bitrate plus its AC-3 soundtrack.
         let expected =
             (60 * (u64::from(estimate.video_bitrate) + u64::from(AC3_STEREO_BITRATE))) / 8;
-        assert_eq!(sizes.get(1), Some(&(transcoded, expected)));
+        assert_eq!(sizes.get(1), Some(&(transcoded, muxed(expected))));
         Ok(())
     }
 
@@ -4315,8 +4466,9 @@ mod tests {
                 .find(|(timeline, _)| *timeline == id)
                 .map_or(0, |(_, bytes)| *bytes)
         };
-        // 80 minutes at 2 Mbit/s and 192 kbit/s of sound.
+        // 80 minutes at 2 Mbit/s and 192 kbit/s of sound, multiplexed (M6.498).
         let expected = 4800 * (2_000_000 + u64::from(AC3_STEREO_BITRATE)) / 8;
+        let expected = expected + super::mux_bytes(expected, 4800.0);
         assert!(bytes(&estimate, one).abs_diff(expected) < 1_000);
         assert!(bytes(&estimate, one) < bytes(&even, one));
         assert!(bytes(&estimate, two) > bytes(&even, two));
@@ -4333,6 +4485,99 @@ mod tests {
         assert!(project.set_asset_transcode(first, Some(50_000)).is_err());
         project.set_asset_transcode(first, None)?;
         assert_eq!(super::fixed_video_bitrate(&project, first), None);
+        Ok(())
+    }
+
+    /// M6.496: the clips of a timeline of several clips are counted at their own rates (or the first clip's, as the
+    /// join gives it), and the timeline's transcoded sound for the whole timeline, not its first clip.
+    #[test]
+    fn a_joined_timelines_own_rates_and_sound_are_counted() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::{AudioClip, AudioTrack};
+        let mut project = Project::default();
+        let first = project.add_asset(Path::new("first.mp4"))?;
+        let second = project.add_asset(Path::new("second.mp4"))?;
+        let timeline = project.add_timeline(first, None)?;
+        let found = project.timelines.get_mut(&timeline).ok_or("no timeline")?;
+        found.more_video = vec![second];
+        found.audio.push(AudioTrack {
+            more: vec![AudioClip {
+                asset: second,
+                start: 143_856,
+                trim_start: 0,
+                trim_end: None,
+            }],
+            ..AudioTrack::of(first)
+        });
+        // Two clips of 80 minutes: the first at 2 Mbit/s, the second at 3 Mbit/s.
+        let probe = |_path: &Path| Ok::<f64, DvdError>(4800.0);
+        project.set_asset_transcode(first, Some(2_000))?;
+        project.set_asset_transcode(second, Some(3_000))?;
+        let estimate = estimate_with_probe(&project, &probe)?;
+        let expected = (4800 * (2_000_000 + 3_000_000) + 9600 * u64::from(AC3_STEREO_BITRATE)) / 8;
+        let expected = expected + super::mux_bytes(expected, 9600.0);
+        let bytes = estimate.timelines.first().map_or(0, |(_, bytes)| *bytes);
+        assert!(
+            bytes.abs_diff(expected) < expected / 50,
+            "{bytes} against {expected}"
+        );
+        let budget = budget_with_probe(&project, &probe)?;
+        assert_eq!(budget.video_bitrate, 0);
+        // M6.502: the clips' encoder leaves the timeline's sound its room in the mux (it was 9.8 Mbit/s).
+        assert_eq!(
+            budget.max_bitrate,
+            MAX_MUX_VIDEO_BITRATE - AC3_STEREO_BITRATE
+        );
+        // The second without one: at the first clip's, as the join makes it.
+        project.set_asset_transcode(second, None)?;
+        let estimate = estimate_with_probe(&project, &probe)?;
+        let expected = (9600 * (2_000_000 + u64::from(AC3_STEREO_BITRATE))) / 8;
+        let expected = expected + super::mux_bytes(expected, 9600.0);
+        let bytes = estimate.timelines.first().map_or(0, |(_, bytes)| *bytes);
+        assert!(
+            bytes.abs_diff(expected) < expected / 50,
+            "{bytes} against {expected}"
+        );
+        Ok(())
+    }
+
+    /// M6.498: a DVD9 with a manual layer break is estimated on each layer: its timeline up to the break (each clip
+    /// at its rate, the sound evenly) on layer 0, the rest on layer 1; without a manual break, or on a single
+    /// layer, there is no split.
+    #[test]
+    fn a_manual_layer_break_splits_the_estimate() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::{AudioTrack, LayerBreakPoint};
+        let mut project = Project::default();
+        project.settings.capacity = Capacity::Dvd9;
+        let first = project.add_asset(Path::new("first.mp4"))?;
+        let second = project.add_asset(Path::new("second.mp4"))?;
+        let timeline = project.add_timeline(first, None)?;
+        let found = project.timelines.get_mut(&timeline).ok_or("no timeline")?;
+        found.more_video = vec![second];
+        found.audio.push(AudioTrack::of(first));
+        project.set_asset_transcode(first, Some(2_000))?;
+        project.set_asset_transcode(second, Some(4_000))?;
+        let probe = |_path: &Path| Ok::<f64, DvdError>(4800.0);
+        assert_eq!(estimate_with_probe(&project, &probe)?.layers, None);
+        // 20 minutes into the second clip.
+        project.settings.layer_break = Some(LayerBreakPoint {
+            timeline,
+            time: Tick(6000 * TICKS_PER_SECOND),
+        });
+        let estimate = estimate_with_probe(&project, &probe)?;
+        let layers = estimate.layers.ok_or("no layers")?;
+        let whole = estimate.timelines.first().map_or(0, |(_, bytes)| *bytes);
+        // Up to the break: 80 min at 2 Mbit/s and 20 at 4, and 100 min of sound, of the whole.
+        let share = (2e6 * 4800.0 + 4e6 * 1200.0 + 192e3 * 6000.0)
+            / (2e6 * 4800.0 + 4e6 * 4800.0 + 192e3 * 9600.0);
+        let expected = (whole as f64 * share) as u64;
+        assert!(layers.layer0_bytes.abs_diff(expected) < 1_000, "{layers:?}");
+        assert_eq!(
+            layers.layer0_bytes + layers.layer1_bytes,
+            estimate.estimated_bytes
+        );
+        assert_eq!(layers.layer0_max, 2_086_912 * 2048);
+        project.settings.capacity = Capacity::Dvd5;
+        assert_eq!(estimate_with_probe(&project, &probe)?.layers, None);
         Ok(())
     }
 
@@ -4961,6 +5206,64 @@ mod tests {
         Ok(())
     }
 
+    /// M6.495: the clips of a timeline of several clips are transcoded side by side before the timeline joins them,
+    /// each video once, at the rate the join gives it (the first clip's own setting, else the disc's); a timeline of
+    /// one whole clip is made as a title, not here; `only` keeps that asset's clips.
+    #[test]
+    fn the_clips_of_a_joined_timeline_are_listed_once_each() -> Result<(), Box<dyn Error>> {
+        let dir = temp_path("clips");
+        fs::create_dir_all(&dir)?;
+        let (first, second) = (dir.join("first.mp4"), dir.join("second.mp4"));
+        fs::write(&first, b"not a stream that goes on the disc as it is")?;
+        fs::write(&second, b"nor this")?;
+        let mut project = Project::default();
+        let one = project.add_asset(&first)?;
+        let two = project.add_asset(&second)?;
+        let joined = project.add_timeline(one, Some("Joined".to_owned()))?;
+        project
+            .timelines
+            .get_mut(&joined)
+            .ok_or("no timeline")?
+            .more_video = vec![two, one];
+        let _alone = project.add_timeline(two, Some("Alone".to_owned()))?;
+        let budget = Budget {
+            video_bitrate: 5_000_000,
+            max_bitrate: 9_000_000,
+            wide: false,
+            audio_bitrate: AC3_STEREO_BITRATE,
+        };
+        let listed = |project: &Project, only| -> Vec<(u64, u32)> {
+            clips_to_transcode(project, &budget, only)
+                .iter()
+                .map(|(timeline, budget)| (timeline.video.0, budget.video_bitrate))
+                .collect()
+        };
+        assert_eq!(
+            listed(&project, None),
+            [(one.0, 5_000_000), (two.0, 5_000_000)]
+        );
+        assert_eq!(listed(&project, Some(two)), [(two.0, 5_000_000)]);
+        // Each listed as the timeline of that one clip.
+        let clips = clips_to_transcode(&project, &budget, None);
+        assert!(
+            clips
+                .iter()
+                .all(|(timeline, _)| timeline.more_video.is_empty())
+        );
+        // The first clip's own rate is the joined timeline's, as the join gives it to every clip.
+        project
+            .assets
+            .get_mut(&one)
+            .ok_or("no asset")?
+            .transcode_kbps = Some(4_000);
+        assert_eq!(
+            listed(&project, None),
+            [(one.0, 4_000_000), (two.0, 4_000_000)]
+        );
+        fs::remove_dir_all(&dir).unwrap_or(());
+        Ok(())
+    }
+
     fn temp_path(ext: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -5015,12 +5318,44 @@ pub struct Estimate {
     pub transcode_seconds: f64,
     /// Video bitrate the transcoder will use (0 when nothing is transcoded).
     pub video_bitrate: u32,
-    /// Estimated bytes of the finished disc: the title VOBs and the ROM content.
+    /// Estimated bytes of the finished disc: the title VOBs (their streams and what multiplexing adds) and the ROM
+    /// content.
     pub estimated_bytes: u64,
+    /// M6.498: what multiplexing adds to the streams, in `estimated_bytes` ([`mux_bytes`]); 0 on an HD Blu-ray,
+    /// whose rates are counted with it.
+    pub mux_bytes: u64,
     /// Bytes of the ROM content (the files beside the video; 0 without any).
     pub rom_bytes: u64,
-    /// Estimated encoded bytes of each timeline (video and audio), in timeline order.
+    /// Estimated bytes of each timeline (video, audio and multiplexing), in timeline order.
     pub timelines: Vec<(TimelineId, u64)>,
+    /// M6.498: on a DVD9 with a manual layer break, how the estimate falls on the two layers.
+    pub layers: Option<LayerEstimate>,
+}
+
+/// How a DVD9's estimate falls on its layers at a manual layer break (M6.498): the titles before the break's timeline
+/// and its timeline up to the break (at each clip's rate, its sound evenly) on layer 0, the rest on layer 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayerEstimate {
+    /// Bytes on layer 0.
+    pub layer0_bytes: u64,
+    /// The most layer 0 of a dual-layer disc holds (2,086,912 sectors).
+    pub layer0_max: u64,
+    /// Bytes on layer 1, which holds no more than layer 0 (DVD+R DL / DVD-R DL, opposite track path).
+    pub layer1_bytes: u64,
+}
+
+/// Sectors of the largest layer 0 of a DVD+R DL / DVD-R DL.
+pub const LAYER0_MAX_SECTORS: u64 = 2_086_912;
+
+/// What a DVD's multiplexing adds to `stream_bytes` of streams playing `seconds` (M6.498): each 2048-byte pack carries
+/// about 2016 bytes of a stream after its pack header and PES header, and each VOBU of about half a second begins with
+/// a NAV pack. A 3-hour DVD-9 build measured 2.25 % over its streams; this gives 2.27 % for it.
+#[must_use]
+pub fn mux_bytes(stream_bytes: u64, seconds: f64) -> u64 {
+    let packs = stream_bytes.saturating_mul(32) / 2016;
+    // `as` saturates; seconds of a disc.
+    let navs = (seconds.max(0.0) * 2.0 * 2048.0) as u64;
+    packs.saturating_add(navs)
 }
 
 /// Estimate the disc usage of `project` (probes media durations; fails like a build would when the content cannot fit).
@@ -5116,12 +5451,14 @@ fn estimate_with_probe(
             transcode_seconds: hd.video_seconds,
             video_bitrate: hd.target_kbps.saturating_mul(1000),
             estimated_bytes: hd.estimated_bytes().saturating_add(rom_bytes),
+            mux_bytes: 0,
             rom_bytes,
             timelines: hd
                 .timelines
                 .iter()
                 .map(|(id, seconds, audio_bits)| (*id, hd.timeline_bytes(*seconds, *audio_bits)))
                 .collect(),
+            layers: None,
         });
     }
     let scan = scan_project(project, probe)?;
@@ -5134,26 +5471,91 @@ fn estimate_with_probe(
     let transcode_bytes =
         (scan.transcode_seconds * (f64::from(budget.video_bitrate) + audio_bps) / 8.0) as u64;
     let mut timelines = Vec::with_capacity(project.timelines.len());
+    let mut played = 0.0_f64;
     for timeline in project.timelines.values() {
         let mut one = Scan::default();
         scan_timeline(project, timeline, probe, &mut one)?;
         let transcoded =
             (one.transcode_seconds * f64::from(budget.video_bitrate) + one.audio_bits) / 8.0;
+        let streams = (one.passthrough_bits / 8).saturating_add(transcoded as u64);
+        // M6.498: with what multiplexing adds to them.
+        let seconds = timeline_play_seconds(project, timeline, probe).unwrap_or(0.0);
+        played += seconds;
         timelines.push((
             timeline.id,
-            (one.passthrough_bits / 8).saturating_add(transcoded as u64),
+            streams.saturating_add(mux_bytes(streams, seconds)),
         ));
     }
+    let streams = (scan.passthrough_bits / 8).saturating_add(transcode_bytes);
+    let mux = mux_bytes(streams, played);
+    let estimated_bytes = streams.saturating_add(mux).saturating_add(rom_bytes);
+    let layers = layer_estimate(project, &budget, probe, &timelines, estimated_bytes);
     Ok(Estimate {
         capacity_bytes: project.settings.capacity.bytes(),
         passthrough_bytes: scan.passthrough_bits / 8,
         transcode_seconds: scan.transcode_seconds,
         video_bitrate: budget.video_bitrate,
-        estimated_bytes: (scan.passthrough_bits / 8)
-            .saturating_add(transcode_bytes)
-            .saturating_add(rom_bytes),
+        estimated_bytes,
+        mux_bytes: mux,
         rom_bytes,
         timelines,
+        layers,
+    })
+}
+
+/// How the estimate of a DVD9 with a manual layer break falls on its layers (M6.498; `None` otherwise, or when a
+/// clip's length cannot be read): the titles before the break's timeline (they are laid out in timeline order) and
+/// its timeline up to the break on layer 0, the rest on layer 1. Within the timeline its bytes are shared out by each
+/// clip's video rate (its own, the first clip's, or the disc's) and its sound evenly; the encoder's own spread within
+/// a clip is not known before it runs.
+fn layer_estimate(
+    project: &Project,
+    budget: &Budget,
+    probe: &dyn Fn(&Path) -> Result<f64, DvdError>,
+    timelines: &[(TimelineId, u64)],
+    total: u64,
+) -> Option<LayerEstimate> {
+    let point = project
+        .settings
+        .layer_break
+        .filter(|_| project.settings.capacity == Capacity::Dvd9)?;
+    let timeline = project.timelines.get(&point.timeline)?;
+    let before: u64 = timelines
+        .iter()
+        .filter(|(id, _)| *id < point.timeline)
+        .map(|(_, bytes)| *bytes)
+        .sum();
+    let whole = timelines.iter().find(|(id, _)| *id == point.timeline)?.1;
+    let spans = clip_spans(project, timeline, probe)?;
+    let length = spans.last().map_or(0.0, |span| span.1 + span.2);
+    let at = point.time.0 as f64 / TICKS_PER_SECOND as f64;
+    // The sound's rate is the same all along; the video's is each clip's.
+    let sound = f64::from(AC3_STEREO_BITRATE) * timeline.audio.len().max(1) as f64;
+    let rate = |video: AssetId| {
+        f64::from(
+            fixed_video_bitrate(project, video)
+                .or_else(|| fixed_video_bitrate(project, timeline.video))
+                .unwrap_or(budget.video_bitrate),
+        )
+    };
+    let weight = |until: f64| -> f64 {
+        let video: f64 = spans
+            .iter()
+            .map(|(video, start, seconds)| rate(*video) * (until - start).clamp(0.0, *seconds))
+            .sum();
+        video + sound * until.clamp(0.0, length)
+    };
+    let all = weight(length);
+    if all <= 0.0 {
+        return None;
+    }
+    // `as` saturates; bytes of a disc.
+    let up_to = (whole as f64 * (weight(at) / all)) as u64;
+    let layer0 = before.saturating_add(up_to);
+    Some(LayerEstimate {
+        layer0_bytes: layer0,
+        layer0_max: LAYER0_MAX_SECTORS * 2048,
+        layer1_bytes: total.saturating_sub(layer0),
     })
 }
 

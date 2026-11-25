@@ -266,6 +266,11 @@ impl DiscCraftApp {
             push(clicked, ui, Action::BuildFolder, true);
             push(clicked, ui, Action::BuildImage, true);
         });
+        // M6.506 (DiscCraft's own): the disc's label, for PhotoCraft to print on a printable disc.
+        push(clicked, ui, Action::CreateDiscLabel, true);
+        // M6.509: the label linked to the project.
+        let labelled = self.session.project.settings.disc_label.is_some();
+        push(clicked, ui, Action::OpenDiscLabel, labelled);
         self.recent_items(ui);
         ui.separator();
         push(clicked, ui, Action::Exit, true);
@@ -864,6 +869,8 @@ impl DiscCraftApp {
             | Action::NewChapterPlaylist
             | Action::AddButton => self.run_create_action(action),
             Action::CreateChapterIndex => self.create_chapter_index(false),
+            Action::CreateDiscLabel => self.open_disc_label(),
+            Action::OpenDiscLabel => self.open_disc_label_file(),
             Action::CreateMultiPageChapterIndex => self.create_chapter_index(true),
             Action::CheckProject | Action::Preview | Action::BuildFolder | Action::BuildImage => {
                 self.run_build_action(action);

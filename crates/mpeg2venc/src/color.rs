@@ -47,20 +47,16 @@ pub(crate) fn rgb_to_frame420_as(
         });
     }
 
-    // Bands of whole chroma rows (two picture rows each), each on a thread of its own: at least
-    // [`BAND_ROWS`] picture rows a band, as more threads cost more to start than they save (M6.365).
-    let bands = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
-        .min(ch.div_ceil(BAND_ROWS / 2))
-        .max(1);
-    let band = ch.div_ceil(bands);
-    let jobs = y
-        .chunks_mut(band * 2 * w)
-        .zip(cb.chunks_mut(band * cw))
-        .zip(cr.chunks_mut(band * cw))
-        .enumerate();
-    if bands == 1 {
-        for (index, ((y_band, cb_band), cr_band)) in jobs {
+    // Bands of whole chroma rows (two picture rows each), [`BAND_ROWS`] picture rows a band, converted on the shared
+    // pool of worker threads (M6.499: they were threads started for each picture, M6.365, which several transcodes
+    // side by side started by the thousand a second).
+    use rayon::prelude::*;
+    let band = (BAND_ROWS / 2).max(1);
+    y.par_chunks_mut(band * 2 * w)
+        .zip(cb.par_chunks_mut(band * cw))
+        .zip(cr.par_chunks_mut(band * cw))
+        .enumerate()
+        .for_each(|(index, ((y_band, cb_band), cr_band))| {
             convert_band(
                 rgb,
                 (w, h, interlaced),
@@ -68,22 +64,7 @@ pub(crate) fn rgb_to_frame420_as(
                 y_band,
                 (cb_band, cr_band),
             );
-        }
-    } else {
-        std::thread::scope(|scope| {
-            for (index, ((y_band, cb_band), cr_band)) in jobs {
-                let _ = scope.spawn(move || {
-                    convert_band(
-                        rgb,
-                        (w, h, interlaced),
-                        index * band,
-                        y_band,
-                        (cb_band, cr_band),
-                    );
-                });
-            }
         });
-    }
 
     Ok(Frame420 {
         width,
@@ -94,7 +75,7 @@ pub(crate) fn rgb_to_frame420_as(
     })
 }
 
-/// The fewest picture rows a thread of [`rgb_to_frame420`] converts.
+/// The picture rows one task of [`rgb_to_frame420`] converts.
 const BAND_ROWS: usize = 48;
 
 /// Converts the picture rows of the chroma rows from `first_cy` on: their luma into `y_band` (whole rows of

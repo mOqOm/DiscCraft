@@ -338,22 +338,32 @@ fn sup(frames: &[(f64, f64, Vec<u8>)]) -> Vec<u8> {
     let mut out = Vec::new();
     for (start, _, bytes) in frames {
         // `as` saturates; the time wraps at 2^32 ticks as the field does.
-        let pts = ((start * 90_000.0).round() as u64 & 0xFFFF_FFFF) as u32;
-        let mut at = 0usize;
-        // Each segment: type (1 byte), length (2 bytes), data.
-        while let (Some(&high), Some(&low)) = (bytes.get(at + 1), bytes.get(at + 2)) {
-            let length = usize::from(u16::from_be_bytes([high, low]));
-            let Some(segment) = bytes.get(at..at + 3 + length) else {
-                break;
-            };
-            out.extend_from_slice(b"PG");
-            out.extend_from_slice(&pts.to_be_bytes());
-            out.extend_from_slice(&pts.to_be_bytes());
-            out.extend_from_slice(segment);
-            at += 3 + length;
-        }
+        let pts = (start * 90_000.0).round() as i64;
+        let _ = push_sup(&mut out, bytes, (pts, pts));
     }
     out
+}
+
+/// Appends the presentation graphics segments in `bytes` (each a type byte, a two-byte length and its data) to the
+/// `.sup` `out`, each behind `PG` and the times `(pts, dts)` (90 kHz, kept to the field's 32 bits): how many.
+pub(crate) fn push_sup(out: &mut Vec<u8>, bytes: &[u8], (pts, dts): (i64, i64)) -> usize {
+    // The field holds 32 bits; times wrap as it does.
+    let field = |time: i64| (time & 0xFFFF_FFFF) as u32;
+    let mut at = 0usize;
+    let mut count = 0usize;
+    while let (Some(&high), Some(&low)) = (bytes.get(at + 1), bytes.get(at + 2)) {
+        let length = usize::from(u16::from_be_bytes([high, low]));
+        let Some(segment) = bytes.get(at..at + 3 + length) else {
+            break;
+        };
+        out.extend_from_slice(b"PG");
+        out.extend_from_slice(&field(pts).to_be_bytes());
+        out.extend_from_slice(&field(dts).to_be_bytes());
+        out.extend_from_slice(segment);
+        at += 3 + length;
+        count += 1;
+    }
+    count
 }
 
 #[cfg(test)]

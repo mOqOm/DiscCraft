@@ -21,7 +21,7 @@ pub fn human_summary(project: &Project) -> Result<String, String> {
 fn write_header(project: &Project, out: &mut String) -> Result<(), String> {
     writeln!(
         out,
-        "ディスク: {} / {} / {} ({} GB) / リージョン: {}",
+        "ディスク: {} / {} / {} ({} GiB) / リージョン: {}",
         kind_label(project.settings.kind),
         standard_label(project.settings.standard),
         capacity_label(project.settings.capacity),
@@ -150,11 +150,10 @@ fn capacity_label(capacity: Capacity) -> &'static str {
     }
 }
 
+/// `bytes` in GiB to two places (M6.494: it was billions of bytes, named GB).
 fn format_gb(bytes: u64) -> String {
-    let q = bytes / 10_000_000;
-    let whole = q / 100;
-    let frac = q % 100;
-    format!("{whole}.{frac:02}")
+    let hundredths = (u128::from(bytes) * 100 + (1 << 29)) >> 30;
+    format!("{}.{:02}", hundredths / 100, hundredths % 100)
 }
 
 fn regions_label(regions: &[u8]) -> String {
