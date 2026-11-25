@@ -1049,7 +1049,6 @@
 	Writing the disc image	ディスクイメージを書いています
 	Transcoding {name}	{name} を変換しています
 	Building: {step} {percent}% ({time})	ビルド中: {step} {percent}%（{time}）
-	Building…	ビルド中…
 	Elapsed: {time}	経過時間: {time}
 	Pop-up Menu	ポップアップメニュー
 	Project Preview (Blu-ray)	プロジェクトプレビュー（Blu-ray）
@@ -1239,6 +1238,8 @@
 	Stops the transcodes of the build or of Transcode Now; what is already transcoded is kept	ビルドや「今すぐトランスコード」の変換を止めます。済んだ変換は残ります
 	Stopping…	停止しています…
 	Build stopped	ビルドを停止しました
+	Build Failed	ビルドに失敗しました
+	The build stopped with this error. What was already transcoded stays for the next build.	ビルドは次のエラーで止まりました。変換が終わったものは次のビルドのために残っています。
 	Transcode stopped	トランスコードを停止しました
 	Metadata	メタデータ
 	Search	検索
@@ -1355,7 +1356,7 @@
 	Added an audio clip	オーディオクリップを追加しました
 	A menu from the Library is made with New Menu or Replace Menu	ライブラリのメニューは 新規メニュー か メニューを置き換え で作ります
 	4:3 Pan & Scan	4:3 パン&スキャン
-	The disc's size, in gigabytes (1 GB = 1,000,000,000 bytes)	ディスクのサイズ（GB。1 GB = 1,000,000,000 バイト）
+	The disc's size, in gibibytes (1 GiB = 1,073,741,824 bytes)	ディスクのサイズ（GiB。1 GiB = 1,073,741,824 バイト）
 	Custom size:	カスタムのサイズ :
 	Kinsoku method:	禁則方法 :
 	Push In First	追い込み優先
@@ -1775,6 +1776,15 @@ xmp:tiff	Copyright	撮影著作権者 / 編集著作権者
 	The disc could not be written	ディスクに書き込めませんでした
 	Write	書き込み
 	Try Again	やり直す
+	Disc image	ディスクイメージ
+	The recorder failed: {message}	レコーダーでエラーが起きました: {message}
+	The disc image (.iso) to write	書き込むディスクイメージ（.iso）
+	Choose the disc image to write.	書き込むディスクイメージを選んでください。
+	The disc image cannot be found.	ディスクイメージが見つかりません。
+	The file is not a disc image (it is not made of whole 2,048-byte sectors).	ディスクイメージではありません（2,048 バイトのセクターで割り切れません）。
+	The image is larger than one layer, but its layer break is not known. DiscCraft writes it beside the images it builds (name.layerbreak.txt): build the disc image again with DiscCraft.	イメージが 1 層より大きいのに、レイヤーブレークの位置がわかりません。DiscCraft はビルドしたイメージの横にそれを書きます（名前.layerbreak.txt）。DiscCraft でディスクイメージをビルドし直してください。
+	A writing stopped on this DVD+R DL before: the drive calls it blank, but its first layer is fixed at {layer0} sectors, so part of it may be written. Use a blank DVD+R DL.	この DVD+R DL には、前に途中で止まった書き込みがあります。ドライブは空と答えますが、1 層目が {layer0} セクターに決まっており、一部が書かれている可能性があります。空の DVD+R DL を使ってください。
+	{kind}: a writing stopped on it before (its first layer is fixed), so it cannot be written	{kind}: 前に途中で止まった書き込みがあるため（1 層目が決まっています）、書き込めません
 	Erasing the disc	ディスクを消去中
 	Closing the disc	ディスクを閉じています
 	Verifying the disc	ディスクをベリファイしています
@@ -1785,7 +1795,54 @@ xmp:tiff	Copyright	撮影著作権者 / 編集著作権者
 	Verify failed: the disc cannot be read back ({message}).	ベリファイに失敗しました: ディスクを読み戻せません（{message}）。
 	{copies} discs written and verified	{copies} 枚のディスクに書き込み、ベリファイしました
 	Disc written and verified	ディスクに書き込み、ベリファイしました
-	Writing…	書き込み中…
+	Build Progress	ビルドの進行状況
+	Time left: about {time}	残り: 約 {time}
+	The window can be minimized: the taskbar button shows how far it is.	ウィンドウは最小化できます。タスクバーのボタンに進み具合が出ます。
+	{kind}: being written	{kind}: 書き込み中
+	Verify stopped: the disc is written and closed, but not verified	ベリファイを停止しました。ディスクは書き込んで閉じてありますが、ベリファイはしていません
+	Create Disc Label…	ディスクのレーベルを作成…
+	Create Disc Label	ディスクのレーベルを作成
+	Makes the disc's face at its real size in DesignCraft, to print on a printable disc on the printer's disc tray.	印刷できるディスクに、プリンターのディスクトレイで印刷するレーベルを、DesignCraft で実物大で作ります。
+	DesignCraft was not found: makes the disc's face at its real size for PhotoCraft instead, to print on a printable disc on the printer's disc tray.	DesignCraft が見つからないため、代わりに PhotoCraft 用に、印刷できるディスクにプリンターのディスクトレイで印刷するレーベルを実物大で作ります。
+	Printable area:	印刷できる範囲 :
+	Wide printable (22 to 118 mm)	ワイドプリンタブル（22〜118 mm）
+	Standard printable (43 to 118 mm)	標準のプリンタブル（43〜118 mm）
+	Inner	内径
+	Outer	外径
+	As the disc's package says; set the printer's disc settings the same.	ディスクのパッケージに書かれた範囲にし、プリンターのディスクの設定も同じにしてください。
+	Resolution:	解像度 :
+	None (white)	なし（白）
+	Disc name:	ディスク名 :
+	The chapter names ({count})	チャプターの名前（{count} 個）
+	No chapter has a name of its own	名前を付けたチャプターがありません
+	Create	作成
+	Disc Face	ディスクの面
+	Picture	絵
+	Guides (hidden, not printed)	ガイド（隠してあり、印刷しない）
+	Disc Label	ディスクのレーベル
+	Cannot make the disc label: {message}	ディスクのレーベルを作れません: {message}
+	Disc label made: {path}. In {app}, print it at 100 % (not scaled to fit) on the printer's CD/DVD paper.	ディスクのレーベルを作りました: {path}。{app} で、プリンターの CD/DVD の用紙に 100 %（用紙に合わせて拡大・縮小しない）で印刷してください。
+	{note} Some chapters did not fit even at the smallest size: shorten them there.	{note} いちばん小さな文字でも入りきらないチャプターがあります。そちらで短くしてください。
+	Disc label made: {path} (it could not be opened: {message})	ディスクのレーベルを作りました: {path}（開けませんでした: {message}）
+	Open Disc Label	ディスクのレーベルを開く
+	This project's label:	このプロジェクトのレーベル :
+	{name} (missing)	{name}（見つかりません）
+	Link a File…	ファイルを紐づける…
+	Unlink	紐づけを外す
+	Found beside the project: {name}	プロジェクトの横にあります: {name}
+	Link This File	このファイルを紐づける
+	The label made is linked to the project and kept when the project is saved (an earlier label's file stays where it is).	作ったレーベルはプロジェクトに紐づけられ、プロジェクトを保存すると一緒に保存されます（前のレーベルのファイルはそのまま残ります）。
+	Link a Disc Label	ディスクのレーベルを紐づける
+	Disc label	ディスクのレーベル
+	All files	すべてのファイル
+	the default app	既定のアプリ
+	The project has no disc label: make one with File ▸ Create Disc Label…, or link a file there.	プロジェクトにディスクのレーベルがありません。ファイル ▸ ディスクのレーベルを作成… で作るか、そこでファイルを紐づけてください。
+	The disc label {path} is missing: link it again in File ▸ Create Disc Label…	ディスクのレーベル {path} が見つかりません。ファイル ▸ ディスクのレーベルを作成… で紐づけ直してください
+	Opened the disc label {path} in {app}.	ディスクのレーベル {path} を {app} で開きました。
+	Cannot open the disc label {path}: {message}	ディスクのレーベル {path} を開けません: {message}
+	The disc label {path} is linked to the project: save the project to keep it.	ディスクのレーベル {path} をプロジェクトに紐づけました。保存するとプロジェクトに残ります。
+	The disc label is no longer linked to the project (its file stays where it is).	ディスクのレーベルとプロジェクトの紐づけを外しました（ファイルはそのまま残ります）。
+	{note} It is linked to the project: save the project to keep it.	{note} プロジェクトに紐づけました。保存するとプロジェクトに残ります。
 	Stops writing; a write-once disc stopped part way cannot be used again	書き込みを止めます。途中で止めた 1 回だけ書き込めるディスクは、もう使えません
 	{step} {percent}% ({time})	{step} {percent}%（{time}）
 	A disc is being written. Stop it or wait for it to finish first.	ディスクに書き込み中です。先に停止するか、終わるまで待ってください。
@@ -1803,7 +1860,12 @@ xmp:tiff	Copyright	撮影著作権者 / 編集著作権者
 	Show playlists shorter than a minute	1 分より短いプレイリストも表示
 	The playlist's clips are laid out in order with its chapters and the sound DiscCraft reads (LPCM, AC-3). Subtitles are not imported. Encrypted discs cannot be read; a disc image is read once it is mounted as a drive.	プレイリストのクリップを順に並べ、チャプターと DiscCraft が読める音声（LPCM、AC-3）を付けます。字幕は読み込みません。暗号化されたディスクは読めません。ディスクイメージはドライブとしてマウントしてから選んでください。
 	Imported playlist {playlist} of the Blu-ray: {clips} clips, {chapters} chapters, {tracks} audio tracks	Blu-ray のプレイリスト {playlist} を読み込みました: クリップ {clips}、チャプター {chapters}、オーディオトラック {tracks}
-	Imported playlist {playlist} of the Blu-ray: {clips} clips, {chapters} chapters, {tracks} audio tracks (left out: {streams})	Blu-ray のプレイリスト {playlist} を読み込みました: クリップ {clips}、チャプター {chapters}、オーディオトラック {tracks}（読めない音声: {streams}）
+	Imported playlist {playlist} of the Blu-ray: {clips} clips, {chapters} chapters, {tracks} audio tracks (left out: {streams})	Blu-ray のプレイリスト {playlist} を読み込みました: クリップ {clips}、チャプター {chapters}、オーディオトラック {tracks}（読み込まなかったストリーム: {streams}）
+	{before} Subtitles not taken out: {streams}	{before} 字幕を取り出せませんでした: {streams}
+	{before} Taking the subtitles out of the Blu-ray: {done} of {total}	{before} Blu-ray の字幕を取り出し中: {total} 本のうち {done} 本
+	{before} Subtitle tracks added from the Blu-ray: {count}	{before} Blu-ray の字幕から字幕トラックを {count} 本追加しました
+	{before} Subtitle tracks added from the Blu-ray: {count} (not taken out: {streams})	{before} Blu-ray の字幕から字幕トラックを {count} 本追加しました（取り出せなかったもの: {streams}）
+	the rest	残り
 	The drive does not tell where the dual-layer disc's first layer ends, so the layer break (sector {wanted}) cannot be placed.	ドライブが 2 層ディスクの 1 層目の終わりを返さないので、レイヤーブレーク（セクター {wanted}）を置けません。
 	The disc's first layer is fixed at {disc} sectors, but the image's layer break is at sector {wanted}. Use a blank DVD+R DL.	ディスクの 1 層目は {disc} セクターに決まっていますが、イメージのレイヤーブレークはセクター {wanted} です。空の DVD+R DL を使ってください。
 	The image's first layer ({wanted} sectors) is larger than the disc's ({disc} sectors).	イメージの 1 層目（{wanted} セクター）がディスクの 1 層目（{disc} セクター）より大きいです。
@@ -1812,3 +1874,12 @@ xmp:tiff	Copyright	撮影著作権者 / 編集著作権者
 	The first menu the disc shows becomes a motion menu with a button for each of its buttons that plays something, at the same place, linked to the timelines of what it plays. A draft to arrange further.	ディスクが最初に出すメニューを、モーションメニューにします。何かを再生するボタンごとに、同じ位置にボタンを置き、再生するもののタイムラインにリンクします。あとから整える下書きです。
 	The disc's menu was not made: {reason}	ディスクのメニューは作れませんでした: {reason}
 	Its menu: {buttons} buttons.	メニュー: ボタン {buttons} 個。
+	Cancelling…	キャンセルしています…
+	Stops the build; what is already transcoded is kept for the next build	ビルドを止めます。変換が終わったものは次のビルドのために残します
+	More comes before the layer break than layer 0 holds.	レイヤーブレークより前の分が、レイヤー 0 に入りきりません。
+	More comes after the layer break than before it (layer 1 holds no more than layer 0).	レイヤーブレークより後の分が、前の分より大きくなっています（レイヤー 1 はレイヤー 0 以下しか入りません）。
+	Video and sound {streams}, multiplexing {mux}, ROM content {rom}	映像と音声 {streams}、多重化 {mux}、ROM コンテンツ {rom}
+	Layer 0 (up to the layer break): about {layer0} of {most}. Layer 1: about {layer1}, at most as much as layer 0.	レイヤー 0（レイヤーブレークまで）: 約 {layer0}（上限 {most}）。レイヤー 1: 約 {layer1}（レイヤー 0 以下まで）。
+	Room left: {room0} on layer 0, {room1} on layer 1.	使える空き: レイヤー 0 に {room0}、レイヤー 1 に {room1}。
+	{size} used for multiplexing.	{size} が多重化に使用されています。
+	What the disc adds to the video and sound: the headers of its packs and a navigation pack every half second	ディスクが映像と音声に足す分: パックのヘッダーと、0.5 秒ごとのナビゲーションパック

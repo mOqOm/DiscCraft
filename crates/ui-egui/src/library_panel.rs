@@ -1534,10 +1534,10 @@ impl DiscCraftApp {
             });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if ui.button(tl!("OK")).clicked() {
+                if ui.add(crate::theme::default_button(tl!("OK"))).clicked() {
                     done = Some(true);
                 }
-                if ui.button(tl!("Cancel")).clicked() {
+                if ui.add(crate::theme::dialog_button(tl!("Cancel"))).clicked() {
                     done = Some(false);
                 }
             });

@@ -171,6 +171,12 @@ pub struct DiscSettings {
     /// DVD-ROM content / BD-ROM content). Its files are in the disc's root, its folders with them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rom_content: Option<String>,
+    /// The disc's label (M6.509, DiscCraft's own: Encore makes no labels): the DesignCraft document or PSD that
+    /// File ▸ Create Disc Label… made for the project, or one linked to it. Saved with the project, with its path
+    /// relative to the project file beside it ("relativeDiscLabel"), so a project moved together with it still
+    /// finds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disc_label: Option<String>,
 }
 
 /// The coding of a Blu-ray disc's HD video (Encore's Project Settings ▸ Codec, M12.28).

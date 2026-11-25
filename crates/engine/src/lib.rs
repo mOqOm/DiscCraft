@@ -77,4 +77,4 @@ pub struct CommandSpec {
     pub journal: bool,
 }
 
-pub use commands::{commands, find_command};
+pub use commands::{commands, find_command, take_bluray_subtitle};

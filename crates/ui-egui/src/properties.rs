@@ -628,7 +628,7 @@ impl DiscCraftApp {
                 ui.label(timeline.name.as_str());
                 self.subtitle_color_rows(ui, id, &timeline);
                 ui.add_space(6.0);
-                if ui.button(tl!("Close")).clicked() {
+                if ui.add(crate::theme::default_button(tl!("Close"))).clicked() {
                     close = true;
                 }
             });

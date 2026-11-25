@@ -17,6 +17,7 @@ mod draw;
 mod effects;
 mod graphic;
 mod highlight;
+pub mod label;
 mod palette;
 mod route;
 mod shadow;
@@ -371,6 +372,35 @@ pub fn menu_psd_layers(
         ));
     }
     Ok((width, height, layers))
+}
+
+/// The background of `menu` alone, without its texts, graphics and buttons, as RGB24 of the frame (M6.506: a disc
+/// label's picture); `picture` stands in for it (a motion menu's first frame).
+///
+/// # Errors
+///
+/// When the background cannot be drawn.
+pub fn menu_background_rgb(
+    project: &Project,
+    menu: &Menu,
+    picture: Option<(&[u8], usize, usize)>,
+) -> Result<(Vec<u8>, u16, u16), MenuError> {
+    let (width, height) = frame_size(&project.settings);
+    let mut rgb = draw::new_frame(width, height)?;
+    let scaled = picture.is_some_and(|(pixels, picture_width, picture_height)| {
+        draw::scale_rgb_into(
+            pixels,
+            picture_width,
+            picture_height,
+            width,
+            height,
+            &mut rgb,
+        )
+    });
+    if !scaled {
+        draw::draw_background(project, menu, width, height, &mut rgb)?;
+    }
+    Ok((rgb, width, height))
 }
 
 /// A menu graphic (image or shape) as a pixel layer of its PSD; a replacement layer keeps Encore's `(!)` in front of

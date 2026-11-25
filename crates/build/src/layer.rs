@@ -419,7 +419,7 @@ mod tests {
     fn the_layer_break_is_read_back_from_the_note() {
         let dir = std::env::temp_dir().join(format!("disccraft-layer-note-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let image = dir.join("Gray.iso");
+        let image = dir.join("disc.iso");
         assert_eq!(super::image_layer_break(&image), None);
         let found = LayerBreak {
             sector: 2_030_528,

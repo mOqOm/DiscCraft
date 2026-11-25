@@ -5,6 +5,7 @@ use std::sync::LazyLock;
 mod arrange;
 mod asset;
 mod bluray;
+pub use bluray::take_bluray_subtitle;
 mod bluray_menu;
 mod build;
 mod chapter_playlist;

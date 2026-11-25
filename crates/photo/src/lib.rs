@@ -33,8 +33,9 @@ mod write;
 
 pub use svg::{is_svg, render_svg_fill, render_svg_fit};
 pub use write::{
-    PsdAdditions, PsdAntialias, PsdButtonAddition, PsdCaps, PsdCharStyle, PsdLayer, PsdScript,
-    PsdShadow, PsdText, PsdTextAlign, page_group_name, write_layered_psd, write_psd_over,
+    MaskedGroup, PsdAdditions, PsdAntialias, PsdButtonAddition, PsdCaps, PsdCharStyle, PsdLayer,
+    PsdScript, PsdShadow, PsdText, PsdTextAlign, page_group_name, write_layered_psd,
+    write_masked_psd, write_psd_over,
 };
 
 /// Errors returned by this crate.

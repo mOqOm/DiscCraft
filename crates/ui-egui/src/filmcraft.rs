@@ -150,10 +150,10 @@ impl DiscCraftApp {
                 let _ = ui.radio_value(&mut dialog.all, true, tl!("All markers"));
                 ui.add_space(10.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(tl!("Cancel")).clicked() {
+                    if ui.add(crate::theme::dialog_button(tl!("Cancel"))).clicked() {
                         choice = Some(false);
                     }
-                    if ui.button(tl!("OK")).clicked() {
+                    if ui.add(crate::theme::default_button(tl!("OK"))).clicked() {
                         choice = Some(true);
                     }
                 });

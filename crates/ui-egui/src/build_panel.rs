@@ -30,9 +30,17 @@ pub(crate) struct BuildJob {
     pub(crate) output_kind: Option<OutputKind>,
     /// What the running build last said it was doing: the step (a media name, or `STEP_IMAGE`) and how far (0 to 1).
     progress: Arc<Mutex<Option<(String, f32)>>>,
+    /// M6.497: every step that is running (transcodes run side by side), in the order they began, each with how far
+    /// it is and when it last said so; a step goes when it reaches 1.
+    steps: Arc<Mutex<Vec<(String, f32, Instant)>>>,
     /// When the running build started.
     started: Option<Instant>,
+    /// M6.497: Cancel was pressed; the build stops at its next picture or chunk.
+    pub(crate) cancelling: bool,
 }
+
+/// A step that has said nothing for this long is not shown as running (one that never reported its end).
+const STEP_SILENT_SECONDS: u64 = 60;
 
 impl BuildJob {
     pub(crate) fn begin(&mut self) {
@@ -41,6 +49,22 @@ impl BuildJob {
         self.rx = None;
         self.started = Some(Instant::now());
         self.progress = Arc::new(Mutex::new(None));
+        self.steps = Arc::new(Mutex::new(Vec::new()));
+        self.cancelling = false;
+    }
+
+    /// M6.497: the steps that are running, each with how far it is (0 to 1), in the order they began.
+    pub(crate) fn running_steps(&self) -> Vec<(String, f32)> {
+        self.steps
+            .lock()
+            .map(|steps| {
+                steps
+                    .iter()
+                    .filter(|(_, _, heard)| heard.elapsed().as_secs() < STEP_SILENT_SECONDS)
+                    .map(|(step, fraction, _)| (step.clone(), *fraction))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The running build's step and how far it is, if it has said.
@@ -82,9 +106,14 @@ impl BuildJob {
         self.begin();
         self.output_kind = Some(options.output);
         let shared = Arc::clone(&self.progress);
+        let steps = Arc::clone(&self.steps);
         let mut report = move |step: &str, fraction: f32| {
+            let fraction = fraction.clamp(0.0, 1.0);
             if let Ok(mut guard) = shared.lock() {
-                *guard = Some((step.to_owned(), fraction.clamp(0.0, 1.0)));
+                *guard = Some((step.to_owned(), fraction));
+            }
+            if let Ok(mut steps) = steps.lock() {
+                note_step(&mut steps, step, fraction, Instant::now());
             }
         };
 
@@ -122,6 +151,25 @@ impl BuildJob {
     }
 }
 
+/// Notes in `steps` that `step` is `fraction` of the way at `now`: a new step is added at the end, a known one
+/// updated, and one that reached 1 taken off.
+fn note_step(steps: &mut Vec<(String, f32, Instant)>, step: &str, fraction: f32, now: Instant) {
+    let found = steps.iter().position(|(known, _, _)| known == step);
+    match (found, fraction >= 1.0) {
+        (Some(index), true) => {
+            let _ = steps.remove(index);
+        }
+        (Some(index), false) => {
+            if let Some(entry) = steps.get_mut(index) {
+                entry.1 = fraction;
+                entry.2 = now;
+            }
+        }
+        (None, true) => {}
+        (None, false) => steps.push((step.to_owned(), fraction, now)),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Usage {
     pub(crate) estimated_bytes: u64,
@@ -130,6 +178,10 @@ pub(crate) struct Usage {
     pub(crate) rom_bytes: u64,
     /// タイムラインごとのエンコード後のサイズの見積もり（バイト）。
     pub(crate) timelines: std::collections::BTreeMap<u64, u64>,
+    /// M6.498: what multiplexing adds to the streams (part of `estimated_bytes`).
+    pub(crate) mux_bytes: u64,
+    /// M6.498: a DVD9's layers at a manual layer break: (layer 0, the most layer 0 holds, layer 1), in bytes.
+    pub(crate) layers: Option<(u64, u64, u64)>,
 }
 
 #[derive(Clone, Debug)]
@@ -197,11 +249,20 @@ pub(crate) fn parse_usage(value: &Value) -> Option<Usage> {
         })
         .unwrap_or_default();
 
+    let layers = object.get("layers").and_then(|layers| {
+        Some((
+            layers.get("layer0Bytes")?.as_u64()?,
+            layers.get("layer0MaxBytes")?.as_u64()?,
+            layers.get("layer1Bytes")?.as_u64()?,
+        ))
+    });
     Some(Usage {
         estimated_bytes,
         capacity_bytes,
         rom_bytes: get_u64(object, &["romBytes"]).unwrap_or(0),
         timelines,
+        mux_bytes: get_u64(object, &["muxBytes"]).unwrap_or(0),
+        layers,
     })
 }
 
@@ -254,17 +315,40 @@ pub(crate) fn parse_problems(value: &Value) -> Vec<ProblemView> {
         .collect()
 }
 
-pub(crate) fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
+/// M6.497: a label and a bar for each of `steps`, one under another; Preparing… and a moving bar when there are none.
+pub(crate) fn step_bars(ui: &mut Ui, steps: &[(String, f32)]) {
+    if steps.is_empty() {
+        ui.label(tl!("Preparing…"));
+        ui.add(egui::ProgressBar::new(0.0).animate(true));
+        return;
+    }
+    for (step, fraction) in steps {
+        ui.label(step.as_str());
+        ui.add(egui::ProgressBar::new(*fraction).show_percentage());
+    }
+}
 
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
+/// The words for a step a build reports: writing the image, or transcoding a medium (its name).
+fn step_text(step: &str) -> String {
+    if step == STEP_IMAGE {
+        tl!("Writing the disc image").to_owned()
+    } else {
+        tlf!("Transcoding {name}", name = step)
+    }
+}
+
+/// A size in binary units, named as they are (M6.494: 1 GiB = 1024 MiB = 1,073,741,824 bytes; it said "GB" for them).
+pub(crate) fn format_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+
+    if bytes >= GIB {
+        format!("{:.2} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.2} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.2} KiB", bytes as f64 / KIB as f64)
     } else {
         format!("{bytes} B")
     }
@@ -427,11 +511,32 @@ impl DiscCraftApp {
     pub(crate) fn build_step(&self) -> (String, f32) {
         match self.build_job.current_progress() {
             None => (tl!("Preparing…").to_owned(), 0.0),
-            Some((step, fraction)) if step == STEP_IMAGE => {
-                (tl!("Writing the disc image").to_owned(), fraction)
-            }
-            Some((step, fraction)) => (tlf!("Transcoding {name}", name = step), fraction),
+            Some((step, fraction)) => (step_text(&step), fraction),
         }
+    }
+
+    /// M6.497: every step the running build is doing (the transcodes run side by side), each named and with how far
+    /// it is; empty before the first says anything.
+    pub(crate) fn build_steps(&self) -> Vec<(String, f32)> {
+        self.build_job
+            .running_steps()
+            .into_iter()
+            .map(|(step, fraction)| (step_text(&step), fraction))
+            .collect()
+    }
+
+    /// M6.497: the bars of the steps the running build is doing, one under another, or Preparing… before any.
+    pub(crate) fn build_step_bars(&self, ui: &mut Ui) {
+        step_bars(ui, &self.build_steps());
+    }
+
+    /// M6.497: every step Transcode Now is doing, named, with how far it is.
+    pub(crate) fn transcode_steps(&self) -> Vec<(String, f32)> {
+        self.transcode_job
+            .running_steps()
+            .into_iter()
+            .map(|(step, fraction)| (step_text(&step), fraction))
+            .collect()
     }
 
     /// The status bar while a build runs: the step, how far and how long so far.
@@ -461,6 +566,11 @@ impl DiscCraftApp {
     /// The Build button, as in Encore CS6: the project is checked first, and when the check finds something a
     /// dialog offers to show it, to go on anyway, or to cancel. A project without problems builds at once.
     pub(crate) fn request_build(&mut self) {
+        // M6.504: an image made before is written as it is; the project is not built, so it is not checked.
+        if self.disc.chosen && self.disc.from_image {
+            self.start_writing_image();
+            return;
+        }
         self.refresh_check();
         if self.problems.is_empty() {
             self.start_build();
@@ -486,13 +596,13 @@ impl DiscCraftApp {
             ui.add_space(10.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Right to left, so Cancel ends up on the right as in Encore.
-                if ui.button(tl!("Cancel")).clicked() {
+                if ui.add(crate::theme::dialog_button(tl!("Cancel"))).clicked() {
                     choice = Some(0);
                 }
-                if ui.button(tl!("Ignore and Continue")).clicked() {
+                if ui.add(crate::theme::dialog_button(tl!("Ignore and Continue"))).clicked() {
                     choice = Some(1);
                 }
-                if ui.button(tl!("Show")).clicked() {
+                if ui.add(crate::theme::default_button(tl!("Show"))).clicked() {
                     choice = Some(2);
                 }
             });
@@ -512,6 +622,41 @@ impl DiscCraftApp {
             }
             Some(_) => self.build_prompt = false,
             None => {}
+        }
+    }
+
+    /// The dialog of a build that failed (M6.503): why, until **OK**; **Copy** puts the error on the clipboard. A
+    /// build that was stopped does not show it.
+    pub(crate) fn show_build_failure(&mut self, ctx: &egui::Context) {
+        let Some(error) = self.build_failure.clone() else {
+            return;
+        };
+        let mut close = false;
+        let response = egui::Modal::new(egui::Id::unique("build_failure")).show(ctx, |ui| {
+            ui.set_width(480.0);
+            ui.strong(tl!("Build Failed"));
+            ui.add_space(6.0);
+            ui.label(tl!(
+                "The build stopped with this error. What was already transcoded stays for the next build."
+            ));
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical()
+                .max_height(160.0)
+                .show(ui, |ui| {
+                    crate::theme::status_label(ui, crate::theme::Status::Error, error.as_str());
+                });
+            ui.add_space(10.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(crate::theme::default_button(tl!("OK"))).clicked() {
+                    close = true;
+                }
+                if ui.add(crate::theme::dialog_button(tl!("Copy"))).clicked() {
+                    ui.ctx().copy_text(error.clone());
+                }
+            });
+        });
+        if close || response.should_close() {
+            self.build_failure = None;
         }
     }
 
@@ -875,6 +1020,36 @@ pub(crate) fn elapsed_text(seconds: u64) -> String {
         format!("{hours}:{minutes:02}:{secs:02}")
     } else {
         format!("{minutes}:{secs:02}")
+    }
+}
+
+#[cfg(test)]
+mod step_tests {
+    use super::note_step;
+    use std::time::Instant;
+
+    /// M6.497: the steps that run side by side are kept in the order they began, updated as they go, and let go
+    /// when they reach 1 (a step that reports its end after it is gone adds nothing).
+    #[test]
+    fn running_steps_come_and_go() {
+        let now = Instant::now();
+        let mut steps = Vec::new();
+        note_step(&mut steps, "00003", 0.1, now);
+        note_step(&mut steps, "00001", 0.2, now);
+        note_step(&mut steps, "00003", 0.4, now);
+        let names = |steps: &Vec<(String, f32, Instant)>| -> Vec<(String, f32)> {
+            steps
+                .iter()
+                .map(|(name, fraction, _)| (name.clone(), *fraction))
+                .collect()
+        };
+        assert_eq!(
+            names(&steps),
+            [("00003".to_owned(), 0.4), ("00001".to_owned(), 0.2)]
+        );
+        note_step(&mut steps, "00003", 1.0, now);
+        note_step(&mut steps, "00007", 1.0, now);
+        assert_eq!(names(&steps), [("00001".to_owned(), 0.2)]);
     }
 }
 

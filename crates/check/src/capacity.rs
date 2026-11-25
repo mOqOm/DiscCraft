@@ -31,6 +31,29 @@ fn check_estimate(estimate: &Estimate, problems: &mut Vec<Problem>) {
         ));
     }
 
+    // M6.498: a DVD9 with a manual layer break: layer 0 holds what comes before the break, at most 2,086,912
+    // sectors, and layer 1 no more than layer 0 (the build stops otherwise, after its transcodes).
+    if let Some(layers) = estimate.layers {
+        if layers.layer0_bytes > layers.layer0_max {
+            problems.push(warning(
+                "layer0TooLarge",
+                format!(
+                    "about {} bytes come before the layer break, more than layer 0 holds ({} bytes)",
+                    layers.layer0_bytes, layers.layer0_max
+                ),
+            ));
+        }
+        if layers.layer1_bytes > layers.layer0_bytes {
+            problems.push(warning(
+                "layer1LargerThanLayer0",
+                format!(
+                    "about {} bytes come after the layer break, more than the {} before it (layer 1 holds no more than layer 0)",
+                    layers.layer1_bytes, layers.layer0_bytes
+                ),
+            ));
+        }
+    }
+
     if estimate.video_bitrate > 0 && estimate.video_bitrate < LOW_BITRATE_THRESHOLD {
         problems.push(warning(
             "lowBitrate",

@@ -23,6 +23,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+/// M6.500: mimalloc as the allocator. A transcode asks for pictures of megabytes many times a second; the system's
+/// allocator gave each fresh pages (half a million page faults a second), on which several transcodes side by side
+/// waited for one another. mimalloc reuses its own pages: five clips at once went 1.8 times as fast.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 const MAX_SCRIPT_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Parser)]
@@ -115,6 +121,47 @@ enum Sub {
         #[arg(long)]
         recorder: Option<String>,
     },
+    /// Print what the drive tells of the disc in a recorder: its status, sessions and tracks (reserved, blank, next
+    /// writable address, size) and a dual-layer disc's layers (M9.45). Nothing is written
+    DiscInfo {
+        /// The recorder: its id or drive letter as `recorders` lists them (default: the first)
+        #[arg(long)]
+        recorder: Option<String>,
+    },
+    /// Make the disc's label (M6.506, M6.507): a DesignCraft document of the disc's face, 120 mm square, to print on
+    /// a printable disc. A menu's background filling the printable ring (nothing is printed on the hole or past the
+    /// edge), the disc's name and its named chapters as type, and guides that do not print. An --out ending in .psd
+    /// writes a PSD for PhotoCraft instead (the ring as a layer mask)
+    DiscLabel {
+        project: PathBuf,
+        /// The document to write: .designcraft (made by DesignCraft's command line), or .psd
+        #[arg(long)]
+        out: PathBuf,
+        /// The printable ring's inner diameter in mm, as the disc's package says (a "wide printable" disc 22,
+        /// others 43)
+        #[arg(long, default_value_t = 22.0)]
+        inner: f32,
+        /// The printable ring's outer diameter in mm
+        #[arg(long, default_value_t = 118.0)]
+        outer: f32,
+        /// Pixels an inch of a PSD (150 to 600)
+        #[arg(long, default_value_t = 300.0)]
+        dpi: f32,
+        /// The menu whose background is the picture, by its name (default: the menu the disc plays first); `none`
+        /// for a white disc
+        #[arg(long)]
+        menu: Option<String>,
+        /// The title across the upper half (default: the disc's name; none without one)
+        #[arg(long)]
+        title: Option<String>,
+        /// Leave the chapters out
+        #[arg(long)]
+        no_chapters: bool,
+        /// Link the label to the project and save the project (M6.509: as the application does, which opens it
+        /// again with File ▸ Open Disc Label)
+        #[arg(long)]
+        link: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -177,6 +224,24 @@ fn run(cli: Cli) -> Result<(), String> {
             no_verify,
         } => burn_image(&image, recorder.as_deref(), speed, (erase, !no_verify)),
         Sub::Verify { image, recorder } => verify_disc(&image, recorder.as_deref()),
+        Sub::DiscInfo { recorder } => disc_info(recorder.as_deref()),
+        Sub::DiscLabel {
+            project,
+            out,
+            inner,
+            outer,
+            dpi,
+            menu,
+            title,
+            no_chapters,
+            link,
+        } => disc_label(
+            &project,
+            &out,
+            (inner, outer, dpi),
+            (menu.as_deref(), title.as_deref()),
+            (!no_chapters, link),
+        ),
         Sub::BdChapters {
             path,
             playlist,
@@ -241,6 +306,190 @@ fn verify_disc(image: &Path, wanted: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// Writes the project's disc label to `out` (M6.506): the picture of the menu named `menu` (default: the one the disc
+/// plays first; `none`: white), the disc's name, and its named chapters when `chapters`. With `link`, links it to
+/// the project and saves the project (M6.509).
+fn disc_label(
+    project: &Path,
+    out: &Path,
+    (inner_mm, outer_mm, dpi): (f32, f32, f32),
+    (menu, title): (Option<&str>, Option<&str>),
+    (chapters, link): (bool, bool),
+) -> Result<(), String> {
+    use disccraft_menu::label::{self, DiscLabel, LabelNames};
+    let mut session = Session::open(project).map_err(|error| error.to_string())?;
+    let project_data = &session.project;
+    let chosen = match menu.map(str::trim) {
+        Some(name) if name.eq_ignore_ascii_case("none") => None,
+        Some(name) => Some(
+            project_data
+                .menus
+                .values()
+                .find(|menu| menu.page_of.is_none() && menu.name.trim() == name)
+                .map(|menu| menu.id)
+                .ok_or_else(|| format!("the project has no menu named {name}"))?,
+        ),
+        None => label::first_menu(project_data),
+    };
+    let picture = chosen
+        .and_then(|id| project_data.menu(id))
+        .map(|menu| -> Result<_, String> {
+            let (rgb, width, height) =
+                disccraft_menu::menu_background_rgb(project_data, menu, None)
+                    .map_err(|error| error.to_string())?;
+            let frame = disccraft_project::frame_size(&project_data.settings);
+            Ok((
+                rgb,
+                usize::from(width),
+                usize::from(height),
+                label::display_aspect(menu, frame),
+            ))
+        })
+        .transpose()?;
+    // M6.508: the title given, else the disc's own name (not the project file's).
+    let title = title.map_or_else(
+        || project_data.settings.name.trim().to_owned(),
+        |title| title.trim().to_owned(),
+    );
+    let lines = if chapters {
+        label::named_chapters(project_data)
+    } else {
+        Vec::new()
+    };
+    let count = lines.len();
+    let made = DiscLabel {
+        inner_mm,
+        outer_mm,
+        dpi,
+        title,
+        lines,
+        picture,
+        names: LabelNames {
+            face: "Disc face".to_owned(),
+            picture: "Picture".to_owned(),
+            guides: "Guides (hidden, not printed)".to_owned(),
+            lines: "Chapters".to_owned(),
+        },
+    };
+    // M6.507: a DesignCraft document, or a PSD for PhotoCraft when the file named is one.
+    let psd = out
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("psd"));
+    if psd {
+        label::export_disc_label_psd(&made, out).map_err(|error| error.to_string())?;
+        println!(
+            "wrote {}: the disc 120 mm across at {dpi:.0} dpi, printable from {inner_mm} to {outer_mm} mm, {count} chapters",
+            out.display()
+        );
+    } else {
+        let cli = label::designcraft::find_cli().ok_or_else(|| {
+            "DesignCraft was not found (set DISCCRAFT_DESIGNCRAFT_CLI to its designcraft-cli), or write a PSD for PhotoCraft with an --out ending in .psd".to_owned()
+        })?;
+        let result =
+            label::designcraft::make(&made, &cli, out).map_err(|error| error.to_string())?;
+        let chapters = match result.chapters_points {
+            Some(points) if result.chapters_overset => {
+                format!("{count} chapters at {points} pt, some left out (overset)")
+            }
+            Some(points) => format!("{count} chapters at {points} pt"),
+            None => "no chapters".to_owned(),
+        };
+        println!(
+            "wrote {}: the disc 120 mm across, printable from {inner_mm} to {outer_mm} mm, {chapters}",
+            out.display()
+        );
+    }
+    if link {
+        session.execute(
+            "disc.setLabel",
+            &serde_json::json!({ "path": out.to_string_lossy() }),
+        )?;
+        let saved = session.save(None)?;
+        println!("linked it to {}", saved.display());
+    }
+    Ok(())
+}
+
+/// Prints what the drive tells of the disc in the recorder (M9.45).
+fn disc_info(wanted: Option<&str>) -> Result<(), String> {
+    use disccraft_platform::burn;
+    let recorder = find_recorder(wanted)?;
+    let report = burn::disc_report(&recorder.id).map_err(|error| error.to_string())?;
+    println!("{}: {}", recorder.label(), report.kind.name());
+    // M9.47: who made the disc, as the drive reads it (a DVD+R's or DVD+RW's).
+    if let Some(id) = &report.media_id {
+        println!("media ID: {id}");
+    }
+    match &report.disc {
+        Ok(disc) => println!(
+            "disc: {}, last session {}, {} session(s), tracks {}..{} in the last session, last possible lead-out at {}{}",
+            match disc.status {
+                0 => "empty",
+                1 => "incomplete (appendable)",
+                2 => "finalized",
+                _ => "other",
+            },
+            match disc.last_session {
+                0 => "empty",
+                1 => "incomplete",
+                2 => "reserved or damaged",
+                _ => "complete",
+            },
+            disc.sessions,
+            disc.first_track_in_last_session,
+            disc.last_track_in_last_session,
+            disc.last_possible_lead_out,
+            if disc.erasable { ", erasable" } else { "" }
+        ),
+        Err(error) => println!("disc: {error}"),
+    }
+    for track in &report.tracks {
+        match track {
+            Ok(track) => println!(
+                "track {} (session {}): start {}, size {}, free {}{}{}, next writable {}, last recorded {}",
+                track.track,
+                track.session,
+                track.start,
+                track.size,
+                track.free_blocks,
+                if track.reserved { ", reserved" } else { "" },
+                if track.blank { ", blank" } else { "" },
+                track
+                    .next_writable
+                    .map_or_else(|| "-".to_owned(), |lba| lba.to_string()),
+                track
+                    .last_recorded
+                    .map_or_else(|| "-".to_owned(), |lba| lba.to_string()),
+            ),
+            Err(error) => println!("track: {error}"),
+        }
+    }
+    if let Some(boundary) = report.layer_boundary {
+        println!(
+            "layer 0: {} sectors ({})",
+            boundary.layer0_sectors,
+            if boundary.fixed {
+                "fixed"
+            } else {
+                "can be made smaller"
+            }
+        );
+        // M9.47: an empty DVD+R DL with its layer 0 fixed had a writing stop on it.
+        if boundary.fixed
+            && report.kind == burn::MediaKind::DvdPlusRDualLayer
+            && report.disc.as_ref().is_ok_and(|disc| disc.status == 0)
+        {
+            println!(
+                "a writing stopped on this disc before: the drive calls it empty, but part of it may be written"
+            );
+        }
+    }
+    if let Some(written) = report.written_layer0 {
+        println!("written layer 0 ends after {written} sectors");
+    }
+    Ok(())
+}
+
 /// Prints each recorder (id, drive and name) and the disc in it.
 fn list_recorders() -> Result<(), String> {
     use disccraft_platform::burn;
@@ -266,7 +515,13 @@ fn list_recorders() -> Result<(), String> {
                     } else {
                         " (cannot be written)"
                     },
-                    if media.blank { ", blank" } else { "" },
+                    if media.started_before() {
+                        ", blank as the drive says, but a writing stopped on it before (cannot be written)"
+                    } else if media.blank {
+                        ", blank"
+                    } else {
+                        ""
+                    },
                     media.free_bytes,
                     media.total_bytes,
                     speeds.join(" ")
@@ -537,18 +792,14 @@ fn print_build_summary(result: &Value) -> Result<(), String> {
         .and_then(Value::as_f64)
         .ok_or_else(|| "build result missing seconds".to_string())?;
 
-    let mut megabytes_whole = total_bytes / 1_000_000;
-    let remainder = total_bytes % 1_000_000;
-    let mut megabytes_tenth = (remainder + 50_000) / 100_000;
-
-    if megabytes_tenth == 10 {
-        megabytes_whole += 1;
-        megabytes_tenth = 0;
-    }
+    // In MiB (M6.494: 1 MiB = 1,048,576 bytes; it was millions of bytes, named MB).
+    let tenths = (total_bytes.saturating_mul(10) + (1 << 19)) >> 20;
 
     say(&format!("書き出した: {output}"))?;
     say(&format!(
-        "タイトル {titles} / チャプター {chapters} / {megabytes_whole}.{megabytes_tenth} MB / {seconds:.1} 秒"
+        "タイトル {titles} / チャプター {chapters} / {}.{} MiB / {seconds:.1} 秒",
+        tenths / 10,
+        tenths % 10
     ))
 }
 

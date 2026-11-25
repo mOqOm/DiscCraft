@@ -30,8 +30,29 @@ enum Message<R> {
     Done(usize, R),
 }
 
+/// Runs `work` on `item`, telling `progress` what it reports and, when it is over, that the last step it named is
+/// done (M6.497: 1, so a list of the jobs that are running can let it go).
+fn run_one<T, R>(
+    item: &T,
+    progress: &mut dyn FnMut(&str, f32),
+    work: &impl Fn(&T, &mut dyn FnMut(&str, f32)) -> R,
+) -> R {
+    let mut last: Option<String> = None;
+    let result = work(item, &mut |label: &str, fraction: f32| {
+        if last.as_deref() != Some(label) {
+            last = Some(label.to_owned());
+        }
+        progress(label, fraction);
+    });
+    if let Some(label) = last {
+        progress(&label, 1.0);
+    }
+    result
+}
+
 /// Runs `work` on every item, on as many threads as the CPU has cores (at most one per item), and returns the
-/// results in the items' order. `progress` is called on the calling thread with what the jobs report.
+/// results in the items' order. `progress` is called on the calling thread with what the jobs report, and with 1 for
+/// each job's last step when it is over.
 pub(crate) fn run<T: Sync, R: Send>(
     items: &[T],
     progress: &mut dyn FnMut(&str, f32),
@@ -39,7 +60,10 @@ pub(crate) fn run<T: Sync, R: Send>(
 ) -> Vec<R> {
     let workers = workers_for(items.len());
     if workers <= 1 {
-        return items.iter().map(|item| work(item, progress)).collect();
+        return items
+            .iter()
+            .map(|item| run_one(item, progress, &work))
+            .collect();
     }
     let next = AtomicUsize::new(0);
     let (sender, receiver) = mpsc::channel::<Message<R>>();
@@ -58,7 +82,7 @@ pub(crate) fn run<T: Sync, R: Send>(
                     let mut report = move |label: &str, fraction: f32| {
                         let _ = progress_sender.send(Message::Progress(label.to_owned(), fraction));
                     };
-                    let result = work(item, &mut report);
+                    let result = run_one(item, &mut report, work);
                     let _ = sender.send(Message::Done(index, result));
                 }
             });
@@ -87,16 +111,31 @@ mod tests {
     fn results_keep_the_items_order_and_progress_reaches_the_caller() {
         let items: Vec<u64> = (1..=20).collect();
         let mut heard = 0;
-        let results = run(&items, &mut |_, _| heard += 1, |item, report| {
-            report("job", 0.5);
-            // Uneven work, so jobs finish out of order.
-            std::thread::sleep(std::time::Duration::from_millis(21 - item));
-            item * 10
-        });
+        let mut done = Vec::new();
+        let results = run(
+            &items,
+            &mut |label, fraction| {
+                heard += 1;
+                if fraction >= 1.0 {
+                    done.push(label.to_owned());
+                }
+            },
+            |item, report| {
+                report(&format!("job {item}"), 0.5);
+                // Uneven work, so jobs finish out of order.
+                std::thread::sleep(std::time::Duration::from_millis(21 - item));
+                item * 10
+            },
+        );
         assert_eq!(
             results,
             items.iter().map(|item| item * 10).collect::<Vec<_>>()
         );
-        assert_eq!(heard, 20);
+        // Each job's half way, and (M6.497) its end.
+        assert_eq!(heard, 40);
+        done.sort();
+        let mut expected: Vec<String> = items.iter().map(|item| format!("job {item}")).collect();
+        expected.sort();
+        assert_eq!(done, expected);
     }
 }

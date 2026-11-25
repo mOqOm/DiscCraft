@@ -678,7 +678,7 @@ fn item_media(project: &Project, item: PlaylistItem) -> Option<Media> {
 
 /// Encore's marks of a link on the node it leads to: the audio track and subtitle it selects (the disc's first play
 /// and buttons can), then the chapter of a timeline it plays from or the button a menu is entered at ("A2 S1 C1",
-/// "B2"; a link to the menu's default button shows that button too, as Encore's "B1" for Gray's first play). Empty
+/// "B2"; a link to the menu's default button shows that button too, as Encore's "B1" for a disc's first play). Empty
 /// when it says none of these (a playlist).
 pub(crate) fn link_badge(project: &Project, port: &Port, link: &Link) -> String {
     let (audio, subtitle) = match port {
@@ -1989,7 +1989,7 @@ fn draw_disc(painter: &Painter, node: &Node, rect: Rect, m: &Metrics) {
 }
 
 /// One line of text from `left_center`, vertically centred on it, cut off at `max_width` as Encore cuts a name or a
-/// button's text 4 short of the edge of its box ("GLAY EXPO 201", "02 GLOBAL CO" and the edge of the M after it),
+/// button's text 4 short of the edge of its box ("SUMMER LIVE 2", "02 SECOND CO" and the edge of the M after it),
 /// without a "…".
 fn draw_text(
     painter: &Painter,
@@ -2005,7 +2005,7 @@ fn draw_text(
     }
     let galley = painter.layout_no_wrap(text.to_owned(), chart_font(size), color);
     let top = left_center.y - galley.size().y / 2.0;
-    // Cut at the pixel, as Encore does (M6.459: it shows the edge of the M of "02 GLOBAL CO|MMUNICATION", M6.456 had
+    // Cut at the pixel, as Encore does (M6.459: it shows the edge of the M of "02 SECOND CO|MMON THEME", M6.456 had
     // read it as leaving the M out); its letters sit 1 further right than egui puts them (the 0 of "01" 5 in from the
     // row's edge, not 4).
     let clip = Rect::from_min_size(
@@ -3946,7 +3946,7 @@ mod tests {
             button: Some(1),
         };
         assert_eq!(link_badge(&project, &end, &second_button), "B2");
-        // The default button (Encore marks Gray's first play to the menu's default "B1"); none on a menu without
+        // The default button (Encore marks a disc's first play to the menu's default "B1"); none on a menu without
         // buttons.
         let default = Link::Menu {
             id: menu,

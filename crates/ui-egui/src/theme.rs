@@ -342,8 +342,83 @@ fn apply_style(ctx: &Context, theme: Theme) {
 pub(crate) const LINK_FIELD: egui::class::ClassName =
     egui::class::ClassName::from_static("disccraft::link_field");
 
+/// The class of the button that answers a dialog by default (Yes, OK…): drawn as the other Craft apps draw it
+/// (M6.510, PhotoCraft's Unsaved Changes): round ends, filled with the Craft apps' blue, white text.
+pub(crate) const DIALOG_DEFAULT: egui::class::ClassName =
+    egui::class::ClassName::from_static("disccraft::dialog_default");
+/// The class of a dialog's other answers (No, Cancel…): round ends, an outline (M6.510).
+pub(crate) const DIALOG_BUTTON: egui::class::ClassName =
+    egui::class::ClassName::from_static("disccraft::dialog_button");
+
+/// The Craft apps' blue of a default button (measured on PhotoCraft's Unsaved Changes: 55, 142, 240), lighter
+/// under the pointer and darker pressed.
+const CRAFT_BLUE: [Color32; 3] = [
+    Color32::from_rgb(55, 142, 240),
+    Color32::from_rgb(84, 160, 244),
+    Color32::from_rgb(38, 118, 214),
+];
+/// The outline of a dialog's other buttons (light on the dark look, as PhotoCraft's; mid grey on the light one).
+const DIALOG_OUTLINE: Shade = Shade::gray(205, 128);
+/// What a dialog's other button is filled with under the pointer and pressed (a veil over the dialog's ground).
+/// (Premultiplied: white at 20 and 36 of 255, black at 14 and 28.)
+const DIALOG_VEIL: [Shade; 2] = [
+    Shade::new(
+        Color32::from_rgba_premultiplied(20, 20, 20, 20),
+        Color32::from_rgba_premultiplied(0, 0, 0, 14),
+    ),
+    Shade::new(
+        Color32::from_rgba_premultiplied(36, 36, 36, 36),
+        Color32::from_rgba_premultiplied(0, 0, 0, 28),
+    ),
+];
+
+/// A dialog's default answer (OK, Yes, Create, Close…): round ends, filled with the Craft apps' blue (M6.510).
+pub(crate) fn default_button<'a>(text: impl egui::IntoAtoms<'a>) -> egui::Button<'a> {
+    use egui::class::HasClasses as _;
+    egui::Button::new(text).with_class(DIALOG_DEFAULT)
+}
+
+/// A dialog's other buttons (Cancel, No, Browse…): round ends, an outline (M6.510, M6.511 every dialog).
+pub(crate) fn dialog_button<'a>(text: impl egui::IntoAtoms<'a>) -> egui::Button<'a> {
+    use egui::class::HasClasses as _;
+    egui::Button::new(text).with_class(DIALOG_BUTTON)
+}
+
+/// Draws a dialog's button ([`DIALOG_DEFAULT`] or [`DIALOG_BUTTON`], `default`) in `style`; `small` for one as high
+/// as the text (`Button::small`, a row's Delete).
+fn dialog_button_style(style: &mut ButtonStyle, state: WidgetState, default: bool, small: bool) {
+    let frame = &mut style.atom_layout.frame;
+    // As round as the button is high; wider and a little taller than the panels' buttons (the 1-pixel outline is
+    // within the margin, as egui's own buttons have it).
+    frame.corner_radius = CornerRadius::same(u8::MAX);
+    frame.inner_margin = if small {
+        Margin::symmetric(8, 0)
+    } else {
+        Margin::symmetric(13, 3)
+    };
+    let pick = |index: usize| match state {
+        WidgetState::Hovered => index.min(1),
+        WidgetState::Active => index.min(2),
+        WidgetState::Inactive | WidgetState::Noninteractive => 0,
+    };
+    if default {
+        let blue = CRAFT_BLUE.get(pick(2)).copied().unwrap_or(CRAFT_BLUE[0]);
+        frame.fill = blue;
+        frame.stroke = Stroke::new(1.0, blue);
+        style.atom_layout.text_style.color = Color32::WHITE;
+    } else {
+        frame.fill = match pick(2) {
+            0 => Color32::TRANSPARENT,
+            step => DIALOG_VEIL
+                .get(step.saturating_sub(1))
+                .map_or(Color32::TRANSPARENT, |veil| veil.get()),
+        };
+        frame.stroke = Stroke::new(1.0, DIALOG_OUTLINE.get());
+    }
+}
+
 /// Buttons as egui draws them, but a [`LINK_FIELD`] combo box as Encore's light field (a little lighter under the
-/// pointer).
+/// pointer), and a dialog's answers as the other Craft apps draw them ([`DIALOG_DEFAULT`], [`DIALOG_BUTTON`]).
 struct EncoreButtons;
 
 /// A link field under the pointer.
@@ -353,6 +428,12 @@ impl StyleProvider<ButtonStyle> for EncoreButtons {
     fn style(&mut self, args: &StyleArgs<'_>) -> ButtonStyle {
         use egui::class::HasClasses as _;
         let mut style = StyleProvider::<ButtonStyle>::style(&mut DefaultStyle, args);
+        let small = args.classes.has_class(&egui::Button::CLASS_SMALL);
+        if args.classes.has_class(&DIALOG_DEFAULT) {
+            dialog_button_style(&mut style, args.state, true, small);
+        } else if args.classes.has_class(&DIALOG_BUTTON) {
+            dialog_button_style(&mut style, args.state, false, small);
+        }
         if args.classes.has_class(&LINK_FIELD) {
             style.atom_layout.frame.fill = if args.state == WidgetState::Hovered {
                 FIELD_HOVER.get()
@@ -798,7 +879,7 @@ pub(crate) fn fixed_cell<R>(
     }
 }
 
-/// How many of a cell's first characters Encore keeps when it shortens the text (M6.469: "GLAY EX...OHOKU 20th
+/// How many of a cell's first characters Encore keeps when it shortens the text (M6.469: "SUMMER ...2014 20th
 /// Anniversary", "トランスコード...ません").
 const ELIDE_HEAD: usize = 7;
 /// The room Encore keeps clear at the right end of a cell whose text it shortens.

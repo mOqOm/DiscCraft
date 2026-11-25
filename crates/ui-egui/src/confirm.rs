@@ -7,6 +7,7 @@
 use crate::DiscCraftApp;
 use crate::i18n::{tl, tlf};
 use crate::new_project::NewProjectForm;
+use crate::theme;
 
 use egui::{Align, Context, Id, Layout, Modal};
 use std::path::PathBuf;
@@ -58,14 +59,15 @@ impl DiscCraftApp {
             ui.label(tlf!("Save changes to {name}?", name = name));
             ui.add_space(10.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                // 右から左に並ぶので、キャンセルが右端になる。
-                if ui.button(tl!("Cancel")).clicked() {
+                // 右から左に並ぶので、キャンセルが右端になる。M6.510: ボタンはほかの Craft アプリのダイアログと同じく
+                // 両端が丸く、既定の「はい」は青。
+                if ui.add(theme::dialog_button(tl!("Cancel"))).clicked() {
                     choice = Some(Choice::Cancel);
                 }
-                if ui.button(tl!("No")).clicked() {
+                if ui.add(theme::dialog_button(tl!("No"))).clicked() {
                     choice = Some(Choice::Discard);
                 }
-                if ui.button(tl!("Yes")).clicked() {
+                if ui.add(theme::default_button(tl!("Yes"))).clicked() {
                     choice = Some(Choice::Save);
                 }
             });

@@ -14,6 +14,8 @@ pub mod burn;
 pub mod displays;
 pub mod hw_video;
 pub mod memory;
+pub mod mmc;
+pub mod taskbar;
 
 pub use burn::{BurnError, BurnRequest, BurnStep, LayerBoundary, Media, MediaKind, Recorder};
 pub use displays::{Display, displays, keep_on_top};

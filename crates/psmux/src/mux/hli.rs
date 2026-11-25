@@ -594,7 +594,7 @@ mod tests {
         Ok(())
     }
 
-    /// Encore CS6's 16:9 menu (2026-11-23, the Gray menu set to 16:9, 18 buttons, Offset 5): BTN_MD `0x2120` (two
+    /// Encore CS6's 16:9 menu (2026-11-23, a 24-button menu set to 16:9, 18 buttons, Offset 5): BTN_MD `0x2120` (two
     /// groups, wide then letterbox), BTN_OFN 5, BTN_NS 18, the letterbox group from entry 19 with the same routes
     /// and commands. A 4:3 menu's Offset 0 is BTN_OFN 0.
     #[test]

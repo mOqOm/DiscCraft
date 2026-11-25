@@ -12,6 +12,12 @@ repository = "https://github.com/mOqOm/DiscCraft"
 publish = false
 
 [workspace.dependencies]
+# A shared pool of worker threads for the work on each picture (M6.499): several transcodes side by side share the
+# CPU's threads instead of each starting new ones for every picture. Already in the tree through EffectCraft.
+rayon = "1.12"
+# The programs' allocator (M6.500, MIT): big buffers freed and asked for again are reused from its own pages, not fresh
+# ones from the system each time.
+mimalloc = { version = "0.1", default-features = false }
 disccraft-mpeg2venc = { path = "crates/mpeg2venc" }
 disccraft-ac3enc = { path = "crates/ac3enc" }
 disccraft-psmux = { path = "crates/psmux" }

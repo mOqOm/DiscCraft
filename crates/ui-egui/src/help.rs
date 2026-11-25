@@ -379,13 +379,13 @@ impl DiscCraftApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui
-                    .button(tl!("Copy"))
+                    .add(crate::theme::dialog_button(tl!("Copy")))
                     .on_hover_text(tl!("Copies the report, to paste into a problem report."))
                     .clicked()
                 {
                     ui.ctx().copy_text(report_text(&rows));
                 }
-                if ui.button(tl!("Close")).clicked() {
+                if ui.add(crate::theme::default_button(tl!("Close"))).clicked() {
                     close = true;
                 }
             });
@@ -414,10 +414,10 @@ impl DiscCraftApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 open_releases = ui
-                    .button(tl!("Open the Releases on GitHub"))
+                    .add(crate::theme::dialog_button(tl!("Open the Releases on GitHub")))
                     .on_hover_text(RELEASES)
                     .clicked();
-                if ui.button(tl!("Close")).clicked() {
+                if ui.add(crate::theme::default_button(tl!("Close"))).clicked() {
                     close = true;
                 }
             });

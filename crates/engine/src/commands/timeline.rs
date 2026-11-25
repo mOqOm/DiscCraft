@@ -513,7 +513,7 @@ fn run_create(session: &mut Session, params: &Value) -> CommandResult {
 }
 
 /// A new timeline's first chapter gets the poster frame Encore gives it: where a video that starts black first shows
-/// something, at a half second (Encore CS6, 2026-11-23: the Gray clips that fade in got 1;15 or 2;00, the others none),
+/// something, at a half second (Encore CS6, 2026-11-23: a Blu-ray's clips that fade in got 1;15 or 2;00, the others none),
 /// at the nearest frame. Nothing changes when the file cannot be read or does not start black.
 fn take_first_chapter_poster(session: &mut Session, timeline: TimelineId) {
     let rate = session.project.settings.frame_rate();
@@ -605,11 +605,11 @@ fn take_source_streams(session: &mut Session, timeline: TimelineId) {
 }
 
 /// The most subtitle tracks a timeline has (a DVD's subpicture streams; a Blu-ray takes as many PGS streams).
-const MAX_SUBTITLE_TRACKS: usize = 32;
+pub(crate) const MAX_SUBTITLE_TRACKS: usize = 32;
 
 /// Where subtitles taken out of video files are kept (M6.422): `<project>.subtitles` beside the project, or a
 /// temporary folder before the project is saved.
-fn subtitle_folder(session: &Session) -> std::path::PathBuf {
+pub(crate) fn subtitle_folder(session: &Session) -> std::path::PathBuf {
     match session.path.as_deref() {
         Some(project) => {
             let stem = project

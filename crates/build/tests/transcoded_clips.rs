@@ -165,3 +165,44 @@ fn a_clip_that_needs_a_transcode_plays_the_frames_it_is_trimmed_to() {
     assert!(streams.contains("Audio: ac3"), "{streams}");
     let _ = std::fs::remove_dir_all(video_ts.parent().unwrap().parent().unwrap());
 }
+
+/// M6.493: a chapter in the second clip of a timeline (a Blu-ray's playlist imported is a timeline of several clips)
+/// starts its cell at its own frame too, as one in the first clip does. Before, only the first clip's transcode got
+/// GOPs at the chapters, and a later clip's chapter fell on the nearest regular GOP.
+#[test]
+fn a_chapter_in_a_later_clip_starts_its_cell_at_its_own_frame() {
+    let Some(ffmpeg) = ffmpeg() else {
+        eprintln!("ffmpeg not found; skipping");
+        return;
+    };
+    let video = source(&ffmpeg);
+    let (mut project, timeline) = project_of(&video);
+    let found = project.timelines.get_mut(&timeline).unwrap();
+    // The first clip: frames 0 to 60 of the file; the second: the whole file again.
+    found.more_video = vec![found.video];
+    found.video_trims = vec![
+        ClipTrim {
+            start: 0,
+            end: Some(60),
+        },
+        ClipTrim::default(),
+    ];
+    // Frame 97 of the title: frame 37 of the second clip's file, between the regular GOPs at 30 and 45.
+    project
+        .add_chapter(timeline, Tick(97 * FRAME_TICKS), None)
+        .unwrap();
+    let video_ts = build_folder(&project, "transcoded-later-chapter");
+    let cells = cells_in_frames(&video_ts);
+    assert_eq!(cells.len(), 2, "{cells:?}");
+    assert_eq!(
+        cells[0], 97,
+        "the chapter's cell starts at frame 97: {cells:?}"
+    );
+    // 60 frames and four seconds at 29.97 (119 or 120 frames).
+    assert!(
+        (179..=180).contains(&cells.iter().sum::<u64>()),
+        "{cells:?}"
+    );
+    decodes(&ffmpeg, &video_ts);
+    let _ = std::fs::remove_dir_all(video_ts.parent().unwrap().parent().unwrap());
+}

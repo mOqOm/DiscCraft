@@ -2,7 +2,13 @@
 //! folder, or an image mounted as a drive), to make a DVD of it or a disc with new menus.
 //!
 //! The drive or folder is chosen first; the dialog then lists the disc's playlists (length, chapters, clips, sound)
-//! with its main one, the longest, chosen, and the engine's `timeline.importBluray` makes the timeline.
+//! with its main one, the longest, chosen, and the engine's `timeline.importBluray` makes the timeline. Its
+//! subtitles (M6.491) are taken out of the disc afterwards on a thread of their own, each laid as a subtitle track
+//! when it is out.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 use disccraft_project::TimelineId;
 use rfd::FileDialog;
@@ -41,6 +47,74 @@ pub(crate) struct BlurayDraft {
     show_short: bool,
     /// The disc's menu is made a DVD menu too (M6.430).
     with_menu: bool,
+}
+
+/// The Blu-ray's subtitles being taken out on a thread of their own (M6.491): taking a stream out reads the clips'
+/// indexes, which from a disc drive takes minutes the first time, so the window goes on meanwhile and each stream is
+/// laid as a subtitle track as it is done. Dropping it (another project opened) stops the thread.
+pub(crate) struct SubtitleTaking {
+    jobs: Sender<Value>,
+    results: Receiver<(Value, Result<(), String>)>,
+    stop: Arc<AtomicBool>,
+    /// What the status bar said when the last jobs came (the import's summary), kept in front of the progress.
+    before: String,
+    total: usize,
+    done: usize,
+    added: usize,
+    /// The streams not taken out or not laid.
+    failed: Vec<String>,
+}
+
+impl Drop for SubtitleTaking {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+impl SubtitleTaking {
+    /// Starts the thread, which takes the jobs out one by one as they come.
+    fn start() -> Option<Self> {
+        let (jobs, queue) = std::sync::mpsc::channel::<Value>();
+        let (send, results) = std::sync::mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let _ = std::thread::Builder::new()
+            .name("bluray-subtitles".to_owned())
+            .spawn(move || {
+                for job in queue.iter() {
+                    if stopped.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let go_on = || !stopped.load(Ordering::Relaxed);
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        disccraft_engine::take_bluray_subtitle(&job, &go_on)
+                    }))
+                    .unwrap_or_else(|_| Err("internal error".to_owned()));
+                    if send.send((job, outcome)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self {
+            jobs,
+            results,
+            stop,
+            before: String::new(),
+            total: 0,
+            done: 0,
+            added: 0,
+            failed: Vec::new(),
+        })
+    }
+}
+
+/// The name of a subtitle job's stream (`jpn PG`).
+fn job_name(job: &Value) -> String {
+    job.get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// `seconds` as `H:MM:SS`.
@@ -230,12 +304,12 @@ impl DiscCraftApp {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(draft.chosen.is_some(), egui::Button::new(tl!("Import")))
+                    .add_enabled(draft.chosen.is_some(), crate::theme::default_button(tl!("Import")))
                     .clicked()
                 {
                     done = Some(true);
                 }
-                if ui.button(tl!("Cancel")).clicked() {
+                if ui.add(crate::theme::dialog_button(tl!("Cancel"))).clicked() {
                     done = Some(false);
                 }
             });
@@ -259,7 +333,10 @@ impl DiscCraftApp {
     /// Makes the first menu the disc at `path` shows a menu of the project (M6.430), and opens it.
     fn import_bluray_menu(&mut self, path: &str) {
         let before = self.status.clone();
-        let Some(made) = self.run_command("menu.importBluray", json!({ "path": path })) else {
+        let Some(made) = self.run_command(
+            "menu.importBluray",
+            json!({ "path": path, "subtitlesLater": true }),
+        ) else {
             self.status = format!(
                 "{before} {}",
                 tlf!(
@@ -290,13 +367,14 @@ impl DiscCraftApp {
                 buttons = made.get("buttons").and_then(Value::as_u64).unwrap_or(0)
             )
         );
+        self.take_subtitles_later(&made);
     }
 
     /// Makes the timeline of `playlist` of the disc at `path`, and selects it.
     fn finish_bluray_import(&mut self, path: &str, playlist: u32) {
         let Some(imported) = self.run_command(
             "timeline.importBluray",
-            json!({ "path": path, "playlist": playlist }),
+            json!({ "path": path, "playlist": playlist, "subtitlesLater": true }),
         ) else {
             return;
         };
@@ -314,17 +392,14 @@ impl DiscCraftApp {
         self.place_new_item(timeline);
         self.select(Selection::Timeline(TimelineId(timeline)));
         let count = |key: &str| imported.get(key).and_then(Value::as_u64).unwrap_or(0);
-        let left_out: Vec<String> = imported
-            .get("audioLeftOut")
-            .and_then(Value::as_array)
-            .map(|streams| {
-                streams
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default();
+        // The sound and the subtitle streams left out (M6.491: a DVD's PG subtitles, for now).
+        let left_out: Vec<String> = ["audioLeftOut", "subtitlesLeftOut"]
+            .iter()
+            .filter_map(|key| imported.get(*key).and_then(Value::as_array))
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
         self.status = if left_out.is_empty() {
             tlf!(
                 "Imported playlist {playlist} of the Blu-ray: {clips} clips, {chapters} chapters, {tracks} audio tracks",
@@ -341,6 +416,110 @@ impl DiscCraftApp {
                 chapters = count("chapters"),
                 tracks = count("audioTracks"),
                 streams = left_out.join(", ")
+            )
+        };
+        self.take_subtitles_later(&imported);
+    }
+
+    /// Takes the subtitle streams of an import (its `subtitleJobs`) out on a thread of their own (M6.491).
+    fn take_subtitles_later(&mut self, imported: &Value) {
+        let jobs: Vec<Value> = imported
+            .get("subtitleJobs")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if jobs.is_empty() {
+            return;
+        }
+        if self.bluray_subtitles.is_none() {
+            self.bluray_subtitles = SubtitleTaking::start();
+        }
+        let before = self.status.clone();
+        let Some(taking) = self.bluray_subtitles.as_mut() else {
+            let names: Vec<String> = jobs.iter().map(job_name).collect();
+            self.status = tlf!(
+                "{before} Subtitles not taken out: {streams}",
+                before = before,
+                streams = names.join(", ")
+            );
+            return;
+        };
+        taking.before = before;
+        for job in jobs {
+            let name = job_name(&job);
+            if taking.jobs.send(job).is_ok() {
+                taking.total += 1;
+            } else {
+                taking.failed.push(name);
+            }
+        }
+    }
+
+    /// Lays each subtitle stream taken out as a subtitle track of its timeline; meanwhile shows how far it is.
+    pub(crate) fn poll_bluray_subtitles(&mut self, ctx: &egui::Context) {
+        let Some(taking) = self.bluray_subtitles.as_ref() else {
+            return;
+        };
+        let mut finished = Vec::new();
+        let gone = loop {
+            match taking.results.try_recv() {
+                Ok(result) => finished.push(result),
+                Err(TryRecvError::Empty) => break false,
+                Err(TryRecvError::Disconnected) => break true,
+            }
+        };
+        let mut added = 0usize;
+        let mut failed = Vec::new();
+        for (job, outcome) in finished {
+            let name = job_name(&job);
+            let laid = match outcome {
+                Ok(()) => self.run_command("timeline.addBluraySubtitle", json!({ "job": job })),
+                Err(_) => None,
+            };
+            match laid.and_then(|laid| laid.get("asset").and_then(Value::as_u64)) {
+                Some(asset) => {
+                    self.place_new_item(asset);
+                    added += 1;
+                }
+                None => failed.push(name),
+            }
+        }
+        let Some(taking) = self.bluray_subtitles.as_mut() else {
+            return;
+        };
+        taking.done += added + failed.len();
+        taking.added += added;
+        taking.failed.extend(failed);
+        if taking.done < taking.total && !gone {
+            self.status = tlf!(
+                "{before} Taking the subtitles out of the Blu-ray: {done} of {total}",
+                before = taking.before,
+                done = taking.done,
+                total = taking.total
+            );
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            return;
+        }
+        if taking.done < taking.total {
+            // The thread is gone without the rest.
+            taking.failed.push(tl!("the rest").to_owned());
+        }
+        let before = std::mem::take(&mut taking.before);
+        let added = taking.added;
+        let failed = std::mem::take(&mut taking.failed);
+        self.bluray_subtitles = None;
+        self.status = if failed.is_empty() {
+            tlf!(
+                "{before} Subtitle tracks added from the Blu-ray: {count}",
+                before = before,
+                count = added
+            )
+        } else {
+            tlf!(
+                "{before} Subtitle tracks added from the Blu-ray: {count} (not taken out: {streams})",
+                before = before,
+                count = added,
+                streams = failed.join(", ")
             )
         };
     }

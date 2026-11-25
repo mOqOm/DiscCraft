@@ -354,12 +354,12 @@ impl DiscCraftApp {
                         && dialog.cues > 0
                         && (!dialog.relative || offset.is_some());
                     if ui
-                        .add_enabled(ready, egui::Button::new(tl!("OK")))
+                        .add_enabled(ready, crate::theme::default_button(tl!("OK")))
                         .clicked()
                     {
                         finish = Some(true);
                     }
-                    if ui.button(tl!("Cancel")).clicked() {
+                    if ui.add(crate::theme::dialog_button(tl!("Cancel"))).clicked() {
                         finish = Some(false);
                     }
                 });

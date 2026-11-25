@@ -2821,6 +2821,7 @@ version = "0.1.0"
 dependencies = [
  "disccraft-ui-egui",
  "eframe",
+ "mimalloc",
  "winresource",
 ]
 
@@ -2893,8 +2894,10 @@ dependencies = [
  "disccraft-build",
  "disccraft-check",
  "disccraft-engine",
+ "disccraft-menu",
  "disccraft-platform",
  "disccraft-project",
+ "mimalloc",
  "serde_json",
 ]
 
@@ -2980,7 +2983,10 @@ dependencies = [
  "disccraft-project",
  "encoding_rs",
  "filmcraft-text",
+ "photocraft-doc",
+ "photocraft-io",
  "png",
+ "serde_json",
  "skrifa 0.44.0",
  "thiserror 2.0.21",
 ]
@@ -3000,6 +3006,7 @@ name = "disccraft-mpeg2venc"
 version = "0.1.0"
 dependencies = [
  "craft-video",
+ "rayon",
 ]
 
 [[package]]
@@ -3088,6 +3095,7 @@ dependencies = [
  "filmcraft-media 0.20.1 (git+https://github.com/storytold/filmcraft?rev=ba6fe10529c7bf5d2a9283f9de2e35c0ccff926c)",
  "filmcraft-time 0.20.1 (git+https://github.com/storytold/filmcraft?rev=ba6fe10529c7bf5d2a9283f9de2e35c0ccff926c)",
  "miniz_oxide 0.8.9",
+ "rayon",
  "thiserror 2.0.21",
 ]
 
@@ -5942,6 +5950,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "libredox"
 version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6100,6 +6117,15 @@ checksum = "c73f5c649995a115e1a0220b35e4df0a1294500477f97a91d0660fb5abeb574a"
 dependencies = [
  "libc",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "mimalloc"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
+dependencies = [
+ "libmimalloc-sys",
 ]
 
 [[package]]

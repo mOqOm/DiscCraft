@@ -28,6 +28,7 @@ filmcraft-color.workspace = true
 filmcraft-time.workspace = true
 craft-video = { workspace = true, features = ["h264-encode"] }
 thiserror.workspace = true
+rayon.workspace = true
 
 [features]
 # HEVC (H.265) for Ultra HD video (M12.43, M12.44): craft-video's HEVC encoder, and the hardware encoder's HEVC. Off

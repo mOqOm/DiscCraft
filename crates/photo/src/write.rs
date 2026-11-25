@@ -9,8 +9,8 @@ use photocraft_doc::text::{
     TextRun, TextShape,
 };
 use photocraft_doc::{
-    BlendMode, Color, ColorMode, Document, Effect, FxCommon, Layer, LayerContent, PixelFormat,
-    Rect, SampleType, Size, Surface, TextLayer,
+    BlendMode, Color, ColorMode, Document, Effect, FxCommon, Layer, LayerContent, LayerMask,
+    PixelFormat, Rect, SampleType, Size, Surface, TextLayer,
 };
 use photocraft_geom::Affine;
 
@@ -214,6 +214,77 @@ pub fn write_layered_psd(
         .iter()
         .map(|layer| build_layer(layer, format, canvas, expected))
         .collect::<Result<_, _>>()?;
+    save(&doc, path)
+}
+
+/// The masked group of a PSD written by [`write_masked_psd`].
+#[derive(Debug, Clone, Copy)]
+pub struct MaskedGroup<'a> {
+    /// Group name.
+    pub name: &'a str,
+    /// One byte a canvas pixel (row by row): 0 hides what the group draws there, 255 shows it.
+    pub mask: &'a [u8],
+    /// The layers in the group, bottom to top.
+    pub children: &'a [PsdLayer],
+}
+
+/// Write an 8-bit RGB PSD of `width` x `height` at `dpi` (its print size: `width / dpi` inches) holding `group`
+/// under its layer mask and `over` (bottom to top) above it (M6.506: a disc label, its artwork in the group under
+/// the ring of the disc's printable face, so that nothing is printed on the hole or past the edge, and its guides
+/// over it). A type layer's size is in points (pixels times 72 / `dpi`), as PhotoCraft and Photoshop set type.
+///
+/// # Errors
+///
+/// As [`write_layered_psd`], and for a mask that is not one byte a pixel or a resolution that is not positive.
+pub fn write_masked_psd(
+    path: &Path,
+    (width, height): (u32, u32),
+    dpi: f32,
+    group: MaskedGroup<'_>,
+    over: &[PsdLayer],
+) -> Result<(), PhotoError> {
+    if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
+        return Err(PhotoError::Invalid(format!(
+            "canvas size {width}x{height} out of range"
+        )));
+    }
+    if !(dpi.is_finite() && dpi > 0.0) {
+        return Err(PhotoError::Invalid(format!(
+            "resolution {dpi} out of range"
+        )));
+    }
+    let name = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("label");
+    let mut doc = Document::new(name, Size { width, height }, ColorMode::Rgb, SampleType::U8);
+    doc.resolution_dpi = dpi;
+    let format = doc.pixel_format();
+    let canvas = doc.bounds();
+    let expected = canvas_bytes(width, height)?;
+    if group.mask.len() != expected / 4 {
+        return Err(PhotoError::Invalid(format!(
+            "mask of {} bytes for a {}-pixel canvas",
+            group.mask.len(),
+            expected / 4
+        )));
+    }
+    let children = group
+        .children
+        .iter()
+        .map(|layer| build_layer(layer, format, canvas, expected))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut masked = Layer::group(group.name.to_owned(), children);
+    let mut mask = LayerMask::hide_all();
+    mask.surface
+        .try_write_interleaved(canvas, group.mask)
+        .map_err(|error| PhotoError::Invalid(format!("mask: {error:?}")))?;
+    masked.mask = Some(mask);
+    let mut layers = vec![masked];
+    for layer in over {
+        layers.push(build_layer(layer, format, canvas, expected)?);
+    }
+    doc.layers = layers.into_iter().collect();
     save(&doc, path)
 }
 

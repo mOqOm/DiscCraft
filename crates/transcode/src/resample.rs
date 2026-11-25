@@ -170,38 +170,156 @@ pub(crate) fn render_rgb_filtered(
     Some(rgb)
 }
 
+/// M12.49: [`render_rgb_filtered`] on one plane of 8-bit samples (a Y'CbCr picture's luma, or one of its chroma planes):
+/// `source` (`sw` x `sh`) scaled with [`axis_taps`] into the rectangle `(x, y, width, height)` of `out`, `stride`
+/// samples a row; the rest of `out` is left as it is. `None` when the sizes do not fit.
+pub(crate) fn scale_plane_filtered(
+    source: &[u8],
+    (sw, sh): (usize, usize),
+    out: &mut [u8],
+    stride: usize,
+    (x, y, width, height): (usize, usize, usize, usize),
+) -> Option<()> {
+    if width == 0 || height == 0 {
+        return Some(());
+    }
+    if sw == 0
+        || sh == 0
+        || source.len() < sw.checked_mul(sh)?
+        || x.checked_add(width)? > stride
+        || out.len() < y.checked_add(height)?.checked_mul(stride)?
+    {
+        return None;
+    }
+    // Exactly half each way (a 4K picture's chroma to 1080p's): each sample the average of the 2 x 2 it covers, which
+    // is what the area filter's weights come to, in one go.
+    if sw == width * 2 && sh == height * 2 {
+        let content = out.get_mut(y * stride..(y + height) * stride)?;
+        in_rows(content, stride, |index, row| {
+            let (Some(top), Some(bottom), Some(row)) = (
+                source.get(2 * index * sw..(2 * index + 1) * sw),
+                source.get((2 * index + 1) * sw..(2 * index + 2) * sw),
+                row.get_mut(x..x + width),
+            ) else {
+                return;
+            };
+            let (top, _) = top.as_chunks::<2>();
+            let (bottom, _) = bottom.as_chunks::<2>();
+            for ((slot, [a, b]), [c, d]) in row.iter_mut().zip(top).zip(bottom) {
+                let sum = u16::from(*a) + u16::from(*b) + u16::from(*c) + u16::from(*d);
+                *slot = u8::try_from((sum + 2) / 4).unwrap_or(u8::MAX);
+            }
+        });
+        return Some(());
+    }
+    let columns = axis_taps(sw, width);
+    let rows = axis_taps(sh, height);
+    // Across: every source row to the picture's width, with EXTRA more bits.
+    let mut across = vec![0u16; sh.checked_mul(width)?];
+    in_rows(&mut across, width, |source_row, row| {
+        let Some(line) = source.get(source_row * sw..(source_row + 1) * sw) else {
+            return;
+        };
+        for (slot, taps) in row.iter_mut().zip(&columns) {
+            let total: u32 = taps
+                .weights
+                .iter()
+                .enumerate()
+                .filter_map(|(offset, weight)| {
+                    Some(u32::from(*line.get(taps.first + offset)?) * weight)
+                })
+                .sum();
+            *slot = u16::try_from((total + (1 << (14 - EXTRA - 1))) >> (14 - EXTRA))
+                .unwrap_or(u16::MAX);
+        }
+    });
+    // Down: the picture's rows from those, into the output.
+    let content = out.get_mut(y * stride..(y + height) * stride)?;
+    in_rows(content, stride, |index, row| {
+        let (Some(taps), Some(row)) = (rows.get(index), row.get_mut(x..x + width)) else {
+            return;
+        };
+        for (column, slot) in row.iter_mut().enumerate() {
+            let total: u32 = taps
+                .weights
+                .iter()
+                .enumerate()
+                .filter_map(|(offset, weight)| {
+                    Some(u32::from(*across.get((taps.first + offset) * width + column)?) * weight)
+                })
+                .sum();
+            let shift = 14 + EXTRA;
+            *slot = u8::try_from((total + (1 << (shift - 1))) >> shift).unwrap_or(u8::MAX);
+        }
+    });
+    Some(())
+}
+
 /// Runs `fill` on each `stride`-long row of `buffer` (with its index), the rows shared out between threads.
-fn in_rows<T: Send>(buffer: &mut [T], stride: usize, fill: impl Fn(usize, &mut [T]) + Sync) {
+pub(crate) fn in_rows<T: Send>(
+    buffer: &mut [T],
+    stride: usize,
+    fill: impl Fn(usize, &mut [T]) + Sync,
+) {
     if stride == 0 {
         return;
     }
     let count = buffer.len() / stride;
-    let workers = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZero::get)
-        .clamp(1, (count / ROWS_PER_WORKER).max(1));
-    if workers == 1 {
+    if count <= ROWS_PER_WORKER {
         for (index, row) in buffer.chunks_mut(stride).enumerate() {
             fill(index, row);
         }
         return;
     }
-    let per_worker = count.div_ceil(workers).max(1);
-    std::thread::scope(|scope| {
-        for (block, rows) in buffer.chunks_mut(per_worker * stride).enumerate() {
-            let fill = &fill;
-            let _ = scope.spawn(move || {
-                for (offset, row) in rows.chunks_mut(stride).enumerate() {
-                    fill(block * per_worker + offset, row);
-                }
-            });
-        }
-    });
+    // M6.499: blocks of rows on the shared pool of worker threads, not threads started for each picture (several
+    // transcodes side by side started them by the thousand a second, and waited on the system for them).
+    use rayon::prelude::*;
+    buffer
+        .par_chunks_mut(ROWS_PER_WORKER * stride)
+        .enumerate()
+        .for_each(|(block, rows)| {
+            for (offset, row) in rows.chunks_mut(stride).enumerate() {
+                fill(block * ROWS_PER_WORKER + offset, row);
+            }
+        });
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::indexing_slicing)]
-    use super::{ONE, Taps, axis_taps, render_rgb_filtered};
+    use super::{ONE, Taps, axis_taps, render_rgb_filtered, scale_plane_filtered};
+
+    /// M12.49: one plane scaled into a rectangle of a larger plane: exactly half each way is each sample the
+    /// rounded average of the 2 x 2 it covers; another size the area filter's weights (a flat plane stays flat);
+    /// the samples around the rectangle are left as they were; sizes that do not fit are refused.
+    #[test]
+    fn a_plane_is_scaled_into_its_rectangle() {
+        let source: Vec<u8> = vec![
+            10, 20, 30, 40, //
+            50, 61, 70, 80, //
+            90, 100, 110, 120, //
+            130, 140, 150, 161,
+        ];
+        let mut out = vec![7_u8; 4 * 3];
+        scale_plane_filtered(&source, (4, 4), &mut out, 4, (1, 1, 2, 2)).unwrap();
+        assert_eq!(
+            out,
+            [
+                7, 7, 7, 7, //
+                7, 35, 55, 7, //
+                7, 115, 135, 7,
+            ]
+        );
+        // A flat plane to another size stays flat.
+        let flat = vec![123_u8; 6 * 5];
+        let mut out = vec![0_u8; 4 * 3];
+        scale_plane_filtered(&flat, (6, 5), &mut out, 4, (0, 0, 4, 3)).unwrap();
+        assert!(out.iter().all(|value| *value == 123));
+        // Does not fit: a rectangle past the row, a short source, a short output.
+        assert!(scale_plane_filtered(&flat, (6, 5), &mut out, 4, (1, 0, 4, 3)).is_none());
+        assert!(scale_plane_filtered(&flat[..10], (6, 5), &mut out, 4, (0, 0, 4, 3)).is_none());
+        assert!(scale_plane_filtered(&flat, (6, 5), &mut out, 4, (0, 1, 4, 3)).is_none());
+    }
 
     #[test]
     fn taps_cover_the_source_and_add_up() {

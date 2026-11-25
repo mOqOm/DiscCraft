@@ -267,6 +267,13 @@ fn run_usage(session: &mut Session, _params: &Value) -> CommandResult {
         "transcodeSeconds": e.transcode_seconds,
         "videoBitrate": e.video_bitrate,
         "fits": e.estimated_bytes <= e.capacity_bytes,
+        // M6.498: what multiplexing adds (in estimatedBytes), and a DVD9's layers at a manual layer break.
+        "muxBytes": e.mux_bytes,
+        "layers": e.layers.map(|layers| serde_json::json!({
+            "layer0Bytes": layers.layer0_bytes,
+            "layer0MaxBytes": layers.layer0_max,
+            "layer1Bytes": layers.layer1_bytes,
+        })),
         "timelines": e
             .timelines
             .iter()

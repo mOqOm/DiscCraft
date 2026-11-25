@@ -8,12 +8,15 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+mimalloc.workspace = true
 disccraft-automation.workspace = true
 disccraft-bdmv.workspace = true
 disccraft-build.workspace = true
 disccraft-check.workspace = true
 disccraft-project.workspace = true
 disccraft-engine.workspace = true
+# M6.506: the disc label (`disc-label`).
+disccraft-menu.workspace = true
 disccraft-platform.workspace = true
 serde_json.workspace = true
 clap.workspace = true

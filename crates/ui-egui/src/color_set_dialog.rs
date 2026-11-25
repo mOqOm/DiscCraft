@@ -128,14 +128,17 @@ impl DiscCraftApp {
                         if ui
                             .add_enabled(
                                 !state.new_name.trim().is_empty(),
-                                egui::Button::new(tl!("New")),
+                                crate::theme::dialog_button(tl!("New")),
                             )
                             .clicked()
                         {
                             action = Some(SetAction::New);
                         }
                         if ui
-                            .add_enabled(state.named.is_some(), egui::Button::new(tl!("Delete")))
+                            .add_enabled(
+                                state.named.is_some(),
+                                crate::theme::dialog_button(tl!("Delete")),
+                            )
                             .clicked()
                         {
                             action = Some(SetAction::Delete);
@@ -143,10 +146,16 @@ impl DiscCraftApp {
                     });
                     ui.horizontal(|ui| {
                         crate::properties::prop_label(ui, "");
-                        if ui.button(tl!("Import…")).clicked() {
+                        if ui
+                            .add(crate::theme::dialog_button(tl!("Import…")))
+                            .clicked()
+                        {
                             action = Some(SetAction::Import);
                         }
-                        if ui.button(tl!("Export…")).clicked() {
+                        if ui
+                            .add(crate::theme::dialog_button(tl!("Export…")))
+                            .clicked()
+                        {
                             action = Some(SetAction::Export);
                         }
                     });
@@ -164,13 +173,13 @@ impl DiscCraftApp {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                     let size = egui::vec2(100.0, 0.0);
                     if ui
-                        .add(egui::Button::new(tl!("OK")).min_size(size))
+                        .add(crate::theme::default_button(tl!("OK")).min_size(size))
                         .clicked()
                     {
                         done = Some(true);
                     }
                     if ui
-                        .add(egui::Button::new(tl!("Cancel")).min_size(size))
+                        .add(crate::theme::dialog_button(tl!("Cancel")).min_size(size))
                         .clicked()
                     {
                         done = Some(false);

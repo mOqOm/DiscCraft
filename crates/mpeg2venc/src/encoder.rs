@@ -1468,8 +1468,8 @@ struct Coding {
     between: (i32, i32),
 }
 
-/// Encodes the picture's slices (one per macroblock row) into `out` and `recon`, the rows in bands on several
-/// threads. Every slice is independent (its predictors start afresh; it reads the picture and the reference and
+/// Encodes the picture's slices (one per macroblock row) into `out` and `recon`, the rows in bands on the shared pool
+/// of worker threads. Every slice is independent (its predictors start afresh; it reads the picture and the reference and
 /// writes only its own rows of the reconstruction), and a slice starts byte-aligned with a start code, so the
 /// bands' bytes joined in order are the same as encoding the rows one after another. `previous`: the last picture's
 /// vector of each macroblock (M6.394). Returns this picture's.
@@ -1505,42 +1505,32 @@ fn encode_slices(
         .map(|band| (band * per_band).min(mb_rows)..((band + 1) * per_band).min(mb_rows))
         .filter(|rows| !rows.is_empty())
         .collect();
-    #[allow(clippy::type_complexity)]
-    let encoded: Vec<Option<(Vec<u8>, Frame420, Vec<(i32, i32)>, FieldUse)>> =
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = bands
-                .iter()
-                .map(|rows| {
-                    let rows = rows.clone();
-                    scope.spawn(move || {
-                        let mut writer = BitWriter::new();
-                        let mut band_recon = empty_frame(frame.width, frame.height);
-                        let mut band_vectors = vec![(0, 0); rows.len() * mb_cols];
-                        let mut band_uses = FieldUse::default();
-                        for (row, row_vectors) in rows.zip(band_vectors.chunks_mut(mb_cols.max(1)))
-                        {
-                            encode_row(
-                                (&mut writer, &mut band_uses),
-                                frame,
-                                (reference, previous),
-                                &mut band_recon,
-                                (row, row_vectors),
-                                coding,
-                            );
-                        }
-                        (writer.finish(), band_recon, band_vectors, band_uses)
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|handle| handle.join().ok())
-                .collect()
-        });
+    // M6.499: the bands on the shared pool of worker threads, not threads started for each picture.
+    use rayon::prelude::*;
+    let encoded: Vec<(Vec<u8>, Frame420, Vec<(i32, i32)>, FieldUse)> = bands
+        .par_iter()
+        .map(|rows| {
+            let rows = rows.clone();
+            let mut writer = BitWriter::new();
+            let mut band_recon = empty_frame(frame.width, frame.height);
+            let mut band_vectors = vec![(0, 0); rows.len() * mb_cols];
+            let mut band_uses = FieldUse::default();
+            for (row, row_vectors) in rows.zip(band_vectors.chunks_mut(mb_cols.max(1))) {
+                encode_row(
+                    (&mut writer, &mut band_uses),
+                    frame,
+                    (reference, previous),
+                    &mut band_recon,
+                    (row, row_vectors),
+                    coding,
+                );
+            }
+            (writer.finish(), band_recon, band_vectors, band_uses)
+        })
+        .collect();
     let (width, chroma_width) = (usize::from(frame.width), usize::from(frame.width) / 2);
     for (rows, band) in bands.iter().zip(encoded) {
-        let (bytes, band_recon, band_vectors, band_uses) =
-            band.ok_or_else(|| EncodeError("a slice thread failed".to_string()))?;
+        let (bytes, band_recon, band_vectors, band_uses) = band;
         out.extend_from_slice(&bytes);
         uses.coded = uses.coded.saturating_add(band_uses.coded);
         uses.field = uses.field.saturating_add(band_uses.field);

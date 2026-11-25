@@ -31,7 +31,7 @@ impl DiscCraftApp {
             let _ = ui.hyperlink_to("getartcraft.com", crate::help::WEBSITE);
             let _ = ui.hyperlink_to(tl!("DiscCraft on GitHub"), crate::help::GITHUB);
             ui.add_space(6.0);
-            if ui.button(tl!("OK")).clicked() {
+            if ui.add(crate::theme::default_button(tl!("OK"))).clicked() {
                 close = true;
             }
         });

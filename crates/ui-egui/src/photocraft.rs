@@ -25,6 +25,8 @@ pub(crate) enum CraftApp {
     Sound,
     Effect,
     Film,
+    /// M6.507: the disc label's layout.
+    Design,
 }
 
 impl CraftApp {
@@ -35,6 +37,7 @@ impl CraftApp {
             CraftApp::Sound => "SoundCraft",
             CraftApp::Effect => "EffectCraft",
             CraftApp::Film => "FilmCraft",
+            CraftApp::Design => "DesignCraft",
         }
     }
 
@@ -45,6 +48,7 @@ impl CraftApp {
             CraftApp::Sound => "soundcraft",
             CraftApp::Effect => "effectcraft",
             CraftApp::Film => "filmcraft",
+            CraftApp::Design => "designcraft",
         }
     }
 
@@ -55,6 +59,7 @@ impl CraftApp {
             CraftApp::Sound => "DISCCRAFT_SOUNDCRAFT",
             CraftApp::Effect => "DISCCRAFT_EFFECTCRAFT",
             CraftApp::Film => "DISCCRAFT_FILMCRAFT",
+            CraftApp::Design => "DISCCRAFT_DESIGNCRAFT",
         }
     }
 
@@ -565,7 +570,7 @@ fn build_effectcraft_project(
 }
 
 /// Opens a file in the system's default app for it.
-fn open_with_default_app(path: &Path) -> std::io::Result<()> {
+pub(crate) fn open_with_default_app(path: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     let child = std::process::Command::new("cmd")
         .args(["/C", "start", ""])

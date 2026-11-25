@@ -4,9 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::i18n::tl;
 use crate::new_project::{FormAction, NewProjectForm, draw_new_project};
-use egui::{
-    Align, Align2, Button, Context, FontId, Id, Layout, Modal, ScrollArea, Sense, Ui, vec2,
-};
+use egui::{Align, Align2, Context, FontId, Id, Layout, Modal, ScrollArea, Sense, Ui, vec2};
 
 /// State of the start screen and the New Project dialog.
 #[derive(Clone, Debug, Default)]
@@ -326,14 +324,20 @@ fn draw_start_actions(
 
     ui.horizontal(|ui| {
         if ui
-            .add_sized(vec2(160.0, 48.0), Button::new(tl!("New Project")))
+            .add_sized(
+                vec2(160.0, 48.0),
+                crate::theme::dialog_button(tl!("New Project")),
+            )
             .clicked()
         {
             welcome.start_new_project(recent);
         }
 
         if ui
-            .add_sized(vec2(160.0, 48.0), Button::new(tl!("Open Project…")))
+            .add_sized(
+                vec2(160.0, 48.0),
+                crate::theme::dialog_button(tl!("Open Project…")),
+            )
             .clicked()
         {
             choice = Some(WelcomeChoice::Open);
@@ -348,7 +352,7 @@ fn draw_exit(ui: &mut Ui) -> Option<WelcomeChoice> {
     let mut choice = None;
 
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        if ui.button(tl!("Exit")).clicked() {
+        if ui.add(crate::theme::dialog_button(tl!("Exit"))).clicked() {
             choice = Some(WelcomeChoice::Exit);
         }
     });

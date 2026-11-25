@@ -274,8 +274,11 @@ switches as well.
   Explorer; the dialog lists its playlists (length, chapters, clips, sound) with the main one, the longest, chosen.
   The playlist's clips are laid out in order, trimmed as it plays them, with its chapter points and an audio track
   for each sound stream DiscCraft reads (LPCM, AC-3) in the disc's language; DTS and Dolby TrueHD streams are
-  named as left out in the status bar. Subtitles are not imported. Encrypted discs cannot be read. The timeline shows
-  at once; the clips are opened in the background, so their pictures may take a minute to appear.
+  named as left out in the status bar. In a Blu-ray project its subtitles (PG) come in too, as subtitle tracks in the
+  disc's languages: they are taken out of the disc after the timeline is made, while you go on working (the status bar
+  shows how far; the first time, reading a disc in a drive through takes some minutes). In a DVD project they are
+  named as left out, for now. Encrypted discs cannot be read. The timeline shows at once; the clips are opened in the
+  background, so their pictures may take a minute to appear.
   With **Make the disc's menu a menu too** (on at first), the first menu the disc shows becomes a motion menu of
   the project: its picture is the first 30 seconds of the disc's menu video, with its music, and each of its
   buttons that plays something becomes a button at the same place, highlighted by the shape of the disc's
@@ -1184,15 +1187,21 @@ DTS tracks are silent.
 |---|---|
 | Format / Output | DVD / Blu-ray, a **Disc** (written to the disc in a recorder), a folder (`VIDEO_TS` / `BDMV`), an ISO image, or for a DVD a **DDP Image** (for replication) |
 | Build | Starts the build. It saves the project and checks it first |
-| Source | The current project (the Build panel writes only the project that is open) |
+| Source | The current project, or with the output **DVD Disc** / **Blu-ray Disc** a **Disc image** made before (its file in the box under the list, or **Browse…**) |
 | Destination | When empty, the place shown in faint text (`<project name>_DVD` / `_BD` beside the project; `<project name>.iso` for an image; `<project name>_DDP` for a DDP image). For a folder or a DDP image, naming an existing folder makes a `<disc name>` folder inside it (a place that already has `VIDEO_TS` / `BDMV`, or a DDP image's `DDPID`, is built again in place). An image cannot be given a folder |
-| Disc Info | The usage bar (**Refresh Usage** calculates it), the disc's name (also the ISO's volume label), the size (**Custom**, last in the list, takes a size of your own in GB beside it — 1 GB = 1,000,000,000 bytes — from 0.001 GB up to a single-layer DVD's 4.7 GB, or a BDXL's 128 GB on a Blu-ray; a larger DVD is DVD9. The usage bar and the project check then measure against it), **DVD-ROM content** / **BD-ROM content** (**Browse…** chooses a folder; its files and folders go in the disc's root, beside `VIDEO_TS` / `BDMV`: a manual or photos to read on a computer. A folder build copies them, an image holds them. They take that much of the capacity from the video, and the line under the bar shows their size. **Clear** takes them off. A file must be under 4 GB, folders at most 7 deep) |
+| Disc Info | The usage bar (**Refresh Usage** calculates it), the disc's name (also the ISO's volume label), the size (**Custom**, last in the list, takes a size of your own in GiB beside it — 1 GiB = 1,073,741,824 bytes — from 0.001 GiB up to a single-layer DVD's 4.7 GB (4.38 GiB), or a BDXL's 128 GB (119.21 GiB) on a Blu-ray; a larger DVD is DVD9. The usage bar and the project check then measure against it. Sizes are shown in binary units, MiB and GiB (1 MiB = 1,048,576 bytes), as on the command line; the disc kinds' names, 4.7 GB and the others, are their makers' sizes in billions of bytes. The used part counts what multiplexing adds to the video and sound (about 2 %), shown orange in the bar and as its own part of the line, as the DVD-ROM content is green (hold the pointer over the line for all the parts). With a manual layer break on a DVD9, two more lines show each layer — layer 0 up to the break, which holds at most 2,086,912 sectors (4,076 MiB), and layer 1, which holds no more than layer 0 — and the room left on each; the project check warns when a layer would be too full), **DVD-ROM content** / **BD-ROM content** (**Browse…** chooses a folder; its files and folders go in the disc's root, beside `VIDEO_TS` / `BDMV`: a manual or photos to read on a computer. A folder build copies them, an image holds them. They take that much of the capacity from the video, and the line under the bar shows their size. **Clear** takes them off. A file must be under 4 GB, folders at most 7 deep) |
 | Layer Break | DVD-9 only. Automatic / manual. Manual is set by timeline and position (timecode / frame / seconds, **Playhead**) |
 | Region Codes | DVD only. All regions / custom (ticks for 1 to 8). **Parental level**: none, or 1 to 8 (8 is the most restricted). A player whose parental level is set lower asks for its password before the disc plays (at the start, and when a title is started from the remote) and stops when it is not given; a player with no level set plays as usual. A timeline, slideshow or chapter playlist can ask a level of its own (**Parental level** in its properties: the disc's, none, or 1 to 8), and a timeline can name what plays in its place when the level is not raised (**If Not Allowed**: another title or a menu; not set, the player stops). A timeline's chapter can have another video for players below a level (the DVD standard's parental block: **Parental Alternative** and **For Levels Below** (2 to 8) in the chapter's properties; the command is `timeline.setParentalChapter`): the title then becomes a version for each range of levels, which the player chooses by its own level (it asks no password; the other video goes on the disc with its own sound; the Project Preview plays the version for the player's parental level in Preferences ▸ Preview, the other video in its chapter, while the Monitor shows the timeline itself). The same levels are written for every country, and this has not been tried on a hardware player |
 | Project Check | The check results (the same rows as the check window) |
 | Result | Errors, the number of titles / chapters / the size, **Simulate** (runs the VM after building to a folder) |
 
-During a build a bar shows the progress and the time taken (also in the status bar, wherever the panel is).
+During a build the **Build Progress** dialog sits in the middle of the window, as in Encore, and the rest of the
+window cannot be used until the build ends (keys and dropped files included). It shows one bar for each thing the
+build is doing, as the clips are transcoded side by side, and the time taken (the status bar and the Progress panel
+show the progress too). **Cancel** stops the build at its next picture; what is already transcoded stays for the
+next build. The window can still be minimized: on Windows its taskbar button shows a moving bar while the build
+runs, red when it failed, and lights up when the build ends while the window is not in front. A build that fails
+says why in a dialog (**Copy** puts the error on the clipboard); the error also stays under Result.
 
 - Converted media stays in `disccraft-cache` at the output (the next build skips the conversion). `--cache` on the
   command line keeps it elsewhere to share it
@@ -1215,8 +1224,9 @@ During a build a bar shows the progress and the time taken (also in the status b
   writes it to the disc, closes the disc, verifies it and opens the tray. A disc that differs from the image is
   reported with the first sector that differs. From the second copy on, insert a blank disc and press **Write**. When a disc could not be
   written, **Try Again** writes the same image again. The image is removed at the end or on **Cancel**. While
-  writing, the Build panel shows the progress and **Stop** (a write-once disc stopped part way cannot be used),
-  and the window does not close. Windows' disc writing (IMAPI2) does the writing; a computer without a recorder
+  writing, the Build Progress dialog shows what is being done (writing, closing or verifying the disc), the time
+  taken, the time left at the pace so far, and **Stop** (a write-once disc stopped part way cannot be used); the
+  taskbar button shows how much is written or verified, and the window does not close. Windows' disc writing (IMAPI2) does the writing; a computer without a recorder
   shows "Not found". Encore's **Run test before writing** is not available, as IMAPI2 has no test write. On the
   command line, `disccraft-cli recorders` lists the recorders and their discs, and `disccraft-cli burn <image>`
   (`--recorder E:`, `--speed 8`, `--erase`, `--no-verify`) writes an image and verifies it, and
@@ -1228,7 +1238,47 @@ During a build a bar shows the progress and the time taken (also in the status b
   layer is full, mostly not at the start of a cell. A disc whose first layer is fixed elsewhere (a DVD-R DL, or a
   DVD+R DL whose layers were set before) is not written, and a disc whose layers meet elsewhere after writing is
   reported. `disccraft-cli recorders` shows a dual-layer disc's first layer (its sectors, and whether it can still
-  be set)
+  be set). DiscCraft writes a DVD+R DL with its own commands to the drive rather than Windows' writing (which set
+  the disc's first layer to half the image on its own): it holds the drive, sets the first layer, asks the write
+  speed, writes the image (waiting while the drive's buffer is full, and when the drive does not answer, going on
+  from where it says the next write goes), flushes the drive's buffer, closes the track and finalizes the disc for
+  DVD players, then gives the drive back its own speeds (the speed asked for writing holds for reading too:
+  without that, the disc was verified no faster than it was written, and on the inner part of a layer at half of
+  that). Each step, with its time, the speed reached and what the drive answered, goes into
+  `<name>.burnlog.txt` beside the image, with the drive's name and the disc's media ID (its maker's code, such as
+  `MKM-003-00`), what the drive says while it is busy, and, when a write fails, what the drive says of it. A DVD+R
+  DL a writing stopped on calls itself blank, but its first layer stays fixed: DiscCraft does not write it again
+  (part of it may be written), and the Build panel's disc line says so
+- With the source **Disc image** (as Encore's), **Build** writes that image as it is: the project is neither built
+  nor checked, and the image stays afterwards. An image checked before (or one already burned once) goes on the
+  disc unchanged. A DVD-9 image is written with the layer break of its `<name>.layerbreak.txt`; one larger than a
+  layer without that note is not written to a dual-layer disc (the drive would change layers anywhere)
+- **File ▸ Create Disc Label…** (DiscCraft's own; Encore has none) makes the label to print on a printable disc on
+  the printer's disc tray, as a DesignCraft document, and opens it in DesignCraft. Its page is the disc, 120 mm
+  square. Choose the printable ring as the disc's package says ("wide printable" from 22 mm across, others from
+  43 mm, to 118 mm), the menu whose background fills the ring (none: nothing is printed but the text), the disc's
+  name and whether its named chapters are listed. On the page's first layer, named after the disc's face: the ring
+  as one path of two circles (the inner one a hole), the picture placed in it (nothing is printed on the hole or
+  past the edge; it can be moved or replaced inside the ring), the disc's name across the upper half and the
+  chapters in the lower half (whole entries a line, at the largest size that fits), as type in points in the font
+  DiscCraft sets menus in, sharp at any printer's resolution. Over it, a layer of guides that does not print (the
+  disc's edge, the printable ring, the hole), locked: the face's layer is the one in use when the document opens,
+  so a logo or a track list pasted in prints (place it inside the ring; it is not cut by it). The title is the
+  disc's name (empty without one; type it in the dialog). `<project name> Disc Label.designcraft` is written beside
+  the project.
+  The label is linked to the project and kept when the project is saved (with its path relative to the project
+  file, so a project moved or copied together with it still finds it): **File ▸ Open Disc Label** opens it again in
+  DesignCraft (a PSD in PhotoCraft). The top of the dialog shows the project's label: **Open**, **Link a File…** (a
+  label made elsewhere), **Unlink** (the file stays where it is). A label made beside the project before labels were
+  linked is offered there (**Link This File**). Making another label links the new one instead; the earlier file
+  stays.
+  Print it with DesignCraft's **File ▸ Print**: the printer's CD/DVD paper, at 100 % (not scaled to fit), centred,
+  with the printer's disc settings (inner and outer diameter) as the package says too. Without DesignCraft, the
+  label is a PSD for PhotoCraft (300 or 600 dpi, the ring as a layer mask on the group of the picture and the
+  texts, the guides a hidden layer), opened in PhotoCraft. On the command line: `disccraft-cli disc-label
+  <project> --out <name>.designcraft` (made by DesignCraft's command line, `designcraft-cli`; `--out <name>.psd`
+  for the PSD; `--inner 43`, `--outer 118`, `--menu <menu name>` or `--menu none`, `--title <title>`, `--no-chapters`,
+  `--dpi 600` for a PSD, `--link` to link it to the project and save the project)
 - How much of the disc is left, and what to do when it is not enough:
   [reading the disc's size as you work](#149-reading-the-discs-size-as-you-work)
 
@@ -1565,7 +1615,7 @@ So that you are not looking for it:
 | Preview | The player the Project Preview and the Monitor stand for. **TV mode**: 16:9 Widescreen, 4:3 Letterbox (a 16:9 title is shown with bars above and below, on a 4:3 screen), or 4:3 Pan & Scan (the middle of a 16:9 title fills the 4:3 screen, its sides cut). **Player region code**: All regions, or one of 1 to 8 — a DVD limited to other regions does not open in the preview (the status bar says why). **Audio language**: when the disc chooses no audio track itself, a title's first track in this language is heard. **Subtitle language**: when no subtitles are shown, a title's first subtitle track in this language is shown. A built Blu-ray opened in the preview picks its first audio and subtitle streams in these languages too, as a player does, while the disc has chosen none. **Player parental level**: None, or 1 to 8 — a disc whose parental level (Build panel) is higher does not play, as on a locked player (the preview has no password to give). The defaults (widescreen, all regions, no language, no level) play every disc as it is. **Preview playback quality**: the same choice for the Project Preview's titles (High by default). Kept in `workspace.json` |
 | Media | Where DiscCraft keeps its **Library Content** (your own library items) and its **Media Cache Database** (the lengths, sizes and thumbnails remembered of media files, and the indexes of MKV files and of transport streams (`.m2ts` / `.ts` / `.mpg` / `.vob`), so a large file opens at once in a later session instead of being read through again), each with **Browse…** (put it in another folder), **Default** (back beside the settings) and **Show in Explorer**. A library folder that already holds a library is opened as it is; an empty one gets the items you have now. A new cache folder is used from then on, and the old one is left as it is. **Clean** empties the media cache: the files are read again when next needed (a build's transcodes are in the build's destination and are not touched). Nothing is ever written into or beside your media files |
 | Menus | Button routing (movement up, down, left and right, how and by which rule to wrap, leaving out "Next" and "Previous" buttons), the default for syncing button names. **Kept in the project** (the routing is the same whichever computer builds it) |
-| Memory | **Installed RAM**, and **Transcodes at a time**: Automatic (one for every processor core), or a number. A build and Transcode Now convert several titles at once and each takes memory of its own, so choose fewer to leave more for other applications. **Use the hardware encoder for HD H.264** (Windows; it can be chosen only when a graphics card's encoder is found; off by default): a Blu-ray's 1080p and 720p H.264 converted in one pass (VBR or CBR) is encoded on the hardware instead of the processor. 1080i, standard definition and two-pass encodes, and a video the encoder cannot open or fails on, are converted on the processor. From the CLI, the environment variable `DISCCRAFT_HARDWARE_ENCODER=1`. Kept in `workspace.json` |
+| Memory | **Installed RAM**, and **Transcodes at a time**: Automatic (one for every processor core), or a number. A build and Transcode Now convert several titles at once and each takes memory of its own, so choose fewer to leave more for other applications. **Use the hardware encoder for HD H.264** (Windows; it can be chosen only when a graphics card's encoder is found; off by default): a Blu-ray's 1080p and 720p H.264 is encoded on the hardware instead of the processor. In one pass (VBR or CBR) as it is; in two passes as one pass and, when its size came out more than 2 % off the target, once more with the average corrected, so that it fits the size (about four to six times as fast as two passes on the processor, at a picture as good or better). A video already at the disc's size and colours goes to the encoder as it was decoded, with nothing converted. 1080i and standard definition, and a video the encoder cannot open or fails on, are converted on the processor. From the CLI, the environment variable `DISCCRAFT_HARDWARE_ENCODER=1`. Kept in `workspace.json` |
 | Interface | Display language (日本語 / English). **Window ▸ Language** switches it too. Until you choose one, every start follows the operating system's display language (Japanese on a Japanese system; English on an English system and on one in any other language). **Brightness**: **Dark** (Encore's, the default) or **Light** (light grey panels with dark text). It changes at once and is kept for the next start |
 
 ## 16. Keyboard shortcuts
@@ -1656,6 +1706,7 @@ cargo run -p disccraft-cli -- build <project.dcproj> --out <dir>
 cargo run -p disccraft-cli -- build <project.dcproj> --iso <file> [--cache <dir>] [--audio-language ja]
 cargo run -p disccraft-cli -- build <project.dcproj> --ddp <dir>
 cargo run -p disccraft-cli -- bd-chapters <D: | disc folder | .mpls> [--playlist 1 | --all] [--json | --ogm]
+cargo run -p disccraft-cli -- disc-info [--recorder E:]
 ```
 
 - `commands` lists the engine's commands (id, label, place in the menus, shortcut, parameters). `--json` for JSON
@@ -1672,6 +1723,11 @@ cargo run -p disccraft-cli -- bd-chapters <D: | disc folder | .mpls> [--playlist
   playlist's chapters, `--json` gives all of it in seconds, and `--ogm` prints the chapters as an OGM chapter
   file (`CHAPTER01=00:00:00.000`). Handy for placing chapter points where a Blu-ray of the same video has them.
   Only the playlists are read; an encrypted disc's playlists are not encrypted, but its video cannot be used
+- `disc-info` prints what the drive tells of the disc in a recorder: a DVD+R's or DVD+RW's media ID, whether it is
+  empty, open or finalized, its sessions, each track (its start and size, whether it is reserved or blank, where
+  the next write goes, the last sector written) and a dual-layer disc's first layer (and whether a writing stopped
+  on an empty DVD+R DL before). Nothing is written: for finding out what a writing that
+  failed left on a disc (Windows; `recorders` and `burn` are described in [Building](#13-building))
 
 ## 18. Using it from an AI agent (MCP)
 

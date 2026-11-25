@@ -18,6 +18,11 @@
 //! T10/1675-D revision 4 (24 October 2006), 6.23.3.2.1 (Table 399), 6.23.3.2.22 (Table 430) and 6.34.3.2.4
 //! (Table 580); sent as they are through IMAPI2's `IDiscRecorder2Ex`.
 //!
+//! A DVD+R DL is written by DiscCraft's own commands (M9.46; [`crate::mmc`] has them): on the first real disc
+//! (M9.45), IMAPI2's `Write` gave the disc a layer 0 of its own, half the image, after DiscCraft had set it, and gave
+//! up on a WRITE the drive did not answer in time. Each step of such a writing is recorded in `<image>.burnlog.txt`.
+//! Other discs are written by IMAPI2's `Write` as before.
+//!
 //! Verifying (M9.38, DiscCraft's own: Encore's panel has no such box): after the disc is closed, and before it comes
 //! out, the disc is read back through its drive letter's volume (`\\.\E:`, unbuffered, and past the end its file
 //! system gives: `FSCTL_ALLOW_EXTENDED_DASD_IO`, for the UDF anchor in the image's last sector lies outside the UDF
@@ -217,6 +222,18 @@ pub struct Media {
     pub layer_boundary: Option<LayerBoundary>,
 }
 
+impl Media {
+    /// A DVD+R DL the drive calls blank whose layer 0 is fixed (M9.47): a writing began on it and stopped, and the
+    /// drive lost track of what it wrote (MMC-5 6.23.3.2.22: a completely blank DVD+R DL reports its layer 0 as still
+    /// changeable), so its first part may be written. It is not written again.
+    #[must_use]
+    pub fn started_before(&self) -> bool {
+        self.kind == MediaKind::DvdPlusRDualLayer
+            && self.blank
+            && self.layer_boundary.is_some_and(|boundary| boundary.fixed)
+    }
+}
+
 /// Where a recordable dual-layer DVD's first layer ends (M9.42).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LayerBoundary {
@@ -310,6 +327,14 @@ pub enum BurnError {
         /// The sectors on the written disc's layer 0.
         written: u32,
     },
+    /// The recorder refused or failed a command DiscCraft sent it (M9.46: a DVD+R DL is written by DiscCraft's own
+    /// commands), with the command and the drive's sense data or the system's words.
+    Drive(String),
+    /// A DVD+R DL the drive calls blank, but a writing began on it and stopped ([`Media::started_before`], M9.47).
+    StartedBefore {
+        /// The sectors its layer 0 is fixed at.
+        layer0: u32,
+    },
     /// Anything else the system reported, with its code.
     System {
         /// The `HRESULT`.
@@ -351,7 +376,7 @@ impl fmt::Display for BurnError {
                 wanted, disc: 0, ..
             } => write!(
                 f,
-                "the drive does not tell where the dual-layer disc's first layer ends, so the layer break                  (sector {wanted}) cannot be placed"
+                "the drive does not tell where the dual-layer disc's first layer ends, so the layer break (sector {wanted}) cannot be placed"
             ),
             Self::LayerBreak {
                 wanted,
@@ -359,7 +384,7 @@ impl fmt::Display for BurnError {
                 fixed: true,
             } => write!(
                 f,
-                "the disc's first layer is fixed at {disc} sectors; the image's layer break is at sector {wanted}                  (use a blank DVD+R DL)"
+                "the disc's first layer is fixed at {disc} sectors; the image's layer break is at sector {wanted} (use a blank DVD+R DL)"
             ),
             Self::LayerBreak {
                 wanted,
@@ -371,7 +396,12 @@ impl fmt::Display for BurnError {
             ),
             Self::LayerBreakMoved { wanted, written } => write!(
                 f,
-                "the written disc's first layer ends after {written} sectors, not at the image's layer break                  ({wanted})"
+                "the written disc's first layer ends after {written} sectors, not at the image's layer break ({wanted})"
+            ),
+            Self::Drive(message) => write!(f, "the recorder failed: {message}"),
+            Self::StartedBefore { layer0 } => write!(
+                f,
+                "a writing stopped on this DVD+R DL before: the drive calls it blank, but its first layer is fixed at {layer0} sectors, so part of it may be written (use a blank DVD+R DL)"
             ),
             Self::System { code, message } => write!(f, "{message} (0x{code:08X})"),
         }
@@ -528,6 +558,33 @@ pub fn eject(recorder: &str) -> Result<(), BurnError> {
     imp::eject(recorder)
 }
 
+/// What the drive tells of the disc in it, as it stands (M9.45): for finding out what a writing left behind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiscReport {
+    /// The kind of disc, as the system's disc writing names it.
+    pub kind: MediaKind,
+    /// READ DISC INFORMATION, or why it failed.
+    pub disc: Result<crate::mmc::DiscInformation, String>,
+    /// READ TRACK INFORMATION of each Logical Track of the last session and of the invisible or incomplete one
+    /// (a DVD+R's, CD's), each with what failed in its place.
+    pub tracks: Vec<Result<crate::mmc::TrackInformation, String>>,
+    /// A dual-layer DVD±R's layer 0 (READ DISC STRUCTURE format 20h).
+    pub layer_boundary: Option<LayerBoundary>,
+    /// Where a written dual-layer disc's layers meet (the physical format information's end of layer 0).
+    pub written_layer0: Option<u32>,
+    /// A DVD+R's or DVD+RW's media ID (M9.47).
+    pub media_id: Option<crate::mmc::MediaId>,
+}
+
+/// Asks the drive `recorder` ([`Recorder::id`]) what is on the disc in it (M9.45). Nothing is written.
+///
+/// # Errors
+///
+/// When the recorder cannot be opened, or has no disc.
+pub fn disc_report(recorder: &str) -> Result<DiscReport, BurnError> {
+    imp::disc_report(recorder)
+}
+
 #[cfg(not(windows))]
 mod imp {
     use super::{BurnError, BurnRequest, BurnStep, Media, Recorder};
@@ -563,6 +620,10 @@ mod imp {
     pub(super) fn eject(_recorder: &str) -> Result<(), BurnError> {
         Err(BurnError::Unsupported)
     }
+
+    pub(super) fn disc_report(_recorder: &str) -> Result<super::DiscReport, BurnError> {
+        Err(BurnError::Unsupported)
+    }
 }
 
 #[cfg(windows)]
@@ -573,10 +634,11 @@ mod imp {
         compare_with_image,
     };
     use std::fs::File;
-    use std::io::{Read, Seek, SeekFrom};
+    use std::io::{BufReader, Read, Seek, SeekFrom, Write};
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
     use windows::Win32::Foundation::{E_ABORT, E_NOTIMPL, E_POINTER, S_FALSE, S_OK, VARIANT_BOOL};
     use windows::Win32::Storage::Imapi::{
         IDiscFormat2Data, IDiscFormat2Erase, IDiscMaster2, IDiscRecorder2, IDiscRecorder2Ex,
@@ -822,9 +884,60 @@ mod imp {
         })
     }
 
+    /// A DVD+R's or DVD+RW's media ID (M9.47): ADIP information, format 11h.
+    fn media_id(recorder: &IDiscRecorder2, kind: MediaKind) -> Option<crate::mmc::MediaId> {
+        let plus = matches!(
+            kind,
+            MediaKind::DvdPlusR
+                | MediaKind::DvdPlusRw
+                | MediaKind::DvdPlusRDualLayer
+                | MediaKind::DvdPlusRwDualLayer
+        );
+        if !plus {
+            return None;
+        }
+        let data = read_disc_structure(
+            recorder,
+            crate::mmc::ADIP_INFORMATION,
+            crate::mmc::ADIP_BYTES,
+        )?;
+        crate::mmc::MediaId::parse(&data)
+    }
+
+    /// Sends `cdb`, which reads up to `length` bytes from the drive (M9.45): the bytes, or the sense data or system
+    /// error in words.
+    fn get_data(recorder: &IDiscRecorder2, cdb: &[u8], length: u16) -> Result<Vec<u8>, String> {
+        let device: IDiscRecorder2Ex = recorder.cast().map_err(|failure| failure.message())?;
+        let mut sense = [0u8; crate::mmc::SENSE_BYTES];
+        let mut data = vec![0u8; usize::from(length)];
+        let mut fetched = 0u32;
+        // SAFETY: the CDB, sense buffer and data buffer are live and as long as the call is told; the drive writes
+        // at most `length` bytes into `data` and the count into `fetched`.
+        let sent = unsafe {
+            device.SendCommandGetDataFromDevice(
+                cdb,
+                &mut sense,
+                COMMAND_SECONDS,
+                &mut data,
+                &raw mut fetched,
+            )
+        };
+        if let Some(sense) = crate::mmc::Sense::parse(&sense).filter(|sense| !sense.recovered()) {
+            return Err(sense.to_string());
+        }
+        sent.map_err(|failure| format!("{} (0x{:08X})", failure.message(), failure.code().0))?;
+        data.truncate(usize::try_from(fetched).unwrap_or(0));
+        Ok(data)
+    }
+
     /// Makes a blank DVD+R DL's layer 0 `sectors` long (format 20h): the parameter list is its length (10), two
-    /// reserved bytes, four reserved bytes and the L0 Data Area Capacity. The recorder is held for it alone.
-    fn set_layer_boundary(recorder: &IDiscRecorder2, sectors: u32) -> Result<(), BurnError> {
+    /// reserved bytes, four reserved bytes and the L0 Data Area Capacity. The recorder is held for it alone, unless
+    /// `held` says the caller holds it already (M9.46).
+    fn set_layer_boundary(
+        recorder: &IDiscRecorder2,
+        sectors: u32,
+        held: bool,
+    ) -> Result<(), BurnError> {
         let device: IDiscRecorder2Ex = recorder.cast().map_err(|failure| error(&failure))?;
         let cdb = [
             SEND_DISC_STRUCTURE,
@@ -843,21 +956,38 @@ mod imp {
         let mut list = [0u8; 12];
         list[1] = 10;
         list[8..12].copy_from_slice(&sectors.to_be_bytes());
-        let mut sense = [0u8; 18];
+        let mut sense = [0u8; crate::mmc::SENSE_BYTES];
         // SAFETY: plain COM calls on the live recorder; the CDB, sense buffer and parameter list are live and as long
         // as the call is told.
-        unsafe {
-            recorder
-                .AcquireExclusiveAccess(variant_bool(false), &BSTR::from(CLIENT))
-                .map_err(|failure| error(&failure))?;
+        let sent = unsafe {
+            if !held {
+                recorder
+                    .AcquireExclusiveAccess(variant_bool(false), &BSTR::from(CLIENT))
+                    .map_err(|failure| error(&failure))?;
+            }
             let sent = device.SendCommandSendDataToDevice(&cdb, &mut sense, COMMAND_SECONDS, &list);
-            let _ = recorder.ReleaseExclusiveAccess();
-            sent.map_err(|failure| error(&failure))
+            if !held {
+                let _ = recorder.ReleaseExclusiveAccess();
+            }
+            sent
+        };
+        // A check condition comes back as success with sense data (IMAPI2's S_IMAPI_COMMAND_HAS_SENSE_DATA).
+        if let Some(sense) = crate::mmc::Sense::parse(&sense).filter(|sense| !sense.recovered()) {
+            return Err(BurnError::System {
+                code: 0,
+                message: format!("SEND DISC STRUCTURE (layer 0 of {sectors} sectors): {sense}"),
+            });
         }
+        sent.map_err(|failure| error(&failure))
     }
 
-    /// Gives a blank dual-layer disc the image's layer break, `wanted` sectors on layer 0, and checks it took it.
-    fn place_layer_break(recorder: &IDiscRecorder2, wanted: u32) -> Result<(), BurnError> {
+    /// Gives a blank dual-layer disc the image's layer break, `wanted` sectors on layer 0, and checks it took it
+    /// (`held`: the caller holds the recorder already, M9.46).
+    fn place_layer_break(
+        recorder: &IDiscRecorder2,
+        wanted: u32,
+        held: bool,
+    ) -> Result<(), BurnError> {
         let refused = |disc: u32, fixed: bool| BurnError::LayerBreak {
             wanted,
             disc,
@@ -873,7 +1003,7 @@ mod imp {
         if wanted > current.layer0_sectors {
             return Err(refused(current.layer0_sectors, false));
         }
-        set_layer_boundary(recorder, wanted)?;
+        set_layer_boundary(recorder, wanted, held)?;
         match layer_boundary(recorder) {
             Some(now) if now.layer0_sectors == wanted => Ok(()),
             Some(now) => Err(refused(now.layer0_sectors, true)),
@@ -1062,6 +1192,68 @@ mod imp {
         })
     }
 
+    /// The most Logical Tracks of the last session a report lists.
+    const MAX_REPORTED_TRACKS: u16 = 8;
+
+    pub(super) fn disc_report(id: &str) -> Result<super::DiscReport, BurnError> {
+        use crate::mmc;
+        let id = id.to_owned();
+        on_com_thread(move || {
+            let recorder = open(&id)?;
+            let format = writer(&recorder)?;
+            // SAFETY: a plain COM call on the live writer.
+            let kind = match unsafe { format.CurrentPhysicalMediaType() } {
+                Ok(value) => kind(value),
+                Err(failure) => return Err(error(&failure)),
+            };
+            let disc = get_data(
+                &recorder,
+                &mmc::read_disc_information(mmc::DISC_INFORMATION_BYTES),
+                mmc::DISC_INFORMATION_BYTES,
+            )
+            .and_then(|data| {
+                mmc::DiscInformation::parse(&data)
+                    .ok_or_else(|| format!("{} bytes of disc information", data.len()))
+            });
+            let track = |number: u32| {
+                get_data(
+                    &recorder,
+                    &mmc::read_track_information(number, mmc::TRACK_INFORMATION_BYTES),
+                    mmc::TRACK_INFORMATION_BYTES,
+                )
+                .and_then(|data| {
+                    mmc::TrackInformation::parse(&data)
+                        .ok_or_else(|| format!("{} bytes of track information", data.len()))
+                })
+            };
+            let mut tracks = Vec::new();
+            if let Ok(info) = &disc {
+                let last = info.last_track_in_last_session.min(
+                    info.first_track_in_last_session
+                        .saturating_add(MAX_REPORTED_TRACKS),
+                );
+                for number in info.first_track_in_last_session.max(1)..=last {
+                    tracks.push(track(u32::from(number)));
+                }
+            }
+            if kind == MediaKind::DvdPlusR
+                || kind == MediaKind::DvdPlusRDualLayer
+                || kind == MediaKind::CdR
+            {
+                tracks.push(track(mmc::INCOMPLETE_TRACK));
+            }
+            let dual = kind.dual_layer();
+            Ok(super::DiscReport {
+                kind,
+                disc,
+                tracks,
+                layer_boundary: dual.then(|| layer_boundary(&recorder)).flatten(),
+                written_layer0: dual.then(|| written_layer0(&recorder)).flatten(),
+                media_id: media_id(&recorder, kind),
+            })
+        })
+    }
+
     pub(super) fn burn(
         request: BurnRequest,
         progress: Arc<dyn Fn(BurnStep, f32) + Send + Sync>,
@@ -1104,6 +1296,16 @@ mod imp {
         let blank = unsafe { format.MediaHeuristicallyBlank() }
             .map(truthy)
             .unwrap_or(false);
+        // M9.47: a DVD+R DL a writing stopped on calls itself blank; its fixed layer 0 tells it.
+        if physical == MediaKind::DvdPlusRDualLayer
+            && blank
+            && let Some(boundary) = layer_boundary(&recorder)
+            && boundary.fixed
+        {
+            return Err(BurnError::StartedBefore {
+                layer0: boundary.layer0_sectors,
+            });
+        }
         let mut format = format;
         if !blank {
             if !physical.rewritable() || !request.erase_rewritable {
@@ -1148,45 +1350,66 @@ mod imp {
         let layer_break = request
             .layer_break
             .filter(|sectors| *sectors > 0 && u64::from(*sectors) < image_sectors);
-        if let Some(wanted) = layer_break
-            && physical.dual_layer()
-        {
-            place_layer_break(&recorder, wanted)?;
-        }
-        // SAFETY: plain COM calls on the live writer with valid arguments.
-        unsafe {
-            format
-                .SetForceMediaToBeClosed(variant_bool(true))
-                .map_err(|failure| error(&failure))?;
-            if let Some(speed) = request.speed.and_then(|speed| i32::try_from(speed).ok()) {
-                format
-                    .SetWriteSpeed(speed, variant_bool(false))
-                    .map_err(|failure| error(&failure))?;
-            }
-        }
-        progress(BurnStep::Writing, 0.0);
-        let stream: IStream = ImageStream {
-            file: Mutex::new(file),
-            size,
-            position: AtomicU64::new(0),
-            read: AtomicU64::new(0),
-            progress: Arc::clone(progress),
-            cancel: Arc::clone(cancel),
-        }
-        .into();
-        // SAFETY: a plain COM call on the live writer; it reads the stream to its end, on threads of its own (the
-        // stream is free-threaded), and returns when the disc is closed.
-        let written = unsafe { format.Write(&stream) };
-        if cancel.load(Ordering::Relaxed) {
-            return Err(BurnError::Cancelled);
-        }
-        written.map_err(|failure| match error(&failure) {
-            BurnError::System { .. } if failure.code() == STREAM_TOO_LARGE => BurnError::TooLarge {
+        if physical == MediaKind::DvdPlusRDualLayer {
+            // M9.46: IMAPI2's Write gives a DVD+R DL a layer 0 of its own (half the image) after the host set it, so
+            // DiscCraft writes such a disc with its own commands.
+            drop(format);
+            let sectors = u32::try_from(image_sectors).map_err(|_| BurnError::TooLarge {
                 needed: size,
                 free: room,
-            },
-            other => other,
-        })?;
+            })?;
+            write_dual_layer(
+                &recorder,
+                file,
+                sectors,
+                request,
+                layer_break,
+                progress,
+                cancel,
+            )?;
+        } else {
+            if let Some(wanted) = layer_break
+                && physical.dual_layer()
+            {
+                place_layer_break(&recorder, wanted, false)?;
+            }
+            // SAFETY: plain COM calls on the live writer with valid arguments.
+            unsafe {
+                format
+                    .SetForceMediaToBeClosed(variant_bool(true))
+                    .map_err(|failure| error(&failure))?;
+                if let Some(speed) = request.speed.and_then(|speed| i32::try_from(speed).ok()) {
+                    format
+                        .SetWriteSpeed(speed, variant_bool(false))
+                        .map_err(|failure| error(&failure))?;
+                }
+            }
+            progress(BurnStep::Writing, 0.0);
+            let stream: IStream = ImageStream {
+                file: Mutex::new(file),
+                size,
+                position: AtomicU64::new(0),
+                read: AtomicU64::new(0),
+                progress: Arc::clone(progress),
+                cancel: Arc::clone(cancel),
+            }
+            .into();
+            // SAFETY: a plain COM call on the live writer; it reads the stream to its end, on threads of its own (the
+            // stream is free-threaded), and returns when the disc is closed.
+            let written = unsafe { format.Write(&stream) };
+            if cancel.load(Ordering::Relaxed) {
+                return Err(BurnError::Cancelled);
+            }
+            written.map_err(|failure| match error(&failure) {
+                BurnError::System { .. } if failure.code() == STREAM_TOO_LARGE => {
+                    BurnError::TooLarge {
+                        needed: size,
+                        free: room,
+                    }
+                }
+                other => other,
+            })?;
+        }
         progress(BurnStep::Closing, 1.0);
         // M9.42: where the written disc's layers meet; it is not verified further when that is not the image's break.
         if let Some(wanted) = layer_break
@@ -1217,6 +1440,512 @@ mod imp {
             let _ = unsafe { recorder.EjectMedia() };
         }
         verified
+    }
+
+    /// IMAPI2's error for a command the drive did not answer in time (`E_IMAPI_RECORDER_COMMAND_TIMEOUT`).
+    const COMMAND_TIMEOUT: HRESULT = HRESULT(0xC0AA_020D_u32 as i32);
+    /// How long one WRITE may take before the host gives up on it, seconds: WRITE is a Group 1 command (MMC-5
+    /// 4.1.9.2), which the drive answers well within its own limit, and a full cache answers NOT READY at once.
+    const WRITE_SECONDS: u32 = 120;
+    /// How long one WRITE may find the drive busy before the writing is given up.
+    const WRITE_BUSY_LIMIT: Duration = Duration::from_secs(300);
+    /// How long the drive may stay busy with a cache flush or a close before the writing is given up (finalizing a
+    /// DVD+R DL writes its middle zones and the rest of layer 1 as lead-out).
+    const CLOSE_BUSY_LIMIT: Duration = Duration::from_secs(3600);
+    /// How many times one WRITE is sent again after the host's time limit ran out on it (MMC-5 4.1.9.1: a Group 1
+    /// command is retried).
+    const WRITE_RETRIES: u32 = 3;
+
+    /// What a command sent to the drive came to (M9.46).
+    enum Answer {
+        /// It did its work.
+        Done,
+        /// The drive is busy (as its sense data says): send it again later.
+        Busy(crate::mmc::Sense),
+        /// The host's time limit ran out before the drive answered.
+        TimedOut,
+        /// It failed, with the drive's sense data.
+        Sense(crate::mmc::Sense),
+        /// It failed in the system, in its words.
+        Error(String),
+    }
+
+    /// What `sent` (with the sense data `sense` the drive left) came to. IMAPI2 returns a check condition as success
+    /// with sense data (`S_IMAPI_COMMAND_HAS_SENSE_DATA`), so the sense data is read first.
+    fn answer(sent: windows::core::Result<()>, sense: &[u8]) -> Answer {
+        match crate::mmc::Sense::parse(sense) {
+            Some(sense) if sense.recovered() => Answer::Done,
+            Some(sense) if sense.busy() => Answer::Busy(sense),
+            Some(sense) => Answer::Sense(sense),
+            None => match sent {
+                Ok(()) => Answer::Done,
+                Err(failure) if failure.code() == COMMAND_TIMEOUT => Answer::TimedOut,
+                Err(failure) => Answer::Error(format!(
+                    "{} (0x{:08X})",
+                    failure.message(),
+                    failure.code().0
+                )),
+            },
+        }
+    }
+
+    /// Sends `cdb`, which moves no data, allowing it `seconds`.
+    fn send_no_data(device: &IDiscRecorder2Ex, cdb: &[u8], seconds: u32) -> Answer {
+        let mut sense = [0u8; crate::mmc::SENSE_BYTES];
+        // SAFETY: the CDB and sense buffer are live and as long as the call is told.
+        let sent = unsafe { device.SendCommandNoData(cdb, &mut sense, seconds) };
+        answer(sent, &sense)
+    }
+
+    /// Sends `cdb` with `data` to the drive, allowing it `seconds`.
+    fn send_data(device: &IDiscRecorder2Ex, cdb: &[u8], seconds: u32, data: &[u8]) -> Answer {
+        let mut sense = [0u8; crate::mmc::SENSE_BYTES];
+        // SAFETY: the CDB, sense buffer and data are live and as long as the call is told; the drive only reads
+        // `data`.
+        let sent = unsafe { device.SendCommandSendDataToDevice(cdb, &mut sense, seconds, data) };
+        answer(sent, &sense)
+    }
+
+    /// The error of a step the drive refused or failed.
+    fn drive_failed(step: &str, why: &str) -> BurnError {
+        BurnError::Drive(format!("{step}: {why}"))
+    }
+
+    /// The record of a writing DiscCraft does itself (M9.46): `<image>.burnlog.txt` beside the image, a line for each
+    /// step with the seconds since the start, so that a writing that fails can be followed afterwards. Nothing is
+    /// recorded when the file cannot be made.
+    struct BurnLog {
+        file: Option<File>,
+        started: Instant,
+    }
+
+    impl BurnLog {
+        fn open(image: &Path) -> Self {
+            Self {
+                file: File::create(image.with_extension("burnlog.txt")).ok(),
+                started: Instant::now(),
+            }
+        }
+
+        fn line(&mut self, text: &str) {
+            let seconds = self.started.elapsed().as_secs_f64();
+            if let Some(file) = &mut self.file {
+                let _ = writeln!(file, "{seconds:>9.1} {text}");
+                let _ = file.flush();
+            }
+        }
+    }
+
+    /// Waits until the drive is done with what a command with Immed started (TEST UNIT READY each second, NOT READY
+    /// while it works, MMC-5 4.1.6.2), at most `limit`. A unit attention (the drive telling of the disc it closed) is
+    /// passed over a few times. What the drive says while it is busy goes into the log each time it changes (M9.47:
+    /// "becoming ready" is a drive that started over, "long write in progress" one still writing).
+    fn wait_ready(
+        device: &IDiscRecorder2Ex,
+        step: &str,
+        limit: Duration,
+        log: &mut BurnLog,
+    ) -> Result<(), BurnError> {
+        let started = Instant::now();
+        let mut attentions = 0;
+        let mut said = String::new();
+        loop {
+            let mut note = |what: String, log: &mut BurnLog| {
+                if what != said {
+                    log.line(&format!(
+                        "{step}: {what} (at {:.1} s)",
+                        started.elapsed().as_secs_f64()
+                    ));
+                    said = what;
+                }
+            };
+            match send_no_data(device, &crate::mmc::test_unit_ready(), COMMAND_SECONDS) {
+                Answer::Done => {
+                    log.line(&format!(
+                        "{step}: done after {:.1} s",
+                        started.elapsed().as_secs_f64()
+                    ));
+                    return Ok(());
+                }
+                Answer::Busy(sense) => note(sense.to_string(), log),
+                Answer::TimedOut => note("no answer".to_owned(), log),
+                Answer::Sense(sense) if sense.key == 6 && attentions < 5 => {
+                    attentions += 1;
+                    log.line(&format!("{step}: {sense}"));
+                }
+                Answer::Sense(sense) => return Err(drive_failed(step, &sense.to_string())),
+                Answer::Error(text) => return Err(drive_failed(step, &text)),
+            }
+            if started.elapsed() > limit {
+                return Err(drive_failed(
+                    step,
+                    &format!("the drive stayed busy for {} s", limit.as_secs()),
+                ));
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    /// How many times a cache flush or a close is sent while the drive is too busy to take it.
+    const CLOSE_TRIES: u32 = 3;
+
+    /// Sends `cdb` (a command with Immed set) and waits until the drive has done it. A drive too busy to take it, or
+    /// one that does not answer, is waited for and sent it again: a flush of an empty cache, the close of a closed
+    /// track and the finalizing of a finalized disc end with GOOD status (MMC-5 6.41.3, 6.3.3.5.2, 6.3.3.5.5).
+    fn immediate(
+        device: &IDiscRecorder2Ex,
+        cdb: &[u8],
+        step: &str,
+        log: &mut BurnLog,
+    ) -> Result<(), BurnError> {
+        for attempt in 1..=CLOSE_TRIES {
+            log.line(&format!("{step} (try {attempt})"));
+            match send_no_data(device, cdb, COMMAND_SECONDS) {
+                Answer::Done => return wait_ready(device, step, CLOSE_BUSY_LIMIT, log),
+                Answer::Busy(_) | Answer::TimedOut => {
+                    wait_ready(device, step, CLOSE_BUSY_LIMIT, log)?;
+                }
+                Answer::Sense(sense) => return Err(drive_failed(step, &sense.to_string())),
+                Answer::Error(text) => return Err(drive_failed(step, &text)),
+            }
+        }
+        Err(drive_failed(
+            step,
+            &format!("the drive did not take it in {CLOSE_TRIES} tries"),
+        ))
+    }
+
+    /// The invisible or incomplete track of a DVD+R (its number and next writable address), as READ TRACK
+    /// INFORMATION tells it.
+    fn incomplete_track(recorder: &IDiscRecorder2) -> Option<crate::mmc::TrackInformation> {
+        let data = get_data(
+            recorder,
+            &crate::mmc::read_track_information(
+                crate::mmc::INCOMPLETE_TRACK,
+                crate::mmc::TRACK_INFORMATION_BYTES,
+            ),
+            crate::mmc::TRACK_INFORMATION_BYTES,
+        )
+        .ok()?;
+        crate::mmc::TrackInformation::parse(&data)
+    }
+
+    /// Writes `count` sectors of `data` at `lba` (M9.46): sent again while the drive is busy (its cache full), and
+    /// after the host's time limit ran out, once the drive is ready, as its next writable address says (written:
+    /// done; not written: sent again).
+    fn write_sectors(
+        recorder: &IDiscRecorder2,
+        device: &IDiscRecorder2Ex,
+        (lba, count): (u32, u16),
+        data: &[u8],
+        log: &mut BurnLog,
+    ) -> Result<(), BurnError> {
+        let cdb = crate::mmc::write10(lba, count);
+        let step = || format!("WRITE of {count} sectors at {lba}");
+        let started = Instant::now();
+        let mut busy_since: Option<Instant> = None;
+        let mut timeouts = 0;
+        loop {
+            let sent = Instant::now();
+            match send_data(device, &cdb, WRITE_SECONDS, data) {
+                Answer::Done => {
+                    if let Some(since) = busy_since
+                        && since.elapsed() >= Duration::from_secs(2)
+                    {
+                        log.line(&format!(
+                            "{}: the drive was busy for {:.1} s",
+                            step(),
+                            since.elapsed().as_secs_f64()
+                        ));
+                    }
+                    return Ok(());
+                }
+                Answer::Busy(_) => {
+                    let since = *busy_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() > WRITE_BUSY_LIMIT {
+                        return Err(drive_failed(
+                            &step(),
+                            &format!("the drive stayed busy for {} s", WRITE_BUSY_LIMIT.as_secs()),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Answer::TimedOut => {
+                    timeouts += 1;
+                    // M9.47: the system calls it unanswered also when it comes back at once (the drive or its
+                    // connection failed it), so how long it took is said, and what the drive says of it.
+                    log.line(&format!(
+                        "{}: the system gave it up as unanswered (time {timeouts}) after {:.2} s ({:.1} s since its first sending)",
+                        step(),
+                        sent.elapsed().as_secs_f64(),
+                        started.elapsed().as_secs_f64()
+                    ));
+                    log_drive_sense(recorder, log);
+                    if timeouts > WRITE_RETRIES {
+                        return Err(drive_failed(
+                            &step(),
+                            &format!(
+                                "the drive did not answer in {WRITE_SECONDS} s, {timeouts} times"
+                            ),
+                        ));
+                    }
+                    wait_ready(
+                        device,
+                        "the drive after a WRITE without answer",
+                        WRITE_BUSY_LIMIT,
+                        log,
+                    )?;
+                    let track = incomplete_track(recorder);
+                    log.line(&format!("the incomplete track: {track:?}"));
+                    let next = track.and_then(|track| track.next_writable);
+                    log.line(&format!("next writable address: {next:?}"));
+                    match next {
+                        Some(next) if next >= lba.saturating_add(u32::from(count)) => return Ok(()),
+                        Some(next) if next == lba => {}
+                        _ => {
+                            return Err(drive_failed(
+                                &step(),
+                                &format!(
+                                    "after it went unanswered the next writable address is {next:?}"
+                                ),
+                            ));
+                        }
+                    }
+                }
+                Answer::Sense(sense) => return Err(drive_failed(&step(), &sense.to_string())),
+                Answer::Error(text) => {
+                    log.line(&format!(
+                        "{}: {text} after {:.2} s",
+                        step(),
+                        sent.elapsed().as_secs_f64()
+                    ));
+                    log_drive_sense(recorder, log);
+                    return Err(drive_failed(&step(), &text));
+                }
+            }
+        }
+    }
+
+    /// Asks the drive what it has to say (REQUEST SENSE, M9.47) after a command that came back without sense data, and
+    /// records it: a reset, a write error or nothing.
+    fn log_drive_sense(recorder: &IDiscRecorder2, log: &mut BurnLog) {
+        let said = match get_data(
+            recorder,
+            &crate::mmc::request_sense(),
+            u16::try_from(crate::mmc::SENSE_BYTES).unwrap_or(u16::MAX),
+        ) {
+            Ok(data) => crate::mmc::Sense::parse(&data)
+                .map_or_else(|| "no sense".to_owned(), |sense| sense.to_string()),
+            Err(failure) => failure,
+        };
+        log.line(&format!("REQUEST SENSE: {said}"));
+    }
+
+    /// Writes a blank DVD+R DL with DiscCraft's own MMC commands (M9.46), as MMC-5 lays the disc out (4.3.7.5): its
+    /// layer 0 made `layer_break` sectors (SEND DISC STRUCTURE, read back), the write speed asked (SET STREAMING), the
+    /// image written from sector 0 by WRITE (10) (the drive goes on to layer 1 where layer 0 ends), the drive's cache
+    /// flushed (SYNCHRONIZE CACHE), the track closed and the disc finalized with the minimal radius (CLOSE TRACK
+    /// SESSION 001b, then 101b, which MMC-5 recommends for DVD players: it writes the lead-in, both middle zones and
+    /// the lead-out). IMAPI2's own `Write` set the disc's layer 0 to half the image after DiscCraft had set it, and
+    /// gave up on a command the drive did not answer in time (M9.45). The recorder is held, and the system's media
+    /// change notices are off, while it writes. Each step goes into `<image>.burnlog.txt`.
+    fn write_dual_layer(
+        recorder: &IDiscRecorder2,
+        file: File,
+        sectors: u32,
+        request: &BurnRequest,
+        layer_break: Option<u32>,
+        progress: &Arc<dyn Fn(BurnStep, f32) + Send + Sync>,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<(), BurnError> {
+        let mut log = BurnLog::open(&request.image);
+        log.line(&format!(
+            "DVD+R DL: {} ({sectors} sectors), layer break {layer_break:?}, speed {:?} sectors/s",
+            request.image.display(),
+            request.speed
+        ));
+        // M9.47: which drive, and which disc (a drive writes each media ID as its maker taught it).
+        // SAFETY: plain COM calls on the live recorder.
+        let (vendor, product, revision) = unsafe {
+            (
+                recorder.VendorId(),
+                recorder.ProductId(),
+                recorder.ProductRevision(),
+            )
+        };
+        log.line(&format!(
+            "recorder: {} {} {}, disc: {}",
+            vendor
+                .map(|text| text.to_string())
+                .unwrap_or_default()
+                .trim(),
+            product
+                .map(|text| text.to_string())
+                .unwrap_or_default()
+                .trim(),
+            revision
+                .map(|text| text.to_string())
+                .unwrap_or_default()
+                .trim(),
+            media_id(recorder, MediaKind::DvdPlusRDualLayer)
+                .map_or_else(|| "no media ID".to_owned(), |id| id.to_string())
+        ));
+        let device: IDiscRecorder2Ex = recorder.cast().map_err(|failure| error(&failure))?;
+        // SAFETY: plain COM calls on the live recorder.
+        unsafe {
+            recorder
+                .AcquireExclusiveAccess(variant_bool(false), &BSTR::from(CLIENT))
+                .map_err(|failure| error(&failure))?;
+            let _ = recorder.DisableMcn();
+        }
+        let written = write_dual_layer_held(
+            recorder,
+            &device,
+            file,
+            sectors,
+            request,
+            layer_break,
+            progress,
+            cancel,
+            &mut log,
+        );
+        // SAFETY: plain COM calls on the live recorder, undoing the two above.
+        unsafe {
+            let _ = recorder.EnableMcn();
+            let _ = recorder.ReleaseExclusiveAccess();
+        }
+        match &written {
+            Ok(()) => log.line("written"),
+            Err(failure) => log.line(&format!("failed: {failure}")),
+        }
+        written
+    }
+
+    /// [`write_dual_layer`] while the recorder is held.
+    #[allow(clippy::too_many_arguments)]
+    fn write_dual_layer_held(
+        recorder: &IDiscRecorder2,
+        device: &IDiscRecorder2Ex,
+        file: File,
+        sectors: u32,
+        request: &BurnRequest,
+        layer_break: Option<u32>,
+        progress: &Arc<dyn Fn(BurnStep, f32) + Send + Sync>,
+        cancel: &Arc<AtomicBool>,
+        log: &mut BurnLog,
+    ) -> Result<(), BurnError> {
+        // A drive still telling of an earlier reset or disc change says so here, not to the first WRITE.
+        wait_ready(device, "the drive before writing", WRITE_BUSY_LIMIT, log)?;
+        log.line(&format!("layer 0 before: {:?}", layer_boundary(recorder)));
+        if let Some(wanted) = layer_break {
+            place_layer_break(recorder, wanted, true)?;
+            log.line(&format!("layer 0 set: {:?}", layer_boundary(recorder)));
+        }
+        if let Some(speed) = request.speed {
+            let kilobytes = crate::mmc::kilobytes_per_second(speed);
+            let descriptor = crate::mmc::performance(sectors.saturating_sub(1), kilobytes);
+            // The drive's own speed is no reason to stop.
+            log.line(&format!(
+                "SET STREAMING {kilobytes} kB/s: {}",
+                set_streaming(device, &descriptor)
+            ));
+        }
+        // SAFETY: a plain COM call on the live recorder.
+        let largest = unsafe { device.GetMaximumNonPageAlignedTransferSize() }.unwrap_or(0);
+        let per_write = crate::mmc::sectors_per_write(largest);
+        log.line(&format!(
+            "{per_write} sectors a WRITE (the drive takes {largest} bytes at a time)"
+        ));
+        let per_write_bytes = usize::from(per_write).saturating_mul(2048);
+        let mut reader = BufReader::with_capacity(1 << 20, file);
+        let mut buffer = vec![0u8; per_write_bytes];
+        progress(BurnStep::Writing, 0.0);
+        let total = f64::from(sectors.max(1));
+        let mut next_note = 0.05_f64;
+        let mut last_note = (Instant::now(), 0u32);
+        for (lba, count) in crate::mmc::writes(sectors, per_write) {
+            if cancel.load(Ordering::Relaxed) {
+                log.line(&format!("stopped at sector {lba}"));
+                return Err(BurnError::Cancelled);
+            }
+            let bytes = usize::from(count).saturating_mul(2048);
+            let chunk = buffer.get_mut(..bytes).unwrap_or_default();
+            let read = super::read_full(&mut reader, chunk)
+                .map_err(|failure| BurnError::Image(failure.to_string()))?;
+            if read < bytes {
+                return Err(BurnError::Image(format!(
+                    "it ends within sector {lba}, before its {sectors} sectors"
+                )));
+            }
+            write_sectors(recorder, device, (lba, count), chunk, log)?;
+            let done = lba.saturating_add(u32::from(count));
+            let fraction = f64::from(done) / total;
+            // `as` is exact enough for a fraction.
+            progress(BurnStep::Writing, fraction as f32);
+            if fraction >= next_note {
+                let seconds = last_note.0.elapsed().as_secs_f64().max(0.001);
+                let rate = f64::from(done.saturating_sub(last_note.1)) / seconds;
+                log.line(&format!(
+                    "{:.0} % written (to sector {done}): {:.2}x",
+                    fraction * 100.0,
+                    rate / f64::from(MediaKind::DvdPlusRDualLayer.sectors_per_second_at_1x())
+                ));
+                last_note = (Instant::now(), done);
+                next_note += 0.05;
+            }
+        }
+        progress(BurnStep::Closing, 0.0);
+        immediate(
+            device,
+            &crate::mmc::synchronize_cache(true),
+            "SYNCHRONIZE CACHE",
+            log,
+        )?;
+        let track = incomplete_track(recorder);
+        log.line(&format!("written track: {track:?}"));
+        let number = track.map_or(1, |track| track.track);
+        immediate(
+            device,
+            &crate::mmc::close_track_session(true, crate::mmc::Close::Track, number),
+            &format!("CLOSE TRACK SESSION 001b (track {number})"),
+            log,
+        )?;
+        progress(BurnStep::Closing, 0.2);
+        immediate(
+            device,
+            &crate::mmc::close_track_session(true, crate::mmc::Close::FinalizeMinimalRadius, 0),
+            "CLOSE TRACK SESSION 101b (finalize with the minimal radius)",
+            log,
+        )?;
+        log.line(&format!(
+            "layer 0 after: {:?}, written layer 0: {:?}",
+            layer_boundary(recorder),
+            written_layer0(recorder)
+        ));
+        // M9.48: the speed asked for writing held for reading too; the disc is verified (and played) at the drive's
+        // own speed. A drive that does not take it reads as it did.
+        if request.speed.is_some() {
+            log.line(&format!(
+                "SET STREAMING the drive's defaults: {}",
+                set_streaming(device, &crate::mmc::performance_defaults())
+            ));
+        }
+        Ok(())
+    }
+
+    /// Sends SET STREAMING with the performance `descriptor`: what the drive said, in words.
+    fn set_streaming(device: &IDiscRecorder2Ex, descriptor: &[u8]) -> String {
+        match send_data(
+            device,
+            &crate::mmc::set_streaming(),
+            COMMAND_SECONDS,
+            descriptor,
+        ) {
+            Answer::Done => "taken".to_owned(),
+            Answer::Busy(sense) | Answer::Sense(sense) => sense.to_string(),
+            Answer::TimedOut => "no answer".to_owned(),
+            Answer::Error(text) => text,
+        }
     }
 
     pub(super) fn verify(
@@ -1615,6 +2344,54 @@ mod tests {
             moved.contains("2086912") && moved.contains("2030528"),
             "{moved}"
         );
+        // M9.46: the words run on without the gaps a line break inside the text once left.
+        let unknown = BurnError::LayerBreak {
+            wanted: 2_038_416,
+            disc: 0,
+            fixed: true,
+        }
+        .to_string();
+        for text in [&fixed, &small, &moved, &unknown] {
+            assert!(!text.contains("  "), "{text}");
+        }
+        let drive = BurnError::Drive("WRITE of 32 sectors at 0: sense 3h/0Ch/00h".to_owned());
+        assert_eq!(
+            drive.to_string(),
+            "the recorder failed: WRITE of 32 sectors at 0: sense 3h/0Ch/00h"
+        );
+    }
+
+    /// M9.47: a DVD+R DL that calls itself blank with its layer 0 fixed had a writing stop on it (as the two discs of
+    /// 2026-11-25 after the drive gave up at 16 % and 26 %); a fresh one, or another kind, did not.
+    #[test]
+    fn a_dual_layer_disc_a_writing_stopped_on_is_told_apart() {
+        use super::{LayerBoundary, Media};
+        let disc = |kind: MediaKind, blank: bool, fixed: bool| Media {
+            kind,
+            supported: true,
+            blank,
+            free_bytes: 0,
+            total_bytes: 0,
+            write_speeds: Vec::new(),
+            layer_boundary: Some(LayerBoundary {
+                layer0_sectors: 2_038_416,
+                fixed,
+            }),
+        };
+        assert!(disc(MediaKind::DvdPlusRDualLayer, true, true).started_before());
+        assert!(!disc(MediaKind::DvdPlusRDualLayer, true, false).started_before());
+        assert!(!disc(MediaKind::DvdPlusRDualLayer, false, true).started_before());
+        // A DVD-R DL's layer 0 is always fixed.
+        assert!(!disc(MediaKind::DvdMinusRDualLayer, true, true).started_before());
+        let mut unknown = disc(MediaKind::DvdPlusRDualLayer, true, true);
+        unknown.layer_boundary = None;
+        assert!(!unknown.started_before());
+        let refused = BurnError::StartedBefore { layer0: 2_038_416 }.to_string();
+        assert!(
+            refused.contains("2038416") && refused.contains("blank DVD+R DL"),
+            "{refused}"
+        );
+        assert!(!refused.contains("  "), "{refused}");
     }
     use std::io::Cursor;
     use std::sync::Mutex;
