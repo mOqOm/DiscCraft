@@ -4,7 +4,7 @@ English | [日本語](../ja/README.md)
 
 How to use DiscCraft, in the order the work goes. Each chapter is a file of its own. If you are new to DiscCraft, start
 with [the tutorial in Chapter 3](03-tutorial.md#3-making-your-first-dvd): it takes you through the whole work once.
-Names of commands and panels are the ones the English interface shows (**Window ▸ Language ▸ English**).
+Names of commands and panels are the ones the English interface shows (**Edit ▸ Preferences…**, **Interface**, **Language**: English).
 
 ## Contents
 

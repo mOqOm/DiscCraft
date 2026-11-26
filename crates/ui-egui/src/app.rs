@@ -143,6 +143,9 @@ pub struct DiscCraftApp {
         std::collections::HashMap<u64, Option<(egui::TextureHandle, [f32; 4])>>,
     /// タイムライン ▸ 字幕を書き出し で選んだトラックのアセット（メニューを閉じてから保存する）。
     pub(crate) subtitle_export: Option<AssetId>,
+    /// The macOS menu bar (M16.4: craft-menu's native menus, as the other Crafting Apps have), when installed; the
+    /// menus are drawn in the window otherwise.
+    pub(crate) native_menu: Option<craft_menu::NativeMenu>,
     /// モニターの拡大率。
     pub(crate) monitor_zoom: crate::monitor::MonitorZoom,
     /// メニュービューアの拡大率。
@@ -604,6 +607,7 @@ impl DiscCraftApp {
             subtitle_cache: BTreeMap::new(),
             image_subtitles: std::collections::HashMap::new(),
             subtitle_export: None,
+            native_menu: None,
             menu_texture: None,
             popup_texture: None,
             selected_buttons: Vec::new(),

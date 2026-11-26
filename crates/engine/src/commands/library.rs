@@ -13,8 +13,8 @@ use super::{always_enabled, object};
 pub(crate) const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "library.list",
-        label: "ライブラリの項目",
-        menu: &["ライブラリ"],
+        label: "Library Items",
+        menu: &["Library"],
         shortcut: None,
         params: "{}",
         enabled: always_enabled,
@@ -23,8 +23,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "library.newMenu",
-        label: "ライブラリから新規メニュー",
-        menu: &["ライブラリ"],
+        label: "New Menu from Library",
+        menu: &["Library"],
         shortcut: None,
         params: r#"{"preset"?: string, "spec"?: MenuSpec, "name"?: string, "labels"?: [string]}"#,
         enabled: always_enabled,
@@ -33,8 +33,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "library.place",
-        label: "ライブラリのボタンを配置",
-        menu: &["ライブラリ"],
+        label: "Place Library Button",
+        menu: &["Library"],
         shortcut: None,
         params: r#"{"menu": id, "preset"?: string, "button"?: ButtonSpec, "label"?: string, "x"?: n, "y"?: n (the button's centre, frame pixels: where it was dropped)}"#,
         enabled: always_enabled,
@@ -43,8 +43,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "library.chapterIndex",
-        label: "チャプターインデックスを作成",
-        menu: &["メニュー"],
+        label: "Create Chapter Index",
+        menu: &["Menu"],
         shortcut: None,
         params: r#"{"timeline": id, "name": string, "perPage"?: count, "labels"?: [string], "previous"?: string, "next"?: string}"#,
         enabled: always_enabled,
@@ -53,8 +53,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "library.setBackground",
-        label: "ライブラリの背景を設定",
-        menu: &["ライブラリ"],
+        label: "Set Library Background",
+        menu: &["Library"],
         shortcut: None,
         params: r#"{"menu": id, "preset": string}"#,
         enabled: always_enabled,

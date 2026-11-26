@@ -4,7 +4,7 @@
 
 The words used on the screen and in this manual, in alphabetical order (numbers first). Look a word up in
 [24.1 Index](#241-index) first, then follow its link (in the PDF, its page number) to the explanation. The italic word
-under a term is its name in the Japanese interface (**Window ▸ Language ▸ 日本語**), where that differs from the English.
+under a term is its name in the Japanese interface (**Edit ▸ Preferences…**, **Interface**, **Language**: 日本語), where that differs from the English.
 The → at the end of an explanation leads to the chapters and sections that tell more, and to related words.
 
 ## 24.1 Index
@@ -79,7 +79,7 @@ converted to 192 kbps stereo AC-3 during the build. Existing AC-3 files are incl
 
 ### Activated
 
-*アクティベート*
+*決定*
 
 Confirming a menu button (pressing the Enter button on the remote). The color of the button when pressed is called the
 "Activated Color," which can be set separately from the "Selected Color" used when the cursor is over it.
@@ -209,7 +209,7 @@ buttons and links automatically. If there are many buttons, they are split into 
 
 ### Chapter Playlist
 
-*チャプター再生リスト*
+*チャプタープレイリスト*
 
 An item that plays selected chapters from a single timeline in any order. You can create digest versions without
 duplicating the video.
@@ -273,7 +273,7 @@ Audio Tracks without conversion (up to 48 kHz, 1509.75 kbps). DiscCraft cannot c
 
 ### Duration
 
-*デュレーション*
+*継続時間*
 
 Length. You set the length of new slides (default 6 seconds) and the length of subtitles added in the Monitor (default 2
 seconds) in Preferences.
@@ -308,7 +308,7 @@ Content** / **BD-ROM Content** in the Build panel.
 
 ### End Action
 
-*エンドアクション*
+*終了時の動作*
 
 The destination to go to after playing a timeline, slideshow, playlist, etc., to the end. For example, you can return to
 the Main Menu when the main movie finishes. Set this in **End Action** in the Properties panel.
@@ -479,7 +479,7 @@ titles or other menus. You can create menus from Library templates or PSDs.
 
 ### Menu Viewer
 
-*メニュービューア*
+*メニュービューアー*
 
 The panel for editing menus. You place buttons and text, and can display safe areas and button routing.
 
@@ -597,7 +597,7 @@ be placed at the playhead's location.
 
 ### Playlist
 
-*再生リスト*
+*プレイリスト*
 
 An item that plays several timelines or slideshows consecutively in a specified order. It is used for buttons that play
 the main movie and extras together, for example.
@@ -683,7 +683,7 @@ players from other regions.
 
 ### Remote Menu
 
-*リモートメニュー*
+*リモコンメニュー*
 
 The menu that appears when the viewer presses the Menu button on the remote during playback. You set this for each
 timeline. On Blu-ray, this becomes a Pop-up Menu.
@@ -765,7 +765,7 @@ points.
 
 ### Timeline Viewer
 
-*タイムラインビューア*
+*タイムラインビューアー*
 
 The panel for editing timelines. Video, audio, and subtitle tracks are arranged in lanes, where you place clips and
 chapter points.

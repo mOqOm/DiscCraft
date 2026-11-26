@@ -1,0 +1,1873 @@
+# 日本語 (ja) interface catalog for DiscCraft, in craft-i18n's layout (storytold/craft-i18n): the strings DiscCraft
+# shares with the other Crafting Apps come from common.tsv next to this file, a copy of craft-i18n's shared catalog
+# at the commit in ../../craft-i18n.rev. This file holds DiscCraft's own strings, and its overrides of shared ones
+# where DiscCraft uses the same English with another meaning (a chapter's Number, a folder's Location:).
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary, in the shared catalog's words and style. No other product's localisation,
+# string table or translated UI was consulted or copied; add entries the same way.
+
+# File menu
+	DiscCraft project	DiscCraft プロジェクト
+	Media	メディア
+	Opened: {path}	開きました: {path}
+	Saved: {path}	保存しました: {path}
+	Save cancelled	保存をキャンセルしました
+	Import cancelled	読み込みをキャンセルしました
+	Created a new project	新規プロジェクトを作成しました
+	DiscCraft started	DiscCraft を起動しました
+
+# Edit menu
+	Undone	取り消しました
+	Redone	やり直しました
+	Command succeeded	コマンドが成功しました
+	The command parameters are invalid	コマンドのパラメーターが無効です
+	Cannot convert the ID to a number	ID を数値に変換できません
+
+# Window menu and workspaces
+	Menu	メニュー
+	Build	ビルド
+	Workspace: {name}	ワークスペース: {name}
+	Workspace: {name} (save failed: {error})	ワークスペース: {name} (保存に失敗しました: {error})
+	Cannot find where to save settings	設定の保存先が見つかりません
+
+# Panels
+	Project	プロジェクト
+	Disc	ディスク
+	Assets	アセット
+	Menus	メニュー
+	Playlists	プレイリスト
+	Slideshows	スライドショー
+	Monitor	モニター
+	Flowchart	フローチャート
+	Checks	チェック
+	Status:	状態:
+	Nothing selected	選択されていません
+
+# Common buttons and labels
+	Seconds	秒
+#	番号
+	 [offline]	 [オフライン]
+	(unnamed)	(名称未設定)
+	Kind: {kind}	種類: {kind}
+	Path: {path}	パス: {path}
+
+# Assets
+	Create from Selected Asset	選択したアセットから作成
+	Asset not found	アセットが見つかりません
+
+# Timelines
+	Choose a timeline	タイムラインを選択してください
+	Chapters	チャプター
+	Chapter {n}	チャプター {n}
+	Chapters: {count}	チャプター: {count}
+	Audio tracks	オーディオトラック
+	Audio tracks: {count}	オーディオトラック: {count}
+	Subtitle tracks: {count}	字幕トラック: {count}
+	Image asset	画像アセット
+	Video: {name}	ビデオ: {name}
+	End action	終了時の動作
+
+# Menus
+	New Menu	新規メニュー
+	Menu not found	メニューが見つかりません
+	Choose a menu	メニューを選択してください
+	Button	ボタン
+	Button {n}	ボタン {n}
+	Buttons: {count}	ボタン: {count}
+	Add Button	ボタンを追加
+	Default button: {n}	既定のボタン: {n}
+	Highlight	ハイライト
+	The menu image has an invalid size	メニュー画像のサイズが無効です
+	Selected	選択時
+	Activated	決定時
+
+# Playlists and slideshows
+	New Playlist	新規プレイリスト
+	New Slideshow	新規スライドショー
+	Playlist not found	プレイリストが見つかりません
+	Slideshow not found	スライドショーが見つかりません
+	Items: {count}	項目: {count}
+	Add Item	項目を追加
+	Slides: {count}	スライド: {count}
+	Add Slide	スライドを追加
+	{n}: {seconds} s	{n}: {seconds} 秒
+	Choose an item to rename	名前を変更する項目を選択してください
+
+# Links
+	Not set	未設定
+	Last menu	最後のメニュー
+	Menu: {name}	メニュー: {name}
+	{name}: chapter 1	{name}: チャプター 1
+	Playlist {id}	プレイリスト {id}
+	Chapter playlist {id}	チャプタープレイリスト {id}
+	Slideshow {id}	スライドショー {id}
+
+# Disc settings
+	First play	ファーストプレイ
+	First play: {target}	ファーストプレイ: {target}
+	DVD-Video	DVD-Video
+	Blu-ray	Blu-ray
+	NTSC	NTSC
+	PAL	PAL
+	4:3	4:3
+	16:9	16:9
+	DVD5	DVD5
+	DVD9	DVD9
+	BD25	BD25
+	BD50	BD50
+	Custom ({size})	カスタム ({size})
+	Refresh Usage	使用状況を更新
+	Reading media…	メディアを読み取り中…
+	Media read	メディアの読み取り完了
+	Usage updated	使用状況を更新しました
+	No usage information	使用状況の情報はありません
+
+# Build
+	ISO	ISO
+	Build started	ビルドを開始しました
+	Build finished: {path}	ビルドが完了しました: {path}
+	The build thread ended	ビルドスレッドが終了しました
+	There is no build result	ビルド結果がありません
+	Titles {titles} / chapters {chapters} / {size}	タイトル {titles} / チャプター {chapters} / {size}
+	Simulate	シミュレート
+	Simulation finished	シミュレーションが完了しました
+	Simulate is available after a folder build	フォルダーにビルドしたあとでシミュレートできます。
+
+# Checks and simulation report
+	No problems	問題はありません
+	Chapters reached: {count}	到達したチャプター: {count}
+	Title {title} chapter {chapter}	タイトル {title} チャプター {chapter}
+	Dead ends	行き止まり
+	Loops	ループ
+
+# Monitor and remote
+	Open Build Output	ビルド出力を開く
+	Build first	先にビルドしてください
+	Preview opened: {path}	プレビューを開きました: {path}
+	Not previewing. Build first, then choose Open Build Output.	プレビューしていません。先にビルドし、「ビルド出力を開く」を選択してください。
+	Now: {state}	現在: {state}
+	Remote	リモコン
+	Enter	決定
+	Stopped	停止中
+	Menu {pgcn} (button {button})	メニュー {pgcn} (ボタン {button})
+	This PGC is not a menu (hidden PGC).	この PGC はメニューではありません (非表示 PGC)。
+
+# Flowchart placeholder
+	The flowchart is not implemented yet (M6.9). Showing the link list instead.	フローチャートはまだ実装されていません (M6.9)。代わりにリンクリストを表示しています。
+	Language: {name}	言語: {name}
+	Language: {name} (could not save: {error})	言語: {name} (保存できませんでした: {error})
+	Check updated	チェック結果を更新しました
+	Number	番号
+	Timeline: {name} → end action: {target}	タイムライン: {name} → 終了時の動作: {target}
+	First Play	ファーストプレイ
+	End Action	終了時の動作
+	Timeline {id}	タイムライン {id}
+	Menu {id}	メニュー {id}
+	{label} → {target}	{label} → {target}
+	Link list	リンクリスト
+	No timeline selected	タイムラインが選択されていません
+	−	−
+	+	+
+	Add Chapter at Playhead	再生ヘッドの位置にチャプターを追加
+	First chapter is fixed	最初のチャプターは動かせません
+	Remove Chapter	チャプターを削除
+	Timeline: {name}	タイムライン: {name}
+	Playhead: {time}	再生ヘッド: {time}
+	Duration: {time}	長さ: {time}
+	Drag onto a menu, timeline, slideshow or playlist in the Project panel to link it	プロジェクトパネル内のメニュー、タイムライン、スライドショーまたはプレイリストにドラッグしてリンクします
+	New Timeline	新規タイムライン
+	Select a video asset in the Project panel first	先にプロジェクトパネルでビデオアセットを選択してください
+	Slideshow	スライドショー
+	Playlist	プレイリスト
+	Open Project…	プロジェクトを開く…
+	Import as Asset…	アセットとして読み込み…
+	Check Project…	プロジェクトをチェック…
+	Folder…	フォルダー…
+	Image…	画像…
+	Add Chapter Point	チャプターポイントを追加
+	Pan & Zoom	パンとズーム
+	Pan:	パン:
+	Zoom:	ズーム:
+	Pan Left	左にパン
+	Pan Right	右にパン
+	Pan Up	上にパン
+	Pan Down	下にパン
+	Random Pan & Zoom	ランダムなパンとズーム
+	The picture moves slowly while the slide is up	スライド表示中に画像がゆっくり移動します
+	Apply a random pan and zoom effect to all slides	すべてのスライドにランダムなパンとズーム効果を適用します
+	Fit in Window	ウィンドウに合わせる
+	Show Normal Subpicture	通常のサブピクチャを表示
+	Show Selected Subpicture	選択時のサブピクチャを表示
+	Show Activated Subpicture	決定時のサブピクチャを表示
+	Show Safe Areas	セーフエリアを表示
+	Show Button Routing	ボタンのルートを表示
+	Timelines	タイムライン
+	Title Button	タイトルボタン
+	The menu that opens when the remote's Title (Top Menu) button is pressed. When not set, the first menu opens.	リモコンのタイトル (トップメニュー) ボタンを押したときに開くメニューです。未設定の場合は最初のメニューが開きます。
+	Workspace:	ワークスペース:
+	(No menu)	(メニューなし)
+	(No timeline)	(タイムラインなし)
+	(No slideshow)	(スライドショーなし)
+	Choose a slideshow	スライドショーを選択してください
+	Open a menu to see its layers.	レイヤーを表示するにはメニューを開いてください。
+	Default button	既定のボタン
+	Menu Viewer	メニュービューアー
+	Slideshow Viewer	スライドショービューアー
+	Timeline Viewer	タイムラインビューアー
+	Recent Projects	最近使ったプロジェクト
+	No recent projects	最近使ったプロジェクトはありません
+	New Project	新規プロジェクト
+	What's New	新着情報
+	Menu bar and keyboard shortcuts that follow the classic authoring tools	クラシックなオーサリングツールに沿ったメニューバーとキーボードショートカット
+	Title Button in the disc properties and the flowchart	ディスクプロパティとフローチャートのタイトルボタン
+	Flowchart with drag-to-link	ドラッグでリンクするフローチャート
+	Timeline panel with chapter points	チャプターポイント付きタイムラインパネル
+	Pick whip linking	ピックウィップによるリンク
+	Blu-ray authoring (folder and ISO)	Blu-ray のオーサリング (フォルダーと ISO)
+	Location:	場所:
+	Authoring mode:	オーサリングモード:
+	TV standard:	テレビ方式:
+	Leave the location empty to choose where to save later.	場所を空のままにすると、保存先をあとで選べます。
+	Panel layout and start screen that follow the classic authoring tools	クラシックなオーサリングツールに沿ったパネルの配置とスタート画面
+	Name and Location	名前と場所
+	Project Settings	プロジェクト設定
+	Transcode settings:	トランスコード設定:
+	No recent folders	最近使ったフォルダーはありません
+	Aspect ratio:	縦横比:
+	Disc capacity:	ディスク容量:
+	You can change the authoring mode and TV standard later in the disc properties.	オーサリングモードとテレビ方式は、あとからディスクのプロパティで変更できます。
+	Video: MPEG-2, {width} x {height}, {rate} fps, progressive	ビデオ: MPEG-2、{width} x {height}、{rate} fps、プログレッシブ
+	Audio: LPCM 48 kHz stereo (AC-3 sources are kept)	オーディオ: LPCM 48 kHz ステレオ (AC-3 のソースはそのまま)
+	Bitrate: automatic, to fit the disc (video up to 9.8 Mbps)	ビットレート: 自動、ディスクに合わせる (ビデオは最大 9.8 Mbps)
+	Standard definition: HD sources are converted down to SD.	標準画質: HD のソースは SD に変換します。
+	Video: {codec}, {width} x {height}, {rate} fps (files that fit go on as they are)	ビデオ: {codec}、{width} x {height}、{rate} fps (合うファイルはそのまま使います)
+	Bitrate: {target} Mbps on average, up to {peak} (more when the disc has room, less when it is short)	ビットレート: 平均 {target} Mbps、最大 {peak} (ディスクに余裕があれば高く、足りなければ低く)
+	Format:	形式:
+	{kind} Folder	{kind} フォルダー
+	{kind} Image	{kind} イメージ
+	Check Project	プロジェクトをチェック
+	{kind} Settings	{kind} 設定
+	Source:	ソース:
+	Current project	現在のプロジェクト
+	Disc Info	ディスク情報
+	{used} used, {free} free	使用済み {used}、空き {free}
+	Region Code	リージョンコード
+	Valid:	有効:
+	All regions	すべてのリージョン
+	Project Check	プロジェクトのチェック
+	Creates a disc folder (VIDEO_TS or BDMV) on the hard drive.	ハードドライブにディスクフォルダー (VIDEO_TS または BDMV) を作成します。
+	Creates an ISO disc image on the hard drive.	ハードドライブに ISO ディスクイメージを作成します。
+	Creates a DDP image on the hard drive for replication.	複製用にハードドライブに DDP イメージを作成します。
+	DDP Image	DDP イメージ
+	1 - United States, Canada	1 - 米国、カナダ
+	2 - Japan, Europe, South Africa, Middle East	2 - 日本、欧州、南アフリカ、中東
+	3 - Southeast Asia, Korea, Hong Kong	3 - 東南アジア、韓国、香港
+	4 - Australia, Mexico, Central and South America	4 - オーストラリア、メキシコ、中央および南アメリカ
+	5 - Russia, South Asia, Africa, North Korea	5 - ロシア、南アジア、アフリカ、北朝鮮
+	6 - China	6 - 中国
+	7 - Reserved (undefined)	7 - 予約済み (未定義)
+	8 - Special venues such as aircraft	8 - 航空機などの特別な場所
+	4.7 GB (DVD5)	4.7 GB (DVD5)
+	8.5 GB (DVD9)	8.5 GB (DVD9)
+	25 GB (BD25)	25 GB (BD25)
+	50 GB (BD50)	50 GB (BD50)
+	Aspect ratio	縦横比
+	First Play:	ファーストプレイ:
+	Title Button:	タイトルボタン:
+	Asset	アセット
+	Duration:	長さ:
+	End Action:	終了時の動作:
+	Video:	ビデオ:
+	Frame rate:	フレームレート:
+	Dimensions:	寸法:
+	Audio tracks:	オーディオトラック:
+	Subtitle tracks:	字幕トラック:
+	Chapters:	チャプター:
+	Buttons:	ボタン:
+	Default button:	既定のボタン:
+	Slides:	スライド:
+	Items:	項目:
+	Subtitle {n}: {language}	字幕 {n}: {language}
+	Close Project	プロジェクトを閉じる
+	Project Settings…	プロジェクト設定…
+	Set as First Play	ファーストプレイに設定
+	Unlinked items	リンクされていない項目
+	Slides	スライド
+	Slideshow Options	スライドショーオプション
+	Slide duration:	スライドの長さ:
+	 s	 秒
+	Total duration: {time}	全体の長さ: {time}
+	Add images from the options on the right.	右側のオプションから画像を追加してください。
+	Now	現在
+	Exit Preview	プレビューを終了
+	Check for	チェックする項目
+	Start	開始
+	Problem	問題
+	{count} items found.	{count} 個の項目が見つかりました。
+	Button and link targets	ボタンとリンク先
+	End actions	終了時の動作
+	Unreachable items	到達できない項目
+	Media files	メディアファイル
+	Track and title limits	トラックとタイトルの制限
+	Disc capacity	ディスク容量
+	Save changes to {name}?	「{name}」への変更を保存しますか？
+	Default TV standard:	既定のテレビ方式:
+	Used as the TV standard of new projects.	新規プロジェクトのテレビ方式として使用されます。
+	Brightness:	明るさ:
+	Brightness: {name}	明るさ: {name}
+	Brightness: {name} (could not save: {error})	明るさ: {name} (保存できませんでした: {error})
+	Timeline:	タイムライン:
+	Video file	ビデオファイル
+	Audio file	オーディオファイル
+	Image file	画像ファイル
+	Subtitle file	字幕ファイル
+	Other file	その他のファイル
+	Button text	ボタンのテキスト
+	Add Chapter Points at Interval	一定間隔でチャプターポイントを追加
+	Add Chapter Points at Interval…	一定間隔でチャプターポイントを追加…
+	Interval:	間隔:
+	 min	 分
+	Chapter points are added at every interval from the start.	開始位置から一定の間隔ごとにチャプターポイントが追加されます。
+	{count} chapter points will be added.	{count} 個のチャプターポイントが追加されます。
+	Add Chapter Point Here	ここにチャプターポイントを追加
+	Delete Chapter Point	チャプターポイントを削除
+	Previous Chapter	前のチャプター
+	Previous Frame	前のフレーム
+	Next Frame	次のフレーム
+	Next Chapter	次のチャプター
+	Deleted	削除しました
+	Delete the selected item. Links to it become not set. An asset that is in use cannot be deleted.	選択した項目を削除します。その項目へのリンクは未設定になります。使用中のアセットは削除できません。
+	Cannot delete: {user} uses this asset.	{user} がこのアセットを使用しているため、削除できません。
+	N/A	N/A
+	Don't Transcode	トランスコードしない
+	Untranscoded	未トランスコード
+	Transcoded	トランスコード済み
+	DVD Transcode Status	DVD トランスコード状態
+	DVD Transcode Settings	DVD トランスコード設定
+	Blu-ray Transcode Status	Blu-ray トランスコード状態
+	Blu-ray Transcode Settings	Blu-ray トランスコード設定
+	DVD Transcode Status:	DVD トランスコード状態:
+	DVD Transcode Settings:	DVD トランスコード設定:
+	Blu-ray Transcode Status:	Blu-ray トランスコード状態:
+	Blu-ray Transcode Settings:	Blu-ray トランスコード設定:
+	Override	上書き
+	Encoded Size	エンコード後のサイズ
+	Remote Menu	リモコンメニュー
+	Estimated size on the disc after the build	ビルド後のディスク上の推定サイズ
+	Select a library set	ライブラリセットを選択
+	Toggle menu display	メニューの表示を切り替え
+	Toggle button display	ボタンの表示を切り替え
+	Toggle background display	背景の表示を切り替え
+	Place	配置
+	Place the selected button in the open menu	選択したボタンを開いているメニューに配置します
+	Create a new menu from the selected menu	選択したメニューから新しいメニューを作成します
+	Set Background	背景を設定
+	Use the selected background in the open menu	選択した背景を開いているメニューで使用します
+	Create New Menu	新規メニューを作成
+	Created menu {name}	メニュー {name} を作成しました
+	Open a menu first	先にメニューを開いてください
+	Plain Dark	プレーン ダーク
+	Plain Light	プレーン ライト
+	Bottom Bar	下部のバー
+	Chapter Grid	チャプターグリッド
+	Left List	左のリスト
+	Wide Button	ワイドボタン
+	Small Button	小さいボタン
+	Tile	タイル
+	Full-Width Bar	全幅のバー
+	Charcoal	チャコール
+	Navy	ネイビー
+	Forest	フォレスト
+	Wine	ワイン
+	Ivory	アイボリー
+	Play Movie	ムービーを再生
+	Chapter	チャプター
+	Extras	特典
+	Setup	セットアップ
+	Main Menu	メインメニュー
+	Scene Selection	シーン選択
+	Subtitles	字幕
+	Show Chapter Names	チャプター名を表示
+	Chapter Number:	チャプター番号:
+	In:	イン点:
+	Add Audio Track…	オーディオトラックを追加…
+	Add Subtitle Track…	字幕トラックを追加…
+	Delete Audio Track	オーディオトラックを削除
+	Delete Subtitle Track	字幕トラックを削除
+	About DiscCraft	DiscCraft について
+	DiscCraft on GitHub	GitHub の DiscCraft
+	Reveal Log Files…	ログファイルを表示…
+	System Compatibility Report…	システム互換性レポート…
+	System Compatibility Report	システム互換性レポート
+	Check for Updates…	更新を確認…
+	DiscCraft Help…	DiscCraft ヘルプ…
+	development build	開発ビルド
+	Saves this session's log and shows it in the file manager.	このセッションのログを保存し、ファイルマネージャーに表示します。
+	Shows a report on this computer.	このコンピューターのレポートを表示します。
+	Shows this version and the releases on GitHub.	このバージョンと GitHub のリリースを表示します。
+	Shows the version, community links and license.	バージョン、コミュニティへのリンク、ライセンスを表示します。
+	Opened {url}	{url} を開きました
+	Saved the log: {path}	ログを保存しました: {path}
+	{n} hardware threads	{n} 個のハードウェアスレッド
+	 — 4 or more are recommended for converting video	 — ビデオの変換には 4 つ以上を推奨します
+	DiscCraft	DiscCraft
+	Operating system	オペレーティングシステム
+	CPU	CPU
+	System language	システムの言語
+	Display language	表示言語
+	Settings folder	設定フォルダー
+	Log folder	ログフォルダー
+	Cache of Craft documents	Craft ドキュメントのキャッシュ
+	DVD output	DVD 出力
+	Blu-ray output	Blu-ray 出力
+	VIDEO_TS folder / ISO: MPEG-2, AC-3, LPCM, DTS (as it is), subpictures	VIDEO_TS フォルダー / ISO: MPEG-2、AC-3、LPCM、DTS (そのまま)、サブピクチャ
+	BDMV folder / ISO: MPEG-2 (SD), H.264 1080p / 720p, AC-3, LPCM, PG subtitles, IG menus	BDMV フォルダー / ISO: MPEG-2 (SD)、H.264 1080p / 720p、AC-3、LPCM、PG 字幕、IG メニュー
+	Copies the report, to paste into a problem report.	不具合の報告に貼り付けられるよう、レポートをコピーします。
+	This version: {version}	このバージョン: {version}
+	DiscCraft does not look for updates by itself. New releases are published on GitHub.	DiscCraft は自分では更新を探しません。新しいリリースは GitHub で公開しています。
+	Open the Releases on GitHub	GitHub のリリースを開く
+	Add Audio Track	オーディオトラックを追加
+	Add Subtitle Track	字幕トラックを追加
+	Asset:	アセット:
+	Import a subtitle file (.srt) first.	先に字幕ファイル (.srt) を読み込んでください。
+	DVD and Blu-ray authoring.	DVD と Blu-ray のオーサリング。
+	License: {license}	ライセンス: {license}
+	Create Chapter Index	チャプターインデックスを作成
+	Create Multi-Page Chapter Index	複数ページのチャプターインデックスを作成
+	{name} Chapters	{name} のチャプター
+	Button text:	ボタンのテキスト:
+	Number:	番号:
+	Link:	リンク:
+	Background:	背景:
+	Highlight:	ハイライト:
+	Left Edges	左端
+	Horizontal Centers	水平方向の中央
+	Right Edges	右端
+	Top Edges	上端
+	Vertical Centers	垂直方向の中央
+	Bottom Edges	下端
+	Align Relative to Safe Area	セーフエリアに対して整列
+	Distribute Relative to Safe Area	セーフエリアに対して分布
+	Select two or more buttons	2 つ以上のボタンを選択してください
+	{n} buttons selected	{n} 個のボタンが選択されています
+	There is no room for the buttons on this menu	このメニューにはボタンを置く場所がありません
+	Slideshow: {name}	スライドショー: {name}
+	Playlist: {name}	プレイリスト: {name}
+	Remote Menu:	リモコンメニュー:
+	This timeline has no menu remote	このタイムラインにはリモコンメニューがありません
+	Select a timeline first	先にタイムラインを選択してください
+	Cannot play: {message}	再生できません: {message}
+	{n} s (motion)	{n} 秒 (モーション)
+	Still	静止画
+	Set an end action to leave the menu when the time is up.	時間になったらメニューから移るように、終了時の動作を設定してください。
+	Auto Activate	自動で決定
+	Import Subtitles…	字幕を読み込み…
+	Export Subtitles	字幕を書き出し
+	Exported: {path}	書き出しました: {path}
+	Read {n} subtitles	字幕を {n} 件読み込みました
+	Audio:	オーディオ:
+	Image:	イメージ:
+	Loop:	ループ:
+	100 GB (BDXL, 3 layers)	100 GB (BDXL、3 レイヤー)
+	128 GB (BDXL, 4 layers)	128 GB (BDXL、4 レイヤー)
+	BD100 (100 GB, BDXL 3 layers)	BD100 (100 GB、BDXL 3 レイヤー)
+	BD128 (128 GB, BDXL 4 layers)	BD128 (128 GB、BDXL 4 レイヤー)
+	Source timecode:	ソースタイムコード:
+	Audio {n}:	オーディオ {n}:
+	{clip} (Stream {n})	{clip} (ストリーム {n})
+	Subtitle {n}:	字幕 {n}:
+	Also the volume label of the ISO image (letters and digits only)	ISO イメージのボリュームラベルにもなります (英字と数字のみ)
+	Text Tool	テキストツール
+	Own color	独自の色
+	Play or search by time	時間で再生または検索
+	Play or search by chapter	チャプターで再生または検索
+	Play a title	タイトルを再生
+	Go up	上の階層に戻る
+	Time or chapter search in the title	タイトル内の時間またはチャプターでの検索
+	Fast forward	早送り
+	Rewind	巻き戻し
+	Title button	タイトルボタン
+	Menu button	メニューボタン
+	Subtitle menu	字幕メニュー
+	Audio menu	オーディオメニュー
+	Angle menu	アングルメニュー
+	Chapter menu	チャプターメニュー
+	Select and activate buttons	ボタンの選択と決定
+	Leave a still	静止画を終了
+	Change audio	オーディオを変更
+	Change subtitles	字幕を変更
+	Change angle	アングルを変更
+	Change karaoke mix	カラオケミックスを変更
+	Change display mode	表示モードを変更
+	All allowed	すべて許可
+	User Operations:	ユーザー操作:
+	Set…	設定…
+	User Operations	ユーザー操作
+	Checked operations are allowed. Uncheck the ones the viewer may not use (DVD).	チェックした操作が許可されます。視聴者に使わせない操作のチェックを外します (DVD)。
+	Allow All	すべて許可
+	{n} prohibited	{n} 件を禁止
+	(not on this computer)	(このコンピューターにはありません)
+	The default font is used instead	代わりに既定のフォントを使います
+	Default font	既定のフォント
+	Search fonts	フォントを検索
+	Encoded Size:	エンコード後のサイズ:
+	Override:	上書き:
+	Set the end action to a timeline, slideshow or playlist first	先に終了時の動作をタイムライン、スライドショー、プレイリストのどれかに設定してください
+	Show in Explorer	エクスプローラーで表示
+	Clear First Play	ファーストプレイをクリア
+	Asset…	アセット…
+	Import a video first	先にビデオを読み込んでください
+	Video for the timeline:	タイムライン用のビデオ:
+	Edit Menu in PhotoCraft	PhotoCraft でメニューを編集
+	Opened in PhotoCraft. Save there to update the menu.	PhotoCraft で開きました。そちらで保存するとメニューを更新します。
+	PhotoCraft was not found; the PSD opened in its default app. Save there to update the menu.	PhotoCraft が見つからないため、PSD を既定のアプリで開きました。そちらで保存するとメニューを更新します。
+	Updated the menu from PhotoCraft.	PhotoCraft からメニューを更新しました。
+	Redo {action}	やり直す: {action}
+	Can't Undo	取り消せません
+	Can't Redo	やり直せません
+	Create EffectCraft Composition…	EffectCraft のコンポジションを作成…
+	EffectCraft was not found.	EffectCraft が見つかりませんでした。
+	Opened the menu in EffectCraft. Render it there; the movie becomes the menu's background.	メニューを EffectCraft で開きました。そちらでレンダリングすると、ムービーがメニューの背景になります。
+	Updated the menu's motion from EffectCraft.	EffectCraft からメニューのモーションを更新しました。
+	{name} is offline.	{name} はオフラインです。
+	Opened {name} in {app}. Save there to update it here.	{name} を {app} で開きました。そちらで保存すると、ここにも反映されます。
+	Opened {name} in its default app. Save there to update it here.	{name} を既定のアプリで開きました。そちらで保存すると、ここにも反映されます。
+	Updated {name}.	{name} を更新しました。
+	Set Disc User Operations…	ディスクのユーザー操作を設定…
+	No Change	変更なし
+	Set Audio:	オーディオを設定:
+	Set Subtitle:	字幕を設定:
+	Set the link to a timeline, slideshow or playlist first	先にタイムライン、スライドショー、プレイリストのどれかへのリンクを設定してください
+	Not available here.	ここでは使えません。
+	Media category:	メディアカテゴリー:
+	Video and audio	ビデオとオーディオ
+	Still image	静止画
+	Toggle the kinds of items shown	表示するアイテムの種類を切り替えます
+	Snap to Guides	ガイドにスナップ
+	New Guide…	新規ガイド…
+	Horizontal Guide	水平ガイド
+	Vertical Guide	垂直ガイド
+	pixels	ピクセル
+	Show / hide safe areas	セーフエリアの表示 / 非表示
+	Set button routing	ボタンのルートを設定
+	Show guides	ガイドを表示
+	New guide	新規ガイド
+	Show normal subpicture	通常のサブピクチャを表示
+	Show selected subpicture highlight	選択時のサブピクチャのハイライトを表示
+	Show activated subpicture highlight	決定時のサブピクチャのハイライトを表示
+	0 to {max}	0〜{max}
+	Poster Frame:	ポスターフレーム:
+	Set Poster Frame	ポスターフレームを設定
+	Preview from Here	ここからプレビュー
+	Show / Hide Columns	列の表示 / 非表示
+	Media Category	メディアカテゴリー
+	File Path	ファイルパス
+	Bitrate	ビットレート
+	Slide	スライド
+	Match slideshow setting	スライドショーの設定に合わせる
+	In point:	イン点:
+	Out point:	アウト点:
+	Total duration:	全体の長さ:
+	Show All Thumbnails	すべてのサムネイルを表示
+	Specify Link	リンクを指定
+	{used} used. {free} free.	使用済み {used}、空き {free}。
+	{size} used for DVD-ROM content.	DVD-ROM コンテンツに {size} を使っています。
+	{size} used for BD-ROM content.	BD-ROM コンテンツに {size} を使っています。
+	DVD-ROM content:	DVD-ROM コンテンツ:
+	BD-ROM content:	BD-ROM コンテンツ:
+	Default transition:	既定のトランジション:
+	Transition:	トランジション:
+	Transition duration:	トランジションの長さ:
+	Cross Dissolve	クロスディゾルブ
+	Dip to Black	黒にディップ
+	Wipe	ワイプ
+	Correct menu pixels to the TV screen	メニューのピクセルをテレビの画面に合わせて補正
+	Show Buttons	ボタンを表示
+	Replace Asset…	アセットを置換…
+	Locate Asset…	アセットの場所を指定…
+	Locate Asset	アセットの場所を指定
+	Manual advance	手動で進める
+	Each slide holds until the viewer presses Next or Enter (DVD)	各スライドは、視聴者が「次へ」か「決定」を押すまで止まります (DVD)
+	Scale and Apply Matte	拡大・縮小とマットを適用
+	Scale and Crop	拡大・縮小と切り抜き
+	Do Not Scale	拡大・縮小しない
+	Set the first play to a timeline, slideshow or playlist first	先にファーストプレイをタイムライン、スライドショー、プレイリストのどれかに設定してください
+	Button Links	ボタンのリンク
+	Orphans	孤立した項目
+	Overrides	上書き
+	Remote Menus	リモコンメニュー
+	Overlapping Buttons	重なったボタン
+	Menu Total Size	メニューの合計サイズ
+	Chapters and Trims	チャプターとトリム
+	Tracking:	トラッキング:
+	Leading:	行送り:
+	Faux bold	疑似ボールド
+	Faux italic	疑似イタリック
+	All caps	すべて大文字
+	Small caps	小型英大文字
+	Highlight {n}:	ハイライト {n}:
+	Activated:	決定時:
+	Group {n}	グループ {n}
+	Sync Button Text and Name	ボタンのテキストと名前を同期
+	Set Name from Link	リンクから名前を設定
+	Automatically Route Buttons	ボタンのルートを自動設定
+	Up:	上:
+	Down:	下:
+	Move to Folder	フォルダーに移動
+	Project root	プロジェクトのルート
+	Add audio…	オーディオを追加…
+	Fit Slideshow to Audio Duration	スライドショーをオーディオの長さに合わせる
+	Loop Audio	オーディオをループ
+	Kerning:	カーニング:
+	Metrics	メトリクス
+	Baseline:	ベースライン:
+	Last Modified	最終更新
+	Last modified:	最終更新:
+	Chapter Playlist	チャプタープレイリスト
+	Chapter Playlists	チャプタープレイリスト
+	Chapter Playlist: {name}	チャプタープレイリスト: {name}
+	{name}: Chapter Playlist	{name}: チャプタープレイリスト
+	{name} Chapter Playlist	{name} チャプタープレイリスト
+	Master Timeline: {name}	マスタータイムライン: {name}
+	Master timeline:	マスタータイムライン:
+	Chapter playlist not found	チャプタープレイリストが見つかりません
+	The master timeline of this chapter playlist no longer exists.	このチャプタープレイリストのマスタータイムラインは存在しなくなりました。
+	Choose a chapter playlist	チャプタープレイリストを選択してください
+	Chapter #	チャプター番号
+	Chapter Name	チャプター名
+	In	イン点
+	Entry #	エントリー番号
+	(missing chapter)	(チャプターがありません)
+	Add →	追加 →
+	Add the selected chapters to the playlist in chapter order (or double-click one). Shift+click picks a range, Ctrl+click one more, Ctrl+A every chapter	選択したチャプターをチャプター順にプレイリストに追加します (ダブルクリックでも追加)。Shift+クリックで範囲を選択、Ctrl+クリックで 1 つずつ選択、Ctrl+A ですべてのチャプターを選択
+	Remove the selected entry (or double-click it)	選択したエントリーを削除します (ダブルクリックでも削除)
+	Playback:	再生:
+	Sequential	順次
+	Shuffle	シャッフル
+	New Chapter Playlist	新規チャプタープレイリスト
+	Select a timeline in the Project panel first	先にプロジェクトパネルでタイムラインを選択してください
+	Create a timeline first	先にタイムラインを作成してください
+	Entries:	エントリー:
+	(missing)	(見つかりません)
+	Timelines:	タイムライン:
+	Drag timelines, slideshows or chapter playlists here, or use ▶.	タイムライン、スライドショー、チャプタープレイリストをここにドラッグするか、▶ を使います。
+	Add an item or remove the selected one	項目を追加するか、選択した項目を削除します
+	Add an item to the playlist first	先にプレイリストに項目を追加してください
+	Toggle image display	画像の表示を切り替え
+	Toggle shape display	シェイプの表示を切り替え
+	Place the selected item in the open menu	選択した項目を開いているメニューに配置します
+	X:	X:
+	Y:	Y:
+	Order:	順序:
+	Image: {name}	画像: {name}
+	Shape: {name}	シェイプ: {name}
+	Drop an image, a timeline, a slideshow or a playlist on the menu	画像、タイムライン、スライドショー、プレイリストのどれかをメニューにドロップしてください
+	Playlist Name	プレイリスト名
+	Enter a name for the playlist:	プレイリストの名前を入力してください:
+	Untitled Playlist	名称未設定のプレイリスト
+	Convert to Button	ボタンに変換
+	Convert to Object	オブジェクトに変換
+	Specify Link…	リンクを指定…
+	Link of {n} buttons	{n} 個のボタンのリンク
+	Link of the button	ボタンのリンク
+	Select a button or an item with an end action first	先にボタンか、終了時の動作のある項目を選択してください
+	Subtitle:	字幕:
+	Remove the selected item from the library	選択した項目をライブラリから削除します
+	Could not save the library: {error}	ライブラリを保存できませんでした: {error}
+	Added {name} to the library	{name} をライブラリに追加しました
+	This link	このリンク
+	Shadow color:	シャドウの色:
+	Distance:	距離:
+	Spread:	拡散:
+	degrees	度
+	Select a text, button, image or shape first	先にテキスト、ボタン、画像、シェイプのどれかを選択してください
+	180°	180°
+	90° (Clockwise)	90° (時計回り)
+	90° (Counterclockwise)	90° (反時計回り)
+	Vertical scale:	垂直比率:
+	Horizontal scale:	水平比率:
+	Font style:	フォントスタイル:
+	Anti-aliasing	アンチエイリアス
+	Crisp	鮮明
+	Strong	強い
+	Smooth	スムーズ
+	Sharp	シャープ
+	Edit Menu Color Set…	メニューのカラーセットを編集…
+	Menu Color Set	メニューのカラーセット
+	Menu:	メニュー:
+	Color Set:	カラーセット:
+	Menu Default	メニューの既定
+	Normal Group	通常グループ
+	Highlight Group {n}	ハイライトグループ {n}
+	Selected Color	選択時の色
+	Activated Color	決定時の色
+	Use Selected Colors as Activated Colors	選択時の色を決定時の色にも使う
+	Set Menu User Operations…	メニューのユーザー操作を設定…
+	Save Menu as File…	メニューをファイルとして保存…
+	Save Menu as Template…	メニューをテンプレートとして保存…
+	Set End Action…	終了時の動作を設定…
+	Saved the menu as {path}	メニューを {path} として保存しました
+	Button Routing	ボタンのルート
+	Route Buttons Up / Down	上下のボタンのルート
+	Route Buttons Left / Right	左右のボタンのルート
+	Wrap Up / Down	上下で折り返す
+	Wrap Left / Right	左右で折り返す
+	Wrap within Same Column	同じ列内で折り返す
+	Wrap to Next Column	次の列へ折り返す
+	Wrap within Same Row	同じ行内で折り返す
+	Wrap to Next Row	次の行へ折り返す
+	Button Sync Defaults	ボタンの同期の既定値
+	Saved with this project, so every computer builds the same routes.	プロジェクトと一緒に保存されるので、どのコンピューターでも同じルートでビルドされます。
+	Kind:	種類:
+	Main	メイン
+	Button Kind	ボタンの種類
+	Create Text Subpicture	テキストサブピクチャを作成
+	Transition	トランジション
+	Played after the button is activated, before its link.	ボタンが決定されたあと、リンク先の前に再生されます。
+	Pop-up	ポップアップ
+	Set as Blu-ray Pop-up Menu	Blu-ray ポップアップメニューとして設定
+	A Blu-ray pop-up menu belongs to the timelines whose remote menu it is: it appears over the video while they play. On a DVD, and when this is off, the remote menu goes to the menu instead.	Blu-ray のポップアップメニューは、それをリモコンメニューにしているタイムラインのものです。それらの再生中にビデオの上に出ます。DVD では、またはこれがオフのときは、リモコンのメニューボタンでこのメニューに移ります。
+	(Motion tab)	(モーションタブ)
+	Background Timeline:	背景のタイムライン:
+	Background Frame:	背景のフレーム:
+	To see how the pop-up looks over the video, choose a background timeline and frame above (the viewer only).	ビデオの上でポップアップがどう見えるかは、上で背景のタイムラインとフレームを選ぶと確かめられます (ビューアーのみ)。
+	Loop #:	ループ回数:
+	Infinite	無限
+	Without an end action the menu repeats (None: it stops on the last picture).	終了時の動作がないとメニューは繰り返します (「なし」: 最後の画で止まります)。
+	Exclude Next and Previous Buttons	「次へ」「前へ」ボタンを除く
+	Loop Point:	ループポイント:
+	Show Subtitles in Monitor	モニターに字幕を表示
+	Replace Menu…	メニューを置換…
+	Import as Menu	メニューとして読み込み
+	Menu files	メニューファイル
+	Replaced the menu	メニューを置換しました
+	Replace the open menu with the selected menu, keeping its links	リンクを保ったまま、開いているメニューを選択したメニューで置換します
+	Add New Page	新規ページを追加
+	{name}: page {n}	{name}: ページ {n}
+	Show Previous Page	前のページを表示
+	Show Next Page	次のページを表示
+	Current page number: {n}	現在のページ番号: {n}
+	Page Number	ページ番号
+	Page {n}	ページ {n}
+	Menu…	メニュー…
+	Pop-up Menu…	ポップアップメニュー…
+	Menu Page…	メニューページ…
+	Import as Pop-up Menu	ポップアップメニューとして読み込み
+	Import as Menu Page	メニューページとして読み込み
+	Imported the menu	メニューを読み込みました
+	Thumbnail Grid	サムネイルグリッド
+	Video Thumbnail	ビデオのサムネイル
+	Motion Buttons	モーションボタン
+	Set menu buttons to motion buttons	メニューのボタンをモーションボタンにする
+	Export Highlights in Rich Color	ハイライトをリッチカラーで書き出す
+	When enabled, rich color highlights are exported for Blu-ray as 256-color images.	オンにすると、Blu-ray のリッチカラーのハイライトを 256 色の画像として書き出します。
+	Timeline…	タイムライン…
+	Slideshow…	スライドショー…
+	Import as Timeline	タイムラインとして読み込み
+	Import as Slideshow	スライドショーとして読み込み
+	Video files	ビデオファイル
+	Image files	画像ファイル
+	Imported as timelines	タイムラインとして読み込みました
+	Imported as a slideshow	スライドショーとして読み込みました
+	Could not create the chapter index. Link at least one chapter button of the current menu to a timeline.	チャプターインデックスを作成できませんでした。現在のメニューのチャプターボタンを少なくとも 1 つ、タイムラインにリンクしてください。
+	Blu-ray video:	Blu-ray ビデオ:
+	SD (MPEG-2)	SD (MPEG-2)
+	Playing without sound: {message}	音声なしで再生中: {message}
+	Cannot play the sound: {message}	音声を再生できません: {message}
+	Playing the sound only (the picture cannot be decoded): {message}	音声だけを再生しています (映像をデコードできません): {message}
+	The picture cannot be shown: {message}	映像を表示できません: {message}
+	Play to hear the sound.	再生すると音声が聞こえます。
+	This disc carries the video as it is, without converting it.	このディスクには、ビデオを変換せずにそのまま入れます。
+	This disc would have to convert the video, which it cannot do.	このディスクにはビデオの変換が必要ですが、変換できません。
+	Transcode Settings…	トランスコード設定…
+	Transcode Now	今すぐトランスコード
+	Transcode All	すべてトランスコード
+	Transcode	トランスコード
+	Revert to Original	オリジナルに戻す
+	Locate Transcoded File	トランスコードしたファイルの場所を表示
+	DVD…	DVD…
+	Blu-ray…	Blu-ray…
+	Interpret Footage…	素材を解釈…
+	A build or a transcode is already running	ビルドかトランスコードがすでに実行中です
+	Transcode started	トランスコードを開始しました
+	Reverted to the original	オリジナルに戻しました
+	This slide holds until the viewer presses Next or Enter	このスライドは、視聴者が「次へ」か「決定」を押すまで止まります
+	Import Chapters from Source	ソースからチャプターを読み込み
+	The source has no chapters to add	追加するチャプターがソースにありません
+	Added {n} chapter points from the source	ソースから {n} 個のチャプターポイントを追加しました
+	The picture cannot be decoded, so the video cannot be converted for this disc.	映像をデコードできないため、このディスク用にビデオを変換できません。
+	Transcode finished ({time})	トランスコードが完了しました ({time})
+	Cannot transcode: {message}	トランスコードできません: {message}
+	Transcoding {step}: {percent}% ({time})	{step} をトランスコード中: {percent}% ({time})
+	Transcoding… ({time})	トランスコード中… ({time})
+	Timeline Display Settings	タイムラインの表示設定
+	Undock Panel	パネルのドッキングを解除
+	Move Panel to Frame	パネルをフレームに移動
+	Move Frame	フレームを移動
+	Close Frame	フレームを閉じる
+	Undock Frame	フレームのドッキングを解除
+	Move Frame To	フレームの移動先
+	Close Other Panels in Frame	フレーム内の他のパネルを閉じる
+	Maximize Frame	パネルを最大化
+	Restore Frame Size	フレームのサイズを元に戻す
+	Close Panel Window	パネルウィンドウを閉じる
+	Panel Menu	パネルメニュー
+	Previous Clip	前のクリップ
+	Next Clip	次のクリップ
+	Cannot arrange the panels: {error}	パネルを配置できません: {error}
+	Too many workspaces; delete one first.	ワークスペースが多すぎます。先に 1 つ削除してください。
+	A workspace with this name is replaced.	この名前のワークスペースは置き換えられます。
+	Reset “{name}”	「{name}」をリセット
+	Display language ({code})	表示言語 ({code})
+	Audio language:	オーディオの言語:
+	Subtitle language:	字幕の言語:
+	Still duration:	静止画の長さ:
+	Subtitle duration:	字幕の長さ:
+	The slide duration of new slideshows.	新規スライドショーのスライドの長さです。
+	The length of a subtitle added in the Monitor.	モニターで追加される字幕の長さです。
+	The language of new tracks (a code such as ja or en). Empty uses the disc's audio language.	新しいトラックの言語です (ja や en などのコード)。空欄のときはディスクのオーディオの言語を使います。
+	Not found	見つかりません
+	Remove from List	リストから削除
+	Audio: Dolby Digital (AC-3) 192 kbps stereo (AC-3 and WAV sources are kept)	オーディオ: Dolby Digital (AC-3) 192 kbps ステレオ (AC-3 と WAV のソースはそのまま)
+	Audio Track	オーディオトラック
+	Close the preview and go back to where you were	プレビューを閉じて元の場所に戻ります
+	Close the preview and open what it shows	プレビューを閉じて、表示しているものを開きます
+	Enter a chapter number	チャプター番号を入力してください
+	Exit Here	ここで終了
+	Exit and Return	終了して戻る
+	Go to Chapter	チャプターへ移動
+	Paused {time}	一時停止中 {time}
+	Project Preview	プロジェクトプレビュー
+	Run the End Action	終了時の動作を実行
+	Stopped. Press Play to start again.	停止しました。再生を押すともう一度再生します。
+	Subtitle Track	字幕トラック
+	Title {n}	タイトル {n}
+	Play / Stop (Space)	再生 / 停止 (Space)
+	Previous Frame (Left Arrow)	前のフレーム (左矢印)
+	Next Frame (Right Arrow)	次のフレーム (右矢印)
+	Auto Layout All	すべて自動レイアウト
+	Auto Layout	自動レイアウト
+	{name} (sound)	{name} (音声)
+	Import an audio file or a video with sound first.	先にオーディオファイルか、音声付きのビデオを読み込んでください。
+	Preparing…	準備中…
+	Writing the disc image	ディスクイメージを書き出し中
+	Transcoding {name}	{name} をトランスコード中
+	Building: {step} {percent}% ({time})	ビルド中: {step} {percent}% ({time})
+	Elapsed: {time}	経過時間: {time}
+	Pop-up Menu	ポップアップメニュー
+	Project Preview (Blu-ray)	プロジェクトプレビュー (Blu-ray)
+	frame {frame} · {ms} ms	フレーム {frame} · {ms} ms
+	Layer Break	レイヤーブレーク
+	Used for a dual-layer disc (8.5 GB).	2 層ディスク (8.5 GB) で使います。
+	Manual	手動
+	The build breaks at the first cell boundary past the middle of the image.	ビルドは、イメージの中央を過ぎた最初のセルの境界で区切ります。
+	Time:	時間:
+	A timecode, a frame number (45f) or milliseconds (1501.5ms)	タイムコード、フレーム番号 (45f) またはミリ秒 (1501.5ms)
+	Playhead	再生ヘッド
+	Set the break at the timeline's playhead	ブレークをタイムラインの再生ヘッドの位置にします
+	The build starts a cell (not a chapter) at this frame. Layer 0 must be at least as large as layer 1.	ビルドはこのフレームから (チャプターではなく) セルを始めます。レイヤー 0 はレイヤー 1 以上の大きさが必要です。
+	Enter a timecode, a frame number (45f) or milliseconds (1501.5ms)	タイムコード、フレーム番号 (45f) またはミリ秒 (1501.5ms) を入力してください
+	A folder has no layer break: build an image to check it.	フォルダーにはレイヤーブレークがありません。確かめるにはイメージをビルドしてください。
+	Layer break at sector {sector} ({mode}): layer 0 {layer0} / layer 1 {layer1} sectors	セクター {sector} ({mode}) のレイヤーブレーク: レイヤー 0 {layer0} / レイヤー 1 {layer1} セクター
+	manual	手動
+	automatic	自動
+	Title {title}, cell {cell}: frame {frame} ({ms} ms)	タイトル {title}、セル {cell}: フレーム {frame} ({ms} ms)
+	The break is not at the start of a cell.	ブレークがセルの開始位置ではありません。
+	As set.	設定どおりです。
+	Not where it was set (frame {frame}).	設定した位置にありません (フレーム {frame})。
+	Move Tool	移動ツール
+	Direct Select Tool	直接選択ツール
+	Rotate Tool	回転ツール
+	Vertical Text Tool	縦書きテキストツール
+	Buttons overlap: fix them before building a DVD (Check Project)	ボタンが重なっています。DVD をビルドする前に直してください (プロジェクトをチェック)
+	No files DiscCraft can import were dropped	DiscCraft で読み込めるファイルはドロップされませんでした
+	Imported {count} files	{count} 個のファイルを読み込みました
+	Drop to import {count} items into the project	ドロップすると {count} 個の項目をプロジェクトに読み込みます
+	Drop audio, a video with sound or subtitles onto a timeline	オーディオ、音声付きのビデオ、字幕をタイムラインにドロップします
+	Added an audio track	オーディオトラックを追加しました
+	Added a subtitle track	字幕トラックを追加しました
+	Subpicture	サブピクチャ
+	Layer {state}	レイヤー: {state}
+	shown	表示
+	hidden	非表示
+	unlocked	ロック解除
+	locked	ロック
+	Show / Hide Safe Areas	セーフエリアの表示 / 非表示
+	Previous Subtitle	前の字幕
+	Next Subtitle	次の字幕
+	Trim Subtitle In Point to Here	字幕のイン点をここまでトリム
+	Trim Subtitle Out Point to Here	字幕のアウト点をここまでトリム
+	Add Subtitle	字幕を追加
+	Type the subtitle	字幕を入力してください
+	Double-click to change the subtitle's text	ダブルクリックで字幕のテキストを変更します
+	Text Script	テキストスクリプト
+	Ignore and Continue	無視して続行
+	The project has problems, so the disc may not play correctly. Do you want to look at them?	プロジェクトに問題があり、ディスクが正しく再生されないことがあります。問題を確認しますか？
+	The destination path is not valid.	書き出し先のパスが無効です。
+	Added a video clip	ビデオクリップを追加しました
+	Clear Video Clip	ビデオクリップをクリア
+	Create Subtitle	字幕を作成
+	Create a subtitle that matches the slide	スライドに合わせた字幕を作成します
+	Hear This Track in Monitor	このトラックをモニターで聞く
+	The link is not set.	リンクが設定されていません。
+	The end action is not set.	終了時の動作が設定されていません。
+	Orphaned timeline	孤立したタイムライン
+	Orphaned menu	孤立したメニュー
+	{count} errors	{count} 個のエラー
+	Include:	含めるもの:
+	Vertical Alignment:	垂直方向の配置:
+	Thin	細い
+	Thick	太い
+	Timeline Default	タイムラインの既定
+	Fill, stroke and anti-alias colors with their opacity	塗り、線、アンチエイリアスの色と不透明度
+	Create anti-alias color from fill and stroke	塗りと線からアンチエイリアスの色を作成
+	Reset to Default	既定値に戻す
+	FilmCraft Project	FilmCraft プロジェクト
+	The FilmCraft project has no sequences.	FilmCraft プロジェクトにシーケンスがありません。
+	Import FilmCraft Markers	FilmCraft のマーカーを読み込み
+	Import FilmCraft Markers…	FilmCraft のマーカーを読み込み…
+	Sequence:	シーケンス:
+	{name} ({chapters} chapter markers, {markers} markers)	{name} ({chapters} 個のチャプターマーカー、{markers} 個のマーカー)
+	Chapter markers only	チャプターマーカーのみ
+	All markers	すべてのマーカー
+	Added {added} chapters from FilmCraft markers ({skipped} left out)	FilmCraft のマーカーから {added} 個のチャプターを追加しました ({skipped} 個は除外)
+	FilmCraft is still exporting.	FilmCraft はまだ書き出し中です。
+	FilmCraft (filmcraft-cli) was not found.	FilmCraft (filmcraft-cli) が見つかりませんでした。
+	FilmCraft is exporting {name}…	FilmCraft で {name} を書き出しています…
+	Made timeline {name} from FilmCraft ({added} chapters)	FilmCraft からタイムライン {name} を作成しました ({added} 個のチャプター)
+	New Timeline from FilmCraft Sequence	FilmCraft のシーケンスから新規タイムライン
+	New Timeline from FilmCraft Sequence…	FilmCraft のシーケンスから新規タイムライン…
+	Composition:	コンポジション:
+	Active in the Project ({name})	プロジェクト内で使用中 ({name})
+	Active in the Project	プロジェクト内で使用中
+	First Play is not set.	ファーストプレイが設定されていません。
+	The menu has no buttons.	メニューにボタンがありません。
+	Buttons overlap.	ボタンが重なっています。
+	The button lies outside the frame.	ボタンがフレームの外にあります。
+	The default button does not exist.	既定のボタンが存在しません。
+	There are too many buttons.	ボタンの数が多すぎます。
+	The 16:9 menu has more than 18 buttons, so on a 4:3 television the highlights are not on the buttons.	16:9 のメニューに 18 を超えるボタンがあるため、4:3 のテレビではハイライトがボタンに表示されません。
+	A layer lies outside the frame.	レイヤーがフレームの外にあります。
+	The slideshow has no slides.	スライドショーにスライドがありません。
+	The playlist has no items.	プレイリストに項目がありません。
+	The chapter playlist has no entries.	チャプタープレイリストにエントリーがありません。
+	The file is offline.	ファイルがオフラインです。
+	There are more than 99 chapters.	チャプターが 99 を超えています。
+	There are more than 8 audio tracks.	オーディオトラックが 8 を超えています。
+	There are more than 32 subtitle tracks.	字幕トラックが 32 を超えています。
+	The first chapter is not at the start.	最初のチャプターが開始位置にありません。
+	The chapters are out of order.	チャプターの順序が正しくありません。
+	Timeline Bitrate Too High	タイムラインのビットレートが高すぎます
+	Subtitle Text Overflow	字幕テキストのオーバーフロー
+	The timeline's bit rate is too high.	タイムラインのビットレートが高すぎます。
+	Subtitle text does not fit.	字幕テキストが収まりません。
+	Subtitle overflow: subtitle track {n}, {a} to {b}	字幕のオーバーフロー: 字幕トラック {n}、{a}〜{b}
+	Subtitle overflow: slide {n}	字幕のオーバーフロー: スライド {n}
+	Subtitle Spacing	字幕の間隔
+	Playback Type	再生の種類
+	Open in Menu Viewer	メニュービューアーで開く
+	Open Link	リンクを開く
+	Chapter In	チャプターのイン点
+	Playback quality:	再生の画質:
+	Preview playback quality:	プレビューの再生の画質:
+	How large the Monitor plays a title's pictures: High at full size, Draft at half, Automatic at half only for HD larger than 1280 × 720.	モニターでタイトルの映像を再生する大きさです。「高」は実寸、「ドラフト」は半分、「自動」は 1280 × 720 より大きい HD のときだけ半分です。
+	On a DVD, random and shuffle play pick from the first 64 entries only.	DVD では、ランダム再生とシャッフル再生は先頭の 64 エントリーからだけ選びます。
+	Subtitles are less than 5 frames apart: subtitle track {n}, {a} to {b}	字幕の間隔が 5 フレーム未満です: 字幕トラック {n}、{a}〜{b}
+	Subtitles are less than 5 frames apart.	字幕の間隔が 5 フレーム未満です。
+	Subtitle Clip	字幕クリップ
+	Track Setting (Group {n})	トラック設定 (グループ {n})
+	Extra Thick	極太
+	Subtitle Color Set	字幕のカラーセット
+	Justify:	行揃え:
+	Parental level:	ペアレンタルレベル:
+	A player set to a lower level asks for its password before the disc plays	低いレベルに設定したプレーヤーは、ディスクの再生前にパスワードを求めます
+	Transcode Settings	トランスコード設定
+	The build chooses the bit rate that fits the titles to the disc	ビルドは、タイトルがディスクに収まるビットレートを選びます
+	Video bit rate:	ビデオビットレート:
+	A video that goes on the disc as it is is not transcoded, whatever is set here. A DVD's video stops at what its sound leaves it.	ディスクにそのまま入れるビデオは、ここでの設定にかかわらずトランスコードしません。DVD のビデオは、音声の分を除いたレートが上限です。
+	Interpret Footage	素材を解釈
+	Pixel Aspect Ratio	ピクセル縦横比
+	Use the asset's pixel aspect ratio:	アセットのピクセル縦横比を使用:
+	Specify pixel aspect ratio:	ピクセル縦横比を指定:
+	Ignore alpha channel	アルファチャンネルを無視
+	Square Pixels (1.0)	正方形ピクセル (1.0)
+	D1/DV NTSC Widescreen 16:9 (1.2121)	D1/DV NTSC ワイドスクリーン 16:9 (1.2121)
+	D1/DV PAL Widescreen 16:9 (1.4587)	D1/DV PAL ワイドスクリーン 16:9 (1.4587)
+	Anamorphic 2:1 (2.0)	アナモルフィック 2:1 (2.0)
+	HD Anamorphic 1080 (1.333)	HD アナモルフィック 1080 (1.333)
+	Chapter index: {n} pages	チャプターインデックス: {n} ページ
+	Create Subpicture	サブピクチャを作成
+	Subpictures created: {n}	作成したサブピクチャ: {n}
+	TV mode:	テレビの表示モード:
+	4:3 Letterbox	4:3 レターボックス
+	16:9 Widescreen	16:9 ワイドスクリーン
+	Player region code:	プレーヤーのリージョンコード:
+	Player parental level:	プレーヤーのペアレンタルレベル:
+	The player the previews stand for. A disc that is not for its region, or whose parental level is above the player's, does not play.	プレビューが想定するプレーヤーです。リージョンが合わないディスクや、ペアレンタルレベルがプレーヤーより高いディスクは再生されません。
+	The disc does not play in region {n} (Preferences ▸ Preview sets the player's region)	このディスクはリージョン {n} では再生されません (プレーヤーのリージョンは 環境設定 ▸ プレビュー で設定します)
+	The disc's parental level ({disc}) is above the player's ({player}): it does not play	ディスクのペアレンタルレベル ({disc}) がプレーヤー ({player}) より高いため、再生されません
+	Audio/Video Output	オーディオ/ビデオ出力
+	Memory	メモリー
+	Audio output device:	オーディオ出力デバイス:
+	System default	システムの既定
+	Where playback in the Monitor and the previews sounds, from the next time it starts. A device that is no longer there gives way to the system's default.	モニターとプレビューの音を出すところです。次に再生を始めたときから使います。なくなったデバイスはシステムの既定に替わります。
+	Library Content	ライブラリの内容
+	Media Cache Database	メディアキャッシュデータベース
+	Clean	クリーンアップ
+	Forgets the lengths, sizes and thumbnails remembered of media files; they are read again when needed	メディアファイルについて覚えている長さ、大きさ、サムネイルを消去します。必要なときにまた読み込みます
+	Media cache cleaned: {n} files	メディアキャッシュをクリーンアップしました: {n} 個のファイル
+	Installed RAM:	搭載メモリー:
+	Transcodes at a time:	同時にトランスコードする数:
+	Automatic ({n})	自動 ({n})
+	A build and Transcode Now convert several titles at once, one for every processor core. Each takes memory of its own: choose fewer to leave more for other applications.	ビルドと「今すぐトランスコード」は、プロセッサーのコア 1 つに 1 つずつ、いくつものタイトルを同時に変換します。それぞれがメモリーを使うので、ほかのアプリケーションにメモリーを残すには少なくしてください。
+	Progress	進行状況
+	Nothing is being transcoded	トランスコード中の項目はありません
+	No media is being read	読み取り中のメディアはありません
+	Reading {n} media files	{n} 個のメディアファイルを読み取り中
+	Select a text or a button in the Menu Viewer to set its characters	メニュービューアーでテキストかボタンを選ぶと、その文字を設定できます
+	Stops the transcodes of the build or of Transcode Now; what is already transcoded is kept	ビルドか「今すぐトランスコード」のトランスコードを止めます。トランスコードが終わった分は残ります
+	Stopping…	停止中…
+	Build stopped	ビルドを停止しました
+	Build Failed	ビルドに失敗しました
+	The build stopped with this error. What was already transcoded stays for the next build.	このエラーでビルドが止まりました。トランスコードが済んだ分は次のビルドのために残ります。
+	Transcode stopped	トランスコードを停止しました
+	Reads the file's metadata again	ファイルのメタデータを読み直します
+	From the sidecar file {name}	サイドカーファイル {name} から
+	Dublin Core	Dublin Core
+	Rights Management	権利管理
+	Media Management	メディア管理
+	Basic Job Ticket	基本ジョブチケット
+	Paged-Text	ページテキスト
+	Dynamic Media	動的メディア
+	EXIF (additional)	EXIF (追加)
+	Select a text or buttons in the Menu Viewer to apply a style	スタイルを適用するには、メニュービューアーでテキストかボタンを選択してください
+	Select one text, button, image or shape to make a style of its look	テキスト、ボタン、画像、シェイプを 1 つ選ぶと、その見た目からスタイルを作れます
+	The set holds at most {n} styles	1 つのセットに入るスタイルは {n} 個までです
+	Style {n}	スタイル {n}
+	No styles yet: select a text, button, image or shape and choose New	スタイルはまだありません。テキスト、ボタン、画像、シェイプのどれかを選び、「新規」を選んでください
+	Puts the style on the selected text, the text of the selected buttons, or the selected image or shape	選択したテキスト、選択したボタンのテキスト、選択した画像かシェイプにスタイルを付けます
+	Keeps the look of the selected text, button, image or shape as a style of the User set	選択したテキスト、ボタン、画像、シェイプの見た目を「ユーザー」セットのスタイルとして保存します
+	Plain	プレーン
+	Bold White	白の太字
+	Title with Shadow	影付きのタイトル
+	Wide Capitals	字間の広い大文字
+	Red Emphasis	赤の強調
+	Quiet Grey	落ち着いたグレー
+	Tsume:	詰め:
+	Mojikumi:	文字組み:
+	Takes this much of the blank around Japanese characters out	日本語の文字の周りの空きを、この分だけ詰めます
+	Half-width punctuation	半角句読点
+	Half-width punctuation at line ends	行末の半角句読点
+	Full-width punctuation at line ends	行末の全角句読点
+	Full-width punctuation	全角句読点
+	Video Output	ビデオ出力
+	Video output turned off	ビデオ出力をオフにしました
+	A window of its own	専用のウィンドウ
+	Display {n}: {w} x {h}	ディスプレイ {n}: {w} x {h}
+	Display {n} (not connected)	ディスプレイ {n} (未接続)
+	Video output:	ビデオ出力:
+	Disable video output when in the background	バックグラウンド時はビデオ出力を無効にする
+	The picture of the title the Monitor or a preview plays, shown full screen on another display or in a window of its own. Esc in that window turns it off.	モニターやプレビューで再生しているタイトルの映像を、別のディスプレイの全画面か専用のウィンドウに表示します。そのウィンドウで Esc を押すとオフになります。
+	Wrap:	折り返し:
+	At a width	幅を指定
+	Paragraph text: the lines wrap at this width (a vertical text's columns at this height). Dragging with a text tool draws such a box	段落テキスト: この幅で行が折り返します (縦書きのテキストでは、この高さで列が折り返します)。テキストツールでドラッグすると、この枠を描きます
+	Kinsoku:	禁則処理:
+	Strong kinsoku	強い禁則
+	Weak kinsoku	弱い禁則
+	Where the lines of a text that wraps at a width may not break	幅で折り返すテキストで、行を分けられない場所
+	Ripple Delete	リップル削除
+	Removes the clip and moves the clips after it up into its place	クリップを削除し、後ろのクリップを詰めます
+	Add Audio Clip Here	ここにオーディオクリップを追加
+	(no audio assets)	(オーディオアセットなし)
+	Clear Audio Clip	オーディオクリップをクリア
+	Sound Stream	音声ストリーム
+	Stream {n}	ストリーム {n}
+	Select DVD-ROM Folder…	DVD-ROM フォルダーを選択…
+	Set Timeline User Operations…	タイムラインのユーザー操作を設定…
+	Save Frame as File…	フレームをファイルとして保存…
+	Render	レンダリング
+	A timeline's only clip cannot be removed	タイムラインに 1 つしかないクリップは削除できません
+	Saved the frame: {path}	フレームを保存しました: {path}
+	Update Markers from Source (Replace All Markers)	ソースからマーカーを更新 (すべてのマーカーを置換)
+	Edit Timeline Color Set…	タイムラインのカラーセットを編集…
+	Replaced the chapter points with {n} from the source	チャプターポイントを、ソースの {n} 個に置き換えました
+	The timeline's color sets are in its Properties	タイムラインのカラーセットは、そのプロパティにあります
+	Edit Quality Presets…	画質プリセットを編集…
+	Edit Quality Presets	画質プリセットを編集
+	No presets yet	プリセットがありません
+	New Preset	新規プリセット
+	Preset {n}	プリセット {n}
+	Added page {n}. The pages are listed under the menu in the Menus panel; the arrows under the viewer go from page to page.	ページ {n} を追加しました。ページはメニューパネルのメニューの下に並び、ビューアーの下の矢印でページを移れます。
+	Move Track to View	トラックを見える位置に移動
+	Timeline Color Set	タイムラインのカラーセット
+	Motion Menu	モーションメニュー
+	Import Subtitles	字幕を読み込み
+	Subtitles in the Video	ビデオ内の字幕
+	The video has no subtitles to take	ビデオに取り出せる字幕がありません
+	Added {n} subtitle tracks from the video	ビデオから {n} 個の字幕トラックを追加しました
+	Text Script…	テキストスクリプト…
+	FAB Image Script…	FAB 画像スクリプト…
+	Image Script…	画像スクリプト…
+	FAB Image Script	FAB 画像スクリプト
+	Image Script	画像スクリプト
+	Folder of the Pictures	画像のフォルダー
+	Map Colors	色の対応付け
+	{file}: {n} subtitles	{file}: {n} 個の字幕
+	{n} pictures are not found, such as {path}	{path} など、{n} 個の画像が見つかりません
+	Click the picture to pick the colour of the chosen item.	画像をクリックすると、選んだ項目の色を拾います。
+	Fill / Color 1	塗り / カラー 1
+	Outline / Color 2	輪郭 / カラー 2
+	The group's fill	グループの塗り
+	The group's stroke	グループの線
+	Any other colour in the pictures is transparent.	画像のほかの色は透明になります。
+	Timecode:	タイムコード:
+	The offset is not a timecode.	オフセットがタイムコードではありません。
+	Picture:	画像:
+	Locate Transcoded File for DVD…	DVD 用のトランスコードしたファイルを指定…
+	Locate Transcoded File for Blu-ray…	Blu-ray 用のトランスコードしたファイルを指定…
+	Transcoded Video for DVD	DVD 用のトランスコードしたビデオ
+	Transcoded Video for Blu-ray	Blu-ray 用のトランスコードしたビデオ
+	Its Sound (Cancel: None)	その音声 (キャンセル: なし)
+	Located the transcoded file: {file}	トランスコードしたファイルを指定しました: {file}
+	Sound	音声
+	Convert to Replacement Layer	置換レイヤーに変換
+	Paste as Subpicture	サブピクチャとして貼り付け
+	Copied the layer: select a button and choose Paste as Subpicture	レイヤーをコピーしました。ボタンを選び、「サブピクチャとして貼り付け」を選んでください
+	Copy a layer and select one button first	先にレイヤーをコピーし、ボタンを 1 つ選択してください
+	Pasted as the button's subpicture	ボタンのサブピクチャとして貼り付けました
+	Added an audio clip	オーディオクリップを追加しました
+	A menu from the Library is made with New Menu or Replace Menu	ライブラリのメニューは「新規メニュー」か「メニューを置換」で作ります
+	4:3 Pan & Scan	4:3 パン&スキャン
+	The disc's size, in gibibytes (1 GiB = 1,073,741,824 bytes)	ディスクの大きさ (GiB。1 GiB = 1,073,741,824 バイト)
+	Custom size:	カスタムサイズ:
+	Kinsoku method:	禁則処理方法:
+	Push In First	追い込み優先
+	Push Out First	追い出し優先
+	Push Out Only	追い出しのみ
+	How a character that may not start a line is kept off it: taken into the line above, or the character before it taken down	行頭に置けない文字を行頭から外す方法: 前の行に入れるか、その前の文字を次の行に送るか
+	Hanging punctuation	ぶら下がり句読点
+	A full-width comma or full stop that does not fit hangs past the end of the line	入りきらない全角の読点や句点は、行末の外にぶら下げます
+	Justify last left	最終行左揃えの両端揃え
+	Box height	ボックスの高さ
+	The lines past this height are not drawn (a vertical text: the columns past this width)	この高さを超える行は描きません (縦書きのテキストでは、この幅を超える列)
+	Some of the text does not fit in the box	テキストの一部がボックスに収まりません
+	Snap subtitle clips	字幕クリップをスナップ
+	A subtitle clip dragged in a timeline snaps to the edges of the subtitle clips, the chapter points and the playhead near it.	タイムラインでドラッグした字幕クリップは、近くの字幕クリップの端、チャプターポイント、再生ヘッドにスナップします。
+	VBR, 2 Pass	VBR、2 パス
+	CBR, 1 Pass	CBR、1 パス
+	VBR, 1 Pass	VBR、1 パス
+	Encoding:	エンコーディング:
+	VBR 2 Pass measures the whole video first and gives hard scenes more of the bits (it takes twice as long). CBR keeps the rate at the bit rate. For a DVD's video.	VBR 2 パスはまずビデオ全体を調べ、難しい場面に多くのビットを割り当てます (時間は 2 倍かかります)。CBR はビットレートを一定に保ちます。DVD のビデオ用です。
+	Named video bit rates and encodings, offered in Transcode Settings. They are kept with DiscCraft's settings, for every project.	トランスコード設定で選べる、名前を付けたビデオのビットレートとエンコーディングです。DiscCraft の設定に保存し、どのプロジェクトでも使えます。
+	Toggle text item display	テキスト項目の表示を切り替え
+	Save the open menu (or its selected button, text, image or shape) to the User set of the library	開いているメニュー (または選択中のボタン、テキスト、画像、シェイプ) をライブラリの「ユーザー」セットに保存
+	New Set…	新規セット…
+	Rename Set…	セットの名前を変更…
+	Delete Set	セットを削除
+	Its items move to the User set	その項目は「ユーザー」セットに移ります
+	Set deleted; {n} items moved to the User set	セットを削除しました。{n} 個の項目を「ユーザー」セットに移しました
+	New Set	新規セット
+	Rename Set	セットの名前を変更
+	A set needs a name	セットには名前が必要です
+	There is already a set named {name}	「{name}」という名前のセットがすでにあります
+	Dolby Digital	Dolby Digital
+	PCM	PCM
+	What the video's own sound is made on a DVD: Dolby Digital (192 kbit/s), or PCM as it is converted (1.536 Mbit/s, leaving the video less of the disc)	DVD でのビデオの音声: Dolby Digital (192 kbit/s) か、変換したままの PCM (1.536 Mbit/s。ビデオに使えるディスクの容量が減ります)
+	DVD Transcode Audio:	DVD のトランスコードのオーディオ:
+	DVD Transcode	DVD のトランスコード
+	Blu-ray Transcode	Blu-ray のトランスコード
+	Quality Preset:	画質プリセット:
+	Codec:	コーデック:
+	Frame Rate:	フレームレート:
+	Field:	フィールド:
+	Odd Field First	奇数フィールド優先
+	No Fields (Progressive Scan)	フィールドなし (プログレッシブスキャン)
+	Automatic: {format}	自動: {format}
+	The project's Blu-ray format, the same for every asset (Transcode Defaults…)	プロジェクトの Blu-ray の形式で、どのアセットでも同じです (トランスコードの既定値…)
+	Transcode Defaults…	トランスコードの既定値…
+	The project's settings: its TV standard and Blu-ray format	プロジェクトの設定: テレビ方式と Blu-ray の形式
+	Use Maximum Render Quality	最高レンダリング画質を使用する
+	Use Frame Blending	フレームブレンドを使用
+	Scaling down averages the pixels each new one covers (fine detail does not shimmer); scaling up blends between pixel centres. Slower	縮小では、新しい 1 ピクセルが覆うピクセルを平均します (細かい部分がちらつきません)。拡大ではピクセルの中心の間を補間します。時間がかかります
+	When the disc's frame rate differs from the video's, a picture that falls between two frames mixes them instead of repeating one	ディスクのフレームレートがビデオと違うとき、2 つのフレームの間に来る絵は、どちらかを繰り返さずに 2 つを混ぜます
+	This video goes on the disc as it is: it is not transcoded	このビデオはそのままディスクに入ります。トランスコードはしません
+	DVD Transcode:	DVD のトランスコード:
+	Blu-ray Transcode:	Blu-ray のトランスコード:
+	Nothing is selected: these are the characters of the next text typed	何も選択されていません。次に入力するテキストの文字の設定です
+	The next text typed gets the default characters	次に入力するテキストは既定の文字の設定になります
+	How far apart the baselines of the lines are; Automatic: 120 % of the size	行のベースラインの間隔です。自動: サイズの 120 %
+	Extra leading from an older project: choosing a leading takes it away	以前のプロジェクトから引き継いだ追加の行送りです。行送りを選ぶとなくなります
+	Field type:	フィールドの種類:
+	Even Field First	偶数フィールド優先
+	SD NTSC (0.9091)	SD NTSC (0.9091)
+	SD PAL (1.0940)	SD PAL (1.0940)
+	Use Project Settings	プロジェクト設定を使用
+	The project's Blu-ray video is SD: an asset's own format is chosen on an HD Blu-ray (Transcode Defaults…)	プロジェクトの Blu-ray のビデオは SD です。アセットごとの形式は HD の Blu-ray で選びます (トランスコードの既定値…)
+	Quality 	画質 
+	How hard the encoder looks for movement, 1 to 5: lower is faster, and the picture is a little worse at the same bit rate	エンコーダーが動きを探す細かさ (1〜5)。低いほど速く、同じビットレートでは画質が少し下がります
+	Peak 	ピーク 
+	The highest rate a moment of the video may take	ビデオがある瞬間に取れる最高のレート
+	Toggle layer set display	レイヤーセットの表示を切り替え
+	Toggle replacement layer display	置換レイヤーの表示を切り替え
+	Layer Set	レイヤーセット
+	Replacement Layer	置換レイヤー
+	Delete Item	項目を削除
+	Click: this kind only (again: every kind). Ctrl+click: add or remove it.	クリック: この種類だけ (もう一度: すべての種類)。Ctrl+クリック: 加えるか外す。
+	Title Band	タイトルの帯
+	Bottom Band	下の帯
+	Thin Frame	細い枠
+	Side Panel	横のパネル
+	Photo 4:3	写真 4:3
+	Photo 16:9	写真 16:9
+	Round Photo	丸い写真
+	Add the Menu's Layers as a Layer Set	メニューのレイヤーをレイヤーセットとして追加
+	The menu has no image or shape layers	メニューに画像やシェイプのレイヤーがありません
+	{name} Layers	{name} のレイヤー
+	Layer Effects	レイヤー効果
+	Layer Effects…	レイヤー効果…
+	Effects:	効果:
+	Outer Glow	光彩 (外側)
+	Inner Glow	光彩 (内側)
+	Bevel	ベベル
+	Color Overlay	カラーオーバーレイ
+	Shadow:	シャドウ:
+	No Effects	効果なし
+	White Edge	白い縁
+	Dark Edge	暗い縁
+	Soft Glow	柔らかい光彩
+	Raised	浮き出し
+	Raised with Shadow	影付きの浮き出し
+	Gold	ゴールド
+	Inner Light	内側の光
+	Toggle image style display	画像スタイルの表示を切り替え
+	Toggle text style display	テキストスタイルの表示を切り替え
+	Toggle shape style display	シェイプスタイルの表示を切り替え
+	Select an image or a shape in the Menu Viewer to apply this style	このスタイルを適用するには、メニュービューアーで画像またはシェイプを選択してください
+	If Not Allowed:	許可されないとき:
+	What plays in the title's place on a player below its parental level (not set: it stops)	ペアレンタルレベルがそれより低いプレーヤーで、タイトルの代わりに再生するもの (未設定: 停止します)
+	Set a parental level first	先にペアレンタルレベルを設定してください
+	Parental Alternative:	ペアレンタルの代替:
+	The video a player set below the level plays in this chapter's place (a DVD parental block)	レベルより低く設定したプレーヤーが、このチャプターの代わりに再生するビデオ (DVD のペアレンタルブロック)
+	For Levels Below:	これより低いレベル:
+	Players set below this parental level play the alternative; players at it or above, and players with no level set, play the chapter	このペアレンタルレベルより低く設定したプレーヤーは代わりのビデオを、それ以上のプレーヤーとレベルを設定していないプレーヤーはチャプターを再生します
+	Choose an alternative video first	先に代わりのビデオを選択してください
+	Disc's ({level})	ディスクの設定 ({level})
+	Disc's (none)	ディスクの設定 (なし)
+	A player set to a lower level asks for its password before the title plays	低いレベルに設定したプレーヤーは、タイトルの再生前にパスワードを求めます
+	Not H.264 (nor HD MPEG-2 that fits the format)	H.264 でない (形式に合う HD の MPEG-2 でもない)
+	H.264 profile {profile}: a Blu-ray takes Main or High	H.264 のプロファイル {profile}: Blu-ray は Main か High
+	Not 4:2:0 at 8 bits (10-bit or 4:2:2)	8 ビットの 4:2:0 でない (10 ビットか 4:2:2)
+	H.264 level {level}: a Blu-ray takes up to 4.1	H.264 のレベル {level}: Blu-ray は 4.1 まで
+	{width} x {height}: not the Blu-ray video's size	{width} x {height}: Blu-ray のビデオの大きさではありません
+	Interlaced, and the Blu-ray video is progressive	インターレースですが、Blu-ray のビデオはプログレッシブです
+	Progressive, and the Blu-ray video is interlaced	プログレッシブですが、Blu-ray のビデオはインターレースです
+	{rate} fps: not the Blu-ray video's frame rate	{rate} fps: Blu-ray のビデオのフレームレートではありません
+	{rate} Mbps on average: a Blu-ray takes up to 40	平均 {rate} Mbps: Blu-ray は 40 まで
+	Changed in Transcode Settings…	変更する場所: トランスコード設定…
+	Characters:	文字:
+	{start} to {end} (selected in the text)	{start}〜{end} (テキストで選択中)
+	Whole text	テキスト全体
+	Set the size, colour, font and style of the whole text instead	代わりにテキスト全体のサイズ、色、フォント、スタイルを設定します
+	Blu-ray codec:	Blu-ray コーデック:
+	Automatic (MPEG-2 for SD and 1080i)	自動 (SD と 1080i は MPEG-2)
+	H.264 (every format)	H.264 (すべての形式)
+	MPEG-2 (every format)	MPEG-2 (すべての形式)
+	SD titles are made on an SD Blu-ray (the project's Blu-ray video, Transcode Defaults…)	SD のタイトルは SD の Blu-ray で作ります (プロジェクトの Blu-ray のビデオ、トランスコードの既定値…)
+	HD titles are made on an HD Blu-ray (the project's Blu-ray video, Transcode Defaults…)	HD のタイトルは HD の Blu-ray で作ります (プロジェクトの Blu-ray のビデオ、トランスコードの既定値…)
+	An SD Blu-ray's titles all take the project's codec (Transcode Defaults…)	SD の Blu-ray のタイトルは、すべてプロジェクトのコーデックになります (トランスコードの既定値…)
+	A DVD preset is an SD Blu-ray's in MPEG-2 (Transcode Defaults…)	DVD のプリセットは MPEG-2 の SD の Blu-ray のものです (トランスコードの既定値…)
+	Film shown by 3:2 pulldown is a DVD's	3:2 プルダウンで見せるフィルムは DVD のものです
+	The project's Blu-ray format and codec, at the rate that fits the disc	ディスクに収まるレートでの、プロジェクトの Blu-ray の形式とコーデック
+	Use the hardware encoder for HD H.264	HD の H.264 にハードウェアエンコーダーを使う
+	This computer has no hardware H.264 encoder	このコンピューターにはハードウェア H.264 エンコーダーがありません
+	{name}: the Blu-ray's 1080p and 720p H.264 in one pass (VBR or CBR), several times as fast. 1080i, standard definition and two-pass encodes stay on the processor, as does a video the encoder fails on.	{name}: Blu-ray の 1080p と 720p の H.264 を 1 パス (VBR か CBR) で、何倍も速く作ります。1080i、標準画質、2 パスのエンコードはプロセッサーで行い、エンコーダーが失敗したビデオもプロセッサーで作ります。
+	No hardware H.264 encoder was found.	ハードウェア H.264 エンコーダーが見つかりませんでした。
+	Rejected	不採用
+	Separate several with ;	; で区切って複数を指定します
+	Wrote the metadata into the file	メタデータをファイルに書き込みました
+	Wrote the metadata to the sidecar {name}	メタデータをサイドカー {name} に書き込みました
+xmp	Dublin Core	Dublin Core
+xmp:dc	Contributor	寄稿者
+xmp:dc	Coverage	範囲
+xmp:dc	Creator	作成者
+xmp:dc	Date	日付
+xmp:dc	Description	説明
+xmp:dc	Format	形式
+xmp:dc	Identifier	識別子
+xmp:dc	Publisher	発行者
+xmp:dc	Relation	関連
+xmp:dc	Rights	権利
+xmp:dc	Source	ソース
+xmp:dc	Subject	主題
+xmp:dc	Title	タイトル
+xmp:dc	Type	種類
+xmp	Basic	基本
+xmp:xmp	Advisory	アドバイザリー
+xmp:xmp	Base URL	ベース URL
+xmp:xmp	Create Date	作成日
+xmp:xmp	Creator Tool	作成ツール
+xmp:xmp	Identifier	識別子
+xmp:xmp	Label	ラベル
+xmp:xmp	Metadata Date	メタデータの日付
+xmp:xmp	Modify Date	更新日
+xmp:xmp	Nickname	ニックネーム
+xmp:xmp	Rating	評価
+xmp	Rights Management	権利管理
+xmp:xmpRights	Certificate	証明書
+xmp:xmpRights	Marked	マーク済み
+xmp:xmpRights	Owner	所有者
+xmp:xmpRights	Usage Terms	使用条件
+xmp:xmpRights	Web Statement	Web 上の声明
+xmp	Media Management	メディア管理
+xmp:xmpMM	Document ID	ドキュメント ID
+xmp:xmpMM	Instance ID	インスタンス ID
+xmp:xmpMM	Manager	マネージャー
+xmp:xmpMM	Manage To	管理の対象
+xmp:xmpMM	Manage UI	管理用 UI
+xmp:xmpMM	Manager Variant	マネージャーのバリアント
+xmp:xmpMM	Rendition Class	レンディションのクラス
+xmp:xmpMM	Rendition Params	レンディションのパラメーター
+xmp:xmpMM	Version ID	バージョン ID
+xmp:xmpMM	Last URL	最後の URL
+xmp:xmpMM	Save ID	保存 ID
+xmp	Basic Job Ticket	基本ジョブチケット
+xmp:xmpBJ	Job Reference	ジョブ参照
+xmp	Paged-Text	ページテキスト
+xmp:xmpTPg	Max Page Size	最大ページサイズ
+xmp:xmpTPg	Number of Pages	ページ数
+xmp	Dynamic Media	動的メディア
+xmp:xmpDM	Project Reference	プロジェクト参照
+xmp:xmpDM	Video Frame Rate	ビデオフレームレート
+xmp:xmpDM	Video Frame Size	ビデオフレームサイズ
+xmp:xmpDM	Video Pixel Aspect Ratio	ビデオのピクセル縦横比
+xmp:xmpDM	Video Pixel Depth	ビデオのピクセル深度
+xmp:xmpDM	Video Color Space	ビデオの色空間
+xmp:xmpDM	Video Alpha Mode	ビデオのアルファのモード
+xmp:xmpDM	Video Alpha Premultiple Color	ビデオのアルファの乗算済みの色
+xmp:xmpDM	Video Alpha Unity Is Transparent	ビデオのアルファで 1 を透明とする
+xmp:xmpDM	Video Compressor	ビデオの圧縮方式
+xmp:xmpDM	Video Field Order	ビデオのフィールドの順序
+xmp:xmpDM	Pull Down	プルダウン
+xmp:xmpDM	Audio Sample Rate	オーディオのサンプルレート
+xmp:xmpDM	Audio Sample Type	オーディオのサンプルの種類
+xmp:xmpDM	Audio Channel Type	オーディオのチャンネルの種類
+xmp:xmpDM	Audio Compressor	オーディオの圧縮方式
+xmp:xmpDM	Speaker Placement	スピーカー配置
+xmp:xmpDM	File Data Rate	ファイルのデータレート
+xmp:xmpDM	Tape Name	テープ名
+xmp:xmpDM	Alternative Tape Name	代替テープ名
+xmp:xmpDM	Start Timecode	開始タイムコード
+xmp:xmpDM	Alternative Timecode	代替タイムコード
+xmp:xmpDM	Duration	継続時間
+xmp:xmpDM	Scene	シーン
+xmp:xmpDM	Shot Name	ショット名
+xmp:xmpDM	Shot Date	撮影日
+xmp:xmpDM	Shot Location	撮影場所
+xmp:xmpDM	Log Comment	ログコメント
+xmp:xmpDM	Absolute Peak Audio File Path	オーディオのピークファイルの絶対パス
+xmp:xmpDM	Relative Peak Audio File Path	オーディオのピークファイルの相対パス
+xmp:xmpDM	Video Modified Date	ビデオの変更日
+xmp:xmpDM	Audio Modified Date	オーディオの変更日
+xmp:xmpDM	Metadata Modified Date	メタデータの変更日
+xmp:xmpDM	Artist	アーティスト
+xmp:xmpDM	Album	アルバム
+xmp:xmpDM	Track Number	トラック番号
+xmp:xmpDM	Genre	ジャンル
+xmp:xmpDM	Release Date	リリース日
+xmp:xmpDM	Composer	作曲者
+xmp:xmpDM	Engineer	エンジニア
+xmp:xmpDM	Tempo	テンポ
+xmp:xmpDM	Instrument	楽器
+xmp:xmpDM	Intro Time	イントロの時間
+xmp:xmpDM	Out Cue	アウトキュー
+xmp:xmpDM	Relative Timestamp	相対タイムスタンプ
+xmp:xmpDM	Loop	ループ
+xmp:xmpDM	Number of Beats	ビート数
+xmp:xmpDM	Key	キー
+xmp:xmpDM	Stretch Mode	ストレッチモード
+xmp:xmpDM	Time Scale Parameters	タイムスケールのパラメーター
+xmp:xmpDM	Resample Parameters	リサンプルのパラメーター
+xmp:xmpDM	Beat Splice Parameters	ビートスプライスのパラメーター
+xmp:xmpDM	Time Signature	拍子
+xmp:xmpDM	Scale Type	音階の種類
+xmp	Adobe PDF	Adobe PDF
+xmp:pdf	Keywords	キーワード
+xmp:pdf	PDF Version	PDF バージョン
+xmp:pdf	Producer	作成アプリケーション
+xmp	Photoshop	Photoshop
+xmp:photoshop	Author's Position	作成者の役職
+xmp:photoshop	Caption Writer	キャプションライター
+xmp:photoshop	Category	カテゴリー
+xmp:photoshop	City	市区町村
+xmp:photoshop	Country	国
+xmp:photoshop	Credit	クレジット
+xmp:photoshop	Date Created	作成日
+xmp:photoshop	Headline	見出し
+xmp:photoshop	Instructions	指示
+xmp:photoshop	Source	ソース
+xmp:photoshop	State	都道府県
+xmp:photoshop	Supplemental Categories	補足カテゴリー
+xmp:photoshop	Transmission Reference	送信の参照
+xmp:photoshop	Urgency	緊急度
+xmp	EXIF Schema for EXIF-specific Properties	EXIF 固有のプロパティの EXIF スキーマ
+xmp:exif	Exif Version	Exif バージョン
+xmp:exif	Flashpix Version	Flashpix バージョン
+xmp:exif	Color Space	カラースペース
+xmp:exif	Compressed Bits Per Pixel	圧縮時の 1 ピクセルのビット数
+xmp:exif	Pixel X Dimension	ピクセル数 (横)
+xmp:exif	Pixel Y Dimension	ピクセル数 (縦)
+xmp:exif	User Comment	ユーザーコメント
+xmp:exif	Related Sound File	関連サウンドファイル
+xmp:exif	Date Time Original	撮影日時
+xmp:exif	Date Time Digitized	デジタル化の日時
+xmp:exif	Exposure Time	露出時間
+xmp:exif	F-Stop	F 値
+xmp:exif	Exposure Program	露出プログラム
+xmp:exif	Spectral Sensitivity	分光感度
+xmp:exif	Opto-Electronic Conversion Function (OECF)	光電変換関数 (OECF)
+xmp:exif	Shutter Speed	シャッタースピード
+xmp:exif	Aperture	絞り
+xmp:exif	Brightness	明るさ
+xmp:exif	Exposure Bias	露出補正
+xmp:exif	Max Aperture	最大絞り
+xmp:exif	Subject Distance	被写体距離
+xmp:exif	Metering Mode	測光モード
+xmp:exif	Light Source	光源
+xmp:exif	Flash	フラッシュ
+xmp:exif	Focal Length	焦点距離
+xmp:exif	Flash Energy	フラッシュエネルギー
+xmp:exif	Spatial Frequency Response	空間周波数応答
+xmp:exif	Focal Plane X Resolution	焦点面の X 解像度
+xmp:exif	Focal Plane Y Resolution	焦点面の Y 解像度
+xmp:exif	Focal Plane Resolution Unit	焦点面の解像度の単位
+xmp:exif	Exposure Index	露出インデックス
+xmp:exif	Sensing Method	センサーの方式
+xmp:exif	File Source	ファイルのソース
+xmp:exif	Scene Type	シーンの種類
+xmp:exif	CFA Pattern	CFA パターン
+xmp:exif	Custom Rendered	特殊処理
+xmp:exif	Exposure Mode	露出モード
+xmp:exif	White Balance	ホワイトバランス
+xmp:exif	Digital Zoom Ratio	デジタルズームの倍率
+xmp:exif	Focal Length In 35mm Film	35 mm 換算の焦点距離
+xmp:exif	Scene Capture Type	撮影シーンの種類
+xmp:exif	Gain Control	ゲインコントロール
+xmp:exif	Contrast	コントラスト
+xmp:exif	Saturation	彩度
+xmp:exif	Sharpness	シャープネス
+xmp:exif	Device Setting Description	デバイスの設定の説明
+xmp:exif	Subject Distance Range	被写体の距離の範囲
+xmp:exif	Image Unique ID	画像の固有 ID
+xmp:exif	GPS Version ID	GPS のバージョン ID
+xmp:exif	GPS Latitude	GPS の緯度
+xmp:exif	GPS Longitude	GPS の経度
+xmp:exif	GPS Altitude Reference	GPS の高度の基準
+xmp:exif	GPS Altitude	GPS の高度
+xmp:exif	GPS Time Stamp	GPS のタイムスタンプ
+xmp:exif	GPS Satellites	GPS の衛星
+xmp:exif	GPS Status	GPS の状態
+xmp:exif	GPS Measure Mode	GPS の測位モード
+xmp:exif	GPS DOP	GPS DOP
+xmp:exif	GPS Speed Reference	GPS の速度の基準
+xmp:exif	GPS Speed	GPS の速度
+xmp:exif	GPS Track Reference	GPS の進行方向の基準
+xmp:exif	GPS Track	GPS の進行方向
+xmp:exif	GPS Image Direction Reference	GPS の画像の方向の基準
+xmp:exif	GPS Image Direction	GPS の画像の方向
+xmp:exif	GPS Map Datum	GPS の測地系
+xmp:exif	GPS Destination Latitude	GPS の目的地の緯度
+xmp:exif	GPS Destination Longitude	GPS の目的地の経度
+xmp:exif	GPS Destination Bearing Reference	GPS の目的地の方位の基準
+xmp:exif	GPS Destination Bearing	GPS の目的地の方位
+xmp:exif	GPS Destination Distance Reference	GPS の目的地の距離の基準
+xmp:exif	GPS Destination Distance	GPS の目的地の距離
+xmp:exif	GPS Processing Method	GPS の測位方法
+xmp:exif	GPS Area Information	GPS のエリア情報
+xmp:exif	GPS Differential	GPS のディファレンシャル補正
+xmp	EXIF Schema for Additional EXIF Properties	追加の EXIF プロパティの EXIF スキーマ
+xmp:aux	Lens	レンズ
+xmp:aux	Serial Number	シリアル番号
+xmp	EXIF Schema for TIFF Properties	TIFF プロパティの EXIF スキーマ
+xmp:tiff	Image Width	画像の幅
+xmp:tiff	Image Length	画像の長さ
+xmp:tiff	Compression	圧縮
+xmp:tiff	Photometric Interpretation	光度解釈
+xmp:tiff	Orientation	方向
+xmp:tiff	Samples Per Pixel	ピクセルあたりのサンプル数
+xmp:tiff	Planar Configuration	平面構成
+xmp:tiff	YCbCr Positioning	YCbCr の位置
+xmp:tiff	X Resolution	X 解像度
+xmp:tiff	Y Resolution	Y 解像度
+xmp:tiff	Resolution Unit	解像度の単位
+xmp:tiff	Date Time	日時
+xmp:tiff	Image Description	画像の説明
+xmp:tiff	Make	メーカー
+xmp:tiff	Model	モデル
+xmp:tiff	Software	ソフトウェア
+xmp:tiff	Artist	アーティスト
+xmp:tiff	Copyright	著作権
+	Add Items from Files…	ファイルから項目を追加…
+	Copy files into the set shown: each is a menu, a button, a picture, a layer set or a replacement layer by its contents	表示しているセットにファイルをコピーします。それぞれの中身に応じて、メニュー、ボタン、画像、レイヤーセット、置換レイヤーのどれかになります
+	Import Folder…	フォルダーを読み込み…
+	Make a set of the folder chosen and of each folder under it that has PSDs or pictures	選んだフォルダーと、その下で PSD か画像のある各フォルダーからセットを作ります
+	Library Files	ライブラリファイル
+	No library files (PSDs or pictures) in that folder	そのフォルダーにライブラリファイル (PSD または画像) がありません
+	The library is still adding files	ライブラリはまだファイルを追加しています
+	The library has no folder (Preferences ▸ Media)	ライブラリのフォルダーがありません (環境設定 ▸ メディア)
+	Adding to the library: {done} of {total}	ライブラリに追加中: {done} / {total}
+	Could not add to the library: {error}	ライブラリに追加できませんでした: {error}
+	Added {n} items to the library	{n} 個の項目をライブラリに追加しました
+	Added {n} items to the library; {skipped} files could not be taken	{n} 個の項目をライブラリに追加しました。{skipped} 個のファイルは取り込めませんでした
+	The library's file is missing: {name}	ライブラリのファイルが見つかりません: {name}
+	Chapter Pages	チャプターページ
+	Scene Pages	シーンページ
+	{kind} Disc	{kind} ディスク
+	Creates a disc to play in a {kind} player, a computer or a game console.	{kind} プレーヤー、コンピューター、ゲーム機で再生するディスクを作ります。
+	Recorder:	レコーダー:
+	Write Speed:	書き込み速度:
+	Run test before writing	書き込む前にテストする
+	Windows' disc writing (IMAPI2) has no test mode: the disc is written at once	Windows のディスクの書き込み (IMAPI2) にはテストモードがないので、すぐにディスクに書き込みます
+	Auto-erase rewritable discs	書き換えできるディスクを自動で消去
+	Disc:	ディスク:
+	No recorder	レコーダーなし
+	No disc	ディスクなし
+	{kind}: cannot be written	{kind}: 書き込めません
+	{kind}, blank, {free} free	{kind}、空、空き {free}
+	{kind}, rewritable, with data on it	{kind}、書き換え可能、データあり
+	{kind}, not blank	{kind}、空ではありません
+	Writing discs is not available on this system yet.	このシステムではディスクへの書き込みはまだ利用できません。
+	The recorder is not available.	レコーダーが利用できません。
+	There is no disc in the recorder.	レコーダーにディスクが入っていません。
+	The disc in the recorder ({kind}) cannot be written.	レコーダーのディスク ({kind}) には書き込めません。
+	The disc is not blank. Insert a blank disc (or turn on Auto-erase rewritable discs for a rewritable one).	ディスクが空ではありません。空のディスクを入れてください (書き換えできるディスクなら「書き換えできるディスクを自動で消去」をオンにします)。
+	The disc is too small: the project needs {needed}, the disc has {free}.	ディスクの容量が足りません。プロジェクトには {needed} 必要ですが、ディスクの空きは {free} です。
+	The disc is write-protected.	ディスクは書き込み禁止です。
+	The recorder is busy. Wait a moment and try again.	レコーダーが使用中です。少し待ってからもう一度試してください。
+	Writing stopped	書き込みを停止しました
+	The disc image cannot be read: {message}	ディスクイメージを読み取れません: {message}
+	Writing the disc (copy {copy} of {copies})	ディスクに書き込み中 (コピー {copy}/{copies})
+	Disc written. Insert the next blank disc.	ディスクに書き込みました。次の空のディスクを入れてください。
+	{copies} discs written	{copies} 枚のディスクに書き込みました
+	Disc written	ディスクに書き込みました
+	Next Disc	次のディスク
+	Insert a blank disc for copy {copy} of {copies}.	コピー {copy}/{copies} 用の空のディスクを入れてください。
+	The disc could not be written	ディスクに書き込めませんでした
+	Write	書き込み
+	Try Again	再試行
+	Disc image	ディスクイメージ
+	The recorder failed: {message}	レコーダーが失敗しました: {message}
+	The disc image (.iso) to write	書き込むディスクイメージ (.iso)
+	Choose the disc image to write.	書き込むディスクイメージを選択してください。
+	The disc image cannot be found.	ディスクイメージが見つかりません。
+	The file is not a disc image (it is not made of whole 2,048-byte sectors).	このファイルはディスクイメージではありません (2,048 バイトのセクター単位で構成されていません)。
+	The image is larger than one layer, but its layer break is not known. DiscCraft writes it beside the images it builds (name.layerbreak.txt): build the disc image again with DiscCraft.	イメージが 1 層より大きいのに、レイヤーブレークが分かりません。DiscCraft はビルドしたイメージの横にそれを書きます (name.layerbreak.txt)。DiscCraft でディスクイメージをビルドし直してください。
+	A writing stopped on this DVD+R DL before: the drive calls it blank, but its first layer is fixed at {layer0} sectors, so part of it may be written. Use a blank DVD+R DL.	この DVD+R DL では以前に書き込みが止まっています。ドライブは空と答えますが、1 層目が {layer0} セクターで決まっているので、一部が書き込まれているかもしれません。空の DVD+R DL を使ってください。
+	{kind}: a writing stopped on it before (its first layer is fixed), so it cannot be written	{kind}: 以前に書き込みが止まっているため (1 層目が決まっています)、書き込めません
+	Erasing the disc	ディスクを消去中
+	Closing the disc	ディスクを閉じています
+	Verifying the disc	ディスクを検証中
+	{kind}: cannot be written (a disc already written and closed, or a pressed one)	{kind}: 書き込めません (書き込んで閉じたディスクか、プレスしたディスク)
+	Verify the disc after writing	書き込んだあとにディスクを検証する
+	Reads the disc back and compares it with the image, sector by sector, before it comes out	取り出す前にディスクを読み戻し、セクターごとにイメージと比べます
+	Verify failed: the disc differs from the image from sector {sector}. Write it again on another disc.	検証に失敗しました: セクター {sector} からディスクがイメージと違います。別のディスクに書き込み直してください。
+	Verify failed: the disc cannot be read back ({message}).	検証に失敗しました: ディスクを読み戻せません ({message})。
+	{copies} discs written and verified	{copies} 枚のディスクに書き込み、検証しました
+	Disc written and verified	ディスクに書き込み、検証しました
+	Build Progress	ビルドの進行状況
+	Time left: about {time}	残り時間: 約 {time}
+	The window can be minimized: the taskbar button shows how far it is.	ウィンドウは最小化できます。タスクバーのボタンに進み具合が出ます。
+	{kind}: being written	{kind}: 書き込み中
+	Verify stopped: the disc is written and closed, but not verified	検証を停止しました: ディスクは書き込んで閉じてありますが、検証していません
+	Create Disc Label…	ディスクのレーベルを作成…
+	Create Disc Label	ディスクのレーベルを作成
+	Makes the disc's face at its real size in DesignCraft, to print on a printable disc on the printer's disc tray.	DesignCraft で、ディスクの面を実寸で作ります。プリンターのディスクトレイで、印刷できるディスクに印刷するためのものです。
+	DesignCraft was not found: makes the disc's face at its real size for PhotoCraft instead, to print on a printable disc on the printer's disc tray.	DesignCraft が見つからないため、代わりに PhotoCraft 用にディスクの面を実寸で作ります。プリンターのディスクトレイで、印刷できるディスクに印刷するためのものです。
+	Printable area:	印刷できる範囲:
+	Wide printable (22 to 118 mm)	広い (22〜118 mm)
+	Standard printable (43 to 118 mm)	標準 (43〜118 mm)
+	Inner	内径
+	Outer	外径
+	As the disc's package says; set the printer's disc settings the same.	ディスクのパッケージの表示に合わせます。プリンターのディスクの設定も同じにしてください。
+	None (white)	なし (白)
+	Disc name:	ディスク名:
+	The chapter names ({count})	チャプター名 ({count})
+	No chapter has a name of its own	自分の名前があるチャプターはありません
+	Disc Face	ディスクの面
+	Picture	画像
+	Guides (hidden, not printed)	ガイド (非表示、印刷しません)
+	Disc Label	ディスクのレーベル
+	Cannot make the disc label: {message}	ディスクのレーベルを作成できません: {message}
+	Disc label made: {path}. In {app}, print it at 100 % (not scaled to fit) on the printer's CD/DVD paper.	ディスクのレーベルを作成しました: {path}。{app} で、プリンターの CD/DVD の用紙に 100 % (合わせて縮小しない) で印刷してください。
+	{note} Some chapters did not fit even at the smallest size: shorten them there.	{note} いちばん小さいサイズでも入らないチャプターがあります。そこで短くしてください。
+	Disc label made: {path} (it could not be opened: {message})	ディスクのレーベルを作成しました: {path} (開けませんでした: {message})
+	Open Disc Label	ディスクのレーベルを開く
+	This project's label:	このプロジェクトのレーベル:
+	{name} (missing)	{name} (見つかりません)
+	Link a File…	ファイルをリンク…
+	Unlink	リンク解除
+	Found beside the project: {name}	プロジェクトの横にあります: {name}
+	Link This File	このファイルをリンク
+	The label made is linked to the project and kept when the project is saved (an earlier label's file stays where it is).	作ったレーベルはプロジェクトにリンクされ、プロジェクトを保存すると一緒に保存されます (前のレーベルのファイルはそのままの場所に残ります)。
+	Link a Disc Label	ディスクのレーベルをリンク
+	Disc label	ディスクのレーベル
+	the default app	既定のアプリ
+	The project has no disc label: make one with File ▸ Create Disc Label…, or link a file there.	このプロジェクトにはディスクのレーベルがありません。ファイル ▸ ディスクのレーベルを作成… で作るか、そこでファイルをリンクしてください。
+	The disc label {path} is missing: link it again in File ▸ Create Disc Label…	ディスクのレーベル {path} が見つかりません。リンクし直すには: ファイル ▸ ディスクのレーベルを作成…
+	Opened the disc label {path} in {app}.	ディスクのレーベル {path} を {app} で開きました。
+	Cannot open the disc label {path}: {message}	ディスクのレーベル {path} を開けません: {message}
+	The disc label {path} is linked to the project: save the project to keep it.	ディスクのレーベル {path} をプロジェクトにリンクしました。残すにはプロジェクトを保存してください。
+	The disc label is no longer linked to the project (its file stays where it is).	ディスクのレーベルとプロジェクトのリンクを解除しました (ファイルはそのままの場所に残ります)。
+	{note} It is linked to the project: save the project to keep it.	{note} プロジェクトにリンクしました。残すにはプロジェクトを保存してください。
+	Stops writing; a write-once disc stopped part way cannot be used again	書き込みを止めます。途中で止めた追記型のディスクは使えなくなります
+	{step} {percent}% ({time})	{step} {percent}% ({time})
+	A disc is being written. Stop it or wait for it to finish first.	ディスクに書き込んでいます。先に止めるか、終わるまで待ってください。
+	Play Faster	速く再生
+	Play Slower	遅く再生
+	Playback speed (J slower, L faster, K stop). The sound keeps its pitch up to 2×; faster playback is silent.	再生の速さ (J で遅く、L で速く、K で停止)。2× までは音の高さが変わりません。それより速いと音は出ません。
+	Import from Blu-ray: choose the disc's drive or folder	Blu-ray から読み込み: ディスクのドライブかフォルダーを選んでください
+	The Blu-ray has no playlists	Blu-ray にプレイリストがありません
+	Import from Blu-ray	Blu-ray から読み込み
+	Blu-ray playlist	Blu-ray のプレイリスト
+	Clips	クリップ
+	{stream} (not read)	{stream} (読み込まない)
+	Clip files are missing	クリップのファイルが見つかりません
+	Show playlists shorter than a minute	1 分未満のプレイリストを表示
+	The playlist's clips are laid out in order with its chapters and the sound DiscCraft reads (LPCM, AC-3). Subtitles are not imported. Encrypted discs cannot be read; a disc image is read once it is mounted as a drive.	プレイリストのクリップを、チャプターと DiscCraft が読める音声 (LPCM、AC-3) と一緒に順に並べます。字幕は読み込みません。暗号化されたディスクは読めません。ディスクイメージはドライブとしてマウントすると読めます。
+	Imported playlist {playlist} of the Blu-ray: {clips} clips, {chapters} chapters, {tracks} audio tracks	Blu-ray のプレイリスト {playlist} を読み込みました: クリップ {clips} 個、チャプター {chapters} 個、オーディオトラック {tracks} 本
+	Imported playlist {playlist} of the Blu-ray: {clips} clips, {chapters} chapters, {tracks} audio tracks (left out: {streams})	Blu-ray のプレイリスト {playlist} を読み込みました: クリップ {clips} 個、チャプター {chapters} 個、オーディオトラック {tracks} 本 (除外: {streams})
+	{before} Subtitles not taken out: {streams}	{before} 取り出さなかった字幕: {streams}
+	{before} Taking the subtitles out of the Blu-ray: {done} of {total}	{before} Blu-ray から字幕を取り出し中: {done} / {total}
+	{before} Subtitle tracks added from the Blu-ray: {count}	{before} Blu-ray から字幕トラックを追加しました: {count} 本
+	{before} Subtitle tracks added from the Blu-ray: {count} (not taken out: {streams})	{before} Blu-ray から字幕トラックを追加しました: {count} 本 (取り出さなかったもの: {streams})
+	the rest	残り
+	The drive does not tell where the dual-layer disc's first layer ends, so the layer break (sector {wanted}) cannot be placed.	ドライブが 2 層ディスクの 1 層目の終わりを教えないので、レイヤーブレーク (セクター {wanted}) を置けません。
+	The disc's first layer is fixed at {disc} sectors, but the image's layer break is at sector {wanted}. Use a blank DVD+R DL.	ディスクの 1 層目は {disc} セクターで決まっていますが、イメージのレイヤーブレークはセクター {wanted} です。空の DVD+R DL を使ってください。
+	The image's first layer ({wanted} sectors) is larger than the disc's ({disc} sectors).	イメージの 1 層目 ({wanted} セクター) がディスクの 1 層目 ({disc} セクター) より大きくなっています。
+	The written disc's first layer ends after {written} sectors, not at the image's layer break ({wanted}).	書き込んだディスクの 1 層目は {written} セクターで終わっていて、イメージのレイヤーブレーク ({wanted}) ではありません。
+	Make the disc's menu a menu too	ディスクのメニューからもメニューを作る
+	The first menu the disc shows becomes a motion menu with a button for each of its buttons that plays something, at the same place, linked to the timelines of what it plays. A draft to arrange further.	ディスクが最初に出すメニューを、モーションメニューにします。何かを再生するボタンごとに同じ位置にボタンを置き、それが再生するもののタイムラインにリンクします。さらに整えるための下書きです。
+	The disc's menu was not made: {reason}	ディスクのメニューを作成できませんでした: {reason}
+	Its menu: {buttons} buttons.	そのメニュー: ボタン {buttons} 個。
+	Cancelling…	キャンセル中…
+	Stops the build; what is already transcoded is kept for the next build	ビルドを止めます。トランスコードが済んだ分は次のビルドのために残ります
+	More comes before the layer break than layer 0 holds.	レイヤーブレークまでの分がレイヤー 0 に入りきりません。
+	More comes after the layer break than before it (layer 1 holds no more than layer 0).	レイヤーブレークのあとの分が前の分より多くなっています (レイヤー 1 はレイヤー 0 以下)。
+	Video and sound {streams}, multiplexing {mux}, ROM content {rom}	ビデオと音声 {streams}、多重化 {mux}、ROM コンテンツ {rom}
+	Layer 0 (up to the layer break): about {layer0} of {most}. Layer 1: about {layer1}, at most as much as layer 0.	レイヤー 0 (レイヤーブレークまで): 約 {layer0} / {most}。レイヤー 1: 約 {layer1} (レイヤー 0 以下)。
+	Room left: {room0} on layer 0, {room1} on layer 1.	空き: レイヤー 0 に {room0}、レイヤー 1 に {room1}。
+	{size} used for multiplexing.	多重化に {size} を使います。
+	What the disc adds to the video and sound: the headers of its packs and a navigation pack every half second	ディスクがビデオと音声に足すもの: パックのヘッダーと、0.5 秒ごとのナビゲーションパック
+	Arrows and Enter of the remote	リモコンの矢印と決定
+	Last built image: {name}	最後にビルドしたイメージ: {name}
+
+# Command names (the Edit menu's Undo / Redo and History, the command list)
+	Add Audio Clip	オーディオクリップを追加
+	Add Chapter	チャプターを追加
+	Add Slideshow Audio	スライドショーにオーディオを追加
+	Add Text	テキストを追加
+	Add Video Clip	ビデオクリップを追加
+	Apply Motion to Menu	モーションをメニューに反映
+	Apply PSD to Menu	PSD をメニューに反映
+	Apply Style	スタイルを適用
+	Apply Subtitle Color Set	字幕のカラーセットを適用
+	Asset Metadata	アセットのメタデータ
+	Asset Transcode Status	アセットのトランスコードの状態
+	Blu-ray Playlists	Blu-ray のプレイリスト
+	Blu-ray Subtitles to Subtitle Tracks	Blu-ray の字幕を字幕トラックに
+	Change Graphic	グラフィックを変更
+	Change Graphic Order	グラフィックの順序を変更
+	Change Menu Preferences	メニューの環境設定を変更
+	Change Motion Buttons	モーションボタンを変更
+	Change Rich Color Highlights	リッチカラーのハイライトを変更
+	Change Subtitle	字幕を変更
+	Change Text	テキストを変更
+	Check Assets Being Read	読み込み中のアセットを確認
+	Choose Asset Composition	アセットのコンポジションを選択
+	Choose Audio and Subtitles	オーディオと字幕を選択
+	Close Preview	プレビューを閉じる
+	Create Chapter Playlist	チャプタープレイリストを作成
+	Create Folder	フォルダーを作成
+	Create Menu	メニューを作成
+	Create Playlist	プレイリストを作成
+	Create Slide Subtitle	スライドの字幕を作成
+	Create Slideshow	スライドショーを作成
+	Create Timeline	タイムラインを作成
+	Delete Audio Clip	オーディオクリップを削除
+	Delete Button	ボタンを削除
+	Delete Buttons	ボタンを削除 (複数)
+	Delete Chapter	チャプターを削除
+	Delete Entry	エントリーを削除
+	Delete Folder	フォルダーを削除
+	Delete Graphic	グラフィックを削除
+	Delete Guide	ガイドを削除
+	Delete Menu Color Set	メニューのカラーセットを削除
+	Delete Slide	スライドを削除
+	Delete Slideshow Audio	スライドショーのオーディオを削除
+	Delete Subtitle	字幕を削除
+	Delete Subtitle Color Set	字幕のカラーセットを削除
+	Delete Text	テキストを削除
+	Delete Video Clip	ビデオクリップを削除
+	Duplicate Item	項目を複製
+	EffectCraft Project Compositions	EffectCraft プロジェクトのコンポジション
+	Estimate Disc Usage	ディスクの使用量を見積もる
+	Export Menu Color Set	メニューのカラーセットを書き出し
+	Export Subtitle Color Set	字幕のカラーセットを書き出し
+	FilmCraft Markers to Chapters	FilmCraft のマーカーをチャプターに
+	FilmCraft Project Sequences	FilmCraft プロジェクトのシーケンス
+	Fits the Blu-ray Format As It Is	Blu-ray の形式にそのまま合うか
+	Flip / Rotate	反転 / 回転
+	Get Asset Frame	アセットのフレームを取り出す
+	Get Style	スタイルを取り出す
+	Import Asset	アセットを読み込み
+	Import Blu-ray Menu	Blu-ray のメニューを読み込み
+	Import Subtitle Color Set	字幕のカラーセットを読み込み
+	Import Subtitles (Image Script)	字幕を読み込み (画像スクリプト)
+	Inspect Project	プロジェクトを調べる
+	Interpret Footage (Ignore Alpha Channel)	素材を解釈 (アルファチャンネルを無視)
+	Library Items	ライブラリの項目
+	List Assets	アセットの一覧
+	List Chapter Playlists	チャプタープレイリストの一覧
+	List Menus	メニューの一覧
+	List Playlists	プレイリストの一覧
+	List Slideshows	スライドショーの一覧
+	List Subtitles	字幕の一覧
+	List Timelines	タイムラインの一覧
+	List Video Clips	ビデオクリップの一覧
+	Make Asset Thumbnail	アセットのサムネイルを作成
+	Move Audio Clip	オーディオクリップを移動
+	Move Buttons	ボタンを移動
+	Move Chapter	チャプターを移動
+	Move Entry	エントリーを移動
+	Move Flowchart Node	フローチャートのノードを移動
+	Move Guide	ガイドを移動
+	Move Item	項目を移動
+	Move Video Clip	ビデオクリップを移動
+	New Menu Color Set	新規メニューカラーセット
+	New Menu from Library	ライブラリから新規メニュー
+	Open Preview	プレビューを開く
+	Open Project	プロジェクトを開く
+	Paste Buttons	ボタンを貼り付け
+	Place Image	画像を配置
+	Place Layers (Library Layer Set / Replacement Layer)	レイヤーを配置 (ライブラリのレイヤーセット / 置換レイヤー)
+	Place Library Button	ライブラリのボタンを配置
+	Place PSD Button (Library Button)	PSD のボタンを配置 (ライブラリのボタン)
+	Place Shape	シェイプを配置
+	Place Text	テキストを配置
+	Preview State	プレビューの状態
+	Probe Asset Duration	アセットの長さを調べる
+	Read Image Script	画像スクリプトを読む
+	Read Menu Color Set	メニューのカラーセットを読み込み
+	Remote Control Key	リモコンのキー
+	Rename Chapter	チャプターの名前を変更
+	Rename Folder	フォルダーの名前を変更
+	Rendering Settings (Maximum Render Quality, Frame Blending)	レンダリングの設定 (最高レンダリング画質、フレームブレンド)
+	Reorder Button Numbers	ボタンの番号を並べ替え
+	Replace Asset File	アセットのファイルを置換
+	Replace Menu	メニューを置換
+	Replace Menu Color Set	メニューのカラーセットを置換
+	Route Buttons Automatically	ボタンのルートを自動設定
+	Save Frame as File	フレームをファイルとして保存
+	Save Subtitle Color Set As	字幕のカラーセットに名前を付けて保存
+	Set Angle	角度を設定
+	Set Aspect Ratio	縦横比を設定
+	Set Audio	オーディオを設定
+	Set Audio Track Stream	オーディオトラックのストリームを設定
+	Set Auto Activate	自動で決定を設定
+	Set Blu-ray Codec	Blu-ray のコーデックを設定
+	Set Blu-ray Video	Blu-ray のビデオを設定
+	Set Button Audio / Subtitle	ボタンのオーディオ / 字幕を設定
+	Set Button Highlight Group	ボタンのハイライトグループを設定
+	Set Button Kind	ボタンの種類を設定
+	Set Button Name	ボタンの名前を設定
+	Set Button Name Sync	ボタンの名前の同期を設定
+	Set Button Number Offset	ボタンの番号のオフセットを設定
+	Set Button Override	ボタンの上書きを設定
+	Set Button Position and Size	ボタンの位置と大きさを設定
+	Set Button Routes	ボタンのルートを設定
+	Set Button Subpicture	ボタンのサブピクチャを設定
+	Set Button Text Font	ボタンのテキストのフォントを設定
+	Set Button Text Format	ボタンのテキストの書式を設定
+	Set Button Text Position	ボタンのテキストの位置を設定
+	Set Button Transition	ボタンのトランジションを設定
+	Set Button Video Thumbnail Area	ボタンのビデオサムネイルの範囲を設定
+	Set Button Video Thumbnail Position	ボタンのビデオサムネイルの位置を設定
+	Set Capacity	容量を設定
+	Set Chapter Parental Alternative	チャプターのペアレンタルの代替を設定
+	Set Colors	色を設定
+	Set Create Text Subpicture	テキストサブピクチャの作成を設定
+	Set Default Button	既定のボタンを設定
+	Set Description	説明を設定
+	Set Disc Audio	ディスクのオーディオを設定
+	Set Disc Audio Language	ディスクのオーディオの言語を設定
+	Set Disc Description	ディスクの説明を設定
+	Set Disc Kind	ディスクの種類を設定
+	Set Disc Label	ディスクのラベルを設定
+	Set Disc Name	ディスクの名前を設定
+	Set Disc Override	ディスクの上書きを設定
+	Set Disc Subtitle	ディスクの字幕を設定
+	Set Disc User Operations	ディスクのユーザー操作を設定
+	Set Drop Shadow	ドロップシャドウを設定
+	Set End Action	終了時の動作を設定
+	Set First Play	ファーストプレイを設定
+	Set If Not Allowed	許可されないときの再生を設定
+	Set Label	ラベルを設定
+	Set Layer Break	レイヤーブレークを設定
+	Set Layer Effects	レイヤー効果を設定
+	Set Layer Visibility / Lock	レイヤーの表示 / ロックを設定
+	Set Library Background	ライブラリの背景を設定
+	Set Link	リンクを設定
+	Set Loop Count	ループ回数を設定
+	Set Loop Point	ループポイントを設定
+	Set Menu Aspect Ratio	メニューの縦横比を設定
+	Set Menu Audio	メニューのオーディオを設定
+	Set Menu Color Set	メニューのカラーセットを設定
+	Set Menu Duration	メニューの長さを設定
+	Set Menu End Action	メニューの終了時の動作を設定
+	Set Menu Override	メニューの上書きを設定
+	Set Menu User Operations	メニューのユーザー操作を設定
+	Set Override	上書きを設定
+	Set Parental Level	ペアレンタルレベルを設定
+	Set Playback Type	再生の種類を設定
+	Set Pop-up Background	ポップアップの背景を設定
+	Set ROM Content Folder	ROM コンテンツのフォルダーを設定
+	Set Regions	リージョンを設定
+	Set Remote Menu	リモコンメニューを設定
+	Set Slide Duration	スライドの長さを設定
+	Set Slide Name and Description	スライドの名前と説明を設定
+	Set Slide Pan and Zoom	スライドのパンとズームを設定
+	Set Slide Scale	スライドの拡大・縮小を設定
+	Set Slide Transition	スライドのトランジションを設定
+	Set Slideshow Manual Advance	スライドショーの手動で進めるを設定
+	Set Slideshow Random Pan and Zoom	スライドショーのランダムなパンとズームを設定
+	Set Slideshow Slide Duration	スライドショーのスライドの長さを設定
+	Set Slideshow Subtitle Color Set	スライドショーの字幕のカラーセットを設定
+	Set Slideshow Transition	スライドショーのトランジションを設定
+	Set Subtitle Track Color Group	字幕トラックのカラーグループを設定
+	Set TV Standard	テレビ方式を設定
+	Set Timeline Aspect Ratio	タイムラインの縦横比を設定
+	Set Timeline Color Set	タイムラインのカラーセットを設定
+	Set Title Button	タイトルボタンを設定
+	Set Track Language	トラックの言語を設定
+	Set User Operations	ユーザー操作を設定
+	Slideshow Audio Settings	スライドショーのオーディオの設定
+	Source Chapters to Chapter Points	ソースのチャプターをチャプターポイントに
+	Subtitles in the Video to Subtitle Tracks	ビデオ内の字幕を字幕トラックに
+	Transcode Settings (Blu-ray)	トランスコード設定 (Blu-ray)
+	Trim Audio Clip	オーディオクリップをトリム
+	Trim Video Clip	ビデオクリップをトリム
+	Write Asset Metadata	アセットのメタデータを書き込み
+
+# The labels craft-menu writes itself (the layouts' About, Quit, the macOS app menu, the overflow menu)
+	About {app}	{app} について
+	Hide {app}	{app} を隠す
+	Quit {app}	{app} を終了
+	Quit	終了
+	Bring All to Front	すべてを手前に移動
+	Close Window	ウィンドウを閉じる

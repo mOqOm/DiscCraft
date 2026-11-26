@@ -18,7 +18,7 @@ The issues are grouped by type. If you cannot find your problem, also try search
 | Panel layout is messed up | Choose **Window ▸ Workspace ▸ Reset "Name"** |
 | Asset is "Offline" | You moved or renamed the asset file. Right-click in the Project panel and choose **Replace Asset…** to specify the new location |
 | No sound | Select the track to listen to using the speaker button in the Monitor header. DTS tracks do not play in the Monitor or Preview (but they are included on the disc). On Linux, you need the ALSA development package (such as `libasound2-dev`) |
-| Garbled characters | Switch the display language via **Window ▸ Language**. Subtitles support UTF-8 / UTF-16 / Shift_JIS |
+| Garbled characters | Switch the display language in **Edit ▸ Preferences…**, **Interface**, **Language**. Subtitles support UTF-8 / UTF-16 / Shift_JIS |
 | EffectCraft project does not look as expected | Select the composition to use in the **Composition** field of the asset properties |
 
 ## 23.2 Menus and Disc Behavior

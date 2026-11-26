@@ -108,7 +108,7 @@ which computer builds it).
 
 ## 18.8 Interface
 
-- **Language**: English / 日本語. Can also be switched via **Window ▸ Language**. Until you choose manually, it follows the
+- **Language**: English / 日本語. On macOS it can also be switched in the app menu's **Language**. Until you choose manually, it follows the
   OS display language on each launch (Japanese for Japanese OS, English otherwise).
 - **Brightness**: **Dark** (default) or **Light** (dark text on light gray panels). Switches immediately and persists to
   the next launch.

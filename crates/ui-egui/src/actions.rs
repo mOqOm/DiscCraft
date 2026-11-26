@@ -1153,13 +1153,6 @@ pub(crate) fn menu_check(ui: &mut Ui, action: Action, checked: bool) -> bool {
     response.clicked()
 }
 
-/// A menu item without a check mark in a menu that has checkable items: its label starts where theirs do, behind
-/// the (empty) check mark column. Returns whether it was clicked.
-pub(crate) fn menu_item_indented(ui: &mut Ui, action: Action, enabled: bool) -> bool {
-    ui.add_enabled(enabled, check_column_button(ui, action))
-        .clicked()
-}
-
 /// The label of a menu item or submenu that is not an action, in a menu with checkable items: behind the check
 /// mark column, where theirs start (Encore lines every label of such a menu up).
 pub(crate) fn indented(label: String) -> (egui::Atom<'static>, egui::Atom<'static>) {

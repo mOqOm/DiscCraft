@@ -102,6 +102,13 @@ craft-media = { git = "https://github.com/storytold/craft-libs", rev = "249a41bd
 # craft-libs' shared UI (MIT OR Apache-2.0), the same revision: its docking (tab groups that are dragged,
 # split, floated and closed, saved as workspaces), as the other Craft apps arrange their panels.
 craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "249a41bd9306a1b34330ac94e596a1a8b881378a", features = ["serde"] }
+# craft-libs' translations (MIT OR Apache-2.0), the same revision: the lookup the Crafting Apps share (app rows over
+# craft-i18n's shared catalog, then English), over the catalogs in crates/ui-egui/i18n (M16.1).
+craft-i18n = { git = "https://github.com/storytold/craft-libs", rev = "249a41bd9306a1b34330ac94e596a1a8b881378a" }
+# craft-libs' menus (MIT OR Apache-2.0), the same revision: the menu bar the Crafting Apps share (its layouts for
+# Windows, Linux and macOS, keyboard access, mnemonics), with craft-keymap's chords for its shortcuts (M16.4).
+craft-menu = { git = "https://github.com/storytold/craft-libs", rev = "249a41bd9306a1b34330ac94e596a1a8b881378a" }
+craft-keymap = { git = "https://github.com/storytold/craft-libs", rev = "249a41bd9306a1b34330ac94e596a1a8b881378a", features = ["egui"] }
 photocraft-io = { git = "https://github.com/storytold/photocraft", rev = "b609bc7d3c6bae486d80a21bfb32d25c990bd954" }
 photocraft-doc = { git = "https://github.com/storytold/photocraft", rev = "b609bc7d3c6bae486d80a21bfb32d25c990bd954" }
 photocraft-compose = { git = "https://github.com/storytold/photocraft", rev = "b609bc7d3c6bae486d80a21bfb32d25c990bd954" }

@@ -370,12 +370,12 @@ mod tests {
         assert_eq!(session.undo_label(), None);
         session.execute("menu.create", &obj(&[]))?;
         session.execute("disc.setName", &serde_json::json!({"name": "Trip"}))?;
-        assert_eq!(session.undo_label(), Some("ディスクの名前を設定"));
+        assert_eq!(session.undo_label(), Some("Set Disc Name"));
         session.undo()?;
-        assert_eq!(session.undo_label(), Some("メニューを作成"));
-        assert_eq!(session.redo_label(), Some("ディスクの名前を設定"));
+        assert_eq!(session.undo_label(), Some("Create Menu"));
+        assert_eq!(session.redo_label(), Some("Set Disc Name"));
         session.redo()?;
-        assert_eq!(session.undo_label(), Some("ディスクの名前を設定"));
+        assert_eq!(session.undo_label(), Some("Set Disc Name"));
         assert_eq!(session.redo_label(), None);
         Ok(())
     }

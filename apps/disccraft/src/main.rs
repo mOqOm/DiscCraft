@@ -31,6 +31,8 @@ impl AppWrapper {
 
         enable_media_cache();
         let mut app = DiscCraftApp::new(&cc.egui_ctx);
+        // On macOS the menus go to the system's menu bar (nothing happens elsewhere).
+        app.install_native_menu(&cc.egui_ctx);
 
         if let Some(path) = path {
             let _ = app.open_path(&path);
@@ -43,6 +45,14 @@ impl AppWrapper {
 impl eframe::App for AppWrapper {
     fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
         self.app.ui(ui);
+    }
+
+    fn raw_input_hook(
+        &mut self,
+        _ctx: &eframe::egui::Context,
+        raw_input: &mut eframe::egui::RawInput,
+    ) {
+        self.app.native_menu_input(raw_input);
     }
 }
 
@@ -80,10 +90,7 @@ fn main() -> ExitCode {
         Err(error) => {
             use std::io::Write;
             // A closed error stream is not a reason to panic.
-            let _ = writeln!(
-                std::io::stderr(),
-                "DiscCraft を起動できませんでした: {error}"
-            );
+            let _ = writeln!(std::io::stderr(), "DiscCraft could not start: {error}");
             ExitCode::FAILURE
         }
     }

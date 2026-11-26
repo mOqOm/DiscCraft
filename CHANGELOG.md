@@ -4,6 +4,29 @@ English | [日本語](CHANGELOG.ja.md)
 
 What changed in each version of DiscCraft. The files for each system are on [GitHub's releases](https://github.com/mOqOm/DiscCraft/releases).
 
+## 0.1.0-alpha.16 (2026-11-26)
+
+### Interface
+
+- The Japanese interface now reads as the other ArtCraft Crafting Apps do: the words they share come from the Crafting Apps' shared translations (craft-i18n), and DiscCraft's own were translated again from the plain meaning of the English (エンドアクション → 終了時の動作, 再生リスト → プレイリスト, 初期設定ボタン → 既定のボタン, アクティベート時 → 決定時, ヒストリー → 履歴, "名前 :" → "名前:" and so on). The manual's names of the screen and its pictures follow
+- The menu bar is the one the other Crafting Apps use (craft-menu). The menus and their items are as before. Alt or F10 opens them from the keyboard, and the Japanese menus get access keys in the form "ファイル(F)". On Windows About is last in Help and Preferences last in Edit. The display language is chosen in **Edit ▸ Preferences… ▸ Interface** (Window ▸ Language is gone; on macOS it is in the app menu). On macOS the menus are in the system's menu bar
+- **Edit ▸ Undo / Redo** and **History** name the step in the English interface too ("Undo Add Button")
+- **Help ▸ DiscCraft Help…** opens the chapter manual on GitHub. Resting the pointer on a Help item no longer shows the address it opens
+
+### Command line
+
+- The commands' names and groups, the parameter notes for agents, `disccraft-cli inspect` and the build's result are in English
+
+### Known limitations
+
+- Importing from Blu-ray reads only discs without encryption. DTS and Dolby TrueHD sound are not imported; the disc's subtitles come into a Blu-ray project only, not yet into a DVD project
+- Writing to discs is Windows only. DVD-R and DVD+R DL (dual layer) have been written in a real drive; DVD+R, DVD-RW, DVD+RW, BD-R and BD-RE not yet
+- A disc label is printed from DesignCraft. DiscCraft does not yet place it where a printer's disc tray prints it: with a printer that prints the tray from an A4 page, place the label on that page in DesignCraft
+- DV time code (subcode) is not read (Encore does not read it either). DVCPRO HD and DV inside MXF cannot be read
+- Automatic routing still sometimes goes elsewhere than Encore's
+- Not signed with a developer certificate. On Windows SmartScreen asks the first time the installer runs, on macOS Gatekeeper the first time (right-click ▸ Open, or remove it with `xattr -d com.apple.quarantine`)
+- The menus in macOS's own menu bar have not been tried on a Mac yet
+
 ## 0.1.0-alpha.15 (2026-11-26)
 
 ### Documents

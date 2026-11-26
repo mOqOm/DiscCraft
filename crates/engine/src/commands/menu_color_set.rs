@@ -10,8 +10,8 @@ use super::{always_enabled, empty_object};
 pub(crate) const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "menucolorset.save",
-        label: "メニューカラーセットを新規",
-        menu: &["メニュー"],
+        label: "New Menu Color Set",
+        menu: &["Menu"],
         shortcut: None,
         params: r#"{"name": string, "colorSet": a colour set (as menu.replaceColorSet takes)}"#,
         enabled: always_enabled,
@@ -20,8 +20,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "menucolorset.delete",
-        label: "メニューカラーセットを削除",
-        menu: &["メニュー"],
+        label: "Delete Menu Color Set",
+        menu: &["Menu"],
         shortcut: None,
         params: r#"{"name": string}"#,
         enabled: always_enabled,
@@ -30,8 +30,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "menucolorset.export",
-        label: "メニューカラーセットを書き出し",
-        menu: &["メニュー"],
+        label: "Export Menu Color Set",
+        menu: &["Menu"],
         shortcut: None,
         params: r#"{"path": string, "colorSet": a colour set}"#,
         enabled: always_enabled,
@@ -40,8 +40,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "menucolorset.read",
-        label: "メニューカラーセットを読み込み",
-        menu: &["メニュー"],
+        label: "Read Menu Color Set",
+        menu: &["Menu"],
         shortcut: None,
         params: r#"{"path": string} -> {"colorSet": a colour set}"#,
         enabled: always_enabled,
@@ -50,8 +50,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "menu.replaceColorSet",
-        label: "メニューカラーセットを設定",
-        menu: &["メニュー"],
+        label: "Replace Menu Color Set",
+        menu: &["Menu"],
         shortcut: None,
         params: r##"{"menu": id, "colorSet": {"groups": [{"selected": [r, g, b], "activated": [r, g, b], "selectedOpacity"?: 0..100, "activatedOpacity"?: 0..100, "sameActivated"?: bool, "more"?: [{"selected": [r, g, b], "selectedOpacity"?: 0..100, "activated": [r, g, b], "activatedOpacity"?: 0..100} x 2]} x 3], "normal"?: {"color": [r, g, b], "opacity": 0..100}, "normalMore"?: [{"color": [r, g, b], "opacity": 0..100} x 2]} | null}"##,
         enabled: always_enabled,

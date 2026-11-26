@@ -10,7 +10,7 @@ use crate::actions::Action;
 use crate::app::DiscCraftApp;
 use crate::i18n::{Language, tl, tlf};
 
-use egui::{Context, Id, Modal, Ui};
+use egui::{Context, Id, Modal};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Once, PoisonError};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -29,8 +29,8 @@ pub(crate) const RELEASES: &str = "https://github.com/mOqOm/DiscCraft/releases/l
 /// The user manual in the interface's language.
 pub(crate) fn manual_url(language: Language) -> &'static str {
     match language {
-        Language::Ja => "https://github.com/mOqOm/DiscCraft/blob/main/docs/user-guide.ja.md",
-        Language::En => "https://github.com/mOqOm/DiscCraft/blob/main/docs/user-guide.md",
+        Language::Ja => "https://github.com/mOqOm/DiscCraft/blob/main/docs/manual/ja/README.md",
+        Language::En => "https://github.com/mOqOm/DiscCraft/blob/main/docs/manual/en/README.md",
     }
 }
 
@@ -289,50 +289,30 @@ pub(crate) fn report_text(rows: &[(&str, String)]) -> String {
 // The menu and its dialogs
 // ---------------------------------------------------------------------------------------------------------------
 
-/// The Help menu's items, in FilmCraft's order.
-pub(crate) const HELP_ITEMS: [Action; 9] = [
-    Action::JoinDiscord,
-    Action::ArtCraftWebsite,
-    Action::DiscCraftOnGitHub,
-    Action::ReportIssue,
-    Action::RevealLogFiles,
-    Action::SystemReport,
-    Action::CheckForUpdates,
-    Action::About,
-    Action::Help,
+/// The Help menu's items, in the order of the other Crafting Apps (FilmCraft, VectorCraft): the community links, then
+/// DiscCraft's own help, then updates; a `None` is a separator. About goes last (craft-menu's layout puts it there on
+/// Windows and Linux, and in the app menu on macOS).
+pub(crate) const HELP_ITEMS: [Option<Action>; 11] = [
+    Some(Action::JoinDiscord),
+    Some(Action::ArtCraftWebsite),
+    Some(Action::DiscCraftOnGitHub),
+    Some(Action::ReportIssue),
+    None,
+    Some(Action::Help),
+    Some(Action::RevealLogFiles),
+    Some(Action::SystemReport),
+    None,
+    Some(Action::CheckForUpdates),
+    Some(Action::About),
 ];
 
-/// What a Help menu item does, shown while the pointer rests on it: the address a link opens, or what an item
-/// that stays inside DiscCraft does.
-pub(crate) fn menu_hint(action: Action, language: Language) -> String {
-    match action {
-        Action::JoinDiscord => DISCORD.to_owned(),
-        Action::ArtCraftWebsite => WEBSITE.to_owned(),
-        Action::DiscCraftOnGitHub => GITHUB.to_owned(),
-        Action::ReportIssue => ISSUES.to_owned(),
-        Action::Help => manual_url(language).to_owned(),
-        Action::RevealLogFiles => {
-            tl!("Saves this session's log and shows it in the file manager.").to_owned()
-        }
-        Action::SystemReport => tl!("Shows a report on this computer.").to_owned(),
-        Action::CheckForUpdates => tl!("Shows this version and the releases on GitHub.").to_owned(),
-        Action::About => tl!("Shows the version, community links and license.").to_owned(),
-        _ => String::new(),
-    }
-}
-
 impl DiscCraftApp {
-    /// ヘルプメニュー。項目にポインターを置くと、開くアドレスか、することが出る。
-    pub(crate) fn help_menu(&self, ui: &mut Ui, clicked: &mut Vec<Action>) {
-        for action in HELP_ITEMS {
-            let button =
-                egui::Button::new(action.label()).shortcut_text(action.shortcut_text(ui.ctx()));
-            if ui
-                .add(button)
-                .on_hover_text(menu_hint(action, self.language))
-                .clicked()
-            {
-                clicked.push(action);
+    /// ヘルプメニュー。
+    pub(crate) fn help_menu(&self, m: &mut dyn crate::menu_model::MenuSink) {
+        for item in HELP_ITEMS {
+            match item {
+                Some(action) => m.action(action, true),
+                None => m.separator(),
             }
         }
     }
@@ -434,31 +414,24 @@ impl DiscCraftApp {
 #[cfg(test)]
 mod tests {
     use super::{
-        HELP_ITEMS, civil_from_days, manual_url, menu_hint, readable_files, report_text, utc_stamps,
+        DISCORD, HELP_ITEMS, ISSUES, civil_from_days, manual_url, readable_files, report_text,
+        utc_stamps,
     };
     use crate::actions::Action;
     use crate::i18n::Language;
     use std::time::{Duration, UNIX_EPOCH};
 
-    /// The menu has FilmCraft's items in FilmCraft's order (without the getartcraft.com page DiscCraft does not
-    /// have), and the links point at the ArtCraft community and DiscCraft's repository.
+    /// The menu has the other Crafting Apps' items in their order (without the getartcraft.com page DiscCraft does not
+    /// have), About last, and the links point at the ArtCraft community and DiscCraft's repository.
     #[test]
-    fn the_help_menu_follows_filmcraft() {
-        assert_eq!(HELP_ITEMS.first(), Some(&Action::JoinDiscord));
-        assert_eq!(HELP_ITEMS.last(), Some(&Action::Help));
-        assert_eq!(
-            menu_hint(Action::JoinDiscord, Language::En),
-            "https://discord.gg/artcraft"
-        );
-        assert!(menu_hint(Action::ReportIssue, Language::En).ends_with("/DiscCraft/issues"));
-        assert!(manual_url(Language::Ja).ends_with("user-guide.ja.md"));
-        assert!(manual_url(Language::En).ends_with("user-guide.md"));
-        assert_eq!(
-            menu_hint(Action::Help, Language::Ja),
-            manual_url(Language::Ja)
-        );
-        for action in HELP_ITEMS {
-            assert!(!menu_hint(action, Language::En).is_empty(), "{action:?}");
+    fn the_help_menu_follows_the_other_crafting_apps() {
+        assert_eq!(HELP_ITEMS.first(), Some(&Some(Action::JoinDiscord)));
+        assert_eq!(HELP_ITEMS.last(), Some(&Some(Action::About)));
+        assert_eq!(DISCORD, "https://discord.gg/artcraft");
+        assert!(ISSUES.ends_with("/DiscCraft/issues"));
+        assert!(manual_url(Language::Ja).ends_with("docs/manual/ja/README.md"));
+        assert!(manual_url(Language::En).ends_with("docs/manual/en/README.md"));
+        for action in HELP_ITEMS.into_iter().flatten() {
             assert!(!action.label().is_empty());
         }
     }

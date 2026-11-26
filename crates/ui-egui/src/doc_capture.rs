@@ -19,7 +19,8 @@
 //! - `{"preview": {"menu": 1, "button": 1}}`: open the Project Preview there (`preview.open`'s start: a menu's PGCN
 //!   and button, or a title and chapter; `{}` from First Play).
 //! - `{"remote": "Enter"}`: a key of the Project Preview's remote (Up, Down, Left, Right, Enter, Title, Menu).
-//! - `{"key": "Escape"}`: a key press (Escape, Enter, Space, Tab).
+//! - `{"key": "Escape"}`: a key press, by egui's name for the key, with modifiers before it (`Alt+F` opens the
+//!   File menu, `ArrowDown`, `Enter`).
 //! - `{"wait": 30}`: frames to wait; `{"sleep": 1500}`: milliseconds to wait (media loading, playback).
 //! - `{"shot": "name.png", ...}`: a picture saved in the output folder (`DISCCRAFT_CAPTURE_OUT`, else the script's
 //!   folder), of the whole window, or cut to `"panel": "Timeline"` (a panel's contents), `"area": "prefs_window"`
@@ -405,13 +406,7 @@ impl DiscCraftApp {
             self.send_remote(key);
             capture.wait_frames = 10;
         } else if let Some(name) = text("key") {
-            let key = match name {
-                "Escape" => egui::Key::Escape,
-                "Enter" => egui::Key::Enter,
-                "Space" => egui::Key::Space,
-                "Tab" => egui::Key::Tab,
-                _ => return Err(format!("no key {name}")),
-            };
+            let (key, modifiers) = key_press(name).ok_or_else(|| format!("no key {name}"))?;
             for pressed in [true, false] {
                 ctx.input_mut(|input| {
                     input.events.push(egui::Event::Key {
@@ -419,7 +414,7 @@ impl DiscCraftApp {
                         physical_key: None,
                         pressed,
                         repeat: false,
-                        modifiers: egui::Modifiers::NONE,
+                        modifiers,
                     });
                 });
             }
@@ -541,6 +536,25 @@ impl DiscCraftApp {
         });
         Ok(())
     }
+}
+
+/// A key step's key and modifiers: `Escape`, `Alt+F`, `Ctrl+Shift+S` (egui's key names).
+fn key_press(name: &str) -> Option<(egui::Key, egui::Modifiers)> {
+    let mut modifiers = egui::Modifiers::NONE;
+    let mut parts: Vec<&str> = name.split('+').collect();
+    let key = egui::Key::from_name(parts.pop()?)?;
+    for part in parts {
+        match part {
+            "Alt" => modifiers.alt = true,
+            "Ctrl" => {
+                modifiers.ctrl = true;
+                modifiers.command = true;
+            }
+            "Shift" => modifiers.shift = true,
+            _ => return None,
+        }
+    }
+    Some((key, modifiers))
 }
 
 #[cfg(test)]

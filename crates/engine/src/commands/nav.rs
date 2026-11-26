@@ -8,8 +8,8 @@ use super::{always_enabled, empty_object};
 pub(crate) const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "nav.setFirstPlay",
-        label: "最初の再生を設定",
-        menu: &["ナビゲーション"],
+        label: "Set First Play",
+        menu: &["Navigation"],
         shortcut: None,
         params: r#"{"target": Link}"#,
         enabled: always_enabled,
@@ -18,8 +18,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "nav.setFirstPlayOverride",
-        label: "ディスクの上書きを設定",
-        menu: &["ディスク"],
+        label: "Set Disc Override",
+        menu: &["Disc"],
         shortcut: None,
         params: r#"{"target": Link | null}"#,
         enabled: always_enabled,
@@ -28,8 +28,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "nav.setTitleRemote",
-        label: "タイトルリモートを設定",
-        menu: &["ナビゲーション"],
+        label: "Set Title Button",
+        menu: &["Navigation"],
         shortcut: None,
         params: r#"{"target": Link}"#,
         enabled: always_enabled,
@@ -38,8 +38,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "flowchart.moveNode",
-        label: "フローチャートのノードを移動",
-        menu: &["フローチャート"],
+        label: "Move Flowchart Node",
+        menu: &["Flowchart"],
         shortcut: None,
         params: r#"{"node": item id | 0 (the disc), "x": 0..100000, "y": 0..100000}"#,
         enabled: always_enabled,
@@ -48,8 +48,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "flowchart.link",
-        label: "リンクを設定",
-        menu: &["フローチャート"],
+        label: "Set Link",
+        menu: &["Flowchart"],
         shortcut: None,
         params: r#"{"command": a link command's id, "params": its params, "node": the item it links to}"#,
         enabled: always_enabled,
@@ -58,8 +58,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "flowchart.arrange",
-        label: "自動レイアウト",
-        menu: &["フローチャート"],
+        label: "Auto Layout",
+        menu: &["Flowchart"],
         shortcut: None,
         params: r#"{"node"?: item id | 0 (the disc); without it, every node}"#,
         enabled: always_enabled,
