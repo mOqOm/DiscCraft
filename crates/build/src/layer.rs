@@ -7,55 +7,7 @@ use disccraft_project::{Capacity, DiscKind, Project, VideoStandard};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-/// Where a dual-layer DVD image goes from layer 0 to layer 1, read back from the written image.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LayerBreak {
-    /// The first sector of layer 1 in the image: the size of layer 0.
-    pub sector: u32,
-    /// The image's size in sectors.
-    pub total_sectors: u32,
-    /// Whether the project set it (手動) rather than the build choosing it (自動).
-    pub manual: bool,
-    /// The title and cell the image's video starts at the break, read back from the image; `None` when the sector
-    /// is no title cell's start (a build never chooses such a sector).
-    pub place: Option<LayerBreakPlace>,
-    /// For a manual break: the time asked for, at the frame nearest to it (90 kHz from the title's start).
-    pub requested_90k: Option<u64>,
-}
-
-/// The title and cell at a layer break.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LayerBreakPlace {
-    /// The project's id of the title's timeline (a slideshow or chapter playlist id for those titles).
-    pub timeline: u64,
-    /// The title number (1-based).
-    pub title: u8,
-    /// The title set (1-based).
-    pub vts: u8,
-    /// The cell of the title's program chain (1-based) that starts at the break.
-    pub cell: u8,
-    /// The time from the title's start of the video at the break (90 kHz), from the navigation packs in the image.
-    pub time_90k: u64,
-}
-
-impl LayerBreak {
-    /// The size of layer 1 in sectors.
-    #[must_use]
-    pub fn layer1_sectors(&self) -> u32 {
-        self.total_sectors.saturating_sub(self.sector)
-    }
-
-    /// For a manual break: whether the image breaks at the frame asked for.
-    #[must_use]
-    pub fn as_requested(&self) -> Option<bool> {
-        let requested = self.requested_90k?;
-        Some(
-            self.place
-                .as_ref()
-                .is_some_and(|place| place.time_90k == requested),
-        )
-    }
-}
+pub use disccraft_project::{LayerBreak, LayerBreakPlace};
 
 /// 90 kHz ticks of one frame at the disc's rate.
 #[must_use]
@@ -320,6 +272,20 @@ pub fn millis(time_90k: u64) -> f64 {
     time_90k as f64 / 90.0
 }
 
+/// The layer break of the DVD-9 image `image` for writing it (M6.515): the one `project` keeps for the image it built
+/// there (`Project::built_image_layer_break`), else its note beside it ([`image_layer_break`]).
+#[must_use]
+pub fn layer_break_for(
+    project: &disccraft_project::Project,
+    image: &std::path::Path,
+) -> Option<u32> {
+    project
+        .built_image_layer_break(image)
+        .map(|found| found.sector)
+        .filter(|sector| *sector > 0)
+        .or_else(|| image_layer_break(image))
+}
+
 /// The layer break of the DVD-9 image `image` as its note beside it says (`LayerBreak=` of `<name>.layerbreak.txt`):
 /// the sectors it puts on layer 0, for writing it on a dual-layer disc (M9.42); `None` without a note.
 #[must_use]
@@ -442,5 +408,33 @@ mod tests {
         .unwrap();
         assert_eq!(super::image_layer_break(&image), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// M6.515: writing an image takes the layer break the project keeps for the image it built there, else the
+    /// note beside the image, else none.
+    #[test]
+    fn the_projects_layer_break_comes_before_the_note() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = std::env::temp_dir().join(format!("disccraft-layer-for-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let image = dir.join("disc.iso");
+        std::fs::write(&image, vec![0_u8; 8192])?;
+        let mut project = disccraft_project::Project::default();
+        assert_eq!(super::layer_break_for(&project, &image), None);
+        std::fs::write(image.with_extension("layerbreak.txt"), "LayerBreak=3\n")?;
+        assert_eq!(super::layer_break_for(&project, &image), Some(3));
+        let found = LayerBreak {
+            sector: 2,
+            total_sectors: 4,
+            manual: false,
+            place: None,
+            requested_90k: None,
+        };
+        assert!(project.note_built_image(&image, 8192, Some(found)));
+        assert_eq!(super::layer_break_for(&project, &image), Some(2));
+        // The note alone, once the image is no longer the one built (another size).
+        std::fs::write(&image, vec![0_u8; 4096])?;
+        assert_eq!(super::layer_break_for(&project, &image), Some(3));
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
     }
 }

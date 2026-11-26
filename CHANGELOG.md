@@ -4,6 +4,30 @@ English | [日本語](CHANGELOG.ja.md)
 
 What changed in each version of DiscCraft. The files for each system are on [GitHub's releases](https://github.com/mOqOm/DiscCraft/releases).
 
+## 0.1.0-alpha.15 (2026-11-26)
+
+### Documents
+
+- A user manual in chapters with pictures of the screen, in English and Japanese: `docs/manual/`, with a tutorial that makes a DVD with a menu from start to finish, a chapter on disc labels and a glossary with an index. Each chapter opens with what it lets you do, and the finer points sit in boxes of their own. The pictures are taken by DiscCraft itself, so they can be taken again for another language or a changed screen. The release also carries the manual as a PDF, one in English and one in Japanese (`disccraft-<version>-manual-en.pdf` / `-ja.pdf`)
+
+### DVD
+
+- The layer break of the last DVD-9 image built from a project is kept in the project and saved with it: the Build panel's Layer Break group shows it after the project is opened again, and writing that image to a dual-layer disc takes it even without the note beside the image
+
+### Project Preview
+
+- The Project Preview opens a disc whose menu buttons overlap, as Encore's does (the build still refuses it); before, it did not open and the status bar showed the check's errors as a raw dump
+- The Project Preview looks more like Encore's: it starts at 100 % (the picture at its own size in the middle, not stretched to the window), the magnification sits under a screen icon, the box of what is playing shows three rows with icons (the menu or title, the button or chapter, still / motion or the time), Title and Menu are picture buttons, and the remote's arrows and Enter are one round pad
+
+### Known limitations
+
+- Importing from Blu-ray reads only discs without encryption. DTS and Dolby TrueHD sound are not imported; the disc's subtitles come into a Blu-ray project only, not yet into a DVD project
+- Writing to discs is Windows only. DVD-R and DVD+R DL (dual layer) have been written in a real drive; DVD+R, DVD-RW, DVD+RW, BD-R and BD-RE not yet
+- A disc label is printed from DesignCraft. DiscCraft does not yet place it where a printer's disc tray prints it: with a printer that prints the tray from an A4 page, place the label on that page in DesignCraft
+- DV time code (subcode) is not read (Encore does not read it either). DVCPRO HD and DV inside MXF cannot be read
+- Automatic routing still sometimes goes elsewhere than Encore's
+- Not signed with a developer certificate. On Windows SmartScreen asks the first time the installer runs, on macOS Gatekeeper the first time (right-click ▸ Open, or remove it with `xattr -d com.apple.quarantine`)
+
 ## 0.1.0-alpha.14 (2026-11-25)
 
 ### Importing from Blu-ray

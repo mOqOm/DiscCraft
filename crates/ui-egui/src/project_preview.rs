@@ -5,6 +5,10 @@
 //! 窓の下の操作バーは Encore と同じ並び: 拡大率、オーディオと字幕、今の項目（名前、ボタンかチャプター、
 //! 静止画か再生の時刻）、タイトル / メニュー、十字キーと決定、前のチャプター・停止・一時停止・再生・次のチャプター・
 //! チャプター番号、そして「ここで終了」（見ている項目を開いて終わる）と「終了して戻る」（開く前の選択に戻る）。
+//!
+//! M6.514: 見た目も Encore のプレビューに近づけた: 初めは 100 %（実寸で真ん中）、拡大率は画面の絵の下、今の項目は
+//! アイコン付きの 3 行の明るめの箱、タイトル / メニューは絵のボタン、十字キーは丸い 1 つの部品。絵は Craft のアイコンと
+//! DiscCraft の描いた形で、Encore の絵柄は写さない（AGENTS.md ルール 2）。
 
 use crate::DiscCraftApp;
 use crate::app::Selection;
@@ -104,7 +108,8 @@ impl DiscCraftApp {
         self.project_preview = Some(ProjectPreview {
             return_to,
             chapter_text: String::new(),
-            zoom: MonitorZoom::Fit,
+            // M6.514: at its own size, as Encore's preview starts (100 %), not stretched to the window.
+            zoom: MonitorZoom::Percent(100),
         });
         self.status = tl!("Project Preview").to_owned();
     }
@@ -432,9 +437,20 @@ impl DiscCraftApp {
         let mut exit = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            // 拡大率。
+            // 拡大率（M6.514: Encore と同じく、画面の絵の下に拡大率）。
             if let Some(open) = self.project_preview.as_mut() {
-                crate::monitor::zoom_combo(ui, "project_preview_zoom", &mut open.zoom);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(80.0, 18.0), egui::Sense::hover());
+                    icons::paint(
+                        ui.painter(),
+                        egui::Rect::from_center_size(rect.center(), egui::vec2(18.0, 18.0)),
+                        Icon::Monitor,
+                        ui.visuals().text_color(),
+                    );
+                    crate::monitor::zoom_combo(ui, "project_preview_zoom", &mut open.zoom);
+                });
             }
             ui.separator();
             self.preview_streams(ui);
@@ -582,28 +598,47 @@ impl DiscCraftApp {
         (audio, subtitles)
     }
 
-    /// 今の項目: 名前、ボタン（メニュー）かチャプター（タイトル）、静止画 / モーション か再生の時刻。
+    /// 今の項目: 名前、ボタン（メニュー）かチャプター（タイトル）、静止画 / モーション か再生の時刻。M6.514: Encore と
+    /// 同じく 3 行それぞれに小さなアイコン（Craft のアイコン）を付け、角の丸い明るめの箱に。
     fn preview_info(&mut self, ui: &mut Ui) {
-        let (name, number, detail) = self.preview_info_lines();
+        let rows = self.preview_info_lines();
         egui::Frame::new()
-            .fill(egui::Color32::from_gray(96))
+            .fill(INFO_BOX.get())
+            .stroke(egui::Stroke::new(1.0, INFO_EDGE.get()))
             .corner_radius(6)
-            .inner_margin(egui::Margin::symmetric(8, 3))
+            .inner_margin(egui::Margin::symmetric(8, 4))
             .show(ui, |ui| {
-                ui.set_width(170.0);
+                ui.set_width(190.0);
                 ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.add(egui::Label::new(name).truncate());
-                    ui.label(number);
-                    ui.label(detail);
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    let color = crate::theme::TEXT_STRONG.get();
+                    for (icon, text) in rows {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 5.0;
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(13.0, 13.0), egui::Sense::hover());
+                            if let Some(icon) = icon {
+                                icons::paint(ui.painter(), rect, icon, color);
+                            }
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(text).color(color)).truncate(),
+                            );
+                        });
+                    }
                 });
             });
     }
 
-    fn preview_info_lines(&self) -> (String, String, String) {
+    /// The item box's three rows: the menu or title (its icon and name), the button or chapter, and still /
+    /// motion or the time played.
+    fn preview_info_lines(&self) -> [(Option<Icon>, String); 3] {
         let state = &self.preview;
         if self.preview_stopped() {
-            return (tl!("Stopped").to_owned(), String::new(), String::new());
+            return [
+                (Some(Icon::Square), tl!("Stopped").to_owned()),
+                (None, String::new()),
+                (None, String::new()),
+            ];
         }
         let project = &self.session.project;
         if let Some(menu) = &state.menu {
@@ -611,16 +646,19 @@ impl DiscCraftApp {
                 .menu_for_pgcn(menu.pgcn)
                 .and_then(|id| project.menu(id));
             let name = found.map_or_else(|| state.label.clone(), |menu| menu.name.clone());
-            let kind = if found.is_some_and(disccraft_project::Menu::is_motion) {
-                tl!("Motion")
-            } else {
-                tl!("Still")
-            };
-            return (
-                name,
-                tlf!("Button {n}", n = format!("{:02}", menu.button)),
-                kind.to_owned(),
-            );
+            let motion = found.is_some_and(disccraft_project::Menu::is_motion);
+            let kind = if motion { tl!("Motion") } else { tl!("Still") };
+            return [
+                (Some(Icon::ListView), name),
+                (
+                    Some(Icon::Selection),
+                    tlf!("Button {n}", n = format!("{:02}", menu.button)),
+                ),
+                (
+                    Some(if motion { Icon::Film } else { Icon::Image }),
+                    kind.to_owned(),
+                ),
+            ];
         }
         if let Some((title, chapter)) = state.title {
             let name = title_name(project, title);
@@ -631,74 +669,51 @@ impl DiscCraftApp {
                 Some(seconds) => self.duration_text(seconds),
                 None => String::new(),
             };
-            return (name, tlf!("Chapter {n}", n = format!("{chapter:02}")), time);
+            return [
+                (Some(Icon::Film), name),
+                (
+                    Some(Icon::Marker),
+                    tlf!("Chapter {n}", n = format!("{chapter:02}")),
+                ),
+                (Some(Icon::Clock), time),
+            ];
         }
-        (state.label.clone(), String::new(), String::new())
+        [
+            (None, state.label.clone()),
+            (None, String::new()),
+            (None, String::new()),
+        ]
     }
 
-    /// タイトル / メニューのボタンと、十字キーと決定。
+    /// タイトル / メニューのボタンと、十字キーと決定。M6.514: Encore と同じく、タイトルとメニューは絵のボタン
+    /// （Craft のアイコン）を縦に並べ、十字キーは丸い 1 つの部品に。
     fn preview_remote(&mut self, ui: &mut Ui) {
         let open = !self.preview_stopped();
         let playing = open && self.preview.menu.is_none();
         let mut key = None;
         ui.vertical(|ui| {
-            if ui
-                .add_enabled(
-                    open,
-                    egui::Button::new(tl!("Title")).min_size(egui::vec2(52.0, 20.0)),
-                )
-                .clicked()
-            {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            if transport_button(ui, Icon::Type, open, tl!("Title")) {
                 key = Some(RemoteKey::Title);
             }
-            if ui
-                .add_enabled(
-                    playing,
-                    egui::Button::new(tl!("Menu")).min_size(egui::vec2(52.0, 20.0)),
-                )
-                .clicked()
-            {
+            if transport_button(ui, Icon::ListView, playing, tl!("Menu")) {
                 key = Some(RemoteKey::Menu);
             }
             // Blu-ray のリモコンのポップアップメニューのボタン（タイトルにポップアップがあるときだけ）。
             if self.preview.bluray
-                && ui
-                    .add_enabled(
-                        playing && (self.preview.popup_available || self.preview.popup.is_some()),
-                        egui::Button::new(tl!("Pop-up Menu")).min_size(egui::vec2(52.0, 20.0)),
-                    )
-                    .clicked()
+                && transport_button(
+                    ui,
+                    Icon::Grid,
+                    playing && (self.preview.popup_available || self.preview.popup.is_some()),
+                    tl!("Pop-up Menu"),
+                )
             {
                 key = Some(RemoteKey::Popup);
             }
         });
-        // 十字キー: 上、左・決定・右、下。
-        ui.add_enabled_ui(open, |ui| {
-            egui::Grid::new("project_preview_dpad")
-                .spacing([2.0, 2.0])
-                .show(ui, |ui| {
-                    let mut pad = |ui: &mut Ui, text: &str, pressed: RemoteKey| {
-                        if ui
-                            .add(egui::Button::new(text).min_size(egui::vec2(22.0, 18.0)))
-                            .clicked()
-                        {
-                            key = Some(pressed);
-                        }
-                    };
-                    ui.label("");
-                    pad(ui, "▲", RemoteKey::Up);
-                    ui.label("");
-                    ui.end_row();
-                    pad(ui, "◀", RemoteKey::Left);
-                    pad(ui, "●", RemoteKey::Enter);
-                    pad(ui, "▶", RemoteKey::Right);
-                    ui.end_row();
-                    ui.label("");
-                    pad(ui, "▼", RemoteKey::Down);
-                    ui.label("");
-                    ui.end_row();
-                });
-        });
+        if let Some(pressed) = arrow_pad(ui, open) {
+            key = Some(pressed);
+        }
         if let Some(key) = key {
             self.preview_paused = false;
             self.send_remote(key);
@@ -860,6 +875,11 @@ impl DiscCraftApp {
         }
     }
 
+    /// Closes the Project Preview as its window's close box does (the manual's screenshot script, M15.1).
+    pub(crate) fn close_project_preview_window(&mut self, ctx: &Context) {
+        self.exit_project_preview(ctx, Exit::Return);
+    }
+
     /// プレビューを閉じる。ここで終了なら見ている項目を開き（タイトルはその時刻）、戻るなら開く前の選択へ。
     fn exit_project_preview(&mut self, ctx: &Context, exit: Exit) {
         let Some(open) = self.project_preview.take() else {
@@ -910,6 +930,120 @@ impl DiscCraftApp {
             .nth(index)
             .map(|id| (Selection::ChapterPlaylist(*id), None))
     }
+}
+
+/// The item box's ground and edge (M6.514).
+const INFO_BOX: crate::theme::Shade = crate::theme::Shade::gray(108, 206);
+const INFO_EDGE: crate::theme::Shade = crate::theme::Shade::gray(136, 172);
+/// The arrow pad: its ring, its edge, the Enter button in the middle (and under the pointer).
+const PAD_RING: crate::theme::Shade = crate::theme::Shade::gray(82, 214);
+const PAD_EDGE: crate::theme::Shade = crate::theme::Shade::gray(34, 150);
+const PAD_ENTER: crate::theme::Shade = crate::theme::Shade::gray(112, 236);
+const PAD_LIT: crate::theme::Shade = crate::theme::Shade::gray(140, 250);
+
+/// Which part of the arrow pad centred on `center` (outer radius `outer`, Enter's radius `inner`) is at `offset`
+/// from its centre: Enter in the middle, else the arrow of the quarter it is in; `None` outside the pad.
+fn pad_part(offset: egui::Vec2, outer: f32, inner: f32) -> Option<RemoteKey> {
+    let distance = offset.length();
+    if distance > outer {
+        return None;
+    }
+    if distance <= inner {
+        return Some(RemoteKey::Enter);
+    }
+    Some(if offset.x.abs() > offset.y.abs() {
+        if offset.x > 0.0 {
+            RemoteKey::Right
+        } else {
+            RemoteKey::Left
+        }
+    } else if offset.y > 0.0 {
+        RemoteKey::Down
+    } else {
+        RemoteKey::Up
+    })
+}
+
+/// The remote's arrows and Enter as one round pad (M6.514, as the remote in Encore's preview; DiscCraft's own
+/// drawing): a ring with an arrow at each quarter and a round Enter button in the middle. The key pressed.
+fn arrow_pad(ui: &mut Ui, enabled: bool) -> Option<RemoteKey> {
+    const SIZE: f32 = 62.0;
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(SIZE, SIZE), sense);
+    let center = rect.center();
+    let outer = SIZE / 2.0 - 1.0;
+    let inner = outer * 0.4;
+    let under = response
+        .hover_pos()
+        .filter(|_| enabled)
+        .and_then(|pos| pad_part(pos - center, outer, inner));
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let faded = |color: egui::Color32| {
+            if enabled {
+                color
+            } else {
+                color.gamma_multiply(0.45)
+            }
+        };
+        painter.circle(
+            center,
+            outer,
+            faded(PAD_RING.get()),
+            egui::Stroke::new(1.0, PAD_EDGE.get()),
+        );
+        let arrow = faded(crate::theme::TEXT.get());
+        let lit = crate::theme::TEXT_STRONG.get();
+        for (key, direction) in [
+            (RemoteKey::Up, egui::vec2(0.0, -1.0)),
+            (RemoteKey::Right, egui::vec2(1.0, 0.0)),
+            (RemoteKey::Down, egui::vec2(0.0, 1.0)),
+            (RemoteKey::Left, egui::vec2(-1.0, 0.0)),
+        ] {
+            let at = center + direction * ((inner + outer) / 2.0 + 1.0);
+            let across = egui::vec2(-direction.y, direction.x);
+            let points = vec![
+                at + direction * 4.0,
+                at - direction * 3.0 + across * 4.5,
+                at - direction * 3.0 - across * 4.5,
+            ];
+            let color = if under == Some(key) { lit } else { arrow };
+            painter.add(egui::Shape::convex_polygon(
+                points,
+                color,
+                egui::Stroke::NONE,
+            ));
+        }
+        let enter = if under == Some(RemoteKey::Enter) {
+            PAD_LIT.get()
+        } else {
+            faded(PAD_ENTER.get())
+        };
+        painter.circle(
+            center,
+            inner - 2.0,
+            enter,
+            egui::Stroke::new(1.0, PAD_EDGE.get()),
+        );
+    }
+    let response = response.on_hover_text(match under {
+        Some(RemoteKey::Enter) => tl!("Enter"),
+        Some(RemoteKey::Up) => tl!("Up"),
+        Some(RemoteKey::Down) => tl!("Down"),
+        Some(RemoteKey::Left) => tl!("Left"),
+        Some(RemoteKey::Right) => tl!("Right"),
+        _ => tl!("Arrows and Enter of the remote"),
+    });
+    if !response.clicked() {
+        return None;
+    }
+    response
+        .interact_pointer_pos()
+        .and_then(|pos| pad_part(pos - center, outer, inner))
 }
 
 /// 操作バーの小さなアイコンのボタン。押されたか。
@@ -975,5 +1109,43 @@ mod popup_tests {
         assert!(rgba.get(8).is_some_and(|grey| grey.abs_diff(199) <= 1));
         // Odd lengths do not panic.
         assert_eq!(matte(&[1, 2], &[3, 4]), Vec::<u8>::new());
+    }
+}
+
+#[cfg(test)]
+mod pad_tests {
+    use super::pad_part;
+    use crate::monitor::RemoteKey;
+    use egui::vec2;
+
+    /// M6.514: the round pad's middle is Enter, each quarter its arrow, and outside it nothing.
+    #[test]
+    fn the_pad_is_split_into_enter_and_four_arrows() {
+        let (outer, inner) = (30.0, 12.0);
+        assert_eq!(
+            pad_part(vec2(0.0, 0.0), outer, inner),
+            Some(RemoteKey::Enter)
+        );
+        assert_eq!(
+            pad_part(vec2(5.0, -6.0), outer, inner),
+            Some(RemoteKey::Enter)
+        );
+        assert_eq!(
+            pad_part(vec2(2.0, -20.0), outer, inner),
+            Some(RemoteKey::Up)
+        );
+        assert_eq!(
+            pad_part(vec2(-3.0, 22.0), outer, inner),
+            Some(RemoteKey::Down)
+        );
+        assert_eq!(
+            pad_part(vec2(-25.0, 4.0), outer, inner),
+            Some(RemoteKey::Left)
+        );
+        assert_eq!(
+            pad_part(vec2(18.0, 9.0), outer, inner),
+            Some(RemoteKey::Right)
+        );
+        assert_eq!(pad_part(vec2(25.0, 25.0), outer, inner), None);
     }
 }

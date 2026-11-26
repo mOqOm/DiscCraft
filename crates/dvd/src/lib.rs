@@ -378,13 +378,30 @@ pub(crate) fn validate_project(project: &Project) -> Result<(usize, usize), DvdE
 
 /// [`validate_project`] without the disc kind: the project passes its check and has 1 to 99 titles.
 pub(crate) fn validate_contents(project: &Project) -> Result<(usize, usize), DvdError> {
-    let problems = project.check();
+    validate_contents_allowing(project, &[])
+}
+
+/// [`validate_contents`], with the errors of the codes `allowed` let through (the Project Preview tries a disc
+/// whose buttons overlap, as Encore's does; the build still refuses it). The errors are named by their messages.
+pub(crate) fn validate_contents_allowing(
+    project: &Project,
+    allowed: &[&str],
+) -> Result<(usize, usize), DvdError> {
+    let problems: Vec<_> = project
+        .check()
+        .into_iter()
+        .filter(|problem| !allowed.contains(&problem.code.as_str()))
+        .collect();
     if has_errors(&problems) {
-        let mut message = String::from("project check failed:");
-        for problem in &problems {
-            message.push_str(&format!(" {problem:?}"));
-        }
-        return Err(DvdError::Invalid(message));
+        let errors: Vec<&str> = problems
+            .iter()
+            .filter(|problem| problem.severity == disccraft_project::Severity::Error)
+            .map(|problem| problem.message.as_str())
+            .collect();
+        return Err(DvdError::Invalid(format!(
+            "the project check found errors: {}",
+            errors.join("; ")
+        )));
     }
 
     let vts_count = project

@@ -72,8 +72,7 @@ pub(crate) enum Panel {
 }
 
 impl Panel {
-    /// すべてのパネル。
-    #[cfg(test)]
+    /// すべてのパネル（テストと、マニュアルの画面の撮影の `show`）。
     pub(crate) const ALL: [Panel; 18] = [
         Panel::Project,
         Panel::Menus,

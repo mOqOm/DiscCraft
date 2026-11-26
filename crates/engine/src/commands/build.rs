@@ -182,6 +182,17 @@ fn run_build(session: &mut Session, params: &Value) -> CommandResult {
     };
 
     let report = disccraft_build::build(&session.project, &options)?;
+    // M6.515: a DVD image's layer break goes into the project (saved with it).
+    if output == OutputKind::Iso
+        && session.project.settings.kind == disccraft_project::DiscKind::Dvd
+        && session.project.note_built_image(
+            &report.output,
+            report.total_bytes,
+            report.layer_break.clone(),
+        )
+    {
+        session.dirty = true;
+    }
     let titles =
         u64::try_from(report.titles).map_err(|_| "title count is too large".to_string())?;
     let chapters =
