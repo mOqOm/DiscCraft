@@ -143,6 +143,26 @@ pub struct PsdPages {
     /// the button sets in each shown `(#)` group (a hidden one is no page), the lowest first. What else a `(#)` group
     /// draws is left out, as on Encore's Blu-ray discs.
     pub pages: Vec<Image8>,
+    /// Each page's button sets one by one (M6.517), in the order [`load_psd_menu`] gives the buttons: Encore's button
+    /// set, whose layers move and scale with the button.
+    pub buttons: Vec<Vec<PsdButtonPicture>>,
+}
+
+/// One button set of a menu PSD as its own pictures (M6.517): what it shows, to be drawn where its button is now
+/// (moved or resized since), as Encore moves and scales a button set's layers with the button.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PsdButtonPicture {
+    /// The set's layer id (`lyid`), as [`PsdButton::layer_id`].
+    pub layer_id: Option<u32>,
+    /// The button's name (after `(+)`), as [`PsdButton::name`].
+    pub name: String,
+    /// The button's place on the canvas (x, y, width, height), as [`PsdButton`] has it: what `picture` covers.
+    pub bounds: [u32; 4],
+    /// What the set shows over `bounds`, its highlight layers and its video frame left out, over transparency.
+    pub picture: Image8,
+    /// The set's video frame (its `(%)` layer as it is shown, Encore's frame the video fills) and the frame's place
+    /// on the canvas; `None` for a set without a shown `(%)` layer.
+    pub frame: Option<([u32; 4], Image8)>,
 }
 
 /// One layer of a PSD's layer tree, as Encore's Layers panel lists it (M10.47).
@@ -521,10 +541,110 @@ fn menu_pages(doc: Document, canvas: Rect) -> Result<PsdPages, PhotoError> {
         .filter(|(_, layer)| is_page_group(layer))
         .map(|(index, _)| index)
         .collect();
-    for group in groups {
-        pages.push(render(&|index, _| index == group)?);
+    for group in &groups {
+        pages.push(render(&|index, _| index == *group)?);
     }
-    Ok(PsdPages { shared, pages })
+    // The sets one by one, numbered as `load_psd_menu` numbers the buttons.
+    let paged = !groups.is_empty();
+    let mut buttons = vec![button_pictures(
+        &collect_button_layers(&doc.layers, paged),
+        canvas,
+    )];
+    for group in groups {
+        let sets = match doc.layers.get(group).map(|layer| &layer.content) {
+            Some(LayerContent::Group(group)) => collect_button_layers(&group.children, false),
+            _ => Vec::new(),
+        };
+        buttons.push(button_pictures(&sets, canvas));
+    }
+    Ok(PsdPages {
+        shared,
+        pages,
+        buttons,
+    })
+}
+
+/// The pictures of `sets` (button sets), as [`PsdButtonPicture`]s; a set that is no button or covers nothing is left
+/// out, as [`load_psd_menu`] leaves its button out.
+fn button_pictures(sets: &[Layer], canvas: Rect) -> Vec<PsdButtonPicture> {
+    sets.iter()
+        .filter_map(|set| button_picture(set, canvas))
+        .collect()
+}
+
+fn button_picture(layer: &Layer, canvas: Rect) -> Option<PsdButtonPicture> {
+    let name = button_name(&layer.name)?;
+    let rect = button_rect(layer, canvas)?;
+    let mut set = layer.clone();
+    hide_highlight_layer(&mut set);
+    let frame_layer = find_thumbnail_layer(&set)
+        .filter(|frame| frame.visible)
+        .cloned();
+    hide_thumbnail_layer(&mut set);
+    let picture = crop_buffer(&render_layer(&set, canvas), rect)?;
+    let frame = frame_layer.and_then(|frame| {
+        let area = thumbnail_bbox(layer, canvas)?;
+        Some((
+            rect_array(area)?,
+            crop_buffer(&render_layer(&frame, canvas), area)?,
+        ))
+    });
+    Some(PsdButtonPicture {
+        layer_id: layer.psd_id,
+        name,
+        bounds: rect_array(rect)?,
+        picture,
+        frame,
+    })
+}
+
+/// `rect` (canvas-relative) as x, y, width, height.
+fn rect_array(rect: Rect) -> Option<[u32; 4]> {
+    Some([
+        u32::try_from(rect.x0).ok()?,
+        u32::try_from(rect.y0).ok()?,
+        rect_width_u32(rect)?,
+        rect_height_u32(rect)?,
+    ])
+}
+
+/// The part `rect` (canvas-relative) of a rendered canvas-sized buffer.
+fn crop_buffer(buffer: &Buffer, rect: Rect) -> Option<Image8> {
+    let image = buffer.to_rgba8();
+    let [x, y, width, height] = rect_array(rect)?;
+    let stride = usize::try_from(image.width).ok()?.checked_mul(4)?;
+    let (x, y) = (usize::try_from(x).ok()?, usize::try_from(y).ok()?);
+    let row_bytes = usize::try_from(width).ok()?.checked_mul(4)?;
+    let mut rgba = Vec::with_capacity(row_bytes.checked_mul(usize::try_from(height).ok()?)?);
+    for row in 0..usize::try_from(height).ok()? {
+        let start = y
+            .checked_add(row)?
+            .checked_mul(stride)?
+            .checked_add(x.checked_mul(4)?)?;
+        rgba.extend_from_slice(image.pixels.get(start..start.checked_add(row_bytes)?)?);
+    }
+    Some(Image8 {
+        width,
+        height,
+        rgba,
+    })
+}
+
+/// Hides the first `(%)` layer of a button set (its video frame, drawn on its own).
+fn hide_thumbnail_layer(layer: &mut Layer) -> bool {
+    let LayerContent::Group(group) = &mut layer.content else {
+        return false;
+    };
+    for child in &mut group.children {
+        if is_thumbnail_name(&child.name) {
+            child.visible = false;
+            return true;
+        }
+        if hide_thumbnail_layer(child) {
+            return true;
+        }
+    }
+    false
 }
 
 fn load_document(path: &Path) -> Result<(Document, Rect), PhotoError> {
@@ -794,13 +914,7 @@ fn build_button(layer: Layer, canvas: Rect) -> Option<PsdButton> {
     let highlights = collect_highlight_layers(&layer);
     let highlight_buffers = render_highlight_buffers(&highlights, canvas);
     let highlight_bbox = highlight_bbox(&highlight_buffers, canvas);
-    let button_bbox = button_bbox(&layer, canvas);
-
-    // Like Encore, the button covers its whole layer set: its layers, hidden ones too, and the highlight layers.
-    let rect = match (button_bbox, highlight_bbox) {
-        (Some(a), Some(b)) => union_bbox(&[a, b])?,
-        (a, b) => a.or(b)?,
-    };
+    let rect = covered(button_bbox(&layer, canvas), highlight_bbox)?;
     let highlight = build_highlight_image(&highlight_buffers, highlight_bbox, rect, canvas);
     let subpicture = build_subpicture(&highlights, rect, canvas);
     let thumbnail = thumbnail_bbox(&layer, canvas).and_then(|area| {
@@ -824,6 +938,21 @@ fn build_button(layer: Layer, canvas: Rect) -> Option<PsdButton> {
         thumbnail,
         subpicture,
     })
+}
+
+/// Like Encore, the button covers its whole layer set: its layers, hidden ones too, and the highlight layers.
+fn covered(set: Option<Rect>, highlights: Option<Rect>) -> Option<Rect> {
+    match (set, highlights) {
+        (Some(a), Some(b)) => union_bbox(&[a, b]),
+        (a, b) => a.or(b),
+    }
+}
+
+/// The place a button set's button covers on the canvas, as [`build_button`] takes it.
+fn button_rect(layer: &Layer, canvas: Rect) -> Option<Rect> {
+    let highlights = collect_highlight_layers(layer);
+    let highlight = highlight_bbox(&render_highlight_buffers(&highlights, canvas), canvas);
+    covered(button_bbox(layer, canvas), highlight)
 }
 
 /// The button's subpicture over `rect`: each `(=n)` layer, bottom to top, marks the pixels it draws half opaque
