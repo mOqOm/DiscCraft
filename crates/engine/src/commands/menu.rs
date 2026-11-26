@@ -2075,6 +2075,12 @@ fn apply_psd_page(
         button.rect = found.rect;
         button.thumbnail = found.thumbnail;
         button.subpicture.clone_from(&found.subpicture);
+        // The PSD's layers say where the set's text and video frame are now: what was moved of them in DiscCraft
+        // before (the Direct Select tool, a content box of its own) is in the PSD already, or was undone there. Kept,
+        // it moved them again from their new places (a video frame away from its picture).
+        button.body = None;
+        button.label_offset = [0, 0];
+        button.thumbnail_offset = [0, 0];
         button.highlight_group = groups.groups.get(index).copied().unwrap_or(1);
         button.label.clear();
         button.psd_layer = found.layer_id;
@@ -4377,6 +4383,120 @@ mod tests {
     /// below Play), Play moved, a new Extras group added; the second page's Back moved. Applied from the second
     /// page, both pages follow: the buttons take the PSD's order, Play keeps its link, the default button stays
     /// Scenes, Extras is a new button, and Back has its new place.
+    /// M6.517: a PSD's button set is drawn where its button is, as Encore moves and scales a button set's layers with
+    /// the button: moved or resized, its video frame and its text go with it (they stayed where the PSD had them,
+    /// the video frame away from the video, GitHub reporter's test).
+    #[test]
+    fn a_psd_button_sets_layers_move_and_scale_with_the_button() -> Result<(), Box<dyn Error>> {
+        use disccraft_photo::PsdLayer;
+        let dir = std::env::temp_dir().join(format!("disccraft-set-moves-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let (w, h) = (720u32, 480u32);
+        let filled = |x0: u32, y0: u32, x1: u32, y1: u32, color: [u8; 4]| {
+            let mut rgba = vec![0u8; (w * h * 4) as usize];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = ((y * w + x) * 4) as usize;
+                    rgba[i..i + 4].copy_from_slice(&color);
+                }
+            }
+            rgba
+        };
+        let path = dir.join("Sets.psd");
+        disccraft_photo::write_layered_psd(
+            &path,
+            w,
+            h,
+            &[
+                PsdLayer::Raster {
+                    name: "Background".to_owned(),
+                    rgba: [20, 20, 60, 255].repeat((w * h) as usize),
+                    visible: true,
+                },
+                PsdLayer::Group {
+                    name: "(+) Chapter 1".to_owned(),
+                    id: Some(10),
+                    children: vec![
+                        PsdLayer::Raster {
+                            name: "(%) video".to_owned(),
+                            rgba: filled(100, 80, 300, 200, [128, 128, 128, 255]),
+                            visible: true,
+                        },
+                        PsdLayer::Raster {
+                            name: "Chapter 1".to_owned(),
+                            rgba: filled(120, 210, 280, 240, [240, 240, 240, 255]),
+                            visible: true,
+                        },
+                    ],
+                },
+            ],
+        )?;
+        let mut session = Session::new();
+        let imported = session.execute(
+            "menu.import",
+            &serde_json::json!({ "path": path.to_string_lossy() }),
+        )?;
+        let menu = MenuId(value_u64(&imported, "menu")?);
+        let at = |session: &Session, x: usize, y: usize| -> Result<[u8; 3], Box<dyn Error>> {
+            let drawn = disccraft_menu::render_menu(
+                &session.project,
+                session.project.menu(menu).ok_or("menu")?,
+            )?;
+            let i = (y * usize::from(drawn.width) + x) * 3;
+            Ok([drawn.rgb[i], drawn.rgb[i + 1], drawn.rgb[i + 2]])
+        };
+        let grey = |c: [u8; 3]| c.iter().all(|v| (100..=160).contains(v));
+        let white = |c: [u8; 3]| c.iter().all(|v| *v > 200);
+        let background = |c: [u8; 3]| c[2] > c[0] + 20 && c[0] < 60;
+        assert!(
+            grey(at(&session, 200, 140)?) && white(at(&session, 200, 225)?),
+            "as the PSD has it"
+        );
+
+        // Moved 300 pixels to the right in DiscCraft: the frame and the text with it, nothing left behind.
+        let rect = session.project.menu(menu).ok_or("menu")?.buttons[0].rect;
+        session.execute(
+            "button.setRect",
+            &serde_json::json!({"menu": menu.0, "button": 0,
+                "rect": {"x": rect.x + 300, "y": rect.y, "w": rect.w, "h": rect.h}}),
+        )?;
+        assert!(
+            grey(at(&session, 500, 140)?),
+            "the frame moved with the button"
+        );
+        assert!(
+            white(at(&session, 500, 225)?),
+            "the text moved with the button"
+        );
+        assert!(
+            background(at(&session, 200, 140)?),
+            "nothing left where the frame was"
+        );
+        assert!(
+            background(at(&session, 200, 225)?),
+            "nothing left where the text was"
+        );
+
+        // Made half as large again: the frame grows with it and is where the button's video goes.
+        session.execute(
+            "button.setRect",
+            &serde_json::json!({"menu": menu.0, "button": 0,
+                "rect": {"x": rect.x + 300, "y": rect.y, "w": rect.w * 3 / 2, "h": rect.h * 3 / 2}}),
+        )?;
+        let button = &session.project.menu(menu).ok_or("menu")?.buttons[0];
+        let frame = button.thumbnail_placed().ok_or("no frame")?;
+        assert!(frame.w >= 290, "the frame scaled: {frame:?}");
+        let (cx, cy) = (
+            usize::from(frame.x + frame.w - 10),
+            usize::from(frame.y + frame.h - 10),
+        );
+        assert!(
+            grey(at(&session, cx, cy)?),
+            "the scaled frame reaches its new corner"
+        );
+        Ok(())
+    }
+
     #[test]
     fn an_edited_psd_is_taken_in_by_name_on_every_page() -> Result<(), Box<dyn Error>> {
         use disccraft_photo::PsdLayer;
@@ -4506,6 +4626,94 @@ mod tests {
     /// deleted set's link, the two paired in order), the renamed set keeps its button and link, and the links to a
     /// button by number and the default button follow their buttons. Buttons from before M10.49 (no layer ids) are
     /// paired with a renamed set where it overlaps them, so the copy, elsewhere, is still new.
+    /// A button set's text and video frame moved in DiscCraft, then the set moved in PhotoCraft: taken in again, the
+    /// frame is where the PSD's `(%)` layer is (it was moved again by what DiscCraft had moved it, away from its
+    /// picture).
+    #[test]
+    fn a_psd_taken_in_again_places_the_video_frame_where_its_layer_is() -> Result<(), Box<dyn Error>>
+    {
+        use disccraft_photo::PsdLayer;
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-apply-frame-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let (w, h) = (720u32, 480u32);
+        let filled = |x0: u32, y0: u32, x1: u32, y1: u32, color: [u8; 4]| {
+            let mut rgba = vec![0u8; (w * h * 4) as usize];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = ((y * w + x) * 4) as usize;
+                    rgba[i..i + 4].copy_from_slice(&color);
+                }
+            }
+            rgba
+        };
+        // A chapter button: a grey video frame and its text under it, `dx` pixels from the left.
+        let write = |dx: u32| -> Result<(), Box<dyn Error>> {
+            disccraft_photo::write_layered_psd(
+                &dir.join("Frames.psd"),
+                w,
+                h,
+                &[
+                    PsdLayer::Raster {
+                        name: "Background".to_owned(),
+                        rgba: [20, 20, 60, 255].repeat((w * h) as usize),
+                        visible: true,
+                    },
+                    PsdLayer::Group {
+                        name: "(+) Chapter 1".to_owned(),
+                        id: Some(10),
+                        children: vec![
+                            PsdLayer::Raster {
+                                name: "(%) video".to_owned(),
+                                rgba: filled(100 + dx, 80, 300 + dx, 200, [128, 128, 128, 255]),
+                                visible: true,
+                            },
+                            PsdLayer::Raster {
+                                name: "Chapter 1".to_owned(),
+                                rgba: filled(120 + dx, 210, 280 + dx, 240, [240, 240, 240, 255]),
+                                visible: true,
+                            },
+                        ],
+                    },
+                ],
+            )?;
+            Ok(())
+        };
+        write(0)?;
+        let path = dir.join("Frames.psd").to_string_lossy().into_owned();
+        let mut session = Session::new();
+        let imported = session.execute("menu.import", &serde_json::json!({ "path": path }))?;
+        let menu = MenuId(value_u64(&imported, "menu")?);
+        // Moved in DiscCraft: the frame and the text, with the Direct Select tool.
+        for (command, x, y) in [
+            ("button.setThumbnailOffset", 30, 10),
+            ("button.setLabelOffset", -20, 5),
+        ] {
+            session.execute(
+                command,
+                &serde_json::json!({"menu": menu.0, "button": 0, "x": x, "y": y}),
+            )?;
+        }
+        // Then the whole set 100 pixels to the right in PhotoCraft, and taken in again.
+        write(100)?;
+        session.execute(
+            "menu.applyPsd",
+            &serde_json::json!({ "menu": menu.0, "path": path }),
+        )?;
+        let button = session
+            .project
+            .menu(menu)
+            .and_then(|menu| menu.buttons.first())
+            .ok_or("button")?;
+        assert_eq!(
+            (button.label_offset, button.thumbnail_offset, button.body),
+            ([0, 0], [0, 0], None)
+        );
+        let frame = button.thumbnail_placed().ok_or("no video frame")?;
+        assert_eq!((frame.x, frame.y, frame.w, frame.h), (200, 80, 200, 120));
+        Ok(())
+    }
+
     #[test]
     fn an_edited_psds_sets_are_known_by_their_layer_ids() -> Result<(), Box<dyn Error>> {
         use disccraft_photo::PsdLayer;

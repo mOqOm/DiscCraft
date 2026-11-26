@@ -60,8 +60,10 @@ pub(crate) fn draw_background(
             Ok(())
         }
         MenuBackground::Image { asset } => {
-            // A PSD shown by page (M10.27): the layers every page shows.
-            let source = match psd_pages(project, menu)? {
+            // A PSD whose buttons are drawn one by one (M10.27 by page, M6.517 every one): the layers that are no
+            // button sets, under them.
+            let pages = document_pages(project, menu)?;
+            let source = match pages.filter(|pages| button_page(menu, pages).is_some()) {
                 Some(pages) => rgba_source(pages.shared.clone())?,
                 None => load_image(project, *asset, width, height)?,
             };
@@ -76,9 +78,11 @@ pub(crate) fn draw_background(
     }
 }
 
-/// Draws over the frame what the menu's page of its PSD background draws (M10.27, Encore's `(#)` groups: page 0
-/// the top level's buttons, page n the n-th group), stretched as the background is. Nothing for a menu that names
-/// no page or whose background is no PSD.
+/// Draws over the frame the button sets of the menu's page of its PSD background (M10.27: page 0 the top level's
+/// buttons, page n the n-th `(#)` group), each where its button is now (M6.517): Encore's button set, whose layers
+/// move and scale with the button (they stayed where the PSD had them when the button was moved or resized, the
+/// video frame away from the video). A set whose button is gone stays where the PSD has it. Nothing for a menu
+/// whose background is no PSD.
 pub(crate) fn draw_psd_page(
     project: &Project,
     menu: &Menu,
@@ -86,17 +90,91 @@ pub(crate) fn draw_psd_page(
     height: u16,
     rgb: &mut [u8],
 ) -> Result<(), MenuError> {
-    let Some(pages) = psd_pages(project, menu)? else {
+    let Some(pages) = document_pages(project, menu)? else {
         return Ok(());
     };
-    let Some(page) = menu
-        .psd_page
-        .and_then(|page| pages.pages.get(usize::from(page)))
-    else {
+    let Some(sets) = button_page(menu, &pages).and_then(|page| pages.buttons.get(page)) else {
         return Ok(());
     };
-    blend_scaled(&rgba_source(page.clone())?, width, height, rgb);
+    let canvas = (pages.shared.width, pages.shared.height);
+    for set in sets {
+        let button = set_button(menu, set);
+        if button.is_some_and(|button| button.hidden) {
+            continue;
+        }
+        let to_frame =
+            |[x, y, w, h]: [u32; 4]| canvas_to_frame([x, y, w, h], canvas, (width, height));
+        let (place, frame_place) = match button {
+            Some(button) => (button.content_box(), button.thumbnail_placed()),
+            None => (
+                to_frame(set.bounds),
+                set.frame.as_ref().map(|(bounds, _)| to_frame(*bounds)),
+            ),
+        };
+        // The video frame under the set's other layers, where the button's video goes.
+        if let (Some((_, frame)), Some(frame_place)) = (&set.frame, frame_place) {
+            blend_scaled_into(
+                &rgba_source(frame.clone())?,
+                frame_place,
+                width,
+                height,
+                rgb,
+            );
+        }
+        blend_scaled_into(
+            &rgba_source(set.picture.clone())?,
+            place,
+            width,
+            height,
+            rgb,
+        );
+    }
     Ok(())
+}
+
+/// The page of the menu's PSD whose button sets it shows (M6.517): the page it names, or the only page of a PSD
+/// without `(#)` groups. `None` for a menu that names no page of a PSD that has pages (drawn whole, as before).
+fn button_page(menu: &Menu, pages: &disccraft_photo::PsdPages) -> Option<usize> {
+    match menu.psd_page {
+        Some(page) => Some(usize::from(page)),
+        None if pages.pages.len() == 1 => Some(0),
+        None => None,
+    }
+}
+
+/// The button a PSD's button set is: the one with its layer id, else (a button from before the ids were kept,
+/// M10.49) the only one without an id that has its name.
+fn set_button<'m>(menu: &'m Menu, set: &disccraft_photo::PsdButtonPicture) -> Option<&'m Button> {
+    if let Some(id) = set.layer_id
+        && let Some(button) = menu
+            .buttons
+            .iter()
+            .find(|button| button.psd_layer == Some(id))
+    {
+        return Some(button);
+    }
+    let mut named = menu
+        .buttons
+        .iter()
+        .filter(|button| button.psd_layer.is_none() && button.name == set.name);
+    match (named.next(), named.next()) {
+        (Some(button), None) => Some(button),
+        _ => None,
+    }
+}
+
+/// A place on a `canvas` (x, y, width, height) in a `frame` the canvas is stretched over.
+fn canvas_to_frame([x, y, w, h]: [u32; 4], canvas: (u32, u32), frame: (u16, u16)) -> Rect {
+    let scale = |value: u32, from: u32, to: u16| -> u16 {
+        let scaled = u64::from(value) * u64::from(to) / u64::from(from.max(1));
+        u16::try_from(scaled).unwrap_or(u16::MAX)
+    };
+    Rect {
+        x: scale(x, canvas.0, frame.0),
+        y: scale(y, canvas.1, frame.1),
+        w: scale(w, canvas.0, frame.0).max(1),
+        h: scale(h, canvas.1, frame.1).max(1),
+    }
 }
 
 /// Draws a pop-up menu made from a PSD without pages over the picture it is given in place of its background
@@ -120,6 +198,10 @@ pub(crate) fn draw_popup_buttons(
     let Some(pages) = document_pages(project, menu)? else {
         return Ok(());
     };
+    // Its button sets one by one are draw_psd_page's (M6.517).
+    if button_page(menu, &pages).is_some() {
+        return Ok(());
+    }
     if let Some(buttons) = pages.pages.first() {
         blend_scaled(&rgba_source(buttons.clone())?, width, height, rgb);
     }
@@ -209,8 +291,8 @@ pub(crate) fn draw_motion_layers(
         return Ok(());
     };
     blend_scaled(&rgba_source(pages.shared.clone())?, width, height, rgb);
-    // Shown whole: its buttons too.
-    if menu.psd_page.is_none()
+    // Shown whole: its buttons too (one by one in draw_psd_page, M6.517, but for a PSD with pages that names none).
+    if button_page(menu, &pages).is_none()
         && let Some(first) = pages.pages.first()
     {
         blend_scaled(&rgba_source(first.clone())?, width, height, rgb);
@@ -284,10 +366,24 @@ fn document_pages(
 /// Draws the RGBA picture `src` stretched over the frame onto `rgb` by its opacity (bilinear, on premultiplied
 /// colours so transparent pixels do not darken the edges).
 fn blend_scaled(src: &SourceImage, dst_w: u16, dst_h: u16, rgb: &mut [u8]) {
+    let whole = Rect {
+        x: 0,
+        y: 0,
+        w: dst_w,
+        h: dst_h,
+    };
+    blend_scaled_into(src, whole, dst_w, dst_h, rgb);
+}
+
+/// Draws the RGBA picture `src` stretched over `place` of a `frame_w` x `frame_h` frame onto `rgb` by its opacity,
+/// as [`blend_scaled`] does over the whole frame; what falls outside the frame is left out.
+fn blend_scaled_into(src: &SourceImage, place: Rect, frame_w: u16, frame_h: u16, rgb: &mut [u8]) {
     if src.channels != 4 || src.width == 0 || src.height == 0 {
         return;
     }
-    let (dst_w, dst_h) = (usize::from(dst_w), usize::from(dst_h));
+    let (dst_w, dst_h) = (usize::from(place.w), usize::from(place.h));
+    let (frame_w, frame_h) = (usize::from(frame_w), usize::from(frame_h));
+    let (left, top) = (usize::from(place.x), usize::from(place.y));
     let pixel = |x: usize, y: usize| -> [f32; 4] {
         let at = y
             .saturating_mul(src.width)
@@ -323,7 +419,11 @@ fn blend_scaled(src: &SourceImage, dst_w: u16, dst_h: u16, rgb: &mut [u8]) {
             if alpha <= 0.0 {
                 continue;
             }
-            let at = (dy * dst_w + dx) * 3;
+            let (x, y) = (left + dx, top + dy);
+            if x >= frame_w || y >= frame_h {
+                continue;
+            }
+            let at = (y * frame_w + x) * 3;
             if let Some(out) = rgb.get_mut(at..at + 3) {
                 for (channel, value) in out.iter_mut().enumerate() {
                     let blended = mixed[channel] + f32::from(*value) * (1.0 - alpha);
