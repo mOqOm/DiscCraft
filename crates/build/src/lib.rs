@@ -91,7 +91,9 @@ fn for_build(project: &Project) -> Result<Project, String> {
 use disccraft_project::{DiscKind, Project};
 
 mod layer;
-pub use layer::{LayerBreak, LayerBreakPlace, frame_90k, image_layer_break, millis, time_text};
+pub use layer::{
+    LayerBreak, LayerBreakPlace, frame_90k, image_layer_break, layer_break_for, millis, time_text,
+};
 
 /// Supported build output kinds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

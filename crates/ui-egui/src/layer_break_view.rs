@@ -186,6 +186,25 @@ impl DiscCraftApp {
     /// and for a manual break whether it is at the frame set.
     fn layer_break_result(&self, ui: &mut Ui) {
         let Some(report) = &self.last_build else {
+            // M6.515: the image built before (kept in the project), while it is still there.
+            if let Some(kept) = &self.session.project.settings.image_layer_break {
+                let image = std::path::Path::new(&kept.image);
+                if self
+                    .session
+                    .project
+                    .built_image_layer_break(image)
+                    .is_some()
+                {
+                    ui.separator();
+                    let name = image.file_name().map_or_else(
+                        || kept.image.clone(),
+                        |name| name.to_string_lossy().into_owned(),
+                    );
+                    ui.label(tlf!("Last built image: {name}", name = name))
+                        .on_hover_text(kept.image.clone());
+                    self.layer_break_lines(ui, &kept.found);
+                }
+            }
             return;
         };
         let Some(found) = &report.layer_break else {
@@ -199,6 +218,11 @@ impl DiscCraftApp {
             return;
         };
         ui.separator();
+        self.layer_break_lines(ui, found);
+    }
+
+    /// The lines of [`result_lines`], drawn.
+    fn layer_break_lines(&self, ui: &mut Ui, found: &LayerBreak) {
         for line in result_lines(found, self.session.project.settings.standard) {
             match line {
                 ResultLine::Plain(text) => {

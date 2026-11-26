@@ -180,6 +180,13 @@ fn settings_mut(value: &mut Value) -> Option<&mut Map<String, Value>> {
 fn add_relative_paths(value: &mut Value, folder: &Path) {
     if let Some(settings) = settings_mut(value) {
         set_relative(settings, "discLabel", "relativeDiscLabel", folder);
+        // The dual-layer image built from the project (M6.515).
+        if let Some(image) = settings
+            .get_mut("imageLayerBreak")
+            .and_then(Value::as_object_mut)
+        {
+            set_relative(image, "image", "relativeImage", folder);
+        }
     }
     for asset in assets_mut(value) {
         set_relative(asset, "path", "relativePath", folder);
@@ -242,6 +249,12 @@ fn find_moved_assets(value: &mut Value, folder: &Path) {
     // The disc label (M6.509), likewise.
     if let Some(settings) = settings_mut(value) {
         find_moved(settings, "discLabel", "relativeDiscLabel", folder);
+        if let Some(image) = settings
+            .get_mut("imageLayerBreak")
+            .and_then(Value::as_object_mut)
+        {
+            find_moved(image, "image", "relativeImage", folder);
+        }
     }
     for asset in assets_mut(value) {
         // Located transcoded files are looked for whether or not the source is (it is often gone on purpose).

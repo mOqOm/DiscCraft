@@ -141,6 +141,7 @@ fn source_image_problem(
 pub(crate) fn check_source_image(
     typed: &str,
     media: Option<&Media>,
+    project: &disccraft_project::Project,
 ) -> Result<PathBuf, SourceImageProblem> {
     let typed = typed.trim().trim_matches('"');
     if typed.is_empty() {
@@ -154,7 +155,8 @@ pub(crate) fn check_source_image(
     let dual_layer_dvd = media.is_some_and(|media| media.kind.dual_layer());
     match source_image_problem(
         bytes,
-        disccraft_build::image_layer_break(path),
+        // M6.515: the layer break the project keeps for the image it built, else the note beside it.
+        disccraft_build::layer_break_for(project, path),
         dual_layer_dvd,
     ) {
         Some(problem) => Err(problem),
@@ -504,8 +506,9 @@ impl DiscCraftApp {
             erase_rewritable: self.disc.erase_rewritable,
             eject: true,
             verify: self.disc.verify,
-            // M9.42: a DVD-9 image's layer break, from the note the build writes beside it.
-            layer_break: disccraft_build::image_layer_break(&image_path),
+            // M9.42: a DVD-9 image's layer break; M6.515: the one the project keeps for the image it built, else
+            // the note the build writes beside it.
+            layer_break: disccraft_build::layer_break_for(&self.session.project, &image_path),
         };
         let progress = Arc::new(Mutex::new((BurnStep::Writing, 0.0_f32)));
         let shared = Arc::clone(&progress);
@@ -607,7 +610,11 @@ impl DiscCraftApp {
             Some(Ok(Some(media))) => Some(media.clone()),
             _ => None,
         };
-        match check_source_image(&self.disc.source_image, media.as_ref()) {
+        match check_source_image(
+            &self.disc.source_image,
+            media.as_ref(),
+            &self.session.project,
+        ) {
             Ok(image) => {
                 self.disc.image = Some(image);
                 self.disc.keep_image = true;
@@ -775,17 +782,32 @@ mod tests {
         let dir = scratch("source")?;
         let image = dir.join("disc.iso");
         std::fs::write(&image, vec![0u8; 4096])?;
-        assert_eq!(check_source_image("  ", None), Err(NotChosen));
         assert_eq!(
-            check_source_image(&format!("\"{}\"", image.display()), None),
+            check_source_image("  ", None, &disccraft_project::Project::default()),
+            Err(NotChosen)
+        );
+        assert_eq!(
+            check_source_image(
+                &format!("\"{}\"", image.display()),
+                None,
+                &disccraft_project::Project::default()
+            ),
             Ok(image.clone())
         );
         assert_eq!(
-            check_source_image(&dir.join("none.iso").to_string_lossy(), None),
+            check_source_image(
+                &dir.join("none.iso").to_string_lossy(),
+                None,
+                &disccraft_project::Project::default()
+            ),
             Err(Missing)
         );
         assert_eq!(
-            check_source_image(&dir.to_string_lossy(), None),
+            check_source_image(
+                &dir.to_string_lossy(),
+                None,
+                &disccraft_project::Project::default()
+            ),
             Err(Missing)
         );
         std::fs::remove_dir_all(&dir)?;

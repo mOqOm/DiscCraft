@@ -14,6 +14,8 @@
 )]
 
 mod arrange;
+mod built_layer_break;
+pub use built_layer_break::{ImageLayerBreak, LayerBreak, LayerBreakPlace};
 mod chapter_index;
 mod chapter_playlist;
 mod chapter_refs;

@@ -407,6 +407,8 @@ pub struct DiscCraftApp {
     /// 「今すぐトランスコード」の裏の仕事（ビルドと同じキャッシュに変換だけを作る）。
     pub(crate) transcode_job: BuildJob,
     pub(crate) last_build: Option<BuildReport>,
+    /// The user manual's screenshot script being played (M15.1, `DISCCRAFT_CAPTURE`).
+    pub(crate) doc_capture: Option<crate::doc_capture::DocCapture>,
     pub(crate) last_output_kind: Option<OutputKind>,
     pub(crate) simulate: Option<SimulateSummary>,
     pub(crate) usage: Option<Usage>,
@@ -650,6 +652,7 @@ impl DiscCraftApp {
             build_job: BuildJob::default(),
             transcode_job: BuildJob::default(),
             last_build: None,
+            doc_capture: crate::doc_capture::from_env(),
             last_output_kind: None,
             simulate: None,
             usage: None,
@@ -688,6 +691,8 @@ impl DiscCraftApp {
         crate::i18n::set_current(self.language);
         self.session
             .set_words(disccraft_project::Words::from_code(self.language.code()));
+        // M15.1: the user manual's screenshot script, when one runs.
+        self.play_capture(ui);
 
         if let Some(result) = self.build_job.poll() {
             self.handle_build_result(result);
@@ -1479,6 +1484,17 @@ impl DiscCraftApp {
         match result {
             Ok(report) => {
                 self.status = tlf!("Build finished: {path}", path = report.output.display());
+                // M6.515: a DVD image's layer break goes into the project (saved with it).
+                if self.build_job.output_kind == Some(disccraft_build::OutputKind::Iso)
+                    && self.session.project.settings.kind == disccraft_project::DiscKind::Dvd
+                    && self.session.project.note_built_image(
+                        &report.output,
+                        report.total_bytes,
+                        report.layer_break.clone(),
+                    )
+                {
+                    self.session.dirty = true;
+                }
                 self.last_build = Some(report);
                 self.last_output_kind = self.build_job.output_kind;
                 self.simulate = None;

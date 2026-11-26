@@ -1883,3 +1883,5 @@ xmp:tiff	Copyright	撮影著作権者 / 編集著作権者
 	Room left: {room0} on layer 0, {room1} on layer 1.	使える空き: レイヤー 0 に {room0}、レイヤー 1 に {room1}。
 	{size} used for multiplexing.	{size} が多重化に使用されています。
 	What the disc adds to the video and sound: the headers of its packs and a navigation pack every half second	ディスクが映像と音声に足す分: パックのヘッダーと、0.5 秒ごとのナビゲーションパック
+	Arrows and Enter of the remote	リモコンの十字キーと決定
+	Last built image: {name}	最後にビルドしたイメージ: {name}

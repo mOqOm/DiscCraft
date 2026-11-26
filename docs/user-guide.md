@@ -2,6 +2,9 @@
 
 English | [日本語](user-guide.ja.md)
 
+> The manual in chapters, with pictures of the screen, is in [manual/](manual/en/README.md). It is newer than this
+> page.
+
 How to use DiscCraft, in the order the work goes. Names of commands and
 panels are the ones the English interface shows. Chapters 1 to 13 are the reference for every screen;
 [chapter 14](#14-advanced-techniques) is the recipes: scene-selection menus, hidden buttons, routing by
@@ -1208,7 +1211,10 @@ says why in a dialog (**Copy** puts the error on the clipboard); the error also 
 - An ISO is UDF + ISO 9660. On Windows a double click in Explorer mounts it
 - A DVD-9 image with a layer break leaves a note in `<name>.layerbreak.txt` at the same place. The image puts the
   break at the start of a 16-sector block, as a dual-layer disc needs: when the break's cell starts elsewhere, its
-  title set is moved a few sectors later in the image (the VIDEO_TS folder build is not moved)
+  title set is moved a few sectors later in the image (the VIDEO_TS folder build is not moved). The project keeps
+  the layer break of the last DVD-9 image built from it, too, and saves it with the project (with the image's path
+  relative to the project file): the Build panel's Layer Break group shows it when the project is opened again,
+  and writing that image to a dual-layer disc takes it, even without the note
 - A **DDP Image** (DVD only, as in Encore) is what a replication plant takes in place of a master disc: a folder
   holding `MAIN.DAT` (the disc image), `CONTROL.DAT` (the disc's control data: its size and layout) and `DDPID`
   (which says what the two files are and where they go on the disc). These are the same files Encore CS6 writes

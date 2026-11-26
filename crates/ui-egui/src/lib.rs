@@ -28,6 +28,7 @@ mod context_menus;
 mod craft_timeline;
 mod disc_label;
 mod disc_writer;
+mod doc_capture;
 mod dock;
 mod effects_dialog;
 mod extra_panels;

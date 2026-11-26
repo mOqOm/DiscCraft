@@ -177,6 +177,11 @@ pub struct DiscSettings {
     /// finds it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disc_label: Option<String>,
+    /// The dual-layer DVD image last built from the project and its layer break, read back from it (M6.515): kept
+    /// with the project, so that the Build panel shows it and writing that image to a dual-layer disc uses it after
+    /// the project is opened again. Its path relative to the project file is saved beside it ("relativeImage").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_layer_break: Option<crate::ImageLayerBreak>,
 }
 
 /// The coding of a Blu-ray disc's HD video (Encore's Project Settings ▸ Codec, M12.28).

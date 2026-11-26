@@ -13,7 +13,7 @@ use disccraft_vm::{ButtonModel, DiscModel, MenuPgcModel, ParentalModel, TitleMod
 
 use disccraft_nav::compile;
 
-use crate::{DvdError, slideshow_ids, validate_contents};
+use crate::{DvdError, slideshow_ids};
 
 /// The disc model of `project` as the DVD build would write it.
 ///
@@ -22,7 +22,8 @@ use crate::{DvdError, slideshow_ids, validate_contents};
 /// The errors of a build before any media is read: a project that fails its check, navigation that does not
 /// compile, a slideshow without slides. A Blu-ray project gives the model of the same disc as a DVD.
 pub fn preview_model(project: &Project) -> Result<DiscModel, DvdError> {
-    let (title_count, _) = validate_contents(project)?;
+    // M6.513: buttons that overlap do not stop the preview (Encore previews such a menu; the build refuses it).
+    let (title_count, _) = crate::validate_contents_allowing(project, &["buttonsOverlap"])?;
     let nav = compile(project)?;
     let invalid = |message: &str| DvdError::Invalid(message.to_string());
     if project.menus.len() != nav.menus.len() {
@@ -231,4 +232,66 @@ fn menu_commands(
         _ => vec![disccraft_nav::link_pgn(loop_program, 0)],
     };
     (pre, post)
+}
+
+#[cfg(test)]
+mod tests {
+    use disccraft_project::{Link, Project, Rect};
+    use std::error::Error;
+
+    /// M6.513: a menu whose buttons overlap is previewed (as in Encore), while the build still refuses it, and the
+    /// refusal names the problem in words (not as a debug dump).
+    #[test]
+    fn overlapping_buttons_do_not_stop_the_preview() -> Result<(), Box<dyn Error>> {
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-preview-overlap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let clip = dir.join("clip.m2v");
+        std::fs::write(&clip, b"not read by the check")?;
+        let mut project = Project::default();
+        let video = project.add_asset(&clip)?;
+        let title = project.add_timeline(video, Some("Main".to_string()))?;
+        let menu = project.add_menu(Some("Top".to_string()))?;
+        let rect = Rect {
+            x: 100,
+            y: 100,
+            w: 200,
+            h: 60,
+        };
+        for label in ["Play", "Again"] {
+            let _ = project.add_button(
+                menu,
+                label.to_string(),
+                Some(rect),
+                Link::Timeline {
+                    id: title,
+                    chapter: 0,
+                },
+            )?;
+        }
+        project.settings.first_play = Link::Menu {
+            id: menu,
+            button: None,
+        };
+        assert!(
+            project
+                .check()
+                .iter()
+                .any(|problem| problem.code == "buttonsOverlap"),
+            "{:?}",
+            project.check()
+        );
+        let model = super::preview_model(&project)?;
+        assert_eq!(model.vmgm.first().map(|menu| menu.buttons.len()), Some(2));
+        let refused = crate::validate_project(&project)
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(
+            refused.contains("the project check found errors") && !refused.contains("Problem {"),
+            "{refused}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
 }

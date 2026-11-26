@@ -145,7 +145,7 @@ Example `commands.jsonl` (a DVD with one video and one menu):
 Material that doesn't meet the spec is converted at build time and kept in `disccraft-cache` in the output folder (later
 builds skip the conversion).
 
-The [user manual](docs/user-guide.md) explains the screens one by one. What is not done yet is in [open issues](docs/open-issues.md). What changed in each version is in the [changelog](CHANGELOG.md).
+The [user manual](docs/manual/en/README.md) explains how to use it. What is not done yet is in [open issues](docs/open-issues.md). What changed in each version is in the [changelog](CHANGELOG.md).
 
 ## Driving it from an AI agent (MCP)
 
