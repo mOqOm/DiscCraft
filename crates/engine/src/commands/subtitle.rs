@@ -26,8 +26,8 @@ const TICKS_PER_SECOND: f64 = 254_016_000_000.0;
 pub(crate) const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "subtitle.cues",
-        label: "字幕の一覧",
-        menu: &["タイムライン"],
+        label: "List Subtitles",
+        menu: &["Timeline"],
         shortcut: None,
         params: r#"{"asset": id}"#,
         enabled: always_enabled,
@@ -36,8 +36,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "subtitle.addCue",
-        label: "字幕を追加",
-        menu: &["タイムライン"],
+        label: "Add Subtitle",
+        menu: &["Timeline"],
         shortcut: None,
         params: r#"{"asset": id, "start": ticks, "end"?: ticks, "text"?: string}"#,
         enabled: always_enabled,
@@ -46,8 +46,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "subtitle.setCue",
-        label: "字幕を変更",
-        menu: &["タイムライン"],
+        label: "Change Subtitle",
+        menu: &["Timeline"],
         shortcut: None,
         params: r#"{"asset": id, "cue": index, "start"?: ticks, "end"?: ticks, "text"?: string, "group"?: 1-3 | null, "stroke"?: "none" | "thin" | "medium" | "thick" | "extraThick" | null, "align"?: 0-100 | null, "justify"?: "left" | "center" | "right" | null}"#,
         enabled: always_enabled,
@@ -56,8 +56,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "subtitle.removeCue",
-        label: "字幕を削除",
-        menu: &["タイムライン"],
+        label: "Delete Subtitle",
+        menu: &["Timeline"],
         shortcut: None,
         params: r#"{"asset": id, "cue": index}"#,
         enabled: always_enabled,
@@ -66,8 +66,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "subtitle.readImageScript",
-        label: "画像スクリプトを読む",
-        menu: &["タイムライン"],
+        label: "Read Image Script",
+        menu: &["Timeline"],
         shortcut: None,
         params: r#"{"path": string, "fab"?: bool (a FAB image script), "folder"?: string (a FAB script's pictures; default: the script's folder)}"#,
         enabled: always_enabled,
@@ -76,8 +76,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "subtitle.importImageScript",
-        label: "字幕の読み込み（画像スクリプト）",
-        menu: &["タイムライン"],
+        label: "Import Subtitles (Image Script)",
+        menu: &["Timeline"],
         shortcut: None,
         params: r##"{"path": string, "fab"?: bool, "folder"?: string, "background"?: "#rrggbb", "fill"?: "#rrggbb", "outline"?: "#rrggbb" (default: guessed from the first picture), "offset"?: ticks (Relative: added to every timecode)}"##,
         enabled: always_enabled,
@@ -86,8 +86,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "subtitle.exportSrt",
-        label: "字幕を書き出し",
-        menu: &["タイムライン"],
+        label: "Export Subtitles",
+        menu: &["Timeline"],
         shortcut: None,
         params: r#"{"asset": id, "path": string (.txt: Encore's text script, otherwise SRT)}"#,
         enabled: always_enabled,

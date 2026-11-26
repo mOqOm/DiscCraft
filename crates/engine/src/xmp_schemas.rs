@@ -1,7 +1,7 @@
 //! The XMP schemas and properties the Metadata panel lists, in Encore CS6's order (M6.397; docs/encore-behavior.md
-//! 9.14): every schema, and every standard property of it, whether the file has it or not. The Japanese names Encore
-//! shows are in the UI catalog (`ja.tsv`): a schema's under the context `xmp`, its properties' under `xmp:<prefix>`
-//! (a test checks that each one has its entry).
+//! 9.14): every schema, and every standard property of it, whether the file has it or not. Their Japanese names are in
+//! the UI catalog (`crates/ui-egui/i18n/locales/ja/disccraft.tsv`): a schema's under the context `xmp`, its
+//! properties' under `xmp:<prefix>` (a test checks that each one has its entry).
 
 /// How a property is shown and written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

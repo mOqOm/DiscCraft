@@ -21,7 +21,7 @@ pub fn human_summary(project: &Project) -> Result<String, String> {
 fn write_header(project: &Project, out: &mut String) -> Result<(), String> {
     writeln!(
         out,
-        "ディスク: {} / {} / {} ({} GiB) / リージョン: {}",
+        "Disc: {} / {} / {} ({} GiB) / regions: {}",
         kind_label(project.settings.kind),
         standard_label(project.settings.standard),
         capacity_label(project.settings.capacity),
@@ -32,7 +32,7 @@ fn write_header(project: &Project, out: &mut String) -> Result<(), String> {
 
     writeln!(
         out,
-        "ファーストプレイ: {}",
+        "First Play: {}",
         link_label(&project.settings.first_play)
     )
     .map_err(|error| error.to_string())?;
@@ -41,14 +41,10 @@ fn write_header(project: &Project, out: &mut String) -> Result<(), String> {
 }
 
 fn write_assets(project: &Project, out: &mut String) -> Result<(), String> {
-    writeln!(out, "アセット ({})", project.assets.len()).map_err(|error| error.to_string())?;
+    writeln!(out, "Assets ({})", project.assets.len()).map_err(|error| error.to_string())?;
 
     for asset in project.assets.values() {
-        let offline = if asset.offline {
-            " (オフライン)"
-        } else {
-            ""
-        };
+        let offline = if asset.offline { " (offline)" } else { "" };
         writeln!(
             out,
             "  [{}] {} ({}) {}{}",
@@ -65,13 +61,12 @@ fn write_assets(project: &Project, out: &mut String) -> Result<(), String> {
 }
 
 fn write_timelines(project: &Project, out: &mut String) -> Result<(), String> {
-    writeln!(out, "タイムライン ({})", project.timelines.len())
-        .map_err(|error| error.to_string())?;
+    writeln!(out, "Timelines ({})", project.timelines.len()).map_err(|error| error.to_string())?;
 
     for timeline in project.timelines.values() {
         writeln!(
             out,
-            "  [{}] {}  映像: [{}]  チャプター: {}  終了時: {}",
+            "  [{}] {}  video: [{}]  chapters: {}  end action: {}",
             timeline.id.0,
             timeline.name,
             timeline.video.0,
@@ -107,7 +102,7 @@ fn write_check(project: &Project, out: &mut String) -> Result<(), String> {
         .filter(|problem| problem.severity == Severity::Warning)
         .count();
 
-    writeln!(out, "チェック: エラー {} / 警告 {}", errors, warnings)
+    writeln!(out, "Check: {} errors / {} warnings", errors, warnings)
         .map_err(|error| error.to_string())?;
 
     for problem in problems {
@@ -158,7 +153,7 @@ fn format_gb(bytes: u64) -> String {
 
 fn regions_label(regions: &[u8]) -> String {
     if regions.is_empty() {
-        return "フリー".to_string();
+        return "all".to_string();
     }
 
     let mut out = String::new();
@@ -173,23 +168,19 @@ fn regions_label(regions: &[u8]) -> String {
 
 fn link_label(link: &Link) -> String {
     match link {
-        Link::NotSet => "未設定".to_string(),
-        Link::Stop => "停止".to_string(),
-        Link::LastMenu => "最後のメニュー".to_string(),
+        Link::NotSet => "not set".to_string(),
+        Link::Stop => "stop".to_string(),
+        Link::LastMenu => "last menu".to_string(),
         Link::Timeline { id, chapter } => {
-            format!(
-                "タイムライン [{}] チャプター {}",
-                id.0,
-                chapter.saturating_add(1)
-            )
+            format!("timeline [{}] chapter {}", id.0, chapter.saturating_add(1))
         }
         Link::Menu { id, button } => match button {
-            Some(button) => format!("メニュー [{}] ボタン {}", id.0, button.saturating_add(1)),
-            None => format!("メニュー [{}]", id.0),
+            Some(button) => format!("menu [{}] button {}", id.0, button.saturating_add(1)),
+            None => format!("menu [{}]", id.0),
         },
-        Link::Playlist { id } => format!("プレイリスト [{}]", id),
-        Link::ChapterPlaylist { id } => format!("チャプタープレイリスト [{}]", id),
-        Link::Slideshow { id } => format!("スライドショー [{}]", id),
+        Link::Playlist { id } => format!("playlist [{}]", id),
+        Link::ChapterPlaylist { id } => format!("chapter playlist [{}]", id),
+        Link::Slideshow { id } => format!("slideshow [{}]", id),
     }
 }
 
@@ -205,7 +196,7 @@ fn asset_kind_label(kind: AssetKind) -> &'static str {
 
 fn severity_label(severity: Severity) -> &'static str {
     match severity {
-        Severity::Error => "エラー",
-        Severity::Warning => "警告",
+        Severity::Error => "error",
+        Severity::Warning => "warning",
     }
 }

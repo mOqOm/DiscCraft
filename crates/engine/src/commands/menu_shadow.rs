@@ -10,8 +10,8 @@ use super::{always_enabled, empty_object};
 
 pub(crate) const COMMANDS: &[CommandSpec] = &[CommandSpec {
     id: "menu.setShadow",
-    label: "ドロップシャドウを設定",
-    menu: &["オブジェクト"],
+    label: "Set Drop Shadow",
+    menu: &["Object"],
     shortcut: None,
     params: r##"{"menu": id, "text" | "button" | "graphic": index, "shadow": {"color"?: "#RRGGBB", "opacity"?: 0..100, "angle"?: 0..359, "distance"?: 0..100, "size"?: 0..100, "spread"?: 0..100} | null}"##,
     enabled: always_enabled,

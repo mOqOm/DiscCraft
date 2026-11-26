@@ -1075,7 +1075,7 @@ mod tests {
             project
                 .chapter_playlists
                 .get(&list)
-                .is_some_and(|found| found.name.ends_with(" チャプター再生リスト"))
+                .is_some_and(|found| found.name.ends_with(" チャプタープレイリスト"))
         );
         Ok(())
     }

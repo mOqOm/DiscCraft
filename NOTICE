@@ -19,8 +19,7 @@ Pinned revision: ba6fe10529c7bf5d2a9283f9de2e35c0ccff926c
 
 Source files ported from FilmCraft (same license; ported at da535c18433dbe046553733b0ab08ce9bd736a51, unchanged in
 FilmCraft up to the pinned revision above):
-crates/ui-egui/src/i18n.rs (from FilmCraft crates/ui-egui/src/i18n.rs)
-crates/ui-egui/src/i18n/catalog.rs (from FilmCraft crates/ui-egui/src/i18n/catalog.rs)
+crates/ui-egui/src/i18n.rs (from FilmCraft crates/ui-egui/src/i18n.rs: its tl!/tlf! macros and placeholder filling)
 crates/ui-egui/src/icons.rs (from FilmCraft crates/ui-egui/src/icons.rs at 19d46c0748cf5c0ef5b0b2a421b85e8ae6d99db6, the
 code-drawn icons the Craft apps share; FilmCraft's theme-bound `button` left out)
 crates/ui-egui/src/craft_timeline.rs (from FilmCraft crates/ui-egui/src/panels/timeline/ruler.rs, layout.rs, scrollbars.rs,
@@ -52,8 +51,15 @@ revision 249a41bd9306a1b34330ac94e596a1a8b881378a), craft-video (its H.264 encod
 filmcraft-h264enc, which makes the HD Blu-ray video, and, only in a build with the transcode crate's `hevc` feature,
 its HEVC encoder for Ultra HD video; the same revision; in tests also its MPEG-2 decoder), craft-media
 (its MPEG-2 Systems, Matroska and MP4 readers, which take out video and audio that fit a disc as they are; the same
-revision) and craft-ui (its docking, which arranges the panels and workspaces; the same revision), and in tests
+revision), craft-ui (its docking, which arranges the panels and workspaces; the same revision) craft-i18n (the
+translation lookup the Crafting Apps share; the same revision) and craft-menu with craft-keymap (the menu bar the
+Crafting Apps share; the same revision), and in tests
 only craft-psd (PSD writer, the same revision). craft-video and craft-media are taken from the fork https://github.com/mOqOm/craft-libs (branch
 disccraft, under the same licences), which adds to that revision craft-libs pull requests #1992 and #2017 (H.264
 field pictures and MBAFF) by their authors, stores that keep Matroska and MPEG-2 transport stream indexes between runs, and interlaced (1080i) H.264 encoding. Its vendored Hayro crates (with the vello and
 linesweeper crates they draw with) are patched to revision 5c5e0d52c387c0a4ae2908a07e476d7584f60362 in Cargo.toml.
+
+This product includes translations from craft-i18n (https://github.com/storytold/craft-i18n), the Crafting Apps' shared
+interface catalogs, licensed under the MIT License or the Apache License 2.0, at your option:
+crates/ui-egui/i18n/locales/ja/common.tsv is its locales/ja/common.tsv, unchanged, at the revision in
+crates/ui-egui/i18n/craft-i18n.rev.

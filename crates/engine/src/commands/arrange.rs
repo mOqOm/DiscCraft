@@ -12,8 +12,8 @@ use super::{always_enabled, empty_object, object};
 pub(crate) const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "menu.pasteButtons",
-        label: "ボタンを貼り付け",
-        menu: &["編集"],
+        label: "Paste Buttons",
+        menu: &["Edit"],
         shortcut: None,
         params: r#"{"menu": id, "buttons": [{"label": string, "rect": {"x": int, "y": int, "w": int, "h": int}, "target"?: Link, "autoActivate"?: bool}]}"#,
         enabled: always_enabled,
@@ -22,8 +22,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "menu.removeButtons",
-        label: "ボタンをまとめて削除",
-        menu: &["編集"],
+        label: "Delete Buttons",
+        menu: &["Edit"],
         shortcut: None,
         params: r#"{"menu": id, "buttons": [index]}"#,
         enabled: always_enabled,
@@ -32,8 +32,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "button.setRects",
-        label: "ボタンをまとめて移動",
-        menu: &["ボタン"],
+        label: "Move Buttons",
+        menu: &["Button"],
         shortcut: None,
         params: r#"{"menu": id, "rects": [{"button": index, "rect": {"x": int, "y": int, "w": int, "h": int}}]}"#,
         enabled: always_enabled,
@@ -42,8 +42,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "menu.reorderButtons",
-        label: "ボタンの番号を並べ替え",
-        menu: &["メニュー"],
+        label: "Reorder Button Numbers",
+        menu: &["Menu"],
         shortcut: None,
         params: r#"{"menu": id, "order": [index]}"#,
         enabled: always_enabled,
@@ -52,8 +52,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "menu.arrangeButtons",
-        label: "アレンジ",
-        menu: &["オブジェクト"],
+        label: "Arrange",
+        menu: &["Object"],
         shortcut: None,
         params: r#"{"menu": id, "buttons": [index], "arrange": "front" | "forward" | "backward" | "back"}"#,
         enabled: always_enabled,
@@ -62,8 +62,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "menu.alignButtons",
-        label: "整列",
-        menu: &["オブジェクト"],
+        label: "Align",
+        menu: &["Object"],
         shortcut: None,
         params: r#"{"menu": id, "buttons": [index], "align": "left" | "center" | "right" | "top" | "middle" | "bottom", "safeArea"?: bool}"#,
         enabled: always_enabled,
@@ -72,8 +72,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "menu.distributeButtons",
-        label: "均等配置",
-        menu: &["オブジェクト"],
+        label: "Distribute",
+        menu: &["Object"],
         shortcut: None,
         params: r#"{"menu": id, "buttons": [index], "axis": "horizontal" | "vertical", "safeArea"?: bool}"#,
         enabled: always_enabled,

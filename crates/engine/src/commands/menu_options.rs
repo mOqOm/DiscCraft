@@ -9,8 +9,8 @@ use super::{always_enabled, empty_object};
 
 pub(crate) const COMMANDS: &[CommandSpec] = &[CommandSpec {
     id: "disc.setMenuOptions",
-    label: "メニューの環境設定を変更",
-    menu: &["編集", "環境設定"],
+    label: "Change Menu Preferences",
+    menu: &["Edit", "Preferences"],
     shortcut: None,
     params: r#"{"vertical"?: bool, "verticalWrap"?: bool, "verticalWrapMode"?: "same" | "next", "horizontal"?: bool, "horizontalWrap"?: bool, "horizontalWrapMode"?: "same" | "next", "excludeNextPrevious"?: bool, "syncButtonNames"?: bool, "nameButtonsFromLinks"?: bool}"#,
     enabled: always_enabled,

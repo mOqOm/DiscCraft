@@ -4,12 +4,16 @@
 //! Encore の既定に合わせる。キーとメニューは同じ [`Action`] を通り、[`DiscCraftApp::run_action`] で実行する。
 
 use crate::DiscCraftApp;
-use crate::actions::{Action, menu_check, menu_item, pasted_text, pressed_actions};
+use crate::actions::{Action, pasted_text, pressed_actions};
 use crate::app::Selection;
 use crate::i18n::{Language, tl, tlf};
 use crate::menu_editor::HighlightPreview;
+use crate::menu_model::{
+    self, Commands, MenuCommand, MenuSink, ModelSink, english_title, layout_label,
+};
 use crate::track_dialog::TrackKind;
 use crate::workspace::Panel;
+use craft_menu::{Gate, ItemRole, Labeled, LayoutOptions, MenuBarUi, MenuRole, Platforms, Target};
 
 use crate::orient::OrientChange;
 use disccraft_build::OutputKind;
@@ -32,81 +36,171 @@ pub(crate) enum ViewRequest {
 }
 
 impl DiscCraftApp {
-    /// メニューバーを描き、このフレームで押されたショートカットとクリックされた項目を実行する。
+    /// メニューバーを描き、このフレームで押されたショートカットと選ばれた項目を実行する。メニューは craft-menu で
+    /// 描く（M16.4。ほかの Crafting Apps と同じ見た目と操作、Alt か F10 でキーボードから）。
     pub(crate) fn menu_bar(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
         // Ctrl+V の文字列は、貼り付けのイベントが消費される前に取っておく。
-        let pasted = pasted_text(ui.ctx());
-        let pressed = pressed_actions(ui.ctx());
+        let pasted = pasted_text(&ctx);
+        // While a menu is open or the keyboard is on the bar (Alt, F10), the keys drive the bar; a command shortcut
+        // takes them off it and runs.
+        let bar_has_keys = craft_menu::bar::is_open(&ctx)
+            || (craft_menu::bar::is_focused(&ctx) && !craft_menu::bar::leave_for_shortcut(&ctx));
+        let pressed = if bar_has_keys {
+            Vec::new()
+        } else {
+            pressed_actions(&ctx)
+        };
         if pressed.contains(&Action::Paste) {
             self.pasted_text = pasted;
         }
-        let mut clicked = Vec::new();
 
-        egui::containers::menu::MenuBar::new().ui(ui, |ui| {
-            // Room around the menus' names, as Encore's menu bar has (the names were packed together).
+        let mut commands = Commands::default();
+        let model = self.menu_model(&mut commands);
+        let options = LayoutOptions {
+            label: &layout_label,
+            ..LayoutOptions::new("DiscCraft")
+        };
+        let gate = Gate {
+            modal: ctx.memory(|memory| memory.top_modal_layer().is_some()),
+            recording_shortcut: false,
+            text_editing: ctx.text_edit_focused(),
+        };
+        let chosen = if let Some(native) = self.native_menu.as_mut() {
+            // macOS: the system's menu bar, kept up to date with what the menus show.
+            native.set_gate(gate);
+            let _ = native.sync(craft_menu::mac_layout(&model, &options));
+            native.take_clicks(&ctx)
+        } else {
+            let laid_out = craft_menu::layout(&model, Target::current(), &options).bar;
+            let english = |labeled: Labeled<'_>| match labeled {
+                Labeled::Command(command) => commands.english(command),
+                Labeled::Title(title) => english_title(title),
+            };
+            // Room around the menus' names, as before (the names were packed together).
             ui.spacing_mut().button_padding = egui::vec2(9.0, 3.0);
-            ui.spacing_mut().item_spacing.x = 2.0;
-            ui.menu_button(tl!("File"), |ui| self.file_menu(ui, &mut clicked));
-            ui.menu_button(tl!("Edit"), |ui| self.edit_menu(ui, &mut clicked));
-            ui.menu_button(tl!("Object"), |ui| self.object_items(ui, &mut clicked));
-            ui.menu_button(tl!("Menu"), |ui| self.menu_menu(ui, &mut clicked));
-            ui.menu_button(tl!("Timeline"), |ui| {
-                self.timeline_menu(ui, &mut clicked);
-            });
-            ui.menu_button(tl!("View"), |ui| self.view_menu(ui, &mut clicked));
-            ui.menu_button(tl!("Window"), |ui| self.window_menu(ui, &mut clicked));
-            ui.menu_button(tl!("Help"), |ui| self.help_menu(ui, &mut clicked));
-        });
+            MenuBarUi::new(&laid_out)
+                .gate(gate)
+                .label(&layout_label)
+                .english(&english)
+                .show(ui)
+        };
 
-        for action in pressed.into_iter().chain(clicked) {
-            self.run_action(ui, action);
-        }
-        let render = ui.ctx().data_mut(|data| {
-            let what = data.get_temp::<disccraft_build::Render>(render_request_id());
-            data.remove::<disccraft_build::Render>(render_request_id());
-            what
-        });
-        if let Some(what) = render {
-            self.start_render(what);
-        }
-        // 編集 ▸ ヒストリー で選んだところまで、まとめて取り消す / やり直す。
-        let jump = ui
-            .ctx()
-            .data_mut(|data| data.remove_temp::<(bool, usize)>(history_request_id()));
-        if let Some((undo, steps)) = jump.filter(|(_, steps)| *steps > 0) {
-            let command = if undo { "edit.undo" } else { "edit.redo" };
-            let _ = self.run_command(command, serde_json::json!({ "steps": steps }));
+        let mut run: Vec<MenuCommand> = pressed.into_iter().map(MenuCommand::Action).collect();
+        run.extend(
+            chosen
+                .iter()
+                .filter_map(|command| commands.get(command).cloned()),
+        );
+        for command in run {
+            self.run_menu_command(ui, command);
         }
         if let Some(asset) = self.subtitle_export.take() {
             self.export_subtitles(asset);
         }
+    }
 
-        let recent = ui.ctx().data_mut(|data| {
-            data.remove_temp::<std::path::PathBuf>(egui::Id::unique("open_recent_request"))
-        });
-        if let Some(path) = recent {
-            self.confirm_or_run(ui.ctx(), crate::confirm::PendingAction::OpenRecent(path));
+    /// Puts the menus in macOS's menu bar (craft-menu's native menus, as the other Crafting Apps have them). Call it
+    /// once, on the main thread, from eframe's creator closure. Elsewhere, or when AppKit refuses, nothing happens and
+    /// the menus stay in the window.
+    pub fn install_native_menu(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "macos")]
+        {
+            let mut commands = Commands::default();
+            let model = self.menu_model(&mut commands);
+            let options = LayoutOptions {
+                label: &layout_label,
+                ..LayoutOptions::new("DiscCraft")
+            };
+            self.native_menu =
+                craft_menu::mac::install(ctx, &craft_menu::mac_layout(&model, &options).bar);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = ctx;
+    }
+
+    /// The key equivalents the macOS menu bar took, given back to egui as the key presses they were (eframe's
+    /// `raw_input_hook`).
+    pub fn native_menu_input(&mut self, raw: &mut egui::RawInput) {
+        if let Some(native) = self.native_menu.as_mut() {
+            native.raw_input(raw);
         }
     }
 
-    fn file_menu(&self, ui: &mut Ui, clicked: &mut Vec<Action>) {
-        ui.menu_button(tl!("New"), |ui| {
+    /// The menu bar's model, before the layout: the menus in Encore's order (File, Edit, Object, Menu, Timeline, View,
+    /// Window, Help), with the roles craft-menu's layouts place them by.
+    pub(crate) fn menu_model(&self, commands: &mut Commands) -> craft_menu::MenuBar {
+        let menus = vec![
+            self.top_menu(commands, tl!("File"), MenuRole::File, Self::file_menu),
+            self.top_menu(commands, tl!("Edit"), MenuRole::Edit, Self::edit_menu),
+            self.top_menu(commands, tl!("Object"), MenuRole::Other, Self::object_items),
+            self.top_menu(commands, tl!("Menu"), MenuRole::Other, Self::menu_menu),
+            self.top_menu(
+                commands,
+                tl!("Timeline"),
+                MenuRole::Other,
+                Self::timeline_menu,
+            ),
+            self.top_menu(commands, tl!("View"), MenuRole::View, Self::view_menu),
+            self.top_menu(commands, tl!("Window"), MenuRole::Window, Self::window_menu),
+            self.top_menu(commands, tl!("Help"), MenuRole::Help, Self::help_menu),
+        ];
+        menu_model::bar(menus)
+    }
+
+    /// One top-level menu: `rows` writes its rows.
+    fn top_menu(
+        &self,
+        commands: &mut Commands,
+        title: &str,
+        role: MenuRole,
+        rows: fn(&Self, &mut dyn MenuSink),
+    ) -> craft_menu::Menu {
+        let mut sink = ModelSink::new(commands);
+        rows(self, &mut sink);
+        sink.menu(title, role)
+    }
+
+    /// Runs what a menu row or a shortcut chose.
+    pub(crate) fn run_menu_command(&mut self, ui: &Ui, command: MenuCommand) {
+        match command {
+            MenuCommand::Action(action) => self.run_action(ui, action),
+            MenuCommand::OpenRecent(path) => {
+                self.confirm_or_run(ui.ctx(), crate::confirm::PendingAction::OpenRecent(path));
+            }
+            MenuCommand::Workspace(id) => self.set_workspace(id),
+            MenuCommand::NewWorkspace => self.new_workspace = Some(String::new()),
+            MenuCommand::DeleteWorkspace(name) => self.delete_workspace(&name),
+            MenuCommand::ResetWorkspace => self.reset_workspace(),
+            MenuCommand::Language(language) => self.set_language(language),
+            MenuCommand::History { undo, steps } => {
+                if steps > 0 {
+                    let command = if undo { "edit.undo" } else { "edit.redo" };
+                    let _ = self.run_command(command, serde_json::json!({ "steps": steps }));
+                }
+            }
+            MenuCommand::Render(what) => self.start_render(what),
+            MenuCommand::CreateTimeline(asset) => self.create_timeline(asset),
+            MenuCommand::ExportSubtitles(asset) => self.subtitle_export = Some(asset),
+        }
+    }
+
+    fn file_menu(&self, m: &mut dyn MenuSink) {
+        m.submenu(tl!("New"), true, &mut |m| {
             let asset = matches!(self.selection, Selection::Asset(_));
-            push(clicked, ui, Action::NewProject, true);
-            push(clicked, ui, Action::NewMenu, true);
-            push(clicked, ui, Action::NewTimeline, asset);
-            push(clicked, ui, Action::NewSlideshow, true);
-            push(clicked, ui, Action::NewPlaylist, true);
+            m.action(Action::NewProject, true);
+            m.action(Action::NewMenu, true);
+            m.action(Action::NewTimeline, asset);
+            m.action(Action::NewSlideshow, true);
+            m.action(Action::NewPlaylist, true);
             let timeline = matches!(self.selection, Selection::Timeline(_));
-            push(clicked, ui, Action::NewChapterPlaylist, timeline);
+            m.action(Action::NewChapterPlaylist, timeline);
         });
-        push(clicked, ui, Action::OpenProject, true);
-        ui.separator();
-        push(clicked, ui, Action::CloseProject, true);
+        m.action(Action::OpenProject, true);
+        m.separator();
+        m.action(Action::CloseProject, true);
         // Encore: 閉じる（使っているビューアに出ているものを閉じる）。
-        push(
-            clicked,
-            ui,
+        m.action(
             Action::CloseViewer,
             matches!(
                 self.selection,
@@ -116,39 +210,32 @@ impl DiscCraftApp {
                     | Selection::ChapterPlaylist(_)
             ),
         );
-        push(clicked, ui, Action::Save, true);
-        push(clicked, ui, Action::SaveAs, true);
-        ui.separator();
-        ui.menu_button(tl!("Import"), |ui| {
-            push(clicked, ui, Action::ImportAsset, true);
-            push(clicked, ui, Action::ImportMenu, true);
-            push(clicked, ui, Action::ImportPopupMenu, true);
+        m.action(Action::Save, true);
+        m.action(Action::SaveAs, true);
+        m.separator();
+        m.submenu(tl!("Import"), true, &mut |m| {
+            m.action(Action::ImportAsset, true);
+            m.action(Action::ImportMenu, true);
+            m.action(Action::ImportPopupMenu, true);
             // メニューページはビューアに開いているメニューのページになる。
-            push(
-                clicked,
-                ui,
-                Action::ImportMenuPage,
-                self.viewer_menu().is_some(),
-            );
-            push(clicked, ui, Action::ImportTimeline, true);
-            push(clicked, ui, Action::ImportBluray, true);
-            push(clicked, ui, Action::ImportSlideshow, true);
+            m.action(Action::ImportMenuPage, self.viewer_menu().is_some());
+            m.action(Action::ImportTimeline, true);
+            m.action(Action::ImportBluray, true);
+            m.action(Action::ImportSlideshow, true);
         });
         // Encore: アセットを置き換え… / アセットを検索…（選んだアセットに。検索はファイルが見つからないときだけ）。
         let chosen_asset = match self.selection {
             Selection::Asset(id) => self.session.project.assets.get(&id),
             _ => None,
         };
-        push(clicked, ui, Action::ReplaceAsset, chosen_asset.is_some());
-        push(
-            clicked,
-            ui,
+        m.action(Action::ReplaceAsset, chosen_asset.is_some());
+        m.action(
             Action::LocateAsset,
             chosen_asset.is_some_and(|asset| asset.offline),
         );
-        ui.separator();
+        m.separator();
         // Encore: トランスコード ▸ トランスコード設定… / 今すぐトランスコード / オリジナルに戻す（選んだアセットに）。
-        ui.menu_button(tl!("Transcode"), |ui| {
+        m.submenu(tl!("Transcode"), true, &mut |m| {
             use crate::project_panel::TranscodeState;
             let idle = !self.build_job.is_running() && !self.transcode_job.is_running();
             let state = match self.selection {
@@ -163,65 +250,46 @@ impl DiscCraftApp {
                 .any(|id| self.transcode_state(*id) == Some(TranscodeState::Untranscoded));
             let settable =
                 matches!(self.selection, Selection::Asset(id) if self.has_transcode_settings(id));
-            push(clicked, ui, Action::TranscodeSettings, settable);
-            push(
-                clicked,
-                ui,
+            m.action(Action::TranscodeSettings, settable);
+            m.action(
                 Action::TranscodeNow,
                 idle && state == Some(TranscodeState::Untranscoded),
             );
-            push(clicked, ui, Action::TranscodeAll, idle && any);
-            push(
-                clicked,
-                ui,
+            m.action(Action::TranscodeAll, idle && any);
+            m.action(
                 Action::RevertToOriginal,
                 idle && state == Some(TranscodeState::Transcoded),
             );
-            ui.separator();
-            push(clicked, ui, Action::EditQualityPresets, true);
+            m.separator();
+            m.action(Action::EditQualityPresets, true);
         });
         // Encore: トランスコードされたファイルを検索 ▸ DVD… / Blu-ray…（選んだビデオのアセットに）。
         let video = matches!(self.selection, Selection::Asset(id) if self.is_video_asset(id));
-        ui.add_enabled_ui(video, |ui| {
-            ui.menu_button(tl!("Locate Transcoded File"), |ui| {
-                if ui.button(tl!("DVD…")).clicked() {
-                    clicked.push(Action::LocateTranscodedDvd);
-                    ui.close();
-                }
-                if ui.button(tl!("Blu-ray…")).clicked() {
-                    clicked.push(Action::LocateTranscodedBluray);
-                    ui.close();
-                }
-            });
+        m.submenu(tl!("Locate Transcoded File"), video, &mut |m| {
+            m.action_as(tl!("DVD…"), Action::LocateTranscodedDvd, true);
+            m.action_as(tl!("Blu-ray…"), Action::LocateTranscodedBluray, true);
         });
-        ui.separator();
-        push(clicked, ui, Action::ProjectSettings, true);
+        m.separator();
+        m.action(Action::ProjectSettings, true);
         // Encore: フッテージを変換…（選んだビデオのアセットに）。
         let interpretable =
             matches!(self.selection, Selection::Asset(id) if self.can_interpret_footage(id));
-        push(clicked, ui, Action::InterpretFootage, interpretable);
-        ui.separator();
+        m.action(Action::InterpretFootage, interpretable);
+        m.separator();
         // Encore: DVD-ROM フォルダーを選択… / ディスクのユーザー操作を設定…
-        push(clicked, ui, Action::ChooseRomFolder, true);
-        push(clicked, ui, Action::DiscUserOps, true);
-        ui.separator();
-        push(
-            clicked,
-            ui,
-            Action::SetFirstPlay,
-            self.selection_node().is_some(),
-        );
-        push(clicked, ui, Action::Preview, true);
+        m.action(Action::ChooseRomFolder, true);
+        m.action(Action::DiscUserOps, true);
+        m.separator();
+        m.action(Action::SetFirstPlay, self.selection_node().is_some());
+        m.action(Action::Preview, true);
         // Encore: レンダリング ▸ プロジェクト / モーションメニュー / スライドショー（ビルドより先にキャッシュに作る）。
-        ui.menu_button(tl!("Render"), |ui| {
+        m.submenu(tl!("Render"), true, &mut |m| {
             let idle = !self.build_job.is_running() && !self.transcode_job.is_running();
             let any = self.session.project.assets.keys().any(|id| {
                 self.transcode_state(*id)
                     == Some(crate::project_panel::TranscodeState::Untranscoded)
             });
-            if labeled(ui, tl!("Project"), Action::TranscodeAll, idle && any) {
-                clicked.push(Action::TranscodeAll);
-            }
+            m.action_as(tl!("Project"), Action::TranscodeAll, idle && any);
             // The selected motion menu (an HD Blu-ray's too: M6.387), the selected slideshow.
             let motion = match self.selection {
                 Selection::Menu(id) => self
@@ -232,69 +300,49 @@ impl DiscCraftApp {
                     .map(|menu| menu.id),
                 _ => None,
             };
-            if ui
-                .add_enabled(
-                    idle && motion.is_some(),
-                    egui::Button::new(tl!("Motion Menu")),
-                )
-                .clicked()
-            {
-                if let Some(id) = motion {
-                    request_render(ui, disccraft_build::Render::MotionMenus(Some(id)));
-                }
-                ui.close();
-            }
+            m.command(
+                tl!("Motion Menu").to_owned(),
+                MenuCommand::Render(disccraft_build::Render::MotionMenus(motion)),
+                idle && motion.is_some(),
+                None,
+            );
             let slideshow = match self.selection {
                 Selection::Slideshow(id) => Some(id),
                 _ => None,
             };
-            if ui
-                .add_enabled(
-                    idle && slideshow.is_some(),
-                    egui::Button::new(tl!("Slideshow")),
-                )
-                .clicked()
-            {
-                if let Some(id) = slideshow {
-                    request_render(ui, disccraft_build::Render::Slideshows(Some(id)));
-                }
-                ui.close();
-            }
+            m.command(
+                tl!("Slideshow").to_owned(),
+                MenuCommand::Render(disccraft_build::Render::Slideshows(slideshow)),
+                idle && slideshow.is_some(),
+                None,
+            );
         });
-        push(clicked, ui, Action::CheckProject, true);
-        ui.menu_button(tl!("Build"), |ui| {
-            push(clicked, ui, Action::BuildFolder, true);
-            push(clicked, ui, Action::BuildImage, true);
+        m.action(Action::CheckProject, true);
+        m.submenu(tl!("Build"), true, &mut |m| {
+            m.action(Action::BuildFolder, true);
+            m.action(Action::BuildImage, true);
         });
         // M6.506 (DiscCraft's own): the disc's label, for PhotoCraft to print on a printable disc.
-        push(clicked, ui, Action::CreateDiscLabel, true);
+        m.action(Action::CreateDiscLabel, true);
         // M6.509: the label linked to the project.
         let labelled = self.session.project.settings.disc_label.is_some();
-        push(clicked, ui, Action::OpenDiscLabel, labelled);
-        self.recent_items(ui);
-        ui.separator();
-        push(clicked, ui, Action::Exit, true);
+        m.action(Action::OpenDiscLabel, labelled);
+        self.recent_items(m);
+        m.separator();
+        m.action(Action::Exit, true);
     }
 
-    /// 最近使ったプロジェクト（Encore と同じく終了の上に番号付きで並べる）。押すと開く。
-    fn recent_items(&self, ui: &mut Ui) {
+    /// 最近使ったプロジェクト（Encore と同じく終了の上に番号付きで並べる）。選ぶと開く。
+    fn recent_items(&self, m: &mut dyn MenuSink) {
         if self.recent.is_empty() {
             return;
         }
-        ui.separator();
+        m.separator();
         for (index, path) in self.recent.iter().enumerate().take(4) {
-            // Encore と同じく途中を省いた形（1 C:\Users\...\名前.ncor）。全体はマウスを重ねると出る（M9.37: 長いパスで
-            // メニューが広く高くなり、低い画面で下の項目が外に出ていた）。
+            // Encore と同じく途中を省いた形（1 C:\Users\...\名前.ncor。M9.37: 長いパスでメニューが広く高くなり、
+            // 低い画面で下の項目が外に出ていた）。
             let text = format!("{} {}", index.saturating_add(1), short_path(path));
-            if ui
-                .button(text)
-                .on_hover_text(path.display().to_string())
-                .clicked()
-            {
-                ui.ctx().data_mut(|data| {
-                    data.insert_temp(egui::Id::unique("open_recent_request"), path.clone());
-                });
-            }
+            m.command(text, MenuCommand::OpenRecent(path.clone()), true, None);
         }
     }
 
@@ -312,70 +360,62 @@ impl DiscCraftApp {
     }
 
     /// Encore と同じく、取り消し / クリップボード / 名前の変更 / 消去と選択 / 環境設定 の順。
-    fn edit_menu(&self, ui: &mut Ui, clicked: &mut Vec<Action>) {
-        // Encore と同じく、取り消す / やり直す操作の名前を出す（「ボタンを追加の取り消し」「やり直しできません」）。
+    fn edit_menu(&self, m: &mut dyn MenuSink) {
+        // 取り消す / やり直す操作の名前を出す（「元に戻す: ボタンを追加」「やり直せません」）。
         let undo = undo_text(self.session.undo_label(), true);
-        if labeled(ui, &undo, Action::Undo, self.session.can_undo()) {
-            clicked.push(Action::Undo);
-        }
+        m.action_as(&undo, Action::Undo, self.session.can_undo());
         let redo = undo_text(self.session.redo_label(), false);
-        if labeled(ui, &redo, Action::Redo, self.session.can_redo()) {
-            clicked.push(Action::Redo);
-        }
-        self.history_menu(ui);
-        ui.separator();
-        self.clipboard_items(ui, clicked);
+        m.action_as(&redo, Action::Redo, self.session.can_redo());
+        self.history_menu(m);
+        m.separator();
+        self.clipboard_items(m);
         // Encore: ソースからマーカーを更新（すべてのマーカーを置換）。
-        push(
-            clicked,
-            ui,
+        m.action(
             Action::UpdateMarkersFromSource,
             self.viewer_timeline().is_some(),
         );
         // Encore: リップル削除（タイムラインビューアの再生ヘッドの下のクリップを消して詰める）。
-        push(
-            clicked,
-            ui,
+        m.action(
             Action::RippleDelete,
             self.viewer_timeline()
                 .and_then(|id| self.session.project.timeline(id))
                 .is_some_and(|timeline| !timeline.more_video.is_empty()),
         );
-        ui.separator();
-        push(
-            clicked,
-            ui,
-            Action::Rename,
-            self.selection != Selection::None,
-        );
-        ui.separator();
-        push(clicked, ui, Action::Clear, self.can_clear());
-        push(
-            clicked,
-            ui,
+        m.separator();
+        m.action(Action::Rename, self.selection != Selection::None);
+        m.separator();
+        m.action(Action::Clear, self.can_clear());
+        m.action(
             Action::EditOriginal,
             matches!(self.selection, Selection::Asset(_)),
         );
-        push(
-            clicked,
-            ui,
-            Action::EditMenuInPhotoCraft,
-            self.viewer_menu().is_some(),
-        );
+        m.action(Action::EditMenuInPhotoCraft, self.viewer_menu().is_some());
         let menu = self.edit_menu_target().is_some();
-        push(clicked, ui, Action::SelectAll, menu);
-        push(
-            clicked,
-            ui,
-            Action::DeselectAll,
-            !self.selected_buttons.is_empty(),
+        m.action(Action::SelectAll, menu);
+        m.action(Action::DeselectAll, !self.selected_buttons.is_empty());
+        m.separator();
+        m.action(Action::Preferences, true);
+        // The interface language: in the app menu on macOS (as the other Crafting Apps have it); on Windows and Linux
+        // it is in Preferences ▸ Interface.
+        m.submenu_with(
+            tl!("Language"),
+            Some(ItemRole::Language),
+            Platforms::MAC,
+            &mut |m| {
+                for language in Language::ALL {
+                    m.command(
+                        language.name().to_owned(),
+                        MenuCommand::Language(language),
+                        true,
+                        Some(self.language == language),
+                    );
+                }
+            },
         );
-        ui.separator();
-        push(clicked, ui, Action::Preferences, true);
     }
 
     /// 切り取り / コピー / 貼り付け / 複製（編集メニューとキャンバスの右クリックで共通）。
-    pub(crate) fn clipboard_items(&self, ui: &mut Ui, clicked: &mut Vec<Action>) {
+    pub(crate) fn clipboard_items(&self, m: &mut dyn MenuSink) {
         let menu = self.edit_menu_target().is_some();
         let selected = menu && !self.selected_buttons.is_empty();
         // With no menu buttons chosen, Copy / Paste / Duplicate act on the item chosen in the Project panel.
@@ -386,26 +426,24 @@ impl DiscCraftApp {
         let graphic = self
             .edit_menu_target()
             .is_some_and(|menu| self.selected_menu_graphic(menu).is_some());
-        push(clicked, ui, Action::Cut, selected || graphic);
-        push(clicked, ui, Action::Copy, selected || item || graphic);
-        push(clicked, ui, Action::Paste, paste_buttons || paste_item);
-        push(
-            clicked,
-            ui,
+        m.action(Action::Cut, selected || graphic);
+        m.action(Action::Copy, selected || item || graphic);
+        m.action(Action::Paste, paste_buttons || paste_item);
+        m.action(
             Action::PasteAsSubpicture,
             menu && self.graphic_clipboard.is_some() && self.selected_buttons.len() == 1,
         );
-        push(clicked, ui, Action::Duplicate, selected || item);
+        m.action(Action::Duplicate, selected || item);
     }
 
     /// オブジェクト ▸ アレンジ / 整列 / 均等配置（メニューバーとキャンバスの右クリックで共通）。
-    pub(crate) fn object_items(&self, ui: &mut Ui, clicked: &mut Vec<Action>) {
+    pub(crate) fn object_items(&self, m: &mut dyn MenuSink) {
         // Encore の並び: ボタンに変換 / オブジェクトに変換、それからアレンジ / 整列 / 均等配置。
         let target = self.edit_menu_target();
         let object_selected = target.is_some_and(|menu| {
             self.selected_menu_text(menu).is_some() || self.selected_menu_graphic(menu).is_some()
         });
-        push(clicked, ui, Action::ConvertToButton, object_selected);
+        m.action(Action::ConvertToButton, object_selected);
         // Encore: 置換レイヤーに変換（Ctrl+J）は選んだグラフィックに。置換レイヤーはオブジェクトに変換 で戻す。
         let replacement = target
             .and_then(|menu| {
@@ -413,53 +451,37 @@ impl DiscCraftApp {
                 self.session.project.menu(menu)?.graphics.get(index)
             })
             .map(|graphic| graphic.replacement);
-        push(
-            clicked,
-            ui,
+        m.action(
             Action::ConvertToReplacementLayer,
             replacement == Some(false),
         );
-        push(
-            clicked,
-            ui,
+        m.action(
             Action::ConvertToObject,
             target.is_some() && (!self.selected_buttons.is_empty() || replacement == Some(true)),
         );
-        push(
-            clicked,
-            ui,
+        m.action(
             Action::CreateSubpicture,
             target.is_some() && !self.selected_buttons.is_empty(),
         );
-        ui.separator();
-        push(
-            clicked,
-            ui,
-            Action::SpecifyLink,
-            self.link_dialog_target().is_some(),
-        );
-        ui.separator();
-        push(
-            clicked,
-            ui,
-            Action::DropShadow,
-            self.shadow_dialog_target().is_some(),
-        );
-        ui.separator();
+        m.separator();
+        m.action(Action::SpecifyLink, self.link_dialog_target().is_some());
+        m.separator();
+        m.action(Action::DropShadow, self.shadow_dialog_target().is_some());
+        m.separator();
         // Encore: 水平方向に反転 / 垂直方向に反転 / 回転 ▸ がアレンジの上に並ぶ。
         let orient = self.shadow_dialog_target().is_some();
-        push(clicked, ui, Action::FlipHorizontal, orient);
-        push(clicked, ui, Action::FlipVertical, orient);
-        ui.menu_button(tl!("Rotate"), |ui| {
+        m.action(Action::FlipHorizontal, orient);
+        m.action(Action::FlipVertical, orient);
+        m.submenu(tl!("Rotate"), true, &mut |m| {
             for action in [
                 Action::Rotate180,
                 Action::RotateClockwise,
                 Action::RotateCounterClockwise,
             ] {
-                push(clicked, ui, action, orient);
+                m.action(action, orient);
             }
         });
-        ui.menu_button(tl!("Arrange"), |ui| {
+        m.submenu(tl!("Arrange"), true, &mut |m| {
             let enabled = self.edit_menu_target().is_some() && !self.selected_buttons.is_empty();
             for action in [
                 Action::BringToFront,
@@ -467,97 +489,73 @@ impl DiscCraftApp {
                 Action::SendBackward,
                 Action::SendToBack,
             ] {
-                push(clicked, ui, action, enabled);
+                m.action(action, enabled);
             }
         });
-        ui.menu_button(tl!("Align"), |ui| {
+        m.submenu(tl!("Align"), true, &mut |m| {
             let enabled = self.can_arrange(self.align_to_safe_area);
             for action in [
                 Action::AlignLeft,
                 Action::AlignHorizontalCenter,
                 Action::AlignRight,
             ] {
-                push_indented(clicked, ui, action, enabled);
+                m.action(action, enabled);
             }
-            ui.separator();
+            m.separator();
             for action in [
                 Action::AlignTop,
                 Action::AlignVerticalCenter,
                 Action::AlignBottom,
             ] {
-                push_indented(clicked, ui, action, enabled);
+                m.action(action, enabled);
             }
-            ui.separator();
-            if menu_check(ui, Action::AlignToSafeArea, self.align_to_safe_area) {
-                clicked.push(Action::AlignToSafeArea);
-            }
+            m.separator();
+            m.check(Action::AlignToSafeArea, self.align_to_safe_area);
         });
-        ui.menu_button(tl!("Distribute"), |ui| {
+        m.submenu(tl!("Distribute"), true, &mut |m| {
             let enabled = self.can_arrange(self.distribute_to_safe_area);
-            push_indented(clicked, ui, Action::DistributeVertically, enabled);
-            push_indented(clicked, ui, Action::DistributeHorizontally, enabled);
-            ui.separator();
-            if menu_check(
-                ui,
-                Action::DistributeToSafeArea,
-                self.distribute_to_safe_area,
-            ) {
-                clicked.push(Action::DistributeToSafeArea);
-            }
+            m.action(Action::DistributeVertically, enabled);
+            m.action(Action::DistributeHorizontally, enabled);
+            m.separator();
+            m.check(Action::DistributeToSafeArea, self.distribute_to_safe_area);
         });
     }
 
-    fn menu_menu(&self, ui: &mut Ui, clicked: &mut Vec<Action>) {
-        if labeled(ui, tl!("New Menu"), Action::NewMenu, true) {
-            clicked.push(Action::NewMenu);
-        }
+    fn menu_menu(&self, m: &mut dyn MenuSink) {
+        m.action_as(tl!("New Menu"), Action::NewMenu, true);
         // ビューアのメニューにチャプターボタンがあれば Encore と同じくそれにリンクを入れ、なければ選択中のタイムラインから
         // メニューを作る（DiscCraft 独自）。
         let timeline = self.selected_timeline().is_some();
-        push(
-            clicked,
-            ui,
+        m.action(
             Action::CreateChapterIndex,
             timeline || self.viewer_menu_has_chapter_buttons(),
         );
-        push(
-            clicked,
-            ui,
+        m.action(
             Action::CreateMultiPageChapterIndex,
             timeline || self.viewer_menu_has_chapter_buttons(),
         );
         // Encore: メニューを置き換え…（ビューアのメニューを PSD のデザインに。リンクは番号で残す）。
-        push(
-            clicked,
-            ui,
-            Action::ReplaceMenu,
-            self.viewer_menu().is_some(),
-        );
-        push(
-            clicked,
-            ui,
-            Action::AddMenuPage,
-            self.viewer_menu().is_some(),
-        );
-        ui.separator();
+        m.action(Action::ReplaceMenu, self.viewer_menu().is_some());
+        m.action(Action::AddMenuPage, self.viewer_menu().is_some());
+        m.separator();
         let menu = matches!(self.selection, Selection::Menu(_));
-        push(clicked, ui, Action::AddButton, menu);
-        ui.separator();
-        // Encore の並び: カラーセット / ユーザー操作、ファイル / テンプレート / After Effects、エンドアクション。
+        m.action(Action::AddButton, menu);
+        m.separator();
+        // Encore の並び: カラーセット / ユーザー操作、ファイル / テンプレート / After Effects、終了時の動作。
         let open = self.viewer_menu().is_some();
-        push(clicked, ui, Action::EditMenuColorSet, open);
-        push(clicked, ui, Action::SetMenuUserOps, open);
-        ui.separator();
-        push(clicked, ui, Action::SaveMenuAsFile, open);
-        push(clicked, ui, Action::SaveMenuAsTemplate, open);
+        m.action(Action::EditMenuColorSet, open);
+        m.action(Action::SetMenuUserOps, open);
+        m.separator();
+        m.action(Action::SaveMenuAsFile, open);
+        m.action(Action::SaveMenuAsTemplate, open);
         // Encore: After Effects コンポジションを作成…
-        push(clicked, ui, Action::CreateEffectCraftComposition, open);
-        ui.separator();
-        push(clicked, ui, Action::SetMenuEnd, open);
+        m.action(Action::CreateEffectCraftComposition, open);
+        m.separator();
+        m.action(Action::SetMenuEnd, open);
     }
 
     /// Encore と同じく、作成 / トラック / チャプターポイントの順。
-    fn timeline_menu(&mut self, ui: &mut Ui, clicked: &mut Vec<Action>) {
+    fn timeline_menu(&self, m: &mut dyn MenuSink) {
         // Encore の「新規タイムライン」はいつでも選べる。DiscCraft のタイムラインはビデオが要るので、ビデオを
         // 選んでいなければビデオの一覧から選ぶ。
         let video = match self.selection {
@@ -571,11 +569,9 @@ impl DiscCraftApp {
             _ => None,
         };
         if video.is_some() {
-            if labeled(ui, tl!("New Timeline"), Action::NewTimeline, true) {
-                clicked.push(Action::NewTimeline);
-            }
+            m.action_as(tl!("New Timeline"), Action::NewTimeline, true);
         } else {
-            ui.menu_button(tl!("New Timeline"), |ui| {
+            m.submenu(tl!("New Timeline"), true, &mut |m| {
                 let videos: Vec<(disccraft_project::AssetId, String)> = self
                     .session
                     .project
@@ -585,93 +581,68 @@ impl DiscCraftApp {
                     .map(|asset| (asset.id, asset.name.clone()))
                     .collect();
                 if videos.is_empty() {
-                    ui.label(tl!("Import a video first"));
+                    m.note(tl!("Import a video first"));
                 }
                 for (id, name) in videos {
-                    if ui.button(name).clicked() {
-                        self.create_timeline(id);
-                        ui.close();
-                    }
+                    m.command(name, MenuCommand::CreateTimeline(id), true, None);
                 }
             });
         }
-        if labeled(ui, tl!("New Slideshow"), Action::NewSlideshow, true) {
-            clicked.push(Action::NewSlideshow);
-        }
+        m.action_as(tl!("New Slideshow"), Action::NewSlideshow, true);
         // Encore の「新規チャプター再生リスト」: 選んでいるタイムラインがマスターになる。
         let selected_timeline = self.selected_timeline().is_some();
-        if labeled(
-            ui,
+        m.action_as(
             tl!("New Chapter Playlist"),
             Action::NewChapterPlaylist,
             selected_timeline,
-        ) {
-            clicked.push(Action::NewChapterPlaylist);
-        }
-        ui.separator();
+        );
+        m.separator();
         let timeline = self.selected_timeline().is_some();
-        push(clicked, ui, Action::AddAudioTrack, timeline);
-        push(clicked, ui, Action::AddSubtitleTrack, timeline);
+        m.action(Action::AddAudioTrack, timeline);
+        m.action(Action::AddSubtitleTrack, timeline);
         let audio = self.track_count(TrackKind::Audio) > 0;
         let subtitles = self.track_count(TrackKind::Subtitle) > 0;
-        push(clicked, ui, Action::RemoveAudioTrack, audio);
-        push(clicked, ui, Action::RemoveSubtitleTrack, subtitles);
-        ui.separator();
+        m.action(Action::RemoveAudioTrack, audio);
+        m.action(Action::RemoveSubtitleTrack, subtitles);
+        m.separator();
         // 字幕の読み込み ▸（Encore と同じ 3 つ）: テキストスクリプト（SRT、WebVTT も読む）、FAB 画像スクリプト、
         // 画像スクリプト。書き出しは SRT かテキストスクリプト。
-        ui.add_enabled_ui(timeline, |ui| {
-            ui.menu_button(tl!("Import Subtitles"), |ui| {
-                if ui.button(tl!("Text Script…")).clicked() {
-                    clicked.push(Action::ImportSubtitles);
-                    ui.close();
-                }
-                push(clicked, ui, Action::ImportFabImageScript, true);
-                push(clicked, ui, Action::ImportImageScript, true);
-                // M6.422（DiscCraft だけ）: タイムラインの動画（mkv）の中の字幕を字幕トラックに。
-                ui.separator();
-                push(clicked, ui, Action::ImportSourceSubtitles, true);
-            });
+        m.submenu(tl!("Import Subtitles"), timeline, &mut |m| {
+            m.action_as(tl!("Text Script…"), Action::ImportSubtitles, true);
+            m.action(Action::ImportFabImageScript, true);
+            m.action(Action::ImportImageScript, true);
+            // M6.422（DiscCraft だけ）: タイムラインの動画（mkv）の中の字幕を字幕トラックに。
+            m.separator();
+            m.action(Action::ImportSourceSubtitles, true);
         });
-        self.export_subtitles_menu(ui);
-        ui.separator();
-        push(clicked, ui, Action::AddChapterPoint, timeline);
-        push(clicked, ui, Action::AddChapterPointsAtInterval, timeline);
-        push(clicked, ui, Action::SetPosterFrame, timeline);
+        self.export_subtitles_menu(m);
+        m.separator();
+        m.action(Action::AddChapterPoint, timeline);
+        m.action(Action::AddChapterPointsAtInterval, timeline);
+        m.action(Action::SetPosterFrame, timeline);
         // FilmCraft のプロジェクトのマーカーをチャプターに（Encore は Premiere Pro のチャプターマーカーを読む）。
-        push(clicked, ui, Action::ImportFilmCraftMarkers, timeline);
-        push(clicked, ui, Action::ImportSourceChapters, timeline);
-        push(clicked, ui, Action::NewTimelineFromFilmCraft, true);
-        ui.separator();
+        m.action(Action::ImportFilmCraftMarkers, timeline);
+        m.action(Action::ImportSourceChapters, timeline);
+        m.action(Action::NewTimelineFromFilmCraft, true);
+        m.separator();
         // Encore と同じく最後に再生。再生中にもう一度選ぶと止まる。
-        push(clicked, ui, Action::EditTimelineColorSet, timeline);
-        push(
-            clicked,
-            ui,
+        m.action(Action::EditTimelineColorSet, timeline);
+        m.action(
             Action::MoveTrackToView,
             self.viewer_timeline()
                 .and_then(|id| self.session.project.timeline(id))
                 .is_some_and(|timeline| !timeline.audio.is_empty()),
         );
-        push(clicked, ui, Action::SetTimelineUserOps, timeline);
-        push(clicked, ui, Action::SaveFrameAsFile, timeline);
-        push(clicked, ui, Action::Play, self.viewer_timeline().is_some());
-        push(
-            clicked,
-            ui,
-            Action::PlayFaster,
-            self.viewer_timeline().is_some(),
-        );
-        push(
-            clicked,
-            ui,
-            Action::PlaySlower,
-            self.viewer_timeline().is_some(),
-        );
-        push(clicked, ui, Action::StopPlayback, self.is_playing());
+        m.action(Action::SetTimelineUserOps, timeline);
+        m.action(Action::SaveFrameAsFile, timeline);
+        m.action(Action::Play, self.viewer_timeline().is_some());
+        m.action(Action::PlayFaster, self.viewer_timeline().is_some());
+        m.action(Action::PlaySlower, self.viewer_timeline().is_some());
+        m.action(Action::StopPlayback, self.is_playing());
     }
 
     /// タイムライン ▸ 字幕を書き出し ▸ 字幕トラックの一覧。選ぶとメニューを閉じてから保存先を聞く。
-    fn export_subtitles_menu(&mut self, ui: &mut Ui) {
+    fn export_subtitles_menu(&self, m: &mut dyn MenuSink) {
         let tracks: Vec<(String, disccraft_project::AssetId)> = self
             .selected_timeline()
             .and_then(|id| self.session.project.timeline(id))
@@ -691,112 +662,88 @@ impl DiscCraftApp {
                     .collect()
             })
             .unwrap_or_default();
-        ui.add_enabled_ui(!tracks.is_empty(), |ui| {
-            ui.menu_button(tl!("Export Subtitles"), |ui| {
-                for (label, asset) in &tracks {
-                    if ui.button(label).clicked() {
-                        self.subtitle_export = Some(*asset);
-                        ui.close();
-                    }
-                }
-            });
+        m.submenu(tl!("Export Subtitles"), !tracks.is_empty(), &mut |m| {
+            if tracks.is_empty() {
+                m.note(tl!("(none)"));
+            }
+            for (label, asset) in &tracks {
+                m.command(
+                    label.clone(),
+                    MenuCommand::ExportSubtitles(*asset),
+                    true,
+                    None,
+                );
+            }
         });
     }
 
-    fn view_menu(&self, ui: &mut Ui, clicked: &mut Vec<Action>) {
-        push_indented(clicked, ui, Action::ZoomIn, true);
-        push_indented(clicked, ui, Action::ZoomOut, true);
-        push_indented(clicked, ui, Action::FitInWindow, true);
-        ui.separator();
+    fn view_menu(&self, m: &mut dyn MenuSink) {
+        m.action(Action::ZoomIn, true);
+        m.action(Action::ZoomOut, true);
+        m.action(Action::FitInWindow, true);
+        m.separator();
         let states = [
             (Action::ShowNormal, HighlightPreview::Normal),
             (Action::ShowSelected, HighlightPreview::Selected),
             (Action::ShowActivated, HighlightPreview::Activated),
         ];
         for (action, state) in states {
-            if menu_check(ui, action, self.highlight_preview == Some(state)) {
-                clicked.push(action);
-            }
+            m.check(action, self.highlight_preview == Some(state));
         }
-        ui.separator();
-        if menu_check(ui, Action::ShowSafeAreas, self.show_safe_areas) {
-            clicked.push(Action::ShowSafeAreas);
-        }
-        ui.separator();
+        m.separator();
+        m.check(Action::ShowSafeAreas, self.show_safe_areas);
+        m.separator();
         // Encore: ガイドを表示 / ガイドにスナップ / ガイドをロック / ガイドを消去 / 新規ガイド…
         let menu_shown = matches!(self.selection, Selection::Menu(_));
-        if menu_check(ui, Action::ShowGuides, self.show_guides) {
-            clicked.push(Action::ShowGuides);
-        }
-        if menu_check(ui, Action::SnapToGuides, self.snap_to_guides) {
-            clicked.push(Action::SnapToGuides);
-        }
-        if menu_check(ui, Action::LockGuides, self.lock_guides) {
-            clicked.push(Action::LockGuides);
-        }
-        push_indented(clicked, ui, Action::ClearGuides, self.has_guides());
-        push_indented(clicked, ui, Action::NewGuide, menu_shown);
-        ui.separator();
-        if menu_check(ui, Action::ShowRouting, self.show_routing) {
-            clicked.push(Action::ShowRouting);
-        }
-        ui.separator();
-        if menu_check(ui, Action::ShowChapterNames, self.show_chapter_names) {
-            clicked.push(Action::ShowChapterNames);
-        }
+        m.check(Action::ShowGuides, self.show_guides);
+        m.check(Action::SnapToGuides, self.snap_to_guides);
+        m.check(Action::LockGuides, self.lock_guides);
+        m.action(Action::ClearGuides, self.has_guides());
+        m.action(Action::NewGuide, menu_shown);
+        m.separator();
+        m.check(Action::ShowRouting, self.show_routing);
+        m.separator();
+        m.check(Action::ShowChapterNames, self.show_chapter_names);
     }
 
-    fn window_menu(&mut self, ui: &mut Ui, clicked: &mut Vec<Action>) {
+    fn window_menu(&self, m: &mut dyn MenuSink) {
         // Encore と同じく、ワークスペースを選び、名前を付けて保存し、消し、リセットする。
-        ui.menu_button(tl!("Workspace"), |ui| {
+        m.submenu(tl!("Workspace"), true, &mut |m| {
             for id in self.workspace_ids() {
-                if ui
-                    .selectable_label(self.workspace == id, id.label())
-                    .clicked()
-                {
-                    self.set_workspace(id);
-                    ui.close();
-                }
+                let selected = self.workspace == id;
+                m.command(id.label(), MenuCommand::Workspace(id), true, Some(selected));
             }
-            ui.separator();
-            if ui.button(tl!("New Workspace…")).clicked() {
-                self.new_workspace = Some(String::new());
-                ui.close();
-            }
-            ui.add_enabled_ui(!self.user_workspaces.is_empty(), |ui| {
-                ui.menu_button(tl!("Delete Workspace"), |ui| {
-                    for name in self.user_workspaces.clone() {
-                        if ui.button(name.as_str()).clicked() {
-                            self.delete_workspace(&name);
-                            ui.close();
-                        }
+            m.separator();
+            m.command(
+                tl!("New Workspace…").to_owned(),
+                MenuCommand::NewWorkspace,
+                true,
+                None,
+            );
+            m.submenu(
+                tl!("Delete Workspace"),
+                !self.user_workspaces.is_empty(),
+                &mut |m| {
+                    if self.user_workspaces.is_empty() {
+                        m.note(tl!("(none)"));
                     }
-                });
-            });
+                    for name in &self.user_workspaces {
+                        m.command(
+                            name.clone(),
+                            MenuCommand::DeleteWorkspace(name.clone()),
+                            true,
+                            None,
+                        );
+                    }
+                },
+            );
             let reset = tlf!("Reset “{name}”", name = self.workspace.label());
-            if ui.button(reset).clicked() {
-                self.reset_workspace();
-                ui.close();
-            }
+            m.command(reset, MenuCommand::ResetWorkspace, true, None);
         });
-        ui.separator();
+        m.separator();
         for action in WINDOW_ACTIONS {
-            if menu_check(ui, action, self.window_shown(action)) {
-                clicked.push(action);
-            }
+            m.check(action, self.window_shown(action));
         }
-        ui.separator();
-        ui.menu_button(tl!("Language"), |ui| {
-            for language in Language::ALL {
-                if ui
-                    .selectable_label(self.language == language, language.name())
-                    .clicked()
-                {
-                    self.set_language(language);
-                    ui.close();
-                }
-            }
-        });
     }
 
     /// ウィンドウメニューの項目が今表示されているか（パネルはタブグループの前面に出ているか）。
@@ -1438,17 +1385,6 @@ impl DiscCraftApp {
     }
 }
 
-/// Where File ▸ Render ▸ Motion Menu / Slideshow leaves what to make (the menus are drawn without `&mut self`).
-fn render_request_id() -> egui::Id {
-    egui::Id::unique("render_request")
-}
-
-/// Asks for `what` to be made once the menus are drawn.
-fn request_render(ui: &Ui, what: disccraft_build::Render) {
-    ui.ctx()
-        .data_mut(|data| data.insert_temp(render_request_id(), what));
-}
-
 /// ウィンドウメニューの項目のパネル。
 fn window_panel(action: Action) -> Option<Panel> {
     Some(match action {
@@ -1496,78 +1432,55 @@ const WINDOW_ACTIONS: [Action; 19] = [
     Action::WindowTimelineViewer,
 ];
 
-/// `action` の項目を描き、クリックされたら `clicked` に積む。
-/// [`push`] in a menu with checkable items: the label lines up with theirs.
-fn push_indented(clicked: &mut Vec<Action>, ui: &mut Ui, action: Action, enabled: bool) {
-    if crate::actions::menu_item_indented(ui, action, enabled) {
-        clicked.push(action);
-    }
-}
-
-fn push(clicked: &mut Vec<Action>, ui: &mut Ui, action: Action, enabled: bool) {
-    if menu_item(ui, action, enabled) {
-        clicked.push(action);
-    }
-}
-
-/// 編集メニューの 取り消し / やり直し の表示名。日本語では Encore と同じく操作の名前を付ける（操作の名前は
-/// コマンドの日本語の名前なので、英語の表示では付けない）。
-/// Where 編集 ▸ ヒストリー leaves the chosen jump (undo?, steps) for after the menus are drawn.
-fn history_request_id() -> egui::Id {
-    egui::Id::unique("history_jump_request")
-}
-
 impl DiscCraftApp {
-    /// 編集 ▸ ヒストリー ▸ (Encore): the steps that can be redone (the farthest first), then the ones that can be
-    /// undone (the newest first). As in Encore, choosing "X の取り消し" takes X back too, with every step above it;
-    /// choosing "X のやり直し" redoes up to and including X.
-    fn history_menu(&self, ui: &mut Ui) {
+    /// Edit ▸ History ▸: the steps that can be redone (the farthest first), then the ones that can be undone (the newest
+    /// first). Choosing "Undo X" takes X back too, with every step above it; choosing "Redo X" redoes up to and
+    /// including X. The steps' names are the commands' English labels, translated (M16.3).
+    fn history_menu(&self, m: &mut dyn MenuSink) {
         let redo = self.session.redo_labels();
         let undo = self.session.undo_labels();
-        ui.add_enabled_ui(!redo.is_empty() || !undo.is_empty(), |ui| {
-            ui.menu_button(tl!("History"), |ui| {
-                egui::ScrollArea::vertical()
-                    .max_height(480.0)
-                    .show(ui, |ui| {
-                        let mut chosen = None;
-                        for (index, label) in redo.iter().enumerate() {
-                            if ui.button(tlf!("Redo {action}", action = *label)).clicked() {
-                                chosen = Some((false, redo.len().saturating_sub(index)));
-                            }
-                        }
-                        for (index, label) in undo.iter().rev().enumerate() {
-                            if ui.button(tlf!("Undo {action}", action = *label)).clicked() {
-                                chosen = Some((true, index.saturating_add(1)));
-                            }
-                        }
-                        if let Some(jump) = chosen {
-                            ui.ctx()
-                                .data_mut(|data| data.insert_temp(history_request_id(), jump));
-                            ui.close();
-                        }
-                    });
-            });
-        });
+        m.submenu(
+            tl!("History"),
+            !redo.is_empty() || !undo.is_empty(),
+            &mut |m| {
+                if redo.is_empty() && undo.is_empty() {
+                    m.note(tl!("(none)"));
+                }
+                for (index, label) in redo.iter().enumerate() {
+                    m.command(
+                        tlf!("Redo {action}", action = crate::i18n::t(label)),
+                        MenuCommand::History {
+                            undo: false,
+                            steps: redo.len().saturating_sub(index),
+                        },
+                        true,
+                        None,
+                    );
+                }
+                for (index, label) in undo.iter().rev().enumerate() {
+                    m.command(
+                        tlf!("Undo {action}", action = crate::i18n::t(label)),
+                        MenuCommand::History {
+                            undo: true,
+                            steps: index.saturating_add(1),
+                        },
+                        true,
+                        None,
+                    );
+                }
+            },
+        );
     }
 }
 
+/// Edit ▸ Undo / Redo with the name of the step ("Undo Add Button"); the command's English label is translated.
 fn undo_text(label: Option<&str>, undo: bool) -> String {
-    let japanese = crate::i18n::current() == crate::i18n::Language::Ja;
     match (label, undo) {
-        (Some(label), true) if japanese => tlf!("Undo {action}", action = label),
-        (Some(label), false) if japanese => tlf!("Redo {action}", action = label),
+        (Some(label), true) => tlf!("Undo {action}", action = crate::i18n::t(label)),
+        (Some(label), false) => tlf!("Redo {action}", action = crate::i18n::t(label)),
         (None, true) => tl!("Can't Undo").to_owned(),
         (None, false) => tl!("Can't Redo").to_owned(),
-        (Some(_), true) => tl!("Undo").to_owned(),
-        (Some(_), false) => tl!("Redo").to_owned(),
     }
-}
-
-/// `action` のショートカットを添えて、別の表示名で項目を描く（例: メニューメニューの「新規メニュー」）。
-fn labeled(ui: &mut Ui, label: &str, action: Action, enabled: bool) -> bool {
-    let shortcut = action.shortcut_text(ui.ctx());
-    ui.add_enabled(enabled, egui::Button::new(label).shortcut_text(shortcut))
-        .clicked()
 }
 
 /// A recent project's path as Encore's File menu shows it: its first two parts, "...", and the file name
@@ -1599,6 +1512,82 @@ mod tests {
     use std::path::Path;
 
     /// Encore's File menu shows a recent project as `C:\Users\...\DCSUBTEST.ncor`; a short path as it is.
+    /// The labels of a laid-out menu's rows (a separator as "-").
+    fn labels(menu: &craft_menu::Menu) -> Vec<String> {
+        menu.children
+            .iter()
+            .map(|node| match node {
+                craft_menu::Node::Item(item) => item.label.clone(),
+                craft_menu::Node::Submenu { label, .. } => format!("{label} ▸"),
+                craft_menu::Node::Separator => "-".to_owned(),
+                craft_menu::Node::Standard { label, .. } => label.clone(),
+            })
+            .collect()
+    }
+
+    /// M16.4: the menus are craft-menu's, laid out as the other Crafting Apps' are. On Windows About is last in
+    /// Help, Preferences last in Edit and Exit last in File, and the language is chosen in Preferences; on macOS
+    /// they and the language go to the app menu. Every row runs a command the bar can give back.
+    #[test]
+    fn the_menus_are_laid_out_as_the_other_crafting_apps() {
+        use crate::menu_model::Commands;
+        use craft_menu::{LayoutOptions, Target};
+        let before = crate::i18n::current();
+        let app = crate::DiscCraftApp::new(&egui::Context::default());
+        crate::i18n::set_current(crate::i18n::Language::En);
+        let mut commands = Commands::default();
+        let model = app.menu_model(&mut commands);
+        let options = LayoutOptions::new("DiscCraft");
+
+        let windows = craft_menu::layout(&model, Target::Windows, &options).bar;
+        let titles: Vec<&str> = windows
+            .menus
+            .iter()
+            .map(|menu| menu.title.as_str())
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                "File", "Edit", "Object", "Menu", "Timeline", "View", "Window", "Help"
+            ]
+        );
+        let last = |title: &str| {
+            windows
+                .menus
+                .iter()
+                .find(|menu| menu.title == title)
+                .and_then(|menu| labels(menu).last().cloned())
+        };
+        assert_eq!(last("File").as_deref(), Some("Exit"));
+        assert_eq!(last("Edit").as_deref(), Some("Preferences…"));
+        assert_eq!(last("Help").as_deref(), Some("About DiscCraft"));
+        assert!(
+            windows
+                .menus
+                .iter()
+                .all(|menu| !labels(menu).contains(&"Language ▸".to_owned())),
+            "the language is in Preferences on Windows"
+        );
+        for item in windows.items() {
+            if item.command.id == "disccraft.menu" {
+                assert!(commands.get(&item.command).is_some(), "{}", item.label);
+            }
+        }
+
+        let mac = craft_menu::layout(&model, Target::Mac, &options).bar;
+        let app_menu = mac.menus.first().map(labels).unwrap_or_default();
+        assert_eq!(
+            mac.menus.first().map(|menu| menu.title.as_str()),
+            Some("DiscCraft")
+        );
+        assert!(
+            app_menu.contains(&"About DiscCraft".to_owned()),
+            "{app_menu:?}"
+        );
+        assert!(app_menu.contains(&"Language ▸".to_owned()), "{app_menu:?}");
+        crate::i18n::set_current(before);
+    }
+
     #[test]
     fn a_recent_project_is_shown_as_encore_shows_it() {
         if cfg!(windows) {

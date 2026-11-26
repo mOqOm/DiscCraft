@@ -1,4 +1,4 @@
-use crate::actions::{Action, menu_item};
+use crate::actions::Action;
 use crate::app::{DiscCraftApp, Selection, rgb_to_f32};
 use crate::button_edit::moved;
 use crate::i18n::{tl, tlf};
@@ -414,27 +414,26 @@ impl DiscCraftApp {
                 None => self.select(Selection::Menu(menu.id)),
             }
         }
-        let mut clicked = Vec::new();
+        let mut chosen = Vec::new();
         let _ = response.context_menu(|ui| {
-            self.clipboard_items(ui, &mut clicked);
+            use crate::menu_model::MenuSink;
+            let mut sink = crate::menu_model::EguiSink::new(ui);
+            self.clipboard_items(&mut sink);
             let has_object = !self.selected_buttons.is_empty()
                 || self.selected_menu_text(menu.id).is_some()
                 || self.selected_menu_graphic(menu.id).is_some();
-            if menu_item(ui, Action::Clear, has_object) {
-                clicked.push(Action::Clear);
+            sink.action(Action::Clear, has_object);
+            sink.separator();
+            sink.action(Action::Rename, self.primary_button().is_some());
+            sink.separator();
+            self.object_items(&mut sink);
+            if !sink.chosen.is_empty() {
+                sink.ui.close();
             }
-            ui.separator();
-            if menu_item(ui, Action::Rename, self.primary_button().is_some()) {
-                clicked.push(Action::Rename);
-            }
-            ui.separator();
-            self.object_items(ui, &mut clicked);
-            if !clicked.is_empty() {
-                ui.close();
-            }
+            chosen = sink.chosen;
         });
-        for action in clicked {
-            self.run_action(ui, action);
+        for command in chosen {
+            self.run_menu_command(ui, command);
         }
     }
 

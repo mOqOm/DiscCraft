@@ -29,10 +29,10 @@ Encore's defaults by default. Commonly used items:
 - **Timeline ▸** (New Timeline / New Slideshow / New Chapter Playlist, add and remove tracks, import and export
   subtitles, add chapter points)
 - **View ▸** (Zoom, Subpicture 3 states, Safe Areas, Button Routing, Guides, Chapter Name)
-- **Window ▸** (Workspace, show/hide panels, Display language)
-- **Help ▸** (Join the ArtCraft Discord… / ArtCraft Website / DiscCraft on GitHub / Report an Issue… / Reveal Log Files…
-  / System Compatibility Report… / Check for Updates… / About DiscCraft / DiscCraft Help… (F1)). Hovering over an item
-  shows the address it opens or what it does. **DiscCraft Help…** opens this manual.
+- **Window ▸** (Workspace, show/hide panels)
+- **Help ▸** (Join the ArtCraft Discord… / ArtCraft Website / DiscCraft on GitHub / Report an Issue… / DiscCraft Help…
+  (F1) / Reveal Log Files… / System Compatibility Report… / Check for Updates… / About DiscCraft). **DiscCraft Help…**
+  opens this manual.
 
 ## 4.2 Toolbar
 

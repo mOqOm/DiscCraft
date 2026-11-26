@@ -1,0 +1,40 @@
+# How editors write DiscCraft's files (https://editorconfig.org). It matches what the files already are: UTF-8, LF line
+# ends (as .gitattributes stores them), a newline at the end, no spaces at the ends of lines, spaces for indentation.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# rustfmt keeps code within 100 columns; comments are wrapped by hand at 120.
+[*.rs]
+max_line_length = 120
+
+[*.py]
+max_line_length = 120
+
+# Documents keep a paragraph or a table row on one line, except where they are wrapped at 120 (the user manual).
+[*.md]
+indent_size = 2
+max_line_length = off
+
+[*.{yml,yaml,sh,xml,in,wxs}]
+indent_size = 2
+
+# Windows PowerShell 5.1 reads a script without a BOM in the system's code page, which breaks its Japanese text.
+[*.ps1]
+charset = utf-8-bom
+
+# The UI translations: columns are separated by tabs, and a space at the end of a field belongs to the text.
+[*.tsv]
+indent_style = tab
+trim_trailing_whitespace = false
+
+# Cargo's lock file and the command scripts, one command to a line.
+[{Cargo.lock,*.jsonl}]
+indent_size = unset
+max_line_length = off

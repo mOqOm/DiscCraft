@@ -11,8 +11,8 @@ use super::{always_enabled, empty_object, object};
 pub(crate) const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "menu.addGuide",
-        label: "ガイドを追加",
-        menu: &["メニュー"],
+        label: "Add Guide",
+        menu: &["Menu"],
         shortcut: None,
         params: r#"{"menu": id, "orientation": "horizontal" | "vertical", "position": n}"#,
         enabled: always_enabled,
@@ -21,8 +21,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "menu.moveGuide",
-        label: "ガイドを移動",
-        menu: &["メニュー"],
+        label: "Move Guide",
+        menu: &["Menu"],
         shortcut: None,
         params: r#"{"menu": id, "index": n, "position": n}"#,
         enabled: always_enabled,
@@ -31,8 +31,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "menu.removeGuide",
-        label: "ガイドを削除",
-        menu: &["メニュー"],
+        label: "Delete Guide",
+        menu: &["Menu"],
         shortcut: None,
         params: r#"{"menu": id, "index": n}"#,
         enabled: always_enabled,
@@ -41,8 +41,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "menu.clearGuides",
-        label: "ガイドを消去",
-        menu: &["メニュー"],
+        label: "Clear Guides",
+        menu: &["Menu"],
         shortcut: None,
         params: r#"{"menu": id}"#,
         enabled: always_enabled,

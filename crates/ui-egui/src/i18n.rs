@@ -1,26 +1,41 @@
-//! Interface translations. Strings in code stay English and are the lookup keys; one catalog per
-//! language (`i18n/<code>.tsv`) maps them to display text at draw time. Untranslated strings are
-//! shown in English, so coverage can grow incrementally. Command ids, automation ids, the control
-//! channel, the CLI and MCP stay English.
+//! Interface translations. Strings in code stay English and are the lookup keys; the catalogs map them to display
+//! text at draw time. Untranslated strings are shown in English. Command ids, automation ids, the control channel, the
+//! CLI and MCP stay English.
 //!
-//! Ported from FilmCraft's `crates/ui-egui/src/i18n.rs`
+//! The catalogs are in craft-i18n's layout (storytold/craft-i18n), looked up with craft-libs' `craft-i18n` crate as
+//! the other Crafting Apps do (M16.1): for Japanese, DiscCraft's own rows (`i18n/locales/ja/disccraft.tsv`) over the
+//! strings the apps share (`i18n/locales/ja/common.tsv`, a copy of craft-i18n's shared catalog at the commit in
+//! `i18n/craft-i18n.rev`), then the English. So a string DiscCraft shares with the other apps reads as it does there.
+//!
+//! The macros follow FilmCraft's `crates/ui-egui/src/i18n.rs`
 //! (https://github.com/storytold/filmcraft, rev `da535c18433dbe046553733b0ab08ce9bd736a51`, unchanged up to `19d46c07`,
 //! MIT OR Apache-2.0). See `NOTICE` and [docs/architecture.md](../../../docs/architecture.md) §5.3.
 //!
 //! # Looking strings up
 //! - [`tl`] with a string literal: that UI string in the language the UI is drawn in
 //!   (see [`set_current`]). Use it for every label, button, heading, tooltip and hint.
-//!   `cargo xtask i18n-report` lists the literals each catalog lacks.
 //! - [`t`]: the same for a string that is not a literal.
 //! - [`tr_ctx`]: when one English word needs different translations (the Menu panel, the Menu tab).
 //! - [`fmt`]: fill `{name}` placeholders after translating a template; translators may reorder them.
 
-mod catalog;
-
-use catalog::Catalog;
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
-use std::sync::OnceLock;
+use std::sync::LazyLock;
+
+/// The catalogs, one (locale, shared catalog, DiscCraft's catalog) entry per language, as craft-i18n's `Embedded`.
+static CATALOGS: &craft_i18n::Embedded = &[(
+    "ja",
+    include_str!("../i18n/locales/ja/common.tsv"),
+    include_str!("../i18n/locales/ja/disccraft.tsv"),
+)];
+
+/// The languages the interface offers besides English (the codes of [`Language::ALL`]).
+const OFFERED: [&str; 1] = ["ja"];
+
+/// The catalogs, ready for lookups. Each language is parsed on its first lookup; a bad row is skipped (the tests
+/// insist there is none).
+static I18N: LazyLock<craft_i18n::I18n> =
+    LazyLock::new(|| craft_i18n::I18n::new(CATALOGS, &OFFERED).0);
 
 /// Translate a UI string literal into the language the interface is drawn in.
 macro_rules! tl {
@@ -60,8 +75,6 @@ pub(crate) enum Language {
     Ja,
 }
 
-static JAPANESE: OnceLock<Catalog> = OnceLock::new();
-
 impl Language {
     /// Every language the interface offers.
     pub(crate) const ALL: [Self; 2] = [Self::En, Self::Ja];
@@ -91,27 +104,24 @@ impl Language {
         }
     }
 
-    /// The language's catalog (none for English, the source language).
-    fn catalog(self) -> Option<&'static Catalog> {
+    /// The language in craft-i18n's terms (English, the source language, has no catalog).
+    fn lang(self) -> craft_i18n::Lang {
         match self {
-            Self::En => None,
-            Self::Ja => Some(JAPANESE.get_or_init(|| Catalog::parse(include_str!("i18n/ja.tsv")))),
+            Self::En => craft_i18n::Lang::EN,
+            Self::Ja => I18N.from_code(self.code()).unwrap_or(craft_i18n::Lang::EN),
         }
     }
 
     /// Translate an English UI string; unknown strings come back unchanged.
     pub(crate) fn tr(self, text: &str) -> &str {
-        self.catalog()
-            .and_then(|catalog| catalog.plain(text))
-            .unwrap_or(text)
+        I18N.t(self.lang(), text)
     }
 
-    /// Does this language's catalog translate `text`? (English never does: it is the source.)
+    /// Does this language translate `text`, in DiscCraft's catalog or the shared one? (English never does: it is the
+    /// source.)
     #[cfg(test)]
     pub(crate) fn has(self, text: &str) -> bool {
-        self.catalog()
-            .and_then(|catalog| catalog.plain(text))
-            .is_some()
+        self != Self::En && I18N.get(self.lang(), "", text).is_some()
     }
 
     /// The interface language for an operating system whose display language is `tag` (a BCP 47 or POSIX locale
@@ -168,21 +178,14 @@ pub(crate) fn t(text: &str) -> &str {
 /// Whether the Japanese catalog has an entry for `text` under `context` (M6.397: the Metadata panel's names).
 #[cfg(test)]
 pub(crate) fn has_contextual(context: &str, text: &str) -> bool {
-    Language::Ja
-        .catalog()
-        .is_some_and(|catalog| catalog.contextual(context, text).is_some())
+    I18N.get(Language::Ja.lang(), context, text).is_some()
 }
 
 /// Like [`t`], for an English string that needs a disambiguating `context`; falls back to the
 /// context-free translation.
 #[allow(dead_code)]
 pub(crate) fn tr_ctx<'a>(context: &str, text: &'a str) -> &'a str {
-    let language = current();
-
-    language
-        .catalog()
-        .and_then(|catalog| catalog.contextual(context, text))
-        .unwrap_or_else(|| language.tr(text))
+    I18N.tc(current().lang(), context, text)
 }
 
 /// Fill `{name}` placeholders. Unknown placeholders are left as written.
@@ -243,19 +246,87 @@ pub(crate) fn literals_in(source: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Language, catalog::parse_entries, current, fmt, literals_in, set_current, t};
+    use super::{CATALOGS, I18N, Language, current, fmt, literals_in, set_current, t};
+    use std::collections::HashMap;
     use std::error::Error;
 
-    /// The bundled Japanese catalog must parse without a single malformed row.
+    /// The bundled catalogs must parse without a single malformed row (as craft-i18n's checker requires).
     #[test]
-    fn japanese_catalog_is_well_formed() -> Result<(), Box<dyn Error>> {
-        let (_entries, errors) = parse_entries(include_str!("i18n/ja.tsv"));
+    fn catalogs_are_well_formed() -> Result<(), Box<dyn Error>> {
+        let problems = I18N.check_all();
 
-        if errors.is_empty() {
+        if problems.is_empty() {
             return Ok(());
         }
 
-        Err(errors.join("\n").into())
+        Err(problems.join("\n").into())
+    }
+
+    /// (context, source) → translation of a catalog's rows.
+    fn rows(text: &str) -> HashMap<(&str, &str), &str> {
+        text.lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .filter_map(|line| {
+                let mut columns = line.split('\t');
+                Some(((columns.next()?, columns.next()?), columns.next()?))
+            })
+            .collect()
+    }
+
+    /// craft-i18n's rule for an app catalog: a row that repeats the shared catalog's translation changes nothing, so
+    /// it is left out (and a shared string then reads as in the other apps). DiscCraft's overrides of shared strings
+    /// are only those it uses with another meaning.
+    #[test]
+    fn disccraft_rows_override_shared_ones_only_to_change_them() {
+        for (_, shared, app) in CATALOGS {
+            let shared = rows(shared);
+            let app = rows(app);
+            let repeated: Vec<_> = app
+                .iter()
+                .filter(|(key, translation)| shared.get(*key) == Some(*translation))
+                .map(|((_, source), _)| *source)
+                .collect();
+            assert!(
+                repeated.is_empty(),
+                "rows that repeat common.tsv: {repeated:?}"
+            );
+            let mut overrides: Vec<_> = app
+                .keys()
+                .filter(|key| shared.contains_key(*key))
+                .map(|(_, source)| *source)
+                .collect();
+            overrides.sort_unstable();
+            assert_eq!(
+                overrides,
+                ["Deleted", "Enter", "Format:", "Location:", "Number", "Tile"],
+                "a new override of a shared string: is the meaning really different?"
+            );
+        }
+    }
+
+    /// Every command's label has a Japanese name: the Edit menu's Undo / Redo and History show them (M16.3: the
+    /// labels are English, translated like the rest of the interface).
+    #[test]
+    fn every_command_label_has_a_japanese_name() {
+        let missing: Vec<&str> = disccraft_engine::commands()
+            .iter()
+            .map(|spec| spec.label)
+            .filter(|label| !Language::Ja.has(label))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "command labels without Japanese: {missing:?}"
+        );
+    }
+
+    /// A shared string reads as craft-i18n's shared catalog has it.
+    #[test]
+    fn shared_strings_read_as_in_the_other_apps() {
+        assert_eq!(Language::Ja.tr("Select All"), "すべて選択");
+        assert_eq!(Language::Ja.tr("History"), "履歴");
+        // An override: a folder's location, not a position.
+        assert_eq!(Language::Ja.tr("Location:"), "場所:");
+        assert_eq!(Language::En.tr("Select All"), "Select All");
     }
 
     /// Every `tl!` literal in the sources must have a Japanese entry, so nothing shows in English

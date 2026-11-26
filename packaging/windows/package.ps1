@@ -1,4 +1,4 @@
-# Packages the Windows build of DiscCraft (.github/workflows/release.yml runs it):
+﻿# Packages the Windows build of DiscCraft (.github/workflows/release.yml runs it):
 #
 #   ./packaging/windows/package.ps1 -Version 0.1.0-alpha.6 -Arch x64 -BinDir target/release
 #

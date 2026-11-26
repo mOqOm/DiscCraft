@@ -1214,7 +1214,7 @@ mod tests {
         }));
 
         assert!(state.open);
-        assert_eq!(state.label, "メニュー 2（ボタン 3）");
+        assert_eq!(state.label, "メニュー 2 (ボタン 3)");
 
         let menu = state
             .menu

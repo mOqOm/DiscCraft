@@ -53,6 +53,7 @@ mod link_dialog;
 mod menu_commands;
 mod menu_editor;
 mod menu_graphic;
+mod menu_model;
 mod menu_text;
 mod menu_tools;
 mod menubar;

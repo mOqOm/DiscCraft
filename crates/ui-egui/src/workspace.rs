@@ -94,7 +94,7 @@ impl Panel {
         Panel::Styles,
     ];
 
-    /// パネルの名前（ウィンドウメニューと同じ）。文字列は英語で書き、`i18n/ja.tsv` で日本語に引く。
+    /// パネルの名前（ウィンドウメニューと同じ）。文字列は英語で書き、`i18n/locales/ja/` のカタログで日本語に引く。
     pub(crate) fn title(self) -> &'static str {
         t(match self {
             Panel::Project => "Project",
@@ -246,7 +246,7 @@ impl WorkspacePreset {
         WorkspacePreset::Build,
     ];
 
-    /// 表示名。文字列は英語で書き、`i18n/ja.tsv` で日本語に引く。
+    /// 表示名。文字列は英語で書き、`i18n/locales/ja/` のカタログで日本語に引く。
     pub(crate) fn label(self) -> String {
         t(match self {
             WorkspacePreset::Standard => "Default",
@@ -1355,8 +1355,8 @@ mod tests {
     #[test]
     fn preset_labels_are_translated() {
         i18n::set_current(Language::Ja);
-        assert_eq!(WorkspacePreset::Standard.label(), "初期設定");
-        assert_eq!(Panel::TimelineViewer.title(), "タイムラインビューア");
+        assert_eq!(WorkspacePreset::Standard.label(), "既定");
+        assert_eq!(Panel::TimelineViewer.title(), "タイムラインビューアー");
 
         i18n::set_current(Language::En);
         assert_eq!(WorkspacePreset::Standard.label(), "Default");

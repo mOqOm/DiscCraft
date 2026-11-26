@@ -795,9 +795,9 @@ fn print_build_summary(result: &Value) -> Result<(), String> {
     // In MiB (M6.494: 1 MiB = 1,048,576 bytes; it was millions of bytes, named MB).
     let tenths = (total_bytes.saturating_mul(10) + (1 << 19)) >> 20;
 
-    say(&format!("書き出した: {output}"))?;
+    say(&format!("Wrote: {output}"))?;
     say(&format!(
-        "タイトル {titles} / チャプター {chapters} / {}.{} MiB / {seconds:.1} 秒",
+        "{titles} titles / {chapters} chapters / {}.{} MiB / {seconds:.1} s",
         tenths / 10,
         tenths % 10
     ))

@@ -15,18 +15,18 @@ use super::{always_enabled, object};
 pub(crate) const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "menu.applyStyle",
-        label: "スタイルを適用",
-        menu: &["オブジェクト"],
+        label: "Apply Style",
+        menu: &["Object"],
         shortcut: None,
-        params: r##"{"menu": id, "text" | "button" | "graphic": index, "style": {"size"?, "color"?, "font"?, "fontStyle"?, "bold"?, …（menu.setText の文字の項目）, "shadow"?: {…} | null, "effects"?: {…} | null（画像・シェイプのレイヤー効果）}}"##,
+        params: r##"{"menu": id, "text" | "button" | "graphic": index, "style": {"size"?, "color"?, "font"?, "fontStyle"?, "bold"?, … (the character settings of menu.setText), "shadow"?: {…} | null, "effects"?: {…} | null (an image's or a shape's layer effects)}}"##,
         enabled: always_enabled,
         run: run_apply_style,
         journal: true,
     },
     CommandSpec {
         id: "menu.styleOf",
-        label: "スタイルを取り出す",
-        menu: &["オブジェクト"],
+        label: "Get Style",
+        menu: &["Object"],
         shortcut: None,
         params: r#"{"menu": id, "text" | "button" | "graphic": index}"#,
         enabled: always_enabled,

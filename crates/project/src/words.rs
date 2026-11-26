@@ -72,11 +72,11 @@ impl Words {
         format!("{} {number}", self.pick("Folder", "フォルダー"))
     }
 
-    /// A chapter playlist of the timeline `timeline`: "Main Chapter Playlist" / "Main チャプター再生リスト".
+    /// A chapter playlist of the timeline `timeline`: "Main Chapter Playlist" / "Main チャプタープレイリスト".
     pub fn chapter_playlist(self, timeline: &str) -> String {
         format!(
             "{timeline} {}",
-            self.pick("Chapter Playlist", "チャプター再生リスト")
+            self.pick("Chapter Playlist", "チャプタープレイリスト")
         )
     }
 
@@ -85,9 +85,9 @@ impl Words {
         format!("{} {number}", self.pick("Slideshow", "スライドショー"))
     }
 
-    /// "Playlist 3" / "再生リスト 3".
+    /// "Playlist 3" / "プレイリスト 3".
     pub fn playlist(self, number: impl std::fmt::Display) -> String {
-        format!("{} {number}", self.pick("Playlist", "再生リスト"))
+        format!("{} {number}", self.pick("Playlist", "プレイリスト"))
     }
 
     /// "Page 3" / "ページ 3" (a later page of a menu; Encore counts them from 0 for the first).

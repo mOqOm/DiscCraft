@@ -41,10 +41,10 @@ const ACTIVATED_OPACITY: u8 = 70;
 
 pub(crate) const COMMANDS: &[CommandSpec] = &[CommandSpec {
     id: "menu.importBluray",
-    label: "Blu-ray のメニューを読み込む",
-    menu: &["ファイル", "読み込み"],
+    label: "Import Blu-ray Menu",
+    menu: &["File", "Import"],
     shortcut: None,
-    params: r#"{"path": string, "subtitlesLater"?: bool (true: 字幕を取り出さず subtitleJobs で返す)} → {"menu", "buttons", "timelines": [id], "leftOut": [string], "assets": [id], "subtitleTracks", "subtitlesLeftOut": [string], "subtitleJobs": [job]}"#,
+    params: r#"{"path": string, "subtitlesLater"?: bool (true: the subtitles are not taken out but returned as subtitleJobs)} → {"menu", "buttons", "timelines": [id], "leftOut": [string], "assets": [id], "subtitleTracks", "subtitlesLeftOut": [string], "subtitleJobs": [job]}"#,
     enabled: always_enabled,
     run: run_import_menu,
     journal: true,

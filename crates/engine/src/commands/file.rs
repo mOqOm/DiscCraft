@@ -9,8 +9,8 @@ use super::{always_enabled, empty_object, object};
 pub(crate) const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "file.new",
-        label: "新規プロジェクト",
-        menu: &["ファイル"],
+        label: "New Project",
+        menu: &["File"],
         shortcut: Some("Ctrl+N"),
         params: r#"{"kind"?: "dvd"|"bluRay", "standard"?: "ntsc"|"pal"}"#,
         enabled: always_enabled,
@@ -19,8 +19,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "file.open",
-        label: "プロジェクトを開く",
-        menu: &["ファイル"],
+        label: "Open Project",
+        menu: &["File"],
         shortcut: Some("Ctrl+O"),
         params: r#"{"path": string}"#,
         enabled: always_enabled,
@@ -29,8 +29,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "file.save",
-        label: "保存",
-        menu: &["ファイル"],
+        label: "Save",
+        menu: &["File"],
         shortcut: Some("Ctrl+S"),
         params: r#"{"path"?: string}"#,
         enabled: always_enabled,
@@ -39,8 +39,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "file.saveAs",
-        label: "名前を付けて保存",
-        menu: &["ファイル"],
+        label: "Save As",
+        menu: &["File"],
         shortcut: Some("Ctrl+Shift+S"),
         params: r#"{"path": string}"#,
         enabled: always_enabled,

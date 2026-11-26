@@ -12,8 +12,8 @@ use super::{always_enabled, empty_object};
 pub(crate) const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "menu.orient",
-        label: "反転 / 回転",
-        menu: &["オブジェクト"],
+        label: "Flip / Rotate",
+        menu: &["Object"],
         shortcut: None,
         params: r#"{"menu": id, "texts"?: [index], "buttons"?: [index], "graphics"?: [index], "flip"?: "horizontal" | "vertical", "rotate"?: 90 | 180 | 270}"#,
         enabled: always_enabled,
@@ -22,10 +22,10 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "menu.setAngle",
-        label: "角度を設定",
-        menu: &["オブジェクト"],
+        label: "Set Angle",
+        menu: &["Object"],
         shortcut: None,
-        params: r#"{"menu": id, "texts"?: [index], "graphics"?: [index], "buttons"?: [index], "degrees": number (時計回り、0.1° 単位)}"#,
+        params: r#"{"menu": id, "texts"?: [index], "graphics"?: [index], "buttons"?: [index], "degrees": number (clockwise, in steps of 0.1°)}"#,
         enabled: always_enabled,
         run: run_set_angle,
         journal: true,

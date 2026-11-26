@@ -7,8 +7,8 @@ use crate::UNDO_LIMIT;
 pub(crate) const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "edit.undo",
-        label: "元に戻す",
-        menu: &["編集"],
+        label: "Undo",
+        menu: &["Edit"],
         shortcut: Some("Ctrl+Z"),
         params: r#"{"steps"?: 1..100}"#,
         enabled: enabled_undo,
@@ -17,8 +17,8 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "edit.redo",
-        label: "やり直し",
-        menu: &["編集"],
+        label: "Redo",
+        menu: &["Edit"],
         shortcut: Some("Ctrl+Shift+Z"),
         params: r#"{"steps"?: 1..100}"#,
         enabled: enabled_redo,

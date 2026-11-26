@@ -438,11 +438,8 @@ mod tests {
                 );
             }
         }
-        assert_eq!(
-            SCHEMAS.first().map(super::schema_name),
-            Some("ダブリンコア")
-        );
-        // Per schema: Dynamic Media's Artist and TIFF's Artist differ, as in Encore.
+        assert_eq!(SCHEMAS.first().map(super::schema_name), Some("Dublin Core"));
+        // Looked up per schema (the context `xmp:<prefix>`): Dynamic Media's Artist and TIFF's.
         let named = |prefix: &str| {
             let schema = SCHEMAS
                 .iter()
@@ -455,7 +452,10 @@ mod tests {
                 .unwrap();
             super::property_name(schema, artist)
         };
-        assert_eq!((named("xmpDM"), named("tiff")), ("アーティスト", "作者名"));
+        assert_eq!(
+            (named("xmpDM"), named("tiff")),
+            ("アーティスト", "アーティスト")
+        );
     }
 
     #[test]
@@ -466,6 +466,6 @@ mod tests {
         crate::i18n::set_current(crate::i18n::Language::Ja);
         assert_eq!(rating_label("3"), "★★★");
         assert_eq!(rating_label("0"), "☆");
-        assert_eq!(rating_label("-1"), "却下");
+        assert_eq!(rating_label("-1"), "不採用");
     }
 }
