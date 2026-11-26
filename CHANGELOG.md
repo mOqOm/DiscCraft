@@ -4,6 +4,24 @@ English | [日本語](CHANGELOG.ja.md)
 
 What changed in each version of DiscCraft. The files for each system are on [GitHub's releases](https://github.com/mOqOm/DiscCraft/releases).
 
+## 0.1.0-alpha.17 (2026-11-26)
+
+### Menus
+
+- Video thumbnail buttons in a menu made from a PSD are fixed. The button sets' artwork (the `(%)` video frame and the text) was drawn into one picture of the page, so moving or resizing a button left its frame and text behind, away from the video. As in Encore, a button set's artwork now moves and scales with its button (in motion and pop-up menus too)
+- A PSD edited in PhotoCraft and taken back in kept the offsets the frame and the text had been given in DiscCraft before, so they were shifted again from their new place: fixed, they follow the PSD's layers
+
+### Known limitations
+
+- Importing from Blu-ray reads only discs without encryption. DTS and Dolby TrueHD sound are not imported; the disc's subtitles come into a Blu-ray project only, not yet into a DVD project
+- Writing to discs is Windows only. DVD-R and DVD+R DL (dual layer) have been written in a real drive; DVD+R, DVD-RW, DVD+RW, BD-R and BD-RE not yet
+- A disc label is printed from DesignCraft. DiscCraft does not yet place it where a printer's disc tray prints it: with a printer that prints the tray from an A4 page, place the label on that page in DesignCraft
+- DV time code (subcode) is not read (Encore does not read it either). DVCPRO HD and DV inside MXF cannot be read
+- Automatic routing still sometimes goes elsewhere than Encore's
+- Not signed with a developer certificate. On Windows SmartScreen asks the first time the installer runs, on macOS Gatekeeper the first time (right-click ▸ Open, or remove it with `xattr -d com.apple.quarantine`)
+- The menus in macOS's own menu bar have not been tried on a Mac yet
+- A PSD button moved or resized in DiscCraft is still at its old place in the PSD when the menu is opened in PhotoCraft, and a PSD button's artwork does not turn when the button is rotated
+
 ## 0.1.0-alpha.16 (2026-11-26)
 
 ### Interface
