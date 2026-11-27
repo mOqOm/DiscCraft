@@ -651,7 +651,9 @@ The timeline's sheet in the Properties panel has the same three link fields as E
 Links can be set in five ways ([five ways to link a button](#147-five-ways-to-link-a-button)). The three quickest:
 
 - Drag the circle to the left of the field (the pick whip) onto an item in the Project panel, a box in the
-  Flowchart, a chapter marker in the Timeline panel (that chapter) or a button in the Menu viewer (that button)
+  Flowchart, a chapter marker in the Timeline panel (that chapter) or a button in the Menu viewer (that button).
+  While you drag, a gold line runs from the circle to the pointer; a target a drop links to is marked gold, and the
+  line turns red where it cannot link (Esc cancels). Hold it near the edge of a list or the Flowchart to scroll
 - **Object ▸ Specify Link…** (Ctrl+L) and choose in the dialog
 - Drag from node to node in the Flowchart
 
@@ -670,7 +672,7 @@ the first image, with the default slide length of 6 seconds).
 | Pan & Zoom | With **Pan & Zoom** on in a slide's properties, the picture moves slowly while the slide is up (Pan: None / Pan Left / Pan Right / Pan Up / Pan Down; Zoom: Zoom In / Zoom Out / None). The slideshow's **Random Pan & Zoom** gives a motion to every slide that has no setting of its own |
 | Create Subtitle | Makes subtitles from each slide's name and description (**Include** also takes the next slide's name). Each slide can choose its highlight (group), stroke and alignment; the colours come from the slideshow's colour set |
 
-Drag slides to reorder them; **Edit ▸ Clear** (Delete) removes them. Adding audio lets you fit the length to it.
+Drag slides to reorder them; **Edit ▸ Clear** (Delete) removes them. Adding audio lets you fit the length to it (drag the circle below the audio list, the pick whip, onto audio in the Project panel to add it).
 Write a slide's name and description in its properties (as subtitles they also become the disc's chapter names).
 
 ## 7. Playlists and chapter playlists
@@ -932,7 +934,7 @@ For choosing the groups button by button, and for invisible highlights, see
 
 Set in the menu's sheet of the Properties panel (**Basic / Motion / Pop-up**).
 
-- The background is a colour / an image / a video asset (not a timeline). With video it becomes a motion menu
+- The background is a colour / an image / a video asset (not a timeline). With video it becomes a motion menu. The Motion tab's Video and Audio can also be filled by dragging the circle on the left of the field (the pick whip) onto an asset in the Project panel (an asset of the right kind is marked gold; over anything else the line turns red). A button's transition Asset and the Basic tab's Background (a picture or a video) work the same way
 - Given a video, a menu made from a PSD keeps its PSD, as in Encore: the video takes the place of the PSD's bottom
   layer (its background), and the other layers (buttons, texts, decorations) stay over the video. Setting the
   Motion tab's video back to **None** brings the PSD's background back. Editing in PhotoCraft and saving to a file
@@ -1523,7 +1525,7 @@ slideshow shows its first slide, still, as in Encore.
 | Way | How | Use it when |
 |---|---|---|
 | Drag from the Project panel | Drag a timeline, slideshow, playlist or chapter playlist onto the canvas. It becomes a button there, named after the item and linked to it | You are making the menu and the item is to hand |
-| The **Link** field | Select the button and choose the target in its sheet. A button's list has the timelines' chapters as well as the timelines | You are setting several buttons in order |
+| The **Link** field | Select the button and choose the target in its sheet. A button's list has the timelines' chapters as well as the timelines. The list is grouped under a heading for each kind and opens with the current target in view. With many targets a filter box appears at the top: type to narrow the list, and Enter takes the first target (↓ moves into the list, where the arrow keys and Enter also choose; Esc closes). The ▶ on the right has Cut / Copy / Paste / Delete and a submenu for each menu and timeline (the current target is shown selected) | You are setting several buttons in order |
 | The pick whip | Drag the circle at the left of the field onto the item in the Project panel or the Flowchart, a chapter marker or a menu's button | The target is far down a long list |
 | **Object ▸ Specify Link…** (Ctrl+L) | A dialog with every target grouped by kind. For buttons it also sets the audio and subtitle the button switches to | You want the whole project in one list, streams included |
 | The Flowchart | Drag from a button's port to another node, or right-click a node ▸ **Specify Link…** | You are drawing the navigation and want to see where it goes |

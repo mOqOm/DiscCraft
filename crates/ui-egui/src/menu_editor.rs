@@ -295,7 +295,11 @@ impl DiscCraftApp {
                     drag: egui::containers::scroll_area::DragScroll::Never,
                     mouse_wheel: true,
                 })
-                .show(ui, |ui| self.menu_canvas_area(ui, menu));
+                .show(ui, |ui| {
+                    // M6.525: a pick whip held near the edge of a zoomed menu scrolls it.
+                    crate::pickwhip::scroll_near_edges(ui);
+                    self.menu_canvas_area(ui, menu);
+                });
         });
     }
 

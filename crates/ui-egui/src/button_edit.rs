@@ -350,7 +350,11 @@ impl DiscCraftApp {
 
     /// メニュービューアで、選んでいるボタンを矢印キーで動かす（Shift で 10 ピクセルずつ）。
     pub(crate) fn nudge_buttons(&mut self, ctx: &egui::Context, menu: &Menu, frame: (u16, u16)) {
-        if self.selected_buttons.is_empty() || ctx.egui_wants_keyboard_input() {
+        // M6.519: an open list or menu (a link field's) takes the arrow keys.
+        if self.selected_buttons.is_empty()
+            || ctx.egui_wants_keyboard_input()
+            || egui::Popup::is_any_open(ctx)
+        {
             return;
         }
         let (mut dx, mut dy) = (0_i32, 0_i32);
@@ -482,6 +486,75 @@ impl DiscCraftApp {
 mod tests {
     use super::{ClipButton, clipboard_text, moved, parse_clipboard, paste_positions, toggled};
     use disccraft_project::{Link, Rect};
+
+    /// M6.519: while a list or a menu is open (a link field's), the arrow keys move through it and leave the
+    /// menu's selected buttons where they are (they moved the button a pixel); once it is closed they move the
+    /// buttons again.
+    #[test]
+    fn arrow_keys_go_to_an_open_list_not_the_selected_buttons()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::app::DiscCraftApp;
+        use serde_json::json;
+        let ctx = egui::Context::default();
+        let mut app = DiscCraftApp::new(&ctx);
+        let created = app
+            .session
+            .execute("menu.create", &json!({ "name": "M" }))?;
+        let id = created
+            .get("menu")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or("no menu id")?;
+        let _ = app
+            .session
+            .execute("menu.addButton", &json!({ "menu": id, "label": "Play" }))?;
+        let menu = disccraft_project::MenuId(id);
+        app.selected_buttons = vec![0];
+        let rect = |app: &DiscCraftApp| {
+            app.session
+                .project
+                .menu(menu)
+                .and_then(|menu| menu.buttons.first())
+                .map(|button| button.rect)
+        };
+        let before = rect(&app);
+        assert!(before.is_some());
+        let press = |app: &mut DiscCraftApp, list_open: bool| {
+            let key = egui::Event::Key {
+                key: egui::Key::ArrowDown,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let input = egui::RawInput {
+                events: vec![key],
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                if list_open {
+                    egui::Popup::open_id(ui.ctx(), egui::Id::unique("a link field's list"));
+                }
+                if let Some(shown) = app.session.project.menu(menu).cloned() {
+                    app.nudge_buttons(ui.ctx(), &shown, (720, 480));
+                }
+            });
+            // No renderer here: the font atlas upload is dropped on purpose.
+            output.textures_delta.clear();
+        };
+        press(&mut app, true);
+        assert_eq!(
+            rect(&app),
+            before,
+            "the open list's arrow key moved the button"
+        );
+        egui::Popup::close_all(&ctx);
+        press(&mut app, false);
+        assert_eq!(
+            rect(&app).map(|moved| moved.y),
+            before.map(|rect| rect.y.saturating_add(1))
+        );
+        Ok(())
+    }
 
     fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
         Rect { x, y, w, h }

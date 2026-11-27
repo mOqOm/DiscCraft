@@ -786,6 +786,8 @@ impl DiscCraftApp {
         self.show_film_marker_dialog(ui.ctx());
         self.poll_film_export(ui.ctx());
         self.intercept_close(ui.ctx());
+        // M6.518: the pick whip's tether goes over every panel and window, so it is drawn last.
+        let _ = crate::pickwhip::draw_tether(ui.ctx());
         // What the status bar said, for the session log (Help ▸ Reveal Log Files…).
         if self.status != self.logged_status {
             crate::help::log(&format!("status: {}", self.status));

@@ -146,7 +146,7 @@ const LINE: crate::theme::Shade =
 /// The selected button's link.
 const LINE_LIT: Color32 = Color32::from_rgb(0, 83, 227);
 /// The edge of the node a drop would link (Encore).
-const DROP_EDGE: Color32 = Color32::from_rgb(199, 138, 17);
+pub(crate) const DROP_EDGE: Color32 = Color32::from_rgb(199, 138, 17);
 /// The dark lines above and below the row under the flowchart, and around the zoom slider's groove (Encore: 6).
 const ROW_LINE: crate::theme::Shade =
     crate::theme::Shade::new(Color32::from_gray(6), Color32::from_gray(160));
@@ -2643,7 +2643,12 @@ impl DiscCraftApp {
         if let Some(to) = ui.data_mut(|data| data.remove_temp::<Vec2>(scroll_to)) {
             area = area.scroll_offset(to);
         }
-        let output = area.show(&mut inside, |ui| self.flowchart_canvas(ui, &chart));
+        let output = area.show(&mut inside, |ui| {
+            // M6.525: also while a link is dragged from a port.
+            let linking = flow_drag_state(ui).is_some();
+            crate::pickwhip::scroll_near_edges_for(ui, linking);
+            self.flowchart_canvas(ui, &chart)
+        });
         let view = output.inner_rect.size();
         let content = output.content_size;
         let mut offset = output.state.clamped_offset();
@@ -2923,6 +2928,12 @@ impl DiscCraftApp {
         draw_scene(&painter, &scene);
 
         let mut drag = flow_drag_state(ui);
+        // M6.525: Escape takes a link drag back, as it does a pick whip.
+        if drag.is_some() && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+            let id = flow_drag_id(ui);
+            ui.data_mut(|data| data.remove::<FlowDrag>(id));
+            drag = None;
+        }
         drag = begin_flow_drag(ui, &response, (&centers, &grips), drag);
         if drag.is_none() {
             // Encore: the Move tool moves a node; the other tools drag it onto another node or a button's row.
@@ -2944,7 +2955,21 @@ impl DiscCraftApp {
         finish_node_drag(self, ui, &response, &placement, (origin, m.zoom));
         clear_stale_node_drag(ui);
 
-        // Encore draws no line while a link is dragged: the node a drop would link turns gold.
+        // A link dragged from a port draws the pick whip's line to the pointer (M6.525; Encore draws none here, only
+        // turning gold the node a drop would link, which it still does).
+        if let Some(state) = drag
+            && let Some(point) = pointer
+            && let Some(from) = center_of(&centers, state.port)
+        {
+            let aim = if link_target(targets, ui.clip_rect(), &state.port, point).is_some() {
+                crate::pickwhip::Aim::Links
+            } else if placement.hit(point).is_some() {
+                crate::pickwhip::Aim::Refused
+            } else {
+                crate::pickwhip::Aim::Nothing
+            };
+            crate::pickwhip::draw_line(ui.ctx(), from, point, aim);
+        }
         if drag.is_none()
             && let Some(point) = pointer
             && let Some((port, _)) = grips.iter().find(|(_, grip)| grip.contains(point))
@@ -3002,11 +3027,22 @@ impl DiscCraftApp {
                 draw_drop_target(painter, rect);
             }
         }
+        // A pick whip over a node or a button's row: outlined when a drop links there, and the tether says whether it
+        // does (M6.518).
+        if placement.hit(point).is_some() {
+            crate::pickwhip::refuse_asset_whip(response);
+        }
         if let Some(payload) = response.dnd_hover_payload::<crate::pickwhip::PickWhip>()
-            && let Some((id, rect)) = placement.hit(point)
-            && port_accepts(&payload.0, id)
+            && let Some((_, rect)) = placement.hit(point)
         {
-            draw_drop_target(painter, rect);
+            let links = link_target((placement, grips, &[]), visible, &payload.0, point).is_some();
+            crate::pickwhip::aim(&response.ctx, links);
+            if links {
+                let row = grips.iter().find_map(|(port, grip)| {
+                    (matches!(port, Port::Button { .. }) && grip.contains(point)).then_some(*grip)
+                });
+                draw_drop_target(painter, row.unwrap_or(rect));
+            }
         }
         if let Some(payload) = crate::pickwhip::released::<NodeDrop>(response) {
             let drop = (payload.node, payload.tray, payload.grab);

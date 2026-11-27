@@ -313,7 +313,7 @@ Set Normal / Selected / Activated colors (highlight frames, text, subpictures) v
 
 Set in the menu sheet of Properties (**Basic / Motion / Pop-up**).
 
-- Background is color / image / video asset (not timeline). Video makes it a Motion Menu
+- Background is color / image / video asset (not timeline). Video makes it a Motion Menu. The Motion tab's Video and Audio can also be filled by dragging the circle on the left of the field (the pick whip) onto an asset in the Project panel (an asset of the right kind is marked gold; over anything else the line turns red). A button's transition Asset and the Basic tab's Background (a picture or a video) work the same way
 - Adding video to PSD-created menus replaces the bottom PSD layer (background); other layers (buttons, text,
   decorations) remain on top. Setting Video to **None** in Motion tab restores PSD background. Editing in PhotoCraft or
   exporting uses PSD as-is; reloading keeps video. Multi-page menus apply video to all pages with same background

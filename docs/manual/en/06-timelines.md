@@ -136,6 +136,10 @@ There are five ways to set links ([Five Ways to Link Buttons](17-advanced.md#177
 fastest methods:
 
 - Drag the circle (pick whip) on the left of the field to an item in the Project panel, a box in the Flowchart, a
-  chapter marker in the Timeline panel (that chapter), or a button in the Menu Viewer (that button).
+  chapter marker in the Timeline panel (that chapter), or a button in the Menu Viewer (that button). While you drag,
+  a gold line runs from the circle to the pointer; a destination a drop links to is marked gold, and the line turns
+  red where it cannot link (Esc cancels). Hold it near the edge of a list or the Flowchart to scroll.
 - Choose **Object ▸ Specify Link…** (Ctrl+L) to select from a dialog.
 - Drag from node to node in the Flowchart.
+
+![Dragging a menu's End Action pick whip onto one of its buttons (a gold line, a gold mark on the button, a gold frame round the field)](../images/en/timelines/pick-whip.png)

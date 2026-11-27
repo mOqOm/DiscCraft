@@ -225,7 +225,7 @@ on the first slide.
 | Method | How To | Best For |
 |---|---|---|
 | Drag from Project panel | Drop a timeline, slideshow, playlist, or chapter playlist onto the canvas to add a button there with name and link attached | While creating menus, when items are nearby |
-| **Link** field | Select a button and choose the destination on its sheet. The button list shows timelines themselves and their chapters | When setting destinations for multiple buttons sequentially |
+| **Link** field | Select a button and choose the destination on its sheet. The button list shows timelines themselves and their chapters. The list is grouped under a heading for each kind and opens with the current destination in view. With many destinations a filter box appears at the top: type to narrow the list, and Enter takes the first destination (↓ moves into the list, where the arrow keys and Enter also choose; Esc closes). The ▶ on the right has Cut / Copy / Paste / Delete and a submenu for each menu and timeline (the current destination is shown selected) | When setting destinations for multiple buttons sequentially |
 | Pick whip | Drag the circle to the left of the field to an item in the Project panel, a box in the Flowchart, a chapter marker, or a menu button | When the destination is far down a long list |
 | **Object ▸ Specify Link…** (Ctrl+L) | A dialog listing all items by type. For buttons, you can also set switching audio and subtitles | When viewing the whole project in one list, or setting tracks together |
 | Flowchart | Drag from a button port to another node, or right-click a node and choose **Specify Link…** | While drawing navigation, when wanting to see destinations |

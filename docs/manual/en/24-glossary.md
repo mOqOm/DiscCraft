@@ -582,7 +582,10 @@ the parental level (None, or 1–8; 8 is the strictest). Discs with a higher lev
 *ピックウィップ*
 
 Dragging the circle on the left of a Properties field and dropping it onto a link destination (an item in the Project
-panel, a box in the Flowchart, a chapter marker, etc.). This is faster than selecting from a long list.
+panel, a box in the Flowchart, a chapter marker, etc.). This is faster than selecting from a long list. While you
+drag, a gold line runs from the circle to the pointer, and a destination a drop links to is marked gold (over a
+place it cannot link to, the line turns red). Esc cancels. The Motion tab's Video and Audio, a button's transition Asset, a menu's Background, a
+slideshow's audio list and a chapter's Parental Alternative have one too; drop those onto an asset in the Project panel.
 
 → [17.7 Five Ways to Link Buttons](17-advanced.md#177-five-ways-to-link-buttons) · Related: [Link](#link)
 

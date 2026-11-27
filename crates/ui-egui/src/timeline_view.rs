@@ -640,6 +640,14 @@ impl DiscCraftApp {
             ui.ctx().request_repaint();
         }
         view.left = canvas.min.x;
+        // M6.525: a pick whip held near the left or right edge scrolls the timeline, to reach a chapter marker out of
+        // sight.
+        let edge = crate::pickwhip::edge_delta(ui.ctx(), canvas, false);
+        if edge.x != 0.0 && view.pps > 0.0 {
+            view.scroll = (view.scroll - f64::from(edge.x) / view.pps).max(0.0);
+            view.target_scroll = view.scroll;
+            ui.ctx().request_repaint();
+        }
         let origin_of =
             |view: &craft_timeline::View| canvas.min.x - (view.scroll * view.pps) as f32;
         let zoom_of = |view: &craft_timeline::View| (view.pps / f64::from(BASE_SCALE)) as f32;
@@ -751,7 +759,7 @@ impl DiscCraftApp {
         response: &Response,
         id: TimelineId,
     ) {
-        use crate::pickwhip::{PickWhip, exact_link_for_drop, released};
+        use crate::pickwhip::{PickWhip, dragged, exact_link_for_drop, released};
         let hovering = response.dnd_hover_payload::<PickWhip>().is_some();
         let Some(point) = ui
             .ctx()
@@ -767,26 +775,35 @@ impl DiscCraftApp {
             .map(|chapter| time_to_x(chapter.time, frame.origin_x, frame.zoom))
             .collect();
         let hit = hit_marker(&markers_x, point.x, HIT_TOLERANCE);
+        let chapter = hit.and_then(|index| u32::try_from(index).ok()).unwrap_or(0);
+        let link = disccraft_project::Link::Timeline { id, chapter };
+        let node = crate::flowchart::NodeId::Timeline(id);
+        // Outlined when a drop links here; the tether says whether it does (M6.518). An asset field's pick whip is
+        // refused (M6.520).
+        crate::pickwhip::refuse_asset_whip(response);
+        let hovering = hovering
+            && dragged(ui.ctx()).is_some_and(|port| {
+                let links = exact_link_for_drop(port, node, link.clone()).is_some();
+                crate::pickwhip::aim(ui.ctx(), links);
+                links
+            });
         if hovering {
-            let stroke = ui.visuals().selection.stroke;
-            let _ = match hit.and_then(|index| markers_x.get(index)) {
+            // M6.524: the gold of every pick whip target (a chapter marker, else the whole timeline).
+            match hit.and_then(|index| markers_x.get(index)) {
                 Some(x) => {
-                    ui.painter()
-                        .vline(*x, frame.canvas.y_range(), Stroke::new(2.0, stroke.color))
+                    let _ = ui.painter().vline(
+                        *x,
+                        frame.canvas.y_range(),
+                        Stroke::new(3.0, crate::flowchart::DROP_EDGE),
+                    );
                 }
-                None => {
-                    ui.painter()
-                        .rect_stroke(frame.canvas, 0.0, stroke, egui::StrokeKind::Inside)
-                }
-            };
-        }
-        if let Some(payload) = released::<PickWhip>(response) {
-            let chapter = hit.and_then(|index| u32::try_from(index).ok()).unwrap_or(0);
-            let link = disccraft_project::Link::Timeline { id, chapter };
-            let node = crate::flowchart::NodeId::Timeline(id);
-            if let Some((command, base, link)) = exact_link_for_drop(payload.0, node, link) {
-                self.apply_link(command, base, &link);
+                None => crate::pickwhip::mark_target(ui.painter(), frame.canvas),
             }
+        }
+        if let Some(payload) = released::<PickWhip>(response)
+            && let Some((command, base, link)) = exact_link_for_drop(payload.0, node, link)
+        {
+            self.apply_link(command, base, &link);
         }
     }
 

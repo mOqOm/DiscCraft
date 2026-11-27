@@ -422,29 +422,31 @@ impl DiscCraftApp {
         let button = self
             .hit_button(menu, frame, response.rect, point)
             .map(|(index, _)| index);
-        if response.dnd_hover_payload::<PickWhip>().is_some() {
-            let area = button
-                .and_then(|index| menu.buttons.get(index))
-                .map_or(response.rect, |found| {
-                    to_canvas(found.rect, frame, response.rect)
-                });
-            let _ = ui.painter().rect_stroke(
-                area,
-                0.0,
-                ui.visuals().selection.stroke,
-                egui::StrokeKind::Inside,
-            );
-        }
-        if let Some(payload) = released::<PickWhip>(response) {
-            let root = self.session.project.menu_root(menu.id);
-            let link = disccraft_project::Link::Menu {
-                id: menu.id,
-                button: button.and_then(|index| u32::try_from(index).ok()),
-            };
-            let node = crate::flowchart::NodeId::Menu(root);
-            if let Some((command, base, link)) = exact_link_for_drop(payload.0, node, link) {
-                self.apply_link(command, base, &link);
+        let root = self.session.project.menu_root(menu.id);
+        let link = disccraft_project::Link::Menu {
+            id: menu.id,
+            button: button.and_then(|index| u32::try_from(index).ok()),
+        };
+        let node = crate::flowchart::NodeId::Menu(root);
+        // Outlined when a drop links here; the tether says whether it does (M6.518). An asset field's pick whip is
+        // refused (M6.520).
+        crate::pickwhip::refuse_asset_whip(response);
+        if let Some(payload) = response.dnd_hover_payload::<PickWhip>() {
+            let links = exact_link_for_drop(payload.0, node, link.clone()).is_some();
+            crate::pickwhip::aim(ui.ctx(), links);
+            if links {
+                let area = button
+                    .and_then(|index| menu.buttons.get(index))
+                    .map_or(response.rect, |found| {
+                        to_canvas(found.rect, frame, response.rect)
+                    });
+                crate::pickwhip::mark_target(ui.painter(), area);
             }
+        }
+        if let Some(payload) = released::<PickWhip>(response)
+            && let Some((command, base, link)) = exact_link_for_drop(payload.0, node, link)
+        {
+            self.apply_link(command, base, &link);
         }
     }
 

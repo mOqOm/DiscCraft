@@ -53,6 +53,7 @@ impl eframe::App for AppWrapper {
         raw_input: &mut eframe::egui::RawInput,
     ) {
         self.app.native_menu_input(raw_input);
+        self.app.capture_input(raw_input);
     }
 }
 

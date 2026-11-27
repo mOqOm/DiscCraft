@@ -350,7 +350,10 @@ impl DiscCraftApp {
     /// ボタンの代わりに）。文字の入力中と、モニターでビルドしたディスクをプレビューしている間（矢印は
     /// リモコン）は何もしない。メニュービューアで選んだボタンを矢印で動かしたときは、そちらが先にキーを使う。
     pub(crate) fn step_frames_by_keys(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() || (self.project_preview.is_none() && self.preview.open)
+        // M6.519: an open list or menu takes the arrow keys.
+        if ctx.egui_wants_keyboard_input()
+            || egui::Popup::is_any_open(ctx)
+            || (self.project_preview.is_none() && self.preview.open)
         {
             return;
         }

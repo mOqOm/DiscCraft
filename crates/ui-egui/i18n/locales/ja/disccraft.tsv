@@ -181,7 +181,7 @@
 	Timeline: {name}	タイムライン: {name}
 	Playhead: {time}	再生ヘッド: {time}
 	Duration: {time}	長さ: {time}
-	Drag onto a menu, timeline, slideshow or playlist in the Project panel to link it	プロジェクトパネル内のメニュー、タイムライン、スライドショーまたはプレイリストにドラッグしてリンクします
+	Drag onto an item in the Project panel, a box in the Flowchart, a button in the Menu Viewer or a chapter marker to link it	プロジェクトパネルの項目、フローチャートの箱、メニュービューアーのボタン、チャプターマーカーへドラッグしてリンクする
 	New Timeline	新規タイムライン
 	Select a video asset in the Project panel first	先にプロジェクトパネルでビデオアセットを選択してください
 	Slideshow	スライドショー
@@ -1666,6 +1666,8 @@ xmp:tiff	Copyright	著作権
 	What the disc adds to the video and sound: the headers of its packs and a navigation pack every half second	ディスクがビデオと音声に足すもの: パックのヘッダーと、0.5 秒ごとのナビゲーションパック
 	Arrows and Enter of the remote	リモコンの矢印と決定
 	Last built image: {name}	最後にビルドしたイメージ: {name}
+	No matches	一致するものはありません
+	Drag onto an asset in the Project panel to use it	プロジェクトパネルのアセットへドラッグして使う
 
 # Command names (the Edit menu's Undo / Redo and History, the command list)
 	Add Audio Clip	オーディオクリップを追加

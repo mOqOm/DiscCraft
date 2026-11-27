@@ -21,6 +21,12 @@
 //! - `{"remote": "Enter"}`: a key of the Project Preview's remote (Up, Down, Left, Right, Enter, Title, Menu).
 //! - `{"key": "Escape"}`: a key press, by egui's name for the key, with modifiers before it (`Alt+F` opens the
 //!   File menu, `ArrowDown`, `Enter`).
+//! - `{"press": "Escape"}`: a key press as `key`, but given to the next frame's input as a real key is (so that egui
+//!   itself sees it: a pick whip taken back with Escape, arrow keys moving through an open list).
+//! - `{"text": "abc"}`: typed text, in the next frame's input (a field with the keyboard takes it).
+//! - `{"pointer": [x, y]}`: the mouse pointer moves there (points), `"button": "press"` / `"release"` also presses or
+//!   lets go of the left button there; moves in between a press and a release drag (the pick whip, M6.518).
+//!   `{"pointer": null}` takes the pointer off the window (no hover in the pictures that follow).
 //! - `{"wait": 30}`: frames to wait; `{"sleep": 1500}`: milliseconds to wait (media loading, playback).
 //! - `{"shot": "name.png", ...}`: a picture saved in the output folder (`DISCCRAFT_CAPTURE_OUT`, else the script's
 //!   folder), of the whole window, or cut to `"panel": "Timeline"` (a panel's contents), `"area": "prefs_window"`
@@ -76,6 +82,8 @@ pub(crate) struct DocCapture {
     embedded: bool,
     /// Numbered marks drawn over the window: where (points) and what.
     marks: Vec<(egui::Pos2, String)>,
+    /// Pointer events of a `pointer` step, for the next frame's input (egui reads the pointer before a frame).
+    input: Vec<egui::Event>,
     out: PathBuf,
     log: Option<std::fs::File>,
 }
@@ -118,6 +126,7 @@ fn load(script: &Path) -> Result<DocCapture, String> {
         pending: None,
         embedded: false,
         marks: Vec::new(),
+        input: Vec::new(),
         out,
         log,
     })
@@ -243,6 +252,13 @@ impl DocCapture {
 
 impl DiscCraftApp {
     /// Plays the next step of the capture script, if one is running (called once a frame, before anything is drawn).
+    /// The pointer events of the script's last `pointer` step, into the next frame's input (eframe's raw input hook).
+    pub fn capture_input(&mut self, raw: &mut egui::RawInput) {
+        if let Some(capture) = self.doc_capture.as_mut() {
+            raw.events.append(&mut capture.input);
+        }
+    }
+
     pub(crate) fn play_capture(&mut self, ui: &Ui) {
         let Some(mut capture) = self.doc_capture.take() else {
             return;
@@ -418,6 +434,25 @@ impl DiscCraftApp {
                     });
                 });
             }
+        } else if let Some(name) = text("press") {
+            let (key, modifiers) = key_press(name).ok_or_else(|| format!("no key {name}"))?;
+            capture.input = [true, false]
+                .into_iter()
+                .map(|pressed| egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers,
+                })
+                .collect();
+            capture.wait_frames = 2;
+        } else if let Some(typed) = text("text") {
+            capture.input = vec![egui::Event::Text(typed.to_owned())];
+            capture.wait_frames = 2;
+        } else if let Some(at) = step.get("pointer") {
+            capture.input = pointer_events(at, text("button"))?;
+            capture.wait_frames = 2;
         } else if let Some(frames) = step.get("wait").and_then(Value::as_u64) {
             capture.wait_frames = frames.min(MAX_WAIT_FRAMES);
         } else if let Some(ms) = step.get("sleep").and_then(Value::as_u64) {
@@ -538,6 +573,33 @@ impl DiscCraftApp {
     }
 }
 
+/// A pointer step's events: a move to `at` (`[x, y]` in points), then a press or a release of the left button there.
+fn pointer_events(at: &Value, button: Option<&str>) -> Result<Vec<egui::Event>, String> {
+    if at.is_null() {
+        return Ok(vec![egui::Event::PointerGone]);
+    }
+    let point = at
+        .as_array()
+        .and_then(|xy| Some((xy.first()?.as_f64()?, xy.get(1)?.as_f64()?)))
+        .filter(|(x, y)| x.is_finite() && y.is_finite())
+        .ok_or_else(|| format!("pointer {at}: not [x, y]"))?;
+    let pos = egui::pos2(point.0 as f32, point.1 as f32);
+    let mut events = vec![egui::Event::PointerMoved(pos)];
+    let pressed = match button {
+        None => return Ok(events),
+        Some("press") => true,
+        Some("release") => false,
+        Some(other) => return Err(format!("no button {other}")),
+    };
+    events.push(egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    });
+    Ok(events)
+}
+
 /// A key step's key and modifiers: `Escape`, `Alt+F`, `Ctrl+Shift+S` (egui's key names).
 fn key_press(name: &str) -> Option<(egui::Key, egui::Modifiers)> {
     let mut modifiers = egui::Modifiers::NONE;
@@ -559,7 +621,7 @@ fn key_press(name: &str) -> Option<(egui::Key, egui::Modifiers)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{crop_pixels, parse, selection};
+    use super::{crop_pixels, parse, pointer_events, selection};
 
     #[test]
     fn scripts_are_json_lines_with_comments() {
@@ -569,6 +631,31 @@ mod tests {
         assert!(parse("{nope}\n").is_err());
         assert!(selection("menu", 2).is_some());
         assert!(selection("button", 2).is_none());
+    }
+
+    /// M6.518: a pointer step moves the pointer, and presses or lets go of the left button there.
+    #[test]
+    fn pointer_steps_move_press_and_release() {
+        let at = serde_json::json!([120, 48.5]);
+        let moved = egui::Event::PointerMoved(egui::pos2(120.0, 48.5));
+        assert_eq!(pointer_events(&at, None), Ok(vec![moved.clone()]));
+        let pressed = pointer_events(&at, Some("press")).unwrap_or_default();
+        assert!(matches!(
+            pressed.as_slice(),
+            [_, egui::Event::PointerButton { pressed: true, .. }]
+        ));
+        let released = pointer_events(&at, Some("release")).unwrap_or_default();
+        assert!(matches!(
+            released.as_slice(),
+            [_, egui::Event::PointerButton { pressed: false, .. }]
+        ));
+        assert!(pointer_events(&at, Some("double")).is_err());
+        assert!(pointer_events(&serde_json::json!([1]), None).is_err());
+        assert_eq!(
+            pointer_events(&serde_json::Value::Null, None),
+            Ok(vec![egui::Event::PointerGone])
+        );
+        assert!(pointer_events(&serde_json::json!("1, 2"), None).is_err());
     }
 
     #[test]
