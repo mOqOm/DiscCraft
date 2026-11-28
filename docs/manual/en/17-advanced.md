@@ -112,8 +112,8 @@ right of the rightmost button become "Next".
 3. Set the numbers first. The **Number** field on the button sheet reorders its position in the list. Since arrows point
    to numbers, assigning them left-to-right and top-to-bottom makes subsequent work easier. The menu's **Offset**
    determines where the remote control's number keys start counting from.
-4. Drag the arrows of the cross diagram to the buttons you want to lead to. Releasing on an empty area of the canvas
-   removes that route. Untouched directions remain automatic.
+4. Drag the arrows of the cross diagram to the buttons you want to lead to (the button it will lead to is framed in
+   gold). Releasing on an empty area of the canvas removes that route. Untouched directions remain automatic.
 5. Hide the routing display and test it. Press **File ▸ Preview** (Alt+Ctrl+Space) and use the arrow keys.
 
 ![Button routing cross diagram](../images/en/advanced/routing.png)
@@ -225,10 +225,14 @@ on the first slide.
 | Method | How To | Best For |
 |---|---|---|
 | Drag from Project panel | Drop a timeline, slideshow, playlist, or chapter playlist onto the canvas to add a button there with name and link attached | While creating menus, when items are nearby |
-| **Link** field | Select a button and choose the destination on its sheet. The button list shows timelines themselves and their chapters. The list is grouped under a heading for each kind and opens with the current destination in view. With many destinations a filter box appears at the top: type to narrow the list, and Enter takes the first destination (↓ moves into the list, where the arrow keys and Enter also choose; Esc closes). The ▶ on the right has Cut / Copy / Paste / Delete and a submenu for each menu and timeline (the current destination is shown selected) | When setting destinations for multiple buttons sequentially |
+| **Link** field | Select a button and choose the destination on its sheet. The button list shows timelines themselves and their chapters. The list is grouped under a heading for each kind and opens with the current destination in view. With many destinations a filter box appears at the top: type to narrow the list, and Enter takes the first destination (↓ moves into the list, where the arrow keys and Enter also choose; Esc closes). The ▶ on the right has Cut / Copy / Paste / Delete and a submenu for each menu and timeline (the current destination is shown selected), **Link Back to Here** (back to the field's own item: a button's own menu with that button, a timeline from its start), Return to Last Menu, **Resume** (a menu's buttons and end action only: from a menu brought up with the remote's Menu button during a title, back to where the title was; on a Blu-ray pop-up menu it closes the menu and playback goes on) and Stop | When setting destinations for multiple buttons sequentially |
 | Pick whip | Drag the circle to the left of the field to an item in the Project panel, a box in the Flowchart, a chapter marker, or a menu button | When the destination is far down a long list |
 | **Object ▸ Specify Link…** (Ctrl+L) | A dialog listing all items by type. For buttons, you can also set switching audio and subtitles | When viewing the whole project in one list, or setting tracks together |
 | Flowchart | Drag from a button port to another node, or right-click a node and choose **Specify Link…** | While drawing navigation, when wanting to see destinations |
+
+![A link field's list: the filter box at the top, a heading for each kind, the current destination shown selected](../images/en/advanced/link-list.png)
+
+![A link field's ▶: Cut / Copy / Paste / Delete, a submenu for each menu and timeline, Link Back to Here, Return to Last Menu, Resume, Stop, Specify Link…](../images/en/advanced/link-menu.png)
 
 End Actions, Overrides, and Remote Menus can also be set using these same five methods. Two destinations are worth
 remembering: **Stop** ends playback, and **Last menu** returns to the menu just viewed. The latter is what makes a "Play

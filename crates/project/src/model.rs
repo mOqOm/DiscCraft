@@ -486,6 +486,79 @@ impl Asset {
 }
 
 impl AssetKind {
+    /// The kind of the file at `path` (M6.568): what its first bytes say it is, where they name a format DiscCraft
+    /// reads ([`AssetKind::from_contents`]), else what its name says ([`AssetKind::guess_from_path`]). A file that
+    /// cannot be read (offline, a folder) goes by its name. Reads at most craft-sniff's [`craft_sniff::HEAD`] bytes.
+    pub fn of_file(path: &Path) -> Self {
+        use std::io::Read;
+        let by_name = Self::guess_from_path(path);
+        let Ok(file) = std::fs::File::open(path) else {
+            return by_name;
+        };
+        let mut head = Vec::with_capacity(craft_sniff::HEAD);
+        if file
+            .take(craft_sniff::HEAD as u64)
+            .read_to_end(&mut head)
+            .is_err()
+        {
+            return by_name;
+        }
+        Self::from_contents(&head, path, by_name)
+    }
+
+    /// The kind of a file whose first bytes are `head`, named `path`, whose name says `by_name`. The bytes decide
+    /// when craft-sniff names a format DiscCraft reads: the pictures (PNG, JPEG, BMP, TIFF, PSD), the sound files
+    /// (WAV, MP3, AAC, FLAC, AIFF, Ogg Vorbis, Opus, MPEG-4 audio) and the movie containers (MP4, QuickTime, 3GP,
+    /// Matroska, WebM, AVI, MPEG program and transport streams) — a container that may hold sound alone stays a sound
+    /// file when its name says so (`.mka`, `.m4a`). The name decides otherwise: a signature DiscCraft does not read
+    /// (a GIF, a ZIP), none at all (raw AC-3 and DTS, DV, MPEG elementary streams), and always for subtitle files and
+    /// the Craft documents DiscCraft opens (`.ecproj`, `.scraft`, `.pcraft`, `.svg`): text has no signature, and a
+    /// script could look like one by chance.
+    pub fn from_contents(head: &[u8], path: &Path, by_name: Self) -> Self {
+        use craft_sniff::Kind;
+        let own_document = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                ["ecproj", "scraft", "pcraft", "svg"]
+                    .iter()
+                    .any(|own| extension.eq_ignore_ascii_case(own))
+            });
+        if by_name == AssetKind::Subtitle || own_document {
+            return by_name;
+        }
+        match craft_sniff::identify(head) {
+            Some(Kind::Png | Kind::Jpeg | Kind::Bmp | Kind::Tiff | Kind::Psd) => AssetKind::Image,
+            Some(
+                Kind::Wav
+                | Kind::Mp3
+                | Kind::Aac
+                | Kind::Flac
+                | Kind::Aiff
+                | Kind::Ogg
+                | Kind::Opus
+                | Kind::M4a,
+            ) => AssetKind::Audio,
+            Some(
+                Kind::Mp4
+                | Kind::QuickTime
+                | Kind::ThreeGp
+                | Kind::Matroska
+                | Kind::WebM
+                | Kind::Avi
+                | Kind::MpegPs
+                | Kind::MpegTs,
+            ) => {
+                if by_name == AssetKind::Audio {
+                    AssetKind::Audio
+                } else {
+                    AssetKind::Video
+                }
+            }
+            _ => by_name,
+        }
+    }
+
     /// Guess an asset kind from a file extension.
     pub fn guess_from_path(path: &Path) -> Self {
         let ext = path
@@ -498,12 +571,16 @@ impl AssetKind {
             | Some("webm") | Some("mts") | Some("m2t") | Some("m1v") | Some("mpv")
             // Raw DV (M6.410).
             | Some("dv") | Some("dif")
+            // Ogg video: Theora (M6.567). Old mobile phones' 3GP (H.263, M6.563; its name, M6.568).
+            | Some("ogv") | Some("3gp") | Some("3g2")
             // EffectCraft compositions are rendered to video.
             | Some("ecproj") => {
                 AssetKind::Video
             }
             Some("wav") | Some("ac3") | Some("dts") | Some("aif") | Some("aiff") | Some("mp3") | Some("mpa")
             | Some("m4a")
+            // Dolby Digital Plus (M6.565), heard through craft-audio's E-AC-3 decoder and converted for a disc.
+            | Some("eac3") | Some("ec3")
             // SoundCraft sessions are mixed down to audio.
             | Some("flac") | Some("scraft")
             // More sound files a tester may have: all go through the same decoders.
@@ -514,7 +591,10 @@ impl AssetKind {
             | Some("psd") | Some("psb") | Some("pcraft") | Some("svg") => AssetKind::Image,
             // Subtitle files; a .txt is read as a timecoded subtitle script. VobSub (.idx, with its .sub) and PGS
             // (.sup) are a DVD's and a Blu-ray's own subtitles, passed through.
-            Some("srt") | Some("vtt") | Some("txt") | Some("idx") | Some("sup") => AssetKind::Subtitle,
+            Some("srt") | Some("vtt") | Some("txt") | Some("idx") | Some("sup")
+            // The caption files read with craft-captions (M6.566).
+            | Some("ass") | Some("ssa") | Some("scc") | Some("mcc") | Some("stl") | Some("ttml")
+            | Some("dfxp") | Some("smi") | Some("sami") => AssetKind::Subtitle,
             _ => AssetKind::Other,
         }
     }
@@ -1454,6 +1534,18 @@ pub struct ParentalChapter {
 /// The most chapters with a parental alternative in one timeline.
 pub const MAX_PARENTAL_CHAPTERS: usize = 8;
 
+/// The age a Blu-ray player's parental setting (PSR13, in years; 255: none set) must reach for a title of parental
+/// level `level` (M6.543). The project's levels are a DVD's 1 to 8; DiscCraft gives each the age of the US film
+/// rating the DVD levels are usually taken for (3 PG, 4 PG-13, 6 R, 7 NC-17) and fills the others between: 1 all
+/// ages (0), 2 six, 3 ten, 4 thirteen, 5 fifteen, 6 seventeen, 7 eighteen, 8 twenty-one. `None` for no level (0) or
+/// one outside 1 to 8.
+#[must_use]
+pub fn bd_parental_age(level: u8) -> Option<u8> {
+    [0, 6, 10, 13, 15, 17, 18, 21]
+        .get(usize::from(level.checked_sub(1)?))
+        .copied()
+}
+
 /// One version of a title with parental chapters (M13.17): the parental levels it is for and which of the
 /// timeline's [`ParentalChapter`]s it plays the alternative of.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1756,7 +1848,7 @@ impl Project {
             )));
         }
         let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-        let kind = AssetKind::guess_from_path(&absolute);
+        let kind = AssetKind::of_file(&absolute);
         let asset = self
             .assets
             .get_mut(&id)
@@ -1779,7 +1871,8 @@ impl Project {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| path_string.clone());
-        let kind = AssetKind::guess_from_path(&absolute);
+        // What the file is (its first bytes, else its name); an offline file by its name (M6.568).
+        let kind = AssetKind::of_file(&absolute);
         let offline = !path.is_file();
 
         self.assets.insert(
@@ -2546,7 +2639,7 @@ mod tests {
         use std::path::Path;
         for name in [
             "a.wav", "a.ac3", "a.dts", "a.mp3", "a.AAC", "a.m4a", "a.mka", "a.mp2", "a.ogg",
-            "a.oga", "a.opus", "a.flac", "a.aiff",
+            "a.oga", "a.opus", "a.flac", "a.aiff", "a.eac3", "a.EC3",
         ] {
             assert_eq!(
                 AssetKind::guess_from_path(Path::new(name)),
@@ -2565,7 +2658,7 @@ mod tests {
             );
         }
         // Files the decoders cannot read stay out.
-        for name in ["a.wma", "a.eac3", "v.wmv", "v.flv", "notes.docx"] {
+        for name in ["a.wma", "v.wmv", "v.flv", "notes.docx"] {
             assert_eq!(
                 AssetKind::guess_from_path(Path::new(name)),
                 AssetKind::Other,

@@ -6,20 +6,10 @@
 
 use disccraft_engine::Session;
 use disccraft_project::{FrameRate, TimelineId};
+use disccraft_test_support::ffmpeg;
 use serde_json::json;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
-
-fn ffmpeg() -> Option<PathBuf> {
-    let path =
-        std::env::var_os("DISCCRAFT_FFMPEG").map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|_| path)
-}
 
 /// An NTSC MPEG-2 file of `filter` (an ffmpeg filter graph making the picture), three seconds long.
 fn make(ffmpeg: &Path, filter: &str, out: &Path) {

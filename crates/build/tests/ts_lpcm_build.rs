@@ -6,25 +6,20 @@
 
 use disccraft_build::{BuildOptions, OutputKind, build};
 use disccraft_project::{BdVideo, DiscKind, Link, Project};
-use std::path::PathBuf;
+use disccraft_test_support::{ffmpeg, ffprobe, fixtures};
 use std::process::Command;
-
-fn tool(variable: &str, name: &str) -> PathBuf {
-    std::env::var_os(variable).map_or_else(|| PathBuf::from(name), PathBuf::from)
-}
 
 #[test]
 fn an_lpcm_m2ts_builds_with_its_sound() {
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/fixtures/h264_1080i_tones.m2ts");
+    let fixture = fixtures().join("h264_1080i_tones.m2ts");
     if !fixture.is_file() {
         eprintln!("h264_1080i_tones.m2ts fixture not found; skipping");
         return;
     }
-    let (ffmpeg, ffprobe) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    );
+    let Some(ffmpeg) = ffmpeg() else {
+        eprintln!("ffmpeg not found; skipping");
+        return;
+    };
     let dir = std::env::temp_dir().join(format!("disccraft-ts-lpcm-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -71,17 +66,19 @@ fn an_lpcm_m2ts_builds_with_its_sound() {
                 && std::fs::metadata(path).is_ok_and(|meta| meta.len() > 100_000)
         })
         .expect("no title stream");
-    let probed = Command::new(&ffprobe)
-        .args([
-            "-v",
-            "error",
-            "-show_entries",
-            "stream=codec_type,codec_name",
-        ])
-        .args(["-of", "csv=p=0"])
-        .arg(&stream)
-        .output();
-    let Ok(probed) = probed else {
+    let probed = ffprobe().map(|ffprobe| {
+        Command::new(ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_type,codec_name",
+            ])
+            .args(["-of", "csv=p=0"])
+            .arg(&stream)
+            .output()
+    });
+    let Some(Ok(probed)) = probed else {
         eprintln!("ffprobe not found; the stream is not checked");
         let _ = std::fs::remove_dir_all(&dir);
         return;

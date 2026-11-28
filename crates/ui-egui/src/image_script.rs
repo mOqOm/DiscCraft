@@ -9,8 +9,9 @@ use crate::DiscCraftApp;
 use crate::i18n::{tl, tlf};
 use crate::track_dialog::TrackKind;
 
+use crate::file_dialogs::{Then, ask};
+use craft_dialogs::FileDialog;
 use disccraft_project::{AssetId, ImageCueColors, TimelineId};
-use rfd::FileDialog;
 use serde_json::{Map, Value, json};
 
 /// The largest the picture is shown in the dialog, points.
@@ -108,7 +109,7 @@ fn pixel_at(
 impl DiscCraftApp {
     /// タイムライン ▸ 字幕の読み込み ▸ FAB 画像スクリプト… (`fab`) / 画像スクリプト…: スクリプト（FAB は絵の
     /// フォルダーも）を選んで読み、カラーをマップのダイアログを開く。
-    pub(crate) fn import_image_script(&mut self, ctx: &egui::Context, fab: bool) {
+    pub(crate) fn import_image_script(&mut self, fab: bool) {
         let Some(timeline) = self.selected_timeline() else {
             self.status = tl!("Select a timeline first").to_string();
             return;
@@ -118,26 +119,48 @@ impl DiscCraftApp {
         } else {
             tl!("Image Script")
         };
-        let Some(path) = FileDialog::new()
-            .set_title(title)
-            .add_filter(title, &["txt"])
-            .pick_file()
-        else {
-            return;
-        };
-        // A FAB script names no folder: Encore asks for the one its pictures are in.
-        let folder = if fab {
-            let mut dialog = FileDialog::new().set_title(tl!("Folder of the Pictures"));
+        ask(
+            FileDialog::open().title(title).filter(title, &["txt"]),
+            Then::ImageScript { timeline, fab },
+        );
+    }
+
+    /// The image script chosen: a FAB script names no folder, so (as Encore does) the folder its pictures are in is
+    /// asked for next; another is read now.
+    pub(crate) fn image_script_chosen(
+        &mut self,
+        ctx: &egui::Context,
+        timeline: TimelineId,
+        fab: bool,
+        path: PathBuf,
+    ) {
+        if fab {
+            let mut dialog = FileDialog::folder().title(tl!("Folder of the Pictures"));
             if let Some(start) = path.parent() {
-                dialog = dialog.set_directory(start);
+                dialog = dialog.directory(start);
             }
-            match dialog.pick_folder() {
-                Some(folder) => Some(folder),
-                None => return,
-            }
-        } else {
-            None
-        };
+            ask(
+                dialog,
+                Then::ImageScriptFolder {
+                    timeline,
+                    script: path,
+                },
+            );
+            return;
+        }
+        self.read_image_script(ctx, timeline, path, None);
+    }
+
+    /// Reads the image script `path` (a FAB script with the `folder` of its pictures) and opens the Map Colors
+    /// dialog.
+    pub(crate) fn read_image_script(
+        &mut self,
+        ctx: &egui::Context,
+        timeline: TimelineId,
+        path: PathBuf,
+        folder: Option<PathBuf>,
+    ) {
+        let fab = folder.is_some();
         let mut params = Map::new();
         params.insert("path".to_owned(), json!(path.to_string_lossy()));
         params.insert("fab".to_owned(), json!(fab));

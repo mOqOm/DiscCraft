@@ -6,6 +6,7 @@
 
 use disccraft_build::{BuildOptions, OutputKind, build};
 use disccraft_project::{Link, Project};
+use disccraft_test_support::{ffmpeg, fixtures};
 use disccraft_udf::read::list_udf;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,27 +14,13 @@ use std::process::Command;
 /// An ECC block of a DVD: 16 sectors.
 const ECC_BLOCK: u32 = 16;
 
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
-
-fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures")
-}
-
 /// A short DVD-compliant MPEG-2 elementary stream (passed through without transcoding).
 fn short_video() -> Option<PathBuf> {
     let video = fixtures().join("dvd_iso.m2v");
     if video.is_file() {
         return Some(video);
     }
-    let ffmpeg = tool("DISCCRAFT_FFMPEG", "ffmpeg")?;
+    let ffmpeg = ffmpeg()?;
     std::fs::create_dir_all(fixtures()).unwrap();
     let ok = Command::new(ffmpeg)
         .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
@@ -124,7 +111,7 @@ fn backups_lie_past_a_gap_that_the_ifos_count() {
     }
 
     // ffmpeg's DVD navigation reads both titles from the image.
-    if let Some(ffmpeg) = tool("DISCCRAFT_FFMPEG", "ffmpeg") {
+    if let Some(ffmpeg) = ffmpeg() {
         for title in ["1", "2"] {
             let out = Command::new(&ffmpeg)
                 .args(["-v", "error", "-f", "dvdvideo", "-title", title, "-i"])

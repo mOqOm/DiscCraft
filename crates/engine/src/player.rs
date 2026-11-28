@@ -1220,12 +1220,12 @@ mod tests {
     /// An MKV of MPEG-4 Part 2 video (DivX / Xvid, which craft-video does not decode) and AC-3, made with ffmpeg
     /// into the fixtures; `None` without ffmpeg.
     fn mpeg4_part2_fixture() -> Option<PathBuf> {
-        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures");
+        let fixtures = disccraft_test_support::fixtures();
         let video = fixtures.join("mpeg4_part2_ac3.mkv");
         if video.is_file() {
             return Some(video);
         }
-        let ffmpeg = std::env::var_os("DISCCRAFT_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
+        let ffmpeg = disccraft_test_support::ffmpeg()?;
         std::fs::create_dir_all(&fixtures).ok()?;
         let part = fixtures.join(format!("mpeg4_part2_ac3.{}.mkv", std::process::id()));
         let made = std::process::Command::new(ffmpeg)

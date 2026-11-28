@@ -383,11 +383,23 @@ pub fn subtitle_tracks_sized(
                 });
                 continue;
             }
+            // M6.546: a DVD's subtitles on a Blu-ray, each subpicture as a PGS subtitle, moved onto the title's clock.
             source::SubtitleFile::VobSub => {
-                return Err(DvdError::Unsupported(format!(
-                    "{}: VobSub (.idx/.sub) subtitles are a DVD's; a Blu-ray takes PGS (.sup) or text subtitles",
-                    path.display()
-                )));
+                let start = first_pts / 300;
+                let segments = crate::vobsub::vobsub_as_pgs(path, (width, height))?
+                    .into_iter()
+                    .map(|segment| crate::PgSegment {
+                        pts: start + segment.pts,
+                        dts: start + segment.dts,
+                        data: segment.data,
+                    })
+                    .collect();
+                tracks.push(SubtitleTrack {
+                    language: source::parse_language(&track.language),
+                    cues: Vec::new(),
+                    segments,
+                });
+                continue;
             }
         }
         let cues = disccraft_menu::subtitle_file::asset_cues(asset, &project.settings)

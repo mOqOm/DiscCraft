@@ -532,18 +532,16 @@ fn documents_dir() -> Option<String> {
     Some(folder.display().to_string())
 }
 
-/// Open a folder picker and store the chosen folder in the form.
+/// Asks for a folder; the one chosen goes into the form ([`crate::welcome::Welcome::set_location`]).
 fn browse_location(form: &mut NewProjectForm) {
-    let mut dialog = rfd::FileDialog::new();
+    let mut dialog = craft_dialogs::FileDialog::folder();
     let location = form.location.trim().to_owned();
 
     if !location.is_empty() {
-        dialog = dialog.set_directory(Path::new(&location));
+        dialog = dialog.directory(Path::new(&location));
     }
 
-    if let Some(folder) = dialog.pick_folder() {
-        form.location = folder.display().to_string();
-    }
+    crate::file_dialogs::ask(dialog, crate::file_dialogs::Then::NewProjectLocation);
 }
 
 /// Replace characters not allowed in Windows file names with underscores.

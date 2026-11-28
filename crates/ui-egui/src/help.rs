@@ -23,8 +23,6 @@ pub(crate) const WEBSITE: &str = "https://getartcraft.com";
 pub(crate) const GITHUB: &str = "https://github.com/mOqOm/DiscCraft";
 /// Where problems are reported.
 pub(crate) const ISSUES: &str = "https://github.com/mOqOm/DiscCraft/issues";
-/// The newest release.
-pub(crate) const RELEASES: &str = "https://github.com/mOqOm/DiscCraft/releases/latest";
 
 /// The user manual in the interface's language.
 pub(crate) fn manual_url(language: Language) -> &'static str {
@@ -372,41 +370,6 @@ impl DiscCraftApp {
         });
         if close || response.should_close() {
             self.system_report_open = false;
-        }
-    }
-
-    /// ヘルプ ▸ アップデートを確認…（開いているときだけ描く）。
-    pub(crate) fn update_window(&mut self, ctx: &Context) {
-        if !self.update_open {
-            return;
-        }
-        let mut close = false;
-        let mut open_releases = false;
-        let response = Modal::new(Id::unique("check_for_updates")).show(ctx, |ui| {
-            ui.set_width(420.0);
-            ui.heading(tl!("Check for Updates"));
-            ui.add_space(6.0);
-            let _ = ui.label(tlf!("This version: {version}", version = version_text()));
-            ui.add_space(4.0);
-            let _ = ui.label(tl!(
-                "DiscCraft does not look for updates by itself. New releases are published on GitHub."
-            ));
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                open_releases = ui
-                    .add(crate::theme::dialog_button(tl!("Open the Releases on GitHub")))
-                    .on_hover_text(RELEASES)
-                    .clicked();
-                if ui.add(crate::theme::default_button(tl!("Close"))).clicked() {
-                    close = true;
-                }
-            });
-        });
-        if open_releases {
-            self.open_link(ctx, RELEASES);
-        }
-        if close || response.should_close() {
-            self.update_open = false;
         }
     }
 }

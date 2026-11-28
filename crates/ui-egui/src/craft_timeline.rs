@@ -25,8 +25,6 @@ pub(crate) mod style {
     pub(crate) const RULER_TICK: Shade = Shade::gray(0x8d, 120);
     /// The ruler's timecodes.
     pub(crate) const RULER_TEXT: Shade = Shade::gray(0xb0, 60);
-    /// The playhead's blue, kept as the docking's accent colour.
-    pub(crate) const PLAYHEAD: Shade = Shade::same(Color32::from_rgb(0x58, 0x95, 0xec));
     /// Encore's playhead (M6.484, measured; the same in both looks): its head shaded from (239,184,5) at the top to
     /// (208,158,3) at the point, its line orange-red through the ruler and red through the tracks.
     pub(crate) const PLAYHEAD_HEAD_TOP: Color32 = Color32::from_rgb(239, 184, 5);

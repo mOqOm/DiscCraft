@@ -132,7 +132,13 @@ impl DiscCraftApp {
         let exit = ctx.show_viewport_immediate(
             ViewportId::from_hash_of("disccraft_project_preview"),
             builder,
-            |ui, _class| {
+            |ui, class| {
+                // M9.54: the remote's keys (arrows, Enter) stay the preview's. (Shown inside the main window, the
+                // main window's keys are its.)
+                if class != egui::ViewportClass::EmbeddedWindow {
+                    crate::framework::host_window(ui);
+                    crate::framework::give_back_escape(ui.ctx());
+                }
                 let mut exit = None;
                 if ui.ctx().input(|input| input.viewport().close_requested()) {
                     exit = Some(Exit::Return);

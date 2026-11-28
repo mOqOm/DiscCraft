@@ -213,8 +213,10 @@ impl Source {
     }
 
     fn open_file(path: &Path) -> Result<Self, TranscodeError> {
-        // DV in a MOV or a Matroska file is decoded by the media reader with this decoder (M6.413).
+        // DV in a MOV or a Matroska file is decoded by the media reader with this decoder (M6.413), and so are the
+        // formats DiscCraft decodes itself in a MOV / MP4 / 3GP file (M6.561).
         crate::dv_decoder::register();
+        crate::own_video::register();
         let reader = FileReader::open(path).map_err(|error| io_error(path, error))?;
         let name = path
             .file_name()
@@ -241,8 +243,13 @@ impl Source {
             } else {
                 let reader_openers = reader_openers();
                 let extra = openers();
-                let media = open_reader(name, reader, &reader_openers, &extra)
-                    .map_err(|error| TranscodeError::Decode(error.to_string()))?;
+                let media = match open_reader(name, reader.clone(), &reader_openers, &extra) {
+                    // An AVI, a Matroska or an Ogg file whose video DiscCraft decodes itself (M6.561, M6.567).
+                    Ok(media) => crate::own_source::with_own_video(&reader, &head, media)?,
+                    // An Ogg file of Theora video and no sound, which the media reader does not open (M6.567).
+                    Err(error) => crate::own_source::alone(&reader, &head, name)?
+                        .ok_or_else(|| TranscodeError::Decode(error.to_string()))?,
+                };
                 (media, None)
             };
 

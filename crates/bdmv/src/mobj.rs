@@ -79,6 +79,20 @@ impl NavCommand {
         Self::new(op, title, 0)
     }
 
+    /// Branch_Resume (M6.528): group 0, sub-group 1, branch option 4, no operands. Goes back to the title the menu
+    /// was called from (the Top Menu key suspends a title whose movie object has the resume intention).
+    pub fn resume() -> Self {
+        let op = opcode(0, 0, 1, false, false, 4, OptionKind::Branch);
+        Self::new(op, 0, 0)
+    }
+
+    /// Set_PopupOff (M6.528): group 2 (Set), sub-group 1, set option 7, no operands. Closes the pop-up menu; the
+    /// title under it plays on.
+    pub fn popup_off() -> Self {
+        let op = opcode(0, SET_GROUP, 1, false, false, 7, OptionKind::Set);
+        Self::new(op, 0, 0)
+    }
+
     /// Set_Move: group 2 (Set), sub-group 0, set option 1; destination is a GPR index, source is immediate.
     pub fn set_reg(gpr: u32, value: u32) -> Self {
         let op = opcode(2, SET_GROUP, 0, false, true, 1, OptionKind::Set);
@@ -162,6 +176,14 @@ impl NavCommand {
     pub fn if_eq(gpr: u32, value: u32) -> Self {
         let op = opcode(2, 1, 0, false, true, 2, OptionKind::Compare);
         Self::new(op, gpr, value)
+    }
+
+    /// Compare_LT (M6.543): group 1, compare option 7 (the BluRay wiki's NavigationCommand table): the next command
+    /// runs only when register `register` (a GPR index, or a PSR's number with [`PSR_OPERAND`]) is below the
+    /// immediate `value`.
+    pub fn if_lt(register: u32, value: u32) -> Self {
+        let op = opcode(2, 1, 0, false, true, 7, OptionKind::Compare);
+        Self::new(op, register, value)
     }
 }
 
@@ -372,6 +394,24 @@ pub fn read_movie_objects(data: &[u8]) -> Result<Vec<MovieObject>, BdmvError> {
 
 #[cfg(test)]
 mod tests {
+    /// M6.528: Branch_Resume is group 0, sub-group 1, branch option 4 and Set_PopupOff group 2 (Set, 10b), sub-group
+    /// 1, set option 7, neither with operands (the BluRay wiki's NavigationCommand table).
+    #[test]
+    fn resume_and_popup_off_encode() {
+        use super::NavCommand;
+        assert_eq!(NavCommand::resume().opcode(), 0x0104_0000);
+        assert_eq!(NavCommand::popup_off().opcode(), 0x1100_0007);
+        assert_eq!(
+            (NavCommand::resume().dst(), NavCommand::resume().src()),
+            (0, 0)
+        );
+        // Its neighbour CallTitle (option 3, one immediate operand) as written before.
+        assert_eq!(
+            NavCommand::call_title(2).opcode() & 0x000F_0000,
+            0x0003_0000
+        );
+    }
+
     use super::{MovieObject, NavCommand, PSR_OPERAND, read_movie_objects, write_movie_objects};
 
     fn sample() -> Vec<MovieObject> {
@@ -424,6 +464,17 @@ mod tests {
             NavCommand::jump_title(1).0,
             [0x21, 0x81, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]
         );
+    }
+
+    /// M6.543: Compare_LT of PSR 13 with an age: a register destination with the PSR flag, an immediate source,
+    /// compare option 7.
+    #[test]
+    fn a_psr_is_compared_with_an_age() {
+        let lt = NavCommand::if_lt(PSR_OPERAND | 13, 13);
+        let op = lt.opcode();
+        assert_eq!(((op >> 27) & 3, (op >> 23) & 1, (op >> 22) & 1), (1, 0, 1));
+        assert_eq!((op >> 8) & 0xF, 7);
+        assert_eq!((lt.dst(), lt.src()), (0x8000_000D, 13));
     }
 
     #[test]

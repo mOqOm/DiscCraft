@@ -408,7 +408,9 @@ pub(crate) fn width_fits(width: u32, format: BdVideoFormat) -> bool {
 /// Whether H.264 with this sequence parameter set is a Blu-ray's video of `format`: Main or High profile up to
 /// level 4.1, 4:2:0 at 8 bits, the format's size (in whole macroblocks; 1440 wide too for 1080 lines), and coded
 /// as the format is scanned (an interlaced format's stream may code fields, a progressive format's codes frames
-/// only).
+/// only). M6.556: and in the disc's colours: 16–235 (a full-range stream's blacks and whites would be shown wrong),
+/// with an HD format's BT.709 matrix (or none said; BT.601 too for standard definition). Other streams are converted,
+/// which moves their colours ([`disccraft_transcode`]'s plane path, M12.50).
 pub(crate) fn sps_fits(sps: &disccraft_transcode::h264_sps::Sps, format: BdVideoFormat) -> bool {
     matches!(sps.profile, 77 | 100)
         && sps.level <= BD_MAX_H264_LEVEL
@@ -416,6 +418,18 @@ pub(crate) fn sps_fits(sps: &disccraft_transcode::h264_sps::Sps, format: BdVideo
         && width_fits(sps.width, format)
         && sps.height == format.height.div_ceil(16).saturating_mul(16)
         && sps.frame_mbs_only != format.interlaced
+        && !sps.full_range
+        && sps.matrix.is_none_or(|matrix| matrix_fits(matrix, format))
+}
+
+/// M6.556: whether `matrix_coefficients` `matrix` (H.264 Table E-5) is a Blu-ray's for `format`: BT.709 (1) or
+/// unspecified (2), and for standard definition also BT.601 (5, 6).
+fn matrix_fits(matrix: u8, format: BdVideoFormat) -> bool {
+    match matrix {
+        1 | 2 => true,
+        5 | 6 => format.height <= 576,
+        _ => false,
+    }
 }
 
 /// Whether `path`'s H.264 would go on a Blu-ray title of `format` as it is ([`demux_h264_for_bd`]), told from the
@@ -1226,8 +1240,37 @@ fn h264_fits(
 
 #[cfg(test)]
 mod direct_tests {
-    use super::{BdVideoFormat, Passthrough, copy_h264_for_bd, demux_h264_for_bd};
+    use super::{BdVideoFormat, Passthrough, copy_h264_for_bd, demux_h264_for_bd, sps_fits};
     use std::path::PathBuf;
+
+    /// M6.556: H.264 goes on a Blu-ray as it is only in the disc's colours: a full-range stream, or an HD one that
+    /// says the BT.601 matrix, is converted; BT.709 and an unsaid matrix go as they are (the sequence parameter set
+    /// of a full-range BT.601 1080p stream from libx264, and the same with its colours changed).
+    #[test]
+    fn only_streams_in_the_discs_colours_go_as_they_are() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use disccraft_transcode::h264_sps::{Sps, parse};
+        let bytes = [
+            0x64, 0x00, 0x29, 0xac, 0xd9, 0x40, 0x78, 0x02, 0x27, 0xe5, 0xc0, 0x5b, 0x81, 0x01,
+            0x03, 0x20, 0x00, 0x00, 0x7d, 0x20, 0x00, 0x17, 0x70, 0x01, 0xe3, 0x06, 0x32, 0xc0,
+        ];
+        let sps = parse(&bytes).ok_or("no sps")?;
+        let format =
+            BdVideoFormat::of_video(disccraft_project::BdVideo::Hd1080p23).ok_or("no format")?;
+        let with = |full_range, matrix| Sps {
+            full_range,
+            matrix,
+            ..sps
+        };
+        assert!(!sps_fits(&sps, format));
+        assert!(!sps_fits(&with(true, Some(1)), format));
+        assert!(!sps_fits(&with(false, Some(6)), format));
+        assert!(!sps_fits(&with(false, Some(9)), format));
+        assert!(sps_fits(&with(false, Some(1)), format));
+        assert!(sps_fits(&with(false, Some(2)), format));
+        assert!(sps_fits(&with(false, None), format));
+        Ok(())
+    }
 
     /// M6.367: H.264 left in its transport stream gives, unit for unit, the access units and bytes that the copy
     /// into the cache had; a trimmed part reads its own units.

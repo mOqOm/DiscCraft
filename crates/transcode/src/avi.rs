@@ -13,7 +13,8 @@ const MOST_STREAM_LIST: u32 = 1 << 20;
 
 /// A stream's header: its type (`vids`, `auds`, `iavs`, …), its handler, its format's compression (the
 /// `biCompression` of a video stream's BITMAPINFOHEADER), and its time base: a chunk of a video stream lasts
-/// `scale / rate` seconds (`dwScale` and `dwRate`; 0 when the header does not say).
+/// `scale / rate` seconds (`dwScale` and `dwRate`; 0 when the header does not say). M6.561: where its format (`strf`,
+/// a video stream's BITMAPINFOHEADER and the codec's own data after it) is in the file, and its length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct Stream {
     pub(crate) kind: [u8; 4],
@@ -21,6 +22,7 @@ pub(crate) struct Stream {
     pub(crate) compression: [u8; 4],
     pub(crate) scale: u32,
     pub(crate) rate: u32,
+    pub(crate) format: (u64, u32),
 }
 
 /// An AVI's streams (in order: the index is the stream's number) and where its `movi` lists are.
@@ -157,7 +159,11 @@ fn stream(reader: &SharedReader, start: u64, end: u64) -> Stream {
                 found.scale = le32(&list, body + 20);
                 found.rate = le32(&list, body + 24);
             }
-            b"strf" => found.compression = code_at(&list, body + 16),
+            b"strf" => {
+                found.compression = code_at(&list, body + 16);
+                let kept = u32::try_from(size.min(list.len().saturating_sub(body))).unwrap_or(0);
+                found.format = (start.saturating_add(body as u64), kept);
+            }
             _ => {}
         }
         at = body.saturating_add(size).saturating_add(size & 1);
@@ -197,7 +203,8 @@ fn collect_chunks(
 ) {
     let mut at = start;
     while at.saturating_add(8) <= end && chunks.len() < MOST_CHUNKS {
-        let Some(head) = read(reader, at, 12) else {
+        // A chunk's id and size (an empty chunk is no more, at the very end of the file too), and a list's kind.
+        let Some(head) = read(reader, at, 12).or_else(|| read(reader, at, 8)) else {
             return;
         };
         let size = le32(&head, 4);

@@ -99,6 +99,9 @@ pub struct Registers {
     pub gprm: [u16; 16],
     /// System parameter registers (SPRM1 audio stream, SPRM2 subpicture stream and display flag, SPRM3 angle).
     pub sprm: [u16; 24],
+    /// The title and chapter the MENU (or TITLE) key was pressed in: the player's resume information, which RSM
+    /// and the MENU key in a menu go back to (M6.533: a preview lost it between key presses, so neither worked).
+    pub resume: Option<(u8, u16)>,
 }
 
 impl Default for Registers {
@@ -113,6 +116,7 @@ impl Default for Registers {
         Self {
             gprm: [0; 16],
             sprm,
+            resume: None,
         }
     }
 }
@@ -234,6 +238,7 @@ impl<'a> Vm<'a> {
         let mut vm = Self::restore(model, location)?;
         vm.gprm = registers.gprm;
         vm.sprm = registers.sprm;
+        vm.resume = registers.resume;
         Ok(vm)
     }
 
@@ -242,6 +247,7 @@ impl<'a> Vm<'a> {
         Registers {
             gprm: self.gprm,
             sprm: self.sprm,
+            resume: self.resume,
         }
     }
 
@@ -795,6 +801,7 @@ impl<'a> Vm<'a> {
             (0x30, 0x02) => self.exec_jump_tt(&cmd),
             (0x30, 0x06) => self.exec_jump_ss(&cmd),
             (0x30, 0x08) => self.exec_call_ss(&cmd),
+            (0x20, 0x01) => self.exec_link_sins(&cmd),
             (0x20, 0x04) => self.exec_link_pgcn(&cmd),
             (0x20, 0x06) => self.exec_link_pgn(&cmd),
             (0x20, 0xA6) => self.exec_cond_link_pgn(&cmd),
@@ -873,6 +880,22 @@ impl<'a> Vm<'a> {
         let pgcn = u16_be(cmd, 2)?;
         self.enter_menu(pgcn)?;
         Ok(Exec::Continue)
+    }
+
+    /// A Link instruction with a sub-instruction. Only `RSM` (16, M6.528): back to the title at the point the menu
+    /// was called from it with the MENU key; with nowhere to go back to, nothing happens and the menu stays.
+    fn exec_link_sins(&mut self, cmd: &Cmd) -> Result<Exec, VmError> {
+        if byte(cmd, 7)? & 0x1F != 0x10 {
+            return Err(unsupported(cmd));
+        }
+        if matches!(self.context, Context::Title { .. }) {
+            return Err(invalid("RSM outside a menu"));
+        }
+        if let Some((title, chapter)) = self.resume.take() {
+            self.highlight = None;
+            self.location = Location::Title { title, chapter };
+        }
+        Ok(Exec::Stop)
     }
 
     fn exec_link_pgcn(&mut self, cmd: &Cmd) -> Result<Exec, VmError> {
@@ -1383,6 +1406,56 @@ mod tests {
         let shown = Location::Menu { pgcn: 1, button: 2 };
         let mut vm = Vm::restore(&plain, shown)?;
         assert_eq!(*vm.time_out_menu()?, shown);
+        Ok(())
+    }
+
+    /// M6.528: RSM in a menu goes back to where the MENU key was pressed; in a menu shown without a title behind it,
+    /// there is nowhere to go and the menu stays.
+    #[test]
+    fn rsm_goes_back_to_where_the_menu_key_was_pressed() -> Result<(), VmError> {
+        let mut model = test_model();
+        if let Some(menu) = model.vmgm.first_mut() {
+            for button in &mut menu.buttons {
+                button.command = [0x20, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10];
+            }
+        }
+        let playing = Location::Title {
+            title: 1,
+            chapter: 2,
+        };
+        let mut vm = Vm::restore(&model, playing)?;
+        assert!(matches!(*vm.menu_key()?, Location::Menu { pgcn: 1, .. }));
+        assert_eq!(*vm.press(Key::Enter)?, playing);
+
+        let shown = Location::Menu { pgcn: 1, button: 1 };
+        let mut fresh = Vm::restore(&model, shown)?;
+        assert_eq!(*fresh.press(Key::Enter)?, shown);
+        Ok(())
+    }
+
+    /// M6.533: the resume information goes with the registers, so a VM restored between key presses (a preview)
+    /// still goes back with RSM and with the MENU key in the menu.
+    #[test]
+    fn the_resume_point_goes_with_the_registers() -> Result<(), VmError> {
+        let mut model = test_model();
+        if let Some(menu) = model.vmgm.first_mut() {
+            for button in &mut menu.buttons {
+                button.command = [0x20, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10];
+            }
+        }
+        let playing = Location::Title {
+            title: 1,
+            chapter: 2,
+        };
+        let mut vm = Vm::restore(&model, playing)?;
+        let menu = *vm.menu_key()?;
+        let registers = vm.registers();
+        assert_eq!(registers.resume, Some((1, 2)));
+
+        let mut next = Vm::restore_with_registers(&model, menu, registers)?;
+        assert_eq!(*next.press(Key::Enter)?, playing);
+        let mut again = Vm::restore_with_registers(&model, menu, registers)?;
+        assert_eq!(*again.menu_key()?, playing);
         Ok(())
     }
 

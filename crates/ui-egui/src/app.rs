@@ -14,8 +14,9 @@ use disccraft_project::{
     AssetId, Capacity, DiscKind, Link, MenuId, Rect, TimelineId, VideoStandard,
 };
 
+use crate::file_dialogs::{Then, ask};
+use craft_dialogs::FileDialog;
 use egui::{self, Context, Ui};
-use rfd::FileDialog;
 use serde_json::{self, Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -51,6 +52,22 @@ pub struct DiscCraftApp {
     pub(crate) maximized_panel: Option<crate::workspace::Panel>,
     /// 前のフレームで描いた各パネルの中身の場所（パネルのメニューの ドッキングを解除 で、浮かべる窓の場所と大きさ）。
     pub(crate) panel_bodies: Vec<(crate::workspace::Panel, egui::Rect)>,
+    /// What the docking reads of each panel (its tab's text), kept between frames: it reads them again only when they
+    /// change (M9.54).
+    pub(crate) dock_specs: craft_ui::contract::Tracked<crate::dock::DiscSpecs>,
+    /// The tab menu to show (M9.55): its window, its panel, where it opens, and whether it opens in this frame.
+    pub(crate) tab_menu: Option<(egui::ViewportId, crate::workspace::Panel, egui::Pos2, bool)>,
+    /// The shortcuts pressed in a panel's own OS window, run by the main window's next pass (M9.55).
+    pub(crate) queued_actions: Vec<crate::actions::Action>,
+    /// Whether a modal dialog was open in the main window at the end of its last pass: the panels in their own OS
+    /// windows take no input meanwhile (M9.55).
+    pub(crate) modal_open: bool,
+    /// The menu bar's rows chosen since the last frame, as the UI runtime fired them (M9.54).
+    pub(crate) fired_menu: Vec<craft_keymap::CommandRef>,
+    /// The commands of the menu rows the last frame laid out: a fired row names one of them.
+    pub(crate) menu_commands: crate::menu_model::Commands,
+    /// The menu bar as last laid out, kept so the bar redraws its last run while nothing changed.
+    pub(crate) menu_bar_model: craft_ui::contract::Tracked<craft_menu::MenuBar>,
     /// 名前を付けて保存したワークスペース（作った順）。
     pub(crate) user_workspaces: Vec<String>,
     /// 「新規ワークスペース…」ダイアログの名前の欄（開いているときだけ）。
@@ -66,6 +83,8 @@ pub struct DiscCraftApp {
     pub(crate) last_timeline: Option<TimelineId>,
     pub(crate) last_slideshow: Option<u64>,
     pub(crate) last_chapter_playlist: Option<u64>,
+    /// M6.539: ビューアで開いた項目（開いた順に 1 つずつ。Encore のビューアのタブの ▼ の一覧。閉じると外れる）。
+    pub(crate) opened: Vec<Selection>,
     /// チャプター再生リストビューアで選んだマスターのチャプター（再生リスト, チャプター番号）とエントリ。
     pub(crate) chapter_playlist_pick: Option<(u64, usize)>,
     /// M6.425: every master chapter picked (Shift / Ctrl+click, Ctrl+A) for the chapter playlist of
@@ -84,6 +103,8 @@ pub struct DiscCraftApp {
     pub(crate) clip_thumbs: crate::clip_thumbs::ClipThumbs,
     /// 起動時のようこそ画面と新規プロジェクトダイアログ。
     pub(crate) welcome: Welcome,
+    /// The file dialogs asked for and their answers (M9.64, [`crate::file_dialogs`]).
+    pub(crate) dialogs: craft_dialogs::Dialogs<Then>,
     /// 最近使ったプロジェクト（新しい順）。
     pub(crate) recent: Vec<PathBuf>,
     /// 「プロジェクトをチェック」のウィンドウ。
@@ -384,8 +405,8 @@ pub struct DiscCraftApp {
     pub(crate) about_open: bool,
     /// ヘルプ ▸ システム互換性レポート… が開いている。
     pub(crate) system_report_open: bool,
-    /// ヘルプ ▸ アップデートを確認… が開いている。
-    pub(crate) update_open: bool,
+    /// Help ▸ Check for Updates… and the check at start (M9.65, [`crate::updates`]).
+    pub(crate) updates: crate::updates::Updates,
     /// ログに書いた最後のステータス（同じ文を何度も書かない）。
     pub(crate) logged_status: String,
     /// タイムラインビューアで選んだチャプターポイント。プロパティパネルはこのときチャプターのシートを出す。
@@ -445,6 +466,8 @@ pub struct DiscCraftApp {
 impl DiscCraftApp {
     /// Creates a new application state.
     pub fn new(ctx: &Context) -> Self {
+        // The settings file (M9.62): a `workspace.json` of the versions before is written to `config.toml` once.
+        crate::workspace::open_settings();
         // Preferences that are not the window's own: the audio output device, and how many transcodes run at
         // a time.
         crate::audio_out::choose_device(crate::workspace::load_audio_device());
@@ -475,6 +498,13 @@ impl DiscCraftApp {
             dock_dirty: false,
             maximized_panel: None,
             panel_bodies: Vec::new(),
+            dock_specs: craft_ui::contract::Tracked::default(),
+            tab_menu: None,
+            queued_actions: Vec::new(),
+            modal_open: false,
+            fired_menu: Vec::new(),
+            menu_commands: crate::menu_model::Commands::default(),
+            menu_bar_model: craft_ui::contract::Tracked::new(craft_menu::MenuBar::new(Vec::new())),
             user_workspaces,
             new_workspace: None,
             preload_waveforms: false,
@@ -484,6 +514,7 @@ impl DiscCraftApp {
             last_timeline: None,
             last_slideshow: None,
             last_chapter_playlist: None,
+            opened: Vec::new(),
             chapter_playlist_pick: None,
             chapter_playlist_picks: Vec::new(),
             chapter_entry_pick: None,
@@ -493,6 +524,10 @@ impl DiscCraftApp {
             waveforms: crate::waveforms::Waveforms::default(),
             clip_thumbs: crate::clip_thumbs::ClipThumbs::default(),
             welcome: Welcome::opened(),
+            dialogs: {
+                let ctx = ctx.clone();
+                craft_dialogs::Dialogs::new(craft_dialogs::Wake::new(move || ctx.request_repaint()))
+            },
             recent: load_recent(),
             check_window: crate::check_window::CheckWindow::default(),
             pending_action: None,
@@ -641,7 +676,11 @@ impl DiscCraftApp {
             track_dialog: None,
             about_open: false,
             system_report_open: false,
-            update_open: false,
+            // Not while the manual's screenshots are taken: their pictures must not depend on GitHub.
+            updates: crate::updates::Updates::new(
+                crate::workspace::load_check_updates_at_start()
+                    && std::env::var_os("DISCCRAFT_CAPTURE").is_none(),
+            ),
             logged_status: String::new(),
             chapter_focus: None,
             cue_focus: None,
@@ -688,6 +727,13 @@ impl DiscCraftApp {
         Ok(())
     }
 
+    /// Before each frame, from eframe's `raw_input_hook` (M9.54): the UI runtime's input for the frame, in the
+    /// interface's language and appearance.
+    pub fn framework_input(&mut self, ctx: &egui::Context) {
+        let fired = crate::framework::before_input(ctx, self.language);
+        self.fired_menu.extend(fired);
+    }
+
     /// Draws the whole UI.
     pub fn ui(&mut self, ui: &mut Ui) {
         // Strings are looked up per thread; set the language before anything is drawn. The words the project makes up
@@ -695,6 +741,14 @@ impl DiscCraftApp {
         crate::i18n::set_current(self.language);
         self.session
             .set_words(disccraft_project::Words::from_code(self.language.code()));
+        // M9.66: the font stack orders its faces for the interface language.
+        crate::fonts::follow_language(ui.ctx(), self.language);
+        // M9.54: the keys stay DiscCraft's while no field has the focus, and an Escape no framework component took
+        // reaches its dialogs, drags and fields as before.
+        crate::framework::host_window(ui);
+        crate::framework::give_back_escape(ui.ctx());
+        // M9.64: the file dialogs' answers go on to what they were asked for.
+        self.pump_dialogs(ui.ctx());
         // M15.1: the user manual's screenshot script, when one runs.
         self.play_capture(ui);
 
@@ -776,7 +830,7 @@ impl DiscCraftApp {
         self.color_set_window(ui.ctx());
         self.about_window(ui.ctx());
         self.system_report_window(ui.ctx());
-        self.update_window(ui.ctx());
+        self.updates_ui(ui);
         self.show_welcome(ui);
         self.show_confirm(ui.ctx());
         self.show_build_prompt(ui.ctx());
@@ -785,7 +839,8 @@ impl DiscCraftApp {
         self.show_build_progress(ui.ctx());
         self.show_film_marker_dialog(ui.ctx());
         self.poll_film_export(ui.ctx());
-        self.intercept_close(ui.ctx());
+        // M9.55: the panels in their own OS windows take no input while a modal dialog is open here.
+        self.modal_open = ui.ctx().memory(|memory| memory.top_modal_layer().is_some());
         // M6.518: the pick whip's tether goes over every panel and window, so it is drawn last.
         let _ = crate::pickwhip::draw_tether(ui.ctx());
         // What the status bar said, for the session log (Help ▸ Reveal Log Files…).
@@ -912,8 +967,10 @@ impl DiscCraftApp {
         let mut result =
             crate::workspace::save_workspace(&self.workspace, &self.dock, &self.user_workspaces);
         let settings = crate::workspace::load_settings();
-        self.dock = crate::workspace::saved_dock(&settings, &id)
-            .unwrap_or_else(|| crate::workspace::default_dock(&settings, &id));
+        self.dock.replace(
+            crate::workspace::saved_dock(&settings, &id)
+                .unwrap_or_else(|| crate::workspace::default_dock(&settings, &id)),
+        );
         self.workspace = id;
         if result.is_ok() {
             result = crate::workspace::save_workspace(
@@ -957,7 +1014,7 @@ impl DiscCraftApp {
         let mut result =
             crate::workspace::save_workspace(&self.workspace, &self.dock, &self.user_workspaces);
         let mut dock = self.dock.clone();
-        dock.saved = Some(dock.layout.clone());
+        dock.saved = Some(dock.layout().clone());
         self.dock = dock;
         self.workspace = WorkspaceId::User(name);
         if result.is_ok() {
@@ -977,8 +1034,10 @@ impl DiscCraftApp {
         if self.workspace == WorkspaceId::User(name.to_owned()) {
             self.workspace = WorkspaceId::default();
             let settings = crate::workspace::load_settings();
-            self.dock = crate::workspace::saved_dock(&settings, &self.workspace)
-                .unwrap_or_else(|| crate::workspace::default_dock(&settings, &self.workspace));
+            self.dock.replace(
+                crate::workspace::saved_dock(&settings, &self.workspace)
+                    .unwrap_or_else(|| crate::workspace::default_dock(&settings, &self.workspace)),
+            );
         }
         let result =
             crate::workspace::save_workspace(&self.workspace, &self.dock, &self.user_workspaces);
@@ -1054,36 +1113,54 @@ impl DiscCraftApp {
     }
 
     pub(crate) fn open_project(&mut self) {
-        if let Some(path) = FileDialog::new()
-            .add_filter(tl!("DiscCraft project"), &["dcproj"])
-            .pick_file()
+        ask(
+            FileDialog::open().filter(tl!("DiscCraft project"), &["dcproj"]),
+            Then::OpenProject,
+        );
+    }
+
+    /// File ▸ Save / Save As…: a project with a file is saved there; Save As, or a project with no file yet, asks
+    /// where first (the save then happens when the answer comes, [`Self::save_project_to`]).
+    pub(crate) fn save_project(&mut self, save_as: bool) {
+        self.save_project_then(save_as, None);
+    }
+
+    /// [`Self::save_project`], then `after` (a close or exit that waited for the save) once it is saved.
+    pub(crate) fn save_project_then(
+        &mut self,
+        save_as: bool,
+        after: Option<crate::confirm::PendingAction>,
+    ) {
+        if save_as || self.session.path.is_none() {
+            ask(
+                FileDialog::save().filter(tl!("DiscCraft project"), &["dcproj"]),
+                Then::SaveProject { save_as, after },
+            );
+            return;
+        }
+        let result = self.session.save(None);
+        self.saved(result);
+    }
+
+    /// Saves the project to `path` (the Save dialog's answer), then runs `after` when it was saved.
+    pub(crate) fn save_project_to(
+        &mut self,
+        ctx: &Context,
+        path: &Path,
+        _save_as: bool,
+        after: Option<crate::confirm::PendingAction>,
+    ) {
+        let result = self.session.save(Some(path));
+        self.saved(result);
+        if !self.session.dirty
+            && let Some(action) = after
         {
-            let _ = self.open_path(&path);
+            self.run_pending(ctx, action);
         }
     }
 
-    pub(crate) fn save_project(&mut self, save_as: bool) {
-        let chosen = if save_as || self.session.path.is_none() {
-            match FileDialog::new()
-                .add_filter(tl!("DiscCraft project"), &["dcproj"])
-                .save_file()
-            {
-                Some(path) => path,
-                None => {
-                    self.status = tl!("Save cancelled").to_string();
-                    return;
-                }
-            }
-        } else {
-            self.session.path.clone().unwrap_or_default()
-        };
-
-        let result = if save_as {
-            self.session.save(Some(&chosen))
-        } else {
-            self.session.save(None)
-        };
-
+    /// Reports a save's result and remembers the file.
+    fn saved(&mut self, result: Result<PathBuf, String>) {
         match result {
             Ok(saved) => {
                 self.status = tlf!("Saved: {path}", path = saved.display());
@@ -1149,6 +1226,14 @@ impl DiscCraftApp {
         let project = &self.session.project;
         self.last_timeline = preload_timeline(project);
         self.last_slideshow = project.slideshows.keys().next().copied();
+        // ビューアに出ているので、開いた項目（M6.539）。
+        let shown = [
+            self.last_timeline.map(Selection::Timeline),
+            self.last_slideshow.map(Selection::Slideshow),
+        ];
+        for selection in shown.into_iter().flatten() {
+            self.note_opened(selection);
+        }
         self.preload_waveforms = true;
     }
 
@@ -1184,6 +1269,7 @@ impl DiscCraftApp {
         self.last_timeline = None;
         self.last_slideshow = None;
         self.last_chapter_playlist = None;
+        self.opened.clear();
         self.chapter_playlist_pick = None;
         self.chapter_playlist_picks.clear();
         self.chapter_entry_pick = None;
@@ -1344,6 +1430,7 @@ impl DiscCraftApp {
             Selection::ChapterPlaylist(id) => self.last_chapter_playlist = Some(id),
             Selection::Playlist(_) | Selection::Asset(_) | Selection::None => {}
         }
+        self.note_opened(selection);
         if show {
             self.show_viewer(selection);
         }
@@ -1521,36 +1608,32 @@ impl DiscCraftApp {
     }
 
     pub(crate) fn import_assets(&mut self) {
-        let Some(paths) = FileDialog::new()
-            .add_filter(tl!("Media"), &crate::file_drop::MEDIA_EXTENSIONS)
-            .pick_files()
-        else {
-            self.status = tl!("Import cancelled").to_string();
-            return;
-        };
-
-        for path in paths {
-            self.import_asset(&path);
-        }
+        ask(
+            FileDialog::open_many().filter(tl!("Media"), &crate::file_drop::MEDIA_EXTENSIONS),
+            Then::ImportAssets,
+        );
     }
 
     /// File ▸ Import ▸ Timeline… (Encore's タイムラインとして読み込み): each chosen video becomes an asset and a
     /// timeline named after it, in one undo step. The last one opens in the Timeline panel; the first becomes First
     /// Play when nothing plays first yet (as a new timeline does).
     pub(crate) fn import_timeline_files(&mut self) {
-        let Some(paths) = FileDialog::new()
-            .set_title(tl!("Import as Timeline"))
-            .add_filter(
-                tl!("Video files"),
-                &[
-                    "mp4", "mov", "m4v", "avi", "mkv", "mxf", "m2v", "m1v", "mpg", "mpeg", "vob",
-                    "m2ts", "ts", "dv", "dif",
-                ],
-            )
-            .pick_files()
-        else {
-            return;
-        };
+        ask(
+            FileDialog::open_many()
+                .title(tl!("Import as Timeline"))
+                .filter(
+                    tl!("Video files"),
+                    &[
+                        "mp4", "mov", "m4v", "avi", "mkv", "mxf", "m2v", "m1v", "mpg", "mpeg",
+                        "vob", "m2ts", "ts", "dv", "dif",
+                    ],
+                ),
+            Then::ImportTimelines,
+        );
+    }
+
+    /// The videos chosen for File ▸ Import ▸ Timeline….
+    pub(crate) fn import_timeline_paths(&mut self, paths: &[PathBuf]) {
         let paths: Vec<Value> = paths
             .iter()
             .map(|path| Value::from(path.to_string_lossy().into_owned()))
@@ -1586,18 +1669,21 @@ impl DiscCraftApp {
     /// File ▸ Import ▸ Slideshow… (Encore's スライドショーとして読み込み): the chosen images become the slides of one
     /// new slideshow (in file name order, named after the first), which opens in the Slideshow panel.
     pub(crate) fn import_slideshow_files(&mut self) {
-        let Some(paths) = FileDialog::new()
-            .set_title(tl!("Import as Slideshow"))
-            .add_filter(
-                tl!("Image files"),
-                &[
-                    "png", "jpg", "jpeg", "bmp", "tif", "tiff", "psd", "pcraft", "svg",
-                ],
-            )
-            .pick_files()
-        else {
-            return;
-        };
+        ask(
+            FileDialog::open_many()
+                .title(tl!("Import as Slideshow"))
+                .filter(
+                    tl!("Image files"),
+                    &[
+                        "png", "jpg", "jpeg", "bmp", "tif", "tiff", "psd", "pcraft", "svg",
+                    ],
+                ),
+            Then::ImportSlideshow,
+        );
+    }
+
+    /// The images chosen for File ▸ Import ▸ Slideshow….
+    pub(crate) fn import_slideshow_paths(&mut self, paths: &[PathBuf]) {
         let paths: Vec<Value> = paths
             .iter()
             .map(|path| Value::from(path.to_string_lossy().into_owned()))
@@ -1620,10 +1706,6 @@ impl DiscCraftApp {
         self.status = tl!("Imported as a slideshow").to_owned();
     }
 
-    fn import_asset(&mut self, path: &Path) {
-        let _ = self.import_asset_id(path);
-    }
-
     /// Imports `path` as an asset (placed in the Project panel's open folder); its id, or `None` when it could not
     /// be imported (the status bar says why).
     pub(crate) fn import_asset_id(&mut self, path: &Path) -> Option<u64> {
@@ -1639,13 +1721,15 @@ impl DiscCraftApp {
         let Some(asset) = self.session.project.assets.get(&id).cloned() else {
             return;
         };
-        let mut dialog = FileDialog::new().set_title(tl!("Locate Asset"));
+        let mut dialog = FileDialog::open().title(tl!("Locate Asset"));
         if let Some(parent) = Path::new(&asset.path).parent().filter(|dir| dir.is_dir()) {
-            dialog = dialog.set_directory(parent);
+            dialog = dialog.directory(parent);
         }
-        let Some(path) = dialog.pick_file() else {
-            return;
-        };
+        ask(dialog, Then::RelinkAsset(id));
+    }
+
+    /// The file chosen to replace asset `id`'s.
+    pub(crate) fn relink_asset_to(&mut self, id: AssetId, path: &Path) {
         if self
             .run_command(
                 "asset.setPath",
@@ -2147,7 +2231,19 @@ impl DiscCraftApp {
             }
         };
 
-        self.run_command(id, params).is_some()
+        let steps = self.session.undo_depth();
+        let done = self.run_command(id, params).is_some();
+        self.name_link_step(steps, link);
+        done
+    }
+
+    /// Names the step a link command just added after the place the link goes to (M6.530: Edit ▸ Undo and History
+    /// say "Set Link → Making: Chapter 1"). `steps` is how many steps there were before the command.
+    pub(crate) fn name_link_step(&mut self, steps: usize, link: &Link) {
+        if self.session.undo_depth() > steps {
+            let place = crate::menu_editor::link_label(&self.session.project, link);
+            self.session.note_last_step(place);
+        }
     }
 }
 

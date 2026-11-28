@@ -9,5 +9,9 @@ publish.workspace = true
 
 [dependencies]
 
+[dev-dependencies]
+# Where ffmpeg, ffprobe and the fixtures are for the tests that compare with them (M9.67).
+disccraft-test-support.workspace = true
+
 [lints]
 workspace = true

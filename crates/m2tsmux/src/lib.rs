@@ -18,7 +18,8 @@ mod psi;
 mod read;
 
 pub use lpcm::{
-    BdLpcmFormat, bd_lpcm_layout, bd_lpcm_units, bd_lpcm_units_of, read_bd_lpcm_header,
+    BdLpcmFormat, LpcmSource, bd_lpcm_layout, bd_lpcm_stored, bd_lpcm_units, bd_lpcm_units_of,
+    read_bd_lpcm_header,
 };
 pub use mux::{STOPPED, mux_m2ts, mux_m2ts_stoppable, mux_m2ts_with};
 pub use read::pes_payloads;

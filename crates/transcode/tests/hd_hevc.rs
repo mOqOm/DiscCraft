@@ -12,28 +12,16 @@
     clippy::indexing_slicing
 )]
 
+use disccraft_test_support::{ffmpeg, ffprobe};
 use std::path::PathBuf;
 use std::process::Command;
 
 use disccraft_transcode::RateMode;
 use disccraft_transcode::hd::{HdCodec, HdOptions, read_h264_index, transcode_h264};
 
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|_| path)
-}
-
 #[test]
 fn an_hd_transcode_makes_hevc_main_10() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };

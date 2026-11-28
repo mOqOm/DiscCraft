@@ -5,22 +5,12 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+use disccraft_test_support::ffmpeg;
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use disccraft_transcode::{Rendering, Standard, TranscodeOptions, transcode};
-
-fn ffmpeg() -> Option<PathBuf> {
-    let path =
-        env::var_os("DISCCRAFT_FFMPEG").map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|_| path)
-}
 
 /// A near-lossless H.264 file of `seconds` made by the lavfi graph `graph` (the decoder takes no lossless one).
 fn make(ffmpeg: &Path, graph: &str, seconds: &str, path: &Path) {

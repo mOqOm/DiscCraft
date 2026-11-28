@@ -246,7 +246,7 @@ impl UserLibrary {
     }
 }
 
-/// `library.json` in the library's folder (Preferences ▸ Media; beside `workspace.json` unless another is
+/// `library.json` in the library's folder (Preferences ▸ Media; beside `config.toml` unless another is
 /// chosen).
 fn library_path() -> Option<PathBuf> {
     crate::workspace::library_dir().map(|dir| dir.join("library.json"))

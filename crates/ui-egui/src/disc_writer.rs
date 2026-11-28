@@ -723,12 +723,10 @@ impl DiscCraftApp {
 
     /// Chooses the Source's disc image (Encore's 使用するソース ▸ 参照…).
     pub(crate) fn pick_source_image(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter(tl!("Disc image"), &["iso", "img"])
-            .pick_file()
-        {
-            self.disc.source_image = path.to_string_lossy().into_owned();
-        }
+        crate::file_dialogs::ask(
+            craft_dialogs::FileDialog::open().filter(tl!("Disc image"), &["iso", "img"]),
+            crate::file_dialogs::Then::SourceImage,
+        );
     }
 }
 

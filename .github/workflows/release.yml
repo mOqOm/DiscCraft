@@ -15,6 +15,7 @@ name: Release builds
 #   disccraft-VERSION-macos-universal.dmg, disccraft-cli-VERSION-macos-universal.zip
 #   disccraft-VERSION-linux-{x86_64,aarch64}.{tar.gz,deb,rpm,pkg.tar.zst,AppImage,AppImage.zsync,flatpak}
 #   disccraft-VERSION-linux-riscv64.{tar.gz,deb,rpm}
+#   SHA256SUMS.txt (the checksums of all of them, added last)
 on:
   workflow_dispatch:
     inputs:
@@ -40,6 +41,12 @@ env:
   APPIMAGETOOL_VERSION: "1.9.1"
   APPIMAGE_RUNTIME_VERSION: "20251108"
   WIX_VERSION: "5.0.2"
+  # The craft-fonts faces ui-egui's build script embeds (M9.66; NOTICE lists them), from the checkout each build job
+  # makes below at the revision craft-libs' own builds use. A missing checkout fails the build. DiscCraft's own
+  # variable, not craft-fonts' CRAFT_FONTS_DIR: that one also makes FilmCraft's and PhotoCraft's text crates embed every
+  # face of the checkout (about 95 MB more).
+  DISCCRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+  DISCCRAFT_FONTS_REQUIRED: "1"
 
 jobs:
   windows:
@@ -58,6 +65,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.tag || github.ref }}
+
+      - name: craft-fonts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: storytold/craft-fonts
+          ref: b076417b5880bd4154bd22f00695b1d28c6bea83
+          path: craft-fonts
+          persist-credentials: false
 
       - name: Names
         shell: bash
@@ -123,6 +138,14 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
+      - name: craft-fonts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: storytold/craft-fonts
+          ref: b076417b5880bd4154bd22f00695b1d28c6bea83
+          path: craft-fonts
+          persist-credentials: false
+
       - name: Names
         run: |
           version="${TAG#v}"
@@ -182,6 +205,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.tag || github.ref }}
+
+      - name: craft-fonts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: storytold/craft-fonts
+          ref: b076417b5880bd4154bd22f00695b1d28c6bea83
+          path: craft-fonts
+          persist-credentials: false
 
       - name: Names
         run: |
@@ -310,6 +341,14 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
+      - name: craft-fonts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: storytold/craft-fonts
+          ref: b076417b5880bd4154bd22f00695b1d28c6bea83
+          path: craft-fonts
+          persist-credentials: false
+
       - name: Names
         run: |
           version="${TAG#v}"
@@ -368,3 +407,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" dist/* --clobber --repo "${{ github.repository }}"
+
+  # The checksums of every package, which DiscCraft's updater (Help ▸ Check for Updates…, craft-update) checks a
+  # download against when it finds the release without GitHub's API.
+  checksums:
+    name: checksums
+    needs: [windows, macos, linux, flatpak, linux-riscv64]
+    if: inputs.tag != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Add SHA256SUMS.txt to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir dist
+          cd dist
+          gh release download "$TAG" --repo "${{ github.repository }}" --pattern 'disccraft-*'
+          sha256sum disccraft-* > SHA256SUMS.txt
+          gh release upload "$TAG" SHA256SUMS.txt --clobber --repo "${{ github.repository }}"

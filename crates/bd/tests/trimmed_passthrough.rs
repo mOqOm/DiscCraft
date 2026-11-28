@@ -6,22 +6,9 @@
 
 use disccraft_bd::build_bdmv;
 use disccraft_project::{BdVideo, ClipTrim, DiscKind, Link, Project};
+use disccraft_test_support::{ffmpeg, ffprobe, fixtures};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
-
-fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures")
-}
 
 /// Three seconds of interlaced 1080i H.264 with a key picture every second (closed GOPs, B pictures), and a tone
 /// that is 440 Hz in the first second, 880 Hz in the second and 1320 Hz in the third.
@@ -102,10 +89,7 @@ fn pitch(samples: &[i16]) -> f64 {
 }
 
 fn check(container: &str) {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };
@@ -279,10 +263,7 @@ fn a_trimmed_clip_in_a_transport_stream_goes_on_the_disc_as_it_is() {
 /// title holds all its pictures and its AC-3 as it is.
 #[test]
 fn an_interlaced_transport_stream_is_imported_and_goes_on_the_disc_as_it_is() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };
@@ -367,10 +348,7 @@ fn an_interlaced_transport_stream_is_imported_and_goes_on_the_disc_as_it_is() {
 /// on a 1080i disc as it is: the same pictures, declared MPEG-2, with the file's AC-3.
 #[test]
 fn hd_mpeg2_in_a_transport_stream_goes_on_the_disc_as_it_is() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };
@@ -487,10 +465,7 @@ fn hd_mpeg2_in_a_transport_stream_goes_on_the_disc_as_it_is() {
 /// file itself: nothing is encoded, only its index is in the cache, and the disc's pictures are the file's.
 #[test]
 fn an_hd_mpeg2_elementary_stream_goes_on_the_disc_as_it_is() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };
@@ -605,7 +580,7 @@ fn hdv_clips_are_trimmed_and_joined_as_they_are() {
 }
 
 fn trimmed_and_joined(width: u32) {
-    let Some(ffmpeg) = tool("DISCCRAFT_FFMPEG", "ffmpeg") else {
+    let Some(ffmpeg) = ffmpeg() else {
         eprintln!("ffmpeg not found; skipping");
         return;
     };
@@ -758,10 +733,7 @@ fn a_title_of_mostly_hdv_clips_is_made_at_1440() {
 /// they are and the SD clip encoded at 1440 (MPEG-2 MP@H-14, shown 16:9), and the whole stream decodes without errors.
 #[test]
 fn an_hdv_clip_joins_a_clip_encoded_at_1440() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };
@@ -862,7 +834,7 @@ fn an_hdv_clip_joins_a_clip_encoded_at_1440() {
 /// a transport stream: nothing encoded, the source's pictures.
 #[test]
 fn hd_mpeg2_in_a_program_stream_goes_on_the_disc_as_it_is() {
-    let Some(ffmpeg) = tool("DISCCRAFT_FFMPEG", "ffmpeg") else {
+    let Some(ffmpeg) = ffmpeg() else {
         eprintln!("ffmpeg not found; skipping");
         return;
     };

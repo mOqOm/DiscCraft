@@ -6,18 +6,9 @@
 
 use disccraft_build::{BuildOptions, OutputKind, build};
 use disccraft_project::{Link, Project};
-use std::path::{Path, PathBuf};
+use disccraft_test_support::{ffmpeg, ffprobe};
+use std::path::Path;
 use std::process::Command;
-
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
 
 /// The display aspect ratio of the first video stream of `file`, as ffprobe reads it.
 fn display_aspect(ffprobe: &Path, file: &Path) -> String {
@@ -35,10 +26,7 @@ fn display_aspect(ffprobe: &Path, file: &Path) -> String {
 
 #[test]
 fn passed_through_video_says_the_titles_shape() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };

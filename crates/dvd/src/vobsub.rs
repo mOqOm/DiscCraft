@@ -13,6 +13,8 @@ pub(crate) struct VobSub {
     pub(crate) palette: [[u8; 3]; 16],
     pub(crate) language: Option<[u8; 2]>,
     pub(crate) units: Vec<(i64, Vec<u8>)>,
+    /// The frame the subpictures are placed in (`size:`), when the file says.
+    pub(crate) size: Option<(u16, u16)>,
 }
 
 fn invalid(path: &Path, what: &str) -> DvdError {
@@ -30,6 +32,7 @@ pub(crate) fn read_vobsub(idx: &Path) -> Result<VobSub, DvdError> {
     let sub = std::fs::read(&sub_path).map_err(|err| crate::io_error(&sub_path, err))?;
 
     let mut palette = None;
+    let mut size = None;
     let mut language = None;
     let mut stream: Option<u8> = None;
     let mut offset_ms = 0i64;
@@ -37,6 +40,10 @@ pub(crate) fn read_vobsub(idx: &Path) -> Result<VobSub, DvdError> {
     for line in text.lines().map(str::trim) {
         if let Some(rest) = line.strip_prefix("palette:") {
             palette = Some(parse_palette(rest).ok_or_else(|| invalid(idx, "bad palette"))?);
+        } else if let Some(rest) = line.strip_prefix("size:") {
+            size = rest.trim().split_once('x').and_then(|(width, height)| {
+                Some((width.trim().parse().ok()?, height.trim().parse().ok()?))
+            });
         } else if let Some(rest) = line.strip_prefix("time offset:") {
             offset_ms = parse_signed_ms(rest).ok_or_else(|| invalid(idx, "bad time offset"))?;
         } else if let Some(rest) = line.strip_prefix("id:") {
@@ -80,6 +87,145 @@ pub(crate) fn read_vobsub(idx: &Path) -> Result<VobSub, DvdError> {
         palette,
         language,
         units,
+        size,
+    })
+}
+
+/// M6.546: a VobSub on a Blu-ray: each subpicture unit as a PGS subtitle (its four colours and contrasts as the
+/// palette, its picture scaled from the VobSub's frame to the title's `frame` by the nearest pixel), written by
+/// `disccraft-pgs` as the segments of display sets (90 kHz from the video's first picture). A unit that does not
+/// decode is left out; one without a stop time shows until the next (at most five seconds).
+///
+/// # Errors
+///
+/// When the files cannot be read, or the subtitles cannot be written as PGS.
+pub(crate) fn vobsub_as_pgs(
+    idx: &Path,
+    (width, height): (u16, u16),
+) -> Result<Vec<crate::PgSegment>, DvdError> {
+    let vobsub = read_vobsub(idx)?;
+    let decoded: Vec<(i64, disccraft_spu::DecodedSpu)> = vobsub
+        .units
+        .iter()
+        .filter_map(|(ms, spu)| Some((ms.saturating_mul(90), disccraft_spu::decode_spu(spu).ok()?)))
+        .collect();
+    // The frame the units are placed in: the file's, else a DVD's (576 lines when a unit reaches past 480).
+    let (source_width, source_height) = vobsub.size.unwrap_or_else(|| {
+        let bottom = decoded
+            .iter()
+            .map(|(_, spu)| u32::from(spu.params.y) + u32::from(spu.bitmap.height))
+            .max()
+            .unwrap_or(0);
+        (720, if bottom > 480 { 576 } else { 480 })
+    });
+    if source_width == 0 || source_height == 0 {
+        return Err(invalid(idx, "bad size"));
+    }
+    let sx = f64::from(width) / f64::from(source_width);
+    let sy = f64::from(height) / f64::from(source_height);
+    let mut subtitles = Vec::with_capacity(decoded.len());
+    for (at, (start, spu)) in decoded.iter().enumerate() {
+        let Ok(start_90k) = u64::try_from(*start) else {
+            continue;
+        };
+        let next = decoded
+            .get(at + 1)
+            .and_then(|(next, _)| u64::try_from(*next).ok());
+        let shown = spu
+            .params
+            .stop_delay
+            .map_or(5 * 90_000, |delay| u64::from(delay) * 1024);
+        let end = next.map_or(start_90k + shown, |next| next.min(start_90k + shown));
+        if end <= start_90k {
+            continue;
+        }
+        let Some(subtitle) = scaled_subtitle(spu, &vobsub.palette, (sx, sy), (width, height))
+        else {
+            continue;
+        };
+        subtitles.push(disccraft_pgs::Subtitle {
+            start: start_90k,
+            end,
+            ..subtitle
+        });
+    }
+    let segments = disccraft_pgs::encode_subtitles(&subtitles, width, height)
+        .map_err(|error| invalid(idx, &error.to_string()))?;
+    Ok(segments
+        .into_iter()
+        .filter_map(|segment| {
+            Some(crate::PgSegment {
+                pts: i64::try_from(segment.pts).ok()?,
+                dts: i64::try_from(segment.dts).ok()?,
+                data: segment.data,
+            })
+        })
+        .collect())
+}
+
+/// A decoded subpicture unit as a PGS subtitle (no times yet): its picture scaled by `(sx, sy)` by the nearest pixel
+/// and kept inside the `frame`, its four values the palette entries 0 to 3 (each value's colour of the VobSub's
+/// `palette`, its contrast as the alpha). `None` for a picture with nothing left.
+fn scaled_subtitle(
+    spu: &disccraft_spu::DecodedSpu,
+    palette: &[[u8; 3]; 16],
+    (sx, sy): (f64, f64),
+    (width, height): (u16, u16),
+) -> Option<disccraft_pgs::Subtitle> {
+    let bitmap = &spu.bitmap;
+    // `as` on values inside the frame.
+    let x = (f64::from(spu.params.x) * sx).floor() as u32;
+    let y = (f64::from(spu.params.y) * sy).floor() as u32;
+    let right = ((f64::from(spu.params.x) + f64::from(bitmap.width)) * sx).ceil() as u32;
+    let bottom = ((f64::from(spu.params.y) + f64::from(bitmap.height)) * sy).ceil() as u32;
+    let right = right.min(u32::from(width));
+    let bottom = bottom.min(u32::from(height));
+    if right <= x || bottom <= y {
+        return None;
+    }
+    let (out_width, out_height) = (right - x, bottom - y);
+    let mut pixels = Vec::with_capacity(usize::try_from(out_width * out_height).ok()?);
+    for row in 0..out_height {
+        // The source pixel whose area holds this one's centre.
+        let source_row = ((f64::from(y + row) + 0.5) / sy - f64::from(spu.params.y)).floor();
+        for column in 0..out_width {
+            let source_column =
+                ((f64::from(x + column) + 0.5) / sx - f64::from(spu.params.x)).floor();
+            let value = if source_row < 0.0 || source_column < 0.0 {
+                0
+            } else {
+                let (r, c) = (source_row as usize, source_column as usize);
+                if r < usize::from(bitmap.height) && c < usize::from(bitmap.width) {
+                    bitmap
+                        .pixels
+                        .get(r * usize::from(bitmap.width) + c)
+                        .copied()
+                        .unwrap_or(0)
+                } else {
+                    0
+                }
+            };
+            pixels.push(value);
+        }
+    }
+    let entries = (0u8..4)
+        .map(|value| {
+            let index = usize::from(spu.params.colors[usize::from(value)] & 15);
+            let [r, g, b] = palette.get(index).copied().unwrap_or([0, 0, 0]);
+            let alpha = spu.params.alpha[usize::from(value)].min(15) * 17;
+            disccraft_pgs::rgba_to_entry(value, r, g, b, alpha)
+        })
+        .collect();
+    Some(disccraft_pgs::Subtitle {
+        forced: spu.params.forced,
+        start: 0,
+        end: 0,
+        x: u16::try_from(x).ok()?,
+        y: u16::try_from(y).ok()?,
+        width: u16::try_from(out_width).ok()?,
+        height: u16::try_from(out_height).ok()?,
+        pixels,
+        palette: entries,
     })
 }
 
@@ -356,5 +502,147 @@ mod tests {
         }
         assert_eq!(read_spu(&sub, 0, 0x20), Some(unit));
         assert_eq!(read_spu(&sub, 0, 0x21), None);
+    }
+
+    /// M6.551: a VobSub unit with the forced start command (shown with subtitles off on a DVD) becomes a PGS display
+    /// set whose composition object is forced (forced_on_flag 0x40); an ordinary one does not.
+    #[test]
+    fn a_forced_unit_stays_forced_as_pgs() {
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-vobsub-forced-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let unit = |forced: bool| {
+            let bitmap = disccraft_spu::Bitmap {
+                width: 40,
+                height: 10,
+                pixels: vec![1; 400],
+            };
+            let params = disccraft_spu::SpuParams {
+                x: 100,
+                y: 400,
+                colors: [0, 1, 2, 3],
+                alpha: [0, 15, 15, 0],
+                forced,
+                stop_delay: Some(disccraft_spu::spu_delay_from_90k(90_000)),
+            };
+            disccraft_spu::encode_spu(&bitmap, &params).unwrap()
+        };
+        let header = "size: 720x480\npalette: 000000, ffffff, ff0000, 000000, 000000, 000000, 000000, 000000, \
+                      000000, 000000, 000000, 000000, 000000, 000000, 000000, 000000\n";
+        let (idx, sub) = disccraft_transcode::vobsub_files(
+            header,
+            Some("ja"),
+            &[(1.0, unit(true)), (3.0, unit(false))],
+        );
+        let path = dir.join("movie.idx");
+        std::fs::write(&path, idx).unwrap();
+        std::fs::write(path.with_extension("sub"), sub).unwrap();
+        let segments = super::vobsub_as_pgs(&path, (1920, 1080)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        // Each PCS with an object: (its time, the object's flags). The body is 11 bytes before the objects (after the
+        // 3-byte segment header), and the flags follow the object id and the window id.
+        let shown: Vec<(i64, u8)> = segments
+            .iter()
+            .filter(|segment| {
+                segment.data.first() == Some(&0x16) && segment.data.get(13) == Some(&1)
+            })
+            .map(|segment| (segment.pts, segment.data[17]))
+            .collect();
+        assert_eq!(shown, [(90_000, 0x40), (270_000, 0x00)]);
+    }
+
+    /// M6.546: a VobSub on a Blu-ray: each unit a PGS display set at its time (and one that clears it at its stop
+    /// time), its picture scaled from 720 x 480 to 1920 x 1080 at its place, its colours and contrasts the palette.
+    #[test]
+    fn a_vobsub_becomes_pgs_on_a_blu_ray() {
+        let dir = std::env::temp_dir().join(format!("disccraft-vobsub-pgs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 40 x 10 at (100, 400): the left half value 1, the right half value 2; shown for one second.
+        let bitmap = disccraft_spu::Bitmap {
+            width: 40,
+            height: 10,
+            pixels: (0..400)
+                .map(|at| if at % 40 < 20 { 1 } else { 2 })
+                .collect(),
+        };
+        let params = disccraft_spu::SpuParams {
+            x: 100,
+            y: 400,
+            colors: [0, 1, 2, 3],
+            alpha: [0, 15, 8, 0],
+            forced: false,
+            stop_delay: Some(disccraft_spu::spu_delay_from_90k(90_000)),
+        };
+        let spu = disccraft_spu::encode_spu(&bitmap, &params).unwrap();
+        let header = "size: 720x480\npalette: 000000, ffffff, ff0000, 000000, 000000, 000000, 000000, 000000, \
+                      000000, 000000, 000000, 000000, 000000, 000000, 000000, 000000\n";
+        let (idx, sub) = disccraft_transcode::vobsub_files(header, Some("ja"), &[(2.0, spu)]);
+        let path = dir.join("movie.1.jpn.idx");
+        std::fs::write(&path, idx).unwrap();
+        std::fs::write(path.with_extension("sub"), sub).unwrap();
+        let segments = super::vobsub_as_pgs(&path, (1920, 1080)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        // The PCS that shows it at two seconds, and the one that clears it at its stop time (a second in the unit's
+        // steps of 1024 / 90000 s: 87 of them).
+        let shows: Vec<i64> = segments
+            .iter()
+            .filter(|segment| segment.data.first() == Some(&0x16))
+            .map(|segment| segment.pts)
+            .collect();
+        assert_eq!(shows, [180_000, 180_000 + 87 * 1024]);
+        let stream: Vec<u8> = segments
+            .iter()
+            .flat_map(|segment| segment.data.clone())
+            .collect();
+        let objects = disccraft_pgs::read::objects(&stream);
+        let object = objects.first().unwrap();
+        // 100..140 × 8/3 = 266..374, 400..410 × 9/4 = 900..923.
+        assert_eq!((object.width, object.height), (108, 23));
+        // Inside the picture, the left half value 1 and the right half 2 (the frame's edges round outward).
+        assert_eq!(object.pixels[10 * 108 + 5], 1);
+        assert_eq!(object.pixels[10 * 108 + 100], 2);
+        let palettes = disccraft_pgs::read::palettes(&stream);
+        let entries = &palettes.first().unwrap().1;
+        let entry = |id: u8| {
+            entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .copied()
+                .unwrap()
+        };
+        // White fully opaque, red about half; the background transparent.
+        assert_eq!((entry(1).y, entry(1).alpha), (235, 255));
+        assert_eq!(entry(2).alpha, 136);
+        assert!(entry(2).cr > 200);
+        assert_eq!(entry(0).alpha, 0);
+    }
+
+    /// M6.542: a VobSub that `disccraft-transcode` writes (from an MKV's `S_VOBSUB` track) reads back: its palette,
+    /// language, and each unit with its time, one of them spanning packs.
+    #[test]
+    fn a_vobsub_taken_out_of_an_mkv_reads_back() {
+        let dir = std::env::temp_dir().join(format!("disccraft-vobsub-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut large = vec![0u8; 5000];
+        large[..2].copy_from_slice(&5000u16.to_be_bytes());
+        for (at, byte) in large.iter_mut().enumerate().skip(2) {
+            *byte = (at % 253) as u8;
+        }
+        let header = "size: 720x480\npalette: 000000, ffffff, ff0000, 000000, 000000, 000000, 000000, 000000, \
+                      000000, 000000, 000000, 000000, 000000, 000000, 000000, 0000ff\n";
+        let (idx, sub) = disccraft_transcode::vobsub_files(
+            header,
+            Some("ja"),
+            &[(0.5, spu()), (3.25, large.clone())],
+        );
+        let path = dir.join("movie.1.jpn.idx");
+        std::fs::write(&path, idx).unwrap();
+        std::fs::write(path.with_extension("sub"), sub).unwrap();
+        let vobsub = super::read_vobsub(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(vobsub.units, vec![(500, spu()), (3250, large)]);
+        assert_eq!(vobsub.language, Some(*b"ja"));
+        assert_eq!(vobsub.palette[2], [255, 0, 0]);
+        assert_eq!(vobsub.palette[15], [0, 0, 255]);
     }
 }

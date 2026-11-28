@@ -290,6 +290,7 @@ fn pg_units(track: &SubtitleTrack, width: u16, height: u16) -> Result<Vec<EsUnit
     let mut subtitles = Vec::with_capacity(track.cues.len());
     for cue in &track.cues {
         subtitles.push(disccraft_pgs::Subtitle {
+            forced: false,
             start: to_90k(cue.start)?,
             end: to_90k(cue.end)?,
             x: cue.bitmap.x,

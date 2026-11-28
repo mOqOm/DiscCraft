@@ -20,6 +20,8 @@ windows = { version = "0.62", features = [
     "Win32_System_Com",
     "Win32_System_IO",
     "Win32_System_Ioctl",
+    # M12.51: NVIDIA's encoder interface (nvEncodeAPI64.dll) and CUDA (nvcuda.dll), loaded when used.
+    "Win32_System_LibraryLoader",
     "Win32_System_Ole",
     "Win32_System_Variant",
     # M6.505: a long job's progress on the taskbar button, and its flash when the job ends.

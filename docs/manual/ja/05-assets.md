@@ -92,6 +92,7 @@ MPEG-4 Part 2（DivX / Xvid）など、絵をデコードできない動画も�
   1920×1080 29.97 / 25 fps、1080p 23.976 / 24 と 720p にはプログレッシブ）。1080 ラインの形式には、ビデオカメラ
   （HDV / AVCHD）の 1440×1080 も合う
 - High か Main プロファイル、レベル 4.1 まで、4:2:0 の 8 ビット、ファイル全体の平均が 40 Mbps 以下
+- 色がディスクと同じ（16〜235 の範囲で、HD なら BT.709。フルレンジや、HD で BT.601 と書かれたものは変換する）
 - キーフレーム（IDR）から始まる
 - 1080i では、そのクリップ 1 本だけのタイムライン
 
@@ -126,12 +127,16 @@ HDV のビデオカメラ（1440×1080i）や放送の録画（1920×1080i、144
 
 ## 5.2 読めるファイル
 
+素材の種類は、ファイルの先頭のバイトから見分ける。拡張子が違うファイルや拡張子のないファイル（名前が `.dat` の MP4 など）も、
+中身の形式が DiscCraft の読めるもの（下の表の映像・音声・画像の形式）なら、その種類として読み込む。中身から分からないとき
+（字幕、Craft の書類、AC-3 や DTS のそのままのストリーム、見つからないファイルなど）は拡張子で決める。
+
 | 種類 | 拡張子 |
 |---|---|
-| 映像 | mp4、mov、m4v、avi、mkv、webm、mxf、m2v、m1v、mpg、mpeg、vob、m2ts、mts、m2t、ts、dv、dif |
-| 音声 | wav、ac3、dts、mp3、aac、m4a、mka、mp2、ogg、oga、opus、flac、aif、aiff |
+| 映像 | mp4、mov、m4v、avi、mkv、webm、mxf、m2v、m1v、mpg、mpeg、vob、m2ts、mts、m2t、ts、dv、dif、ogv、3gp、3g2 |
+| 音声 | wav、ac3、eac3、ec3、dts、mp3、aac、m4a、mka、mp2、ogg、oga、opus、flac、aif、aiff |
 | 画像 | png、jpg、jpeg、bmp、tif、tiff、psd、psb、pcraft、svg |
-| 字幕 | srt、vtt、txt、idx（VobSub）、sup（PGS） |
+| 字幕 | srt、vtt、txt、ass、ssa、scc、mcc、stl、ttml、dfxp、smi、sami、idx（VobSub）、sup（PGS） |
 | メニューのデザイン | psd、pcraft |
 | Craft の書類 | `.scraft`（SoundCraft のセッション → 音声）、`.ecproj`（EffectCraft のプロジェクト → ビデオ）、`.fcproj`（FilmCraft のシーケンス → タイムライン） |
 
@@ -146,8 +151,9 @@ WAV は 16 ビット・48 kHz ならそのまま（LPCM）入り、それ以外�
 >   20 ビットの WAV は 24 ビットとして入る
 > - Blu-ray: 16・20・24 ビットで 48・96・192 kHz の WAV を、8 チャンネル・27.648 Mbps まで（24 ビット・192 kHz は
 >   5.1 まで）そのまま LPCM にする。スピーカーの配置は、モノラル、ステレオ、前の左右にセンターやサラウンド（後ろの中央
->   1 つ、または後ろか横の左右）を足したもの、5.1、7.0、7.1。それ以外（2.1、4.1、6.1、配置を書いていない 7 チャンネル）は
->   変換する。音声が大きいほど、映像のピークのビットレートが下がる（ストリームは 48 Mbps）
+>   1 つ、または後ろか横の左右）を足したもの、5.1、7.0、7.1。Blu-ray に配置のない 2.1・3.1・4.1 などは 5.1 の並びに（ない
+>   スピーカーは無音、サラウンドが 1 つなら左右に 3 dB 下げて）、6.1（配置を書いていない 7 チャンネルも）は 7.1 の並びに（後ろの
+>   中央を後ろの左右に 3 dB 下げて）入れる。音声が大きいほど、映像のピークのビットレートが下がる（ストリームは 48 Mbps）
 > - PAL の DVD では、48 kHz の MPEG-1 Layer II（`.mp2`、`.mpa`）もそのまま入る。NTSC の DVD と Blu-ray では変換する
 >   （NTSC のプレーヤーは MPEG オーディオを再生できるとは限らない）
 

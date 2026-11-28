@@ -8,21 +8,21 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use disccraft_psmux::es::parse_video;
+use disccraft_test_support::{ffmpeg, ffprobe, fixtures};
 use disccraft_transcode::{Standard, TranscodeOptions, transcode};
 
 static FIXTURE_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn transcodes_h264_aac_fixture() -> Result<(), Box<dyn Error>> {
-    let ffmpeg = ffmpeg_path();
-    if !tool_available(&ffmpeg) {
+    let Some(ffmpeg) = ffmpeg() else {
         println!("skipped: ffmpeg not found");
         return Ok(());
-    }
+    };
 
     let _guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
 
-    let fixtures = fixtures_dir();
+    let fixtures = fixtures();
     fs::create_dir_all(&fixtures)?;
 
     let input = fixtures.join("h264_aac.mp4");
@@ -129,8 +129,7 @@ fn run_transcode(input: &Path, dir: &Path) -> Result<(), Box<dyn Error>> {
     let info = parse_video(&data, 0).map_err(|error| format!("parse video: {error}"))?;
     assert_eq!(info.sequence.frame_rate_code, 4);
     check_wav(&fs::read(made.audio.as_ref().ok_or("missing film audio")?)?)?;
-    let ffprobe = ffprobe_path();
-    if tool_available(&ffprobe) {
+    if let Some(ffprobe) = ffprobe() {
         let probed = Command::new(&ffprobe)
             .args([
                 "-v",
@@ -153,7 +152,7 @@ fn run_transcode(input: &Path, dir: &Path) -> Result<(), Box<dyn Error>> {
             "{repeats:?}"
         );
     }
-    let decoded = Command::new(ffmpeg_path())
+    let decoded = Command::new(ffmpeg().ok_or("ffmpeg not found")?)
         .args(["-v", "error", "-xerror", "-i"])
         .arg(&made.video)
         .args(["-f", "null", "-"])
@@ -202,7 +201,7 @@ fn run_transcode(input: &Path, dir: &Path) -> Result<(), Box<dyn Error>> {
     )?;
     assert_eq!(made.frames, output.frames);
     assert_ne!(fs::read(&made.video)?, video_data);
-    let decoded = Command::new(ffmpeg_path())
+    let decoded = Command::new(ffmpeg().ok_or("ffmpeg not found")?)
         .args(["-v", "error", "-xerror", "-i"])
         .arg(&made.video)
         .args(["-f", "null", "-"])
@@ -276,39 +275,6 @@ fn create_fixture(ffmpeg: &Path, path: &Path) -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
-}
-
-fn tool_available(cmd: &Path) -> bool {
-    Command::new(cmd)
-        .arg("-version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn ffprobe_path() -> PathBuf {
-    env::var_os("DISCCRAFT_FFPROBE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("ffprobe"))
-}
-
-fn ffmpeg_path() -> PathBuf {
-    env::var_os("DISCCRAFT_FFMPEG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("ffmpeg"))
-}
-
-fn workspace_root() -> PathBuf {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest
-        .parent()
-        .and_then(|parent| parent.parent())
-        .map(PathBuf::from)
-        .unwrap_or(manifest)
-}
-
-fn fixtures_dir() -> PathBuf {
-    workspace_root().join("target").join("fixtures")
 }
 
 fn temp_dir(name: &str) -> PathBuf {

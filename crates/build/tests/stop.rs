@@ -8,11 +8,11 @@ use disccraft_build::{
     BuildOptions, OutputKind, build, build_with_progress, request_stop, was_stopped,
 };
 use disccraft_project::{Link, Project};
-use std::path::PathBuf;
+use disccraft_test_support::fixtures;
 
 #[test]
 fn a_build_stops_when_asked_and_the_next_one_runs() {
-    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures");
+    let fixtures = fixtures();
     let video = fixtures.join("sound_track.mp4");
     if !video.is_file() {
         eprintln!("sound_track.mp4 fixture not found; skipping");

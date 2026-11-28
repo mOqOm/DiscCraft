@@ -899,7 +899,8 @@ fn compile_title_pre(chapters: usize) -> Result<Vec<Cmd>, NavError> {
 fn compile_first_play(ctx: &mut Context, link: &Link) -> Result<Vec<Cmd>, NavError> {
     match link {
         Link::Stop => Ok(vec![cmd::exit()]),
-        Link::NotSet | Link::LastMenu => {
+        // Nothing has played yet to resume: as an unset first play.
+        Link::NotSet | Link::LastMenu | Link::Resume => {
             if ctx.menu_count > 0 {
                 Ok(vec![cmd::jump_ss_vmgm_pgcn(1)])
             } else {
@@ -977,6 +978,10 @@ fn link_command(ctx: &mut Context, link: &Link, from_title: bool) -> Result<Vec<
             }
         }
         Link::LastMenu => link_last_menu(ctx, from_title),
+        // M6.528: a menu goes back to the title it was called from (RSM); a title cannot resume itself (RSM is for
+        // menu PGCs), so there playback stops as with Stop.
+        Link::Resume if from_title => Ok(vec![cmd::exit()]),
+        Link::Resume => Ok(vec![cmd::rsm()]),
         Link::Menu { id, button } => link_menu(ctx, *id, *button, from_title),
         Link::Timeline { id, chapter } => link_timeline(ctx, *id, *chapter, from_title),
         Link::Playlist { id } => link_playlist(ctx, *id, from_title),
@@ -1297,7 +1302,8 @@ fn playlist_end_commands(ctx: &mut Context, id: u64) -> Result<Vec<Cmd>, NavErro
         .ok_or_else(|| NavError::Invalid(format!("playlist {id} does not exist")))?;
 
     match end {
-        Link::Stop | Link::NotSet => Ok(vec![cmd::exit()]),
+        // A playlist plays titles: nothing for it to resume (Project Check warns), playback stops.
+        Link::Stop | Link::NotSet | Link::Resume => Ok(vec![cmd::exit()]),
         Link::LastMenu => {
             let pgcn = ensure_last_menu(ctx)?;
             Ok(vec![cmd::link_pgcn(pgcn)])
@@ -1664,6 +1670,32 @@ mod tests {
     use super::{HiddenKind, NavError, compile, compile_title_pre};
     use crate::cmd;
     use disccraft_project::{Link, Project, Tick};
+
+    /// M6.528: Resume on a menu's button and end action goes back to the title the menu was called from (RSM); a
+    /// title's end action cannot resume (RSM is for menu PGCs) and stops.
+    #[test]
+    fn resume_goes_back_from_a_menu_and_stops_a_title() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::default();
+        let asset = project.add_asset(std::path::Path::new("movie.mp4"))?;
+        let timeline = project.add_timeline(asset, None)?;
+        project
+            .timeline_mut(timeline)
+            .ok_or("missing timeline")?
+            .end_action = Link::Resume;
+        let menu = project.add_menu(Some("Main".to_string()))?;
+        project.add_button(menu, "Back".to_string(), None, Link::Resume)?;
+        project.menu_mut(menu).ok_or("missing menu")?.end_action = Link::Resume;
+
+        let nav = compile(&project)?;
+        let menu_nav = nav.menus.first().ok_or("missing menu nav")?;
+        assert_eq!(menu_nav.buttons, vec![cmd::rsm()]);
+        assert_eq!(menu_nav.post, vec![cmd::rsm()]);
+        let title = nav.titles.first().ok_or("missing title")?;
+        assert!(title.post.contains(&cmd::exit()), "{:?}", title.post);
+        assert!(!title.post.contains(&cmd::rsm()));
+        assert_eq!(cmd::rsm(), [0x20, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10]);
+        Ok(())
+    }
 
     #[test]
     fn compiles_simple_project() -> Result<(), Box<dyn std::error::Error>> {

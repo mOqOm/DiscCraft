@@ -6,22 +6,9 @@
 
 use disccraft_build::{BuildOptions, OutputKind, build};
 use disccraft_project::{AudioTrack, Link, Project};
+use disccraft_test_support::{ffmpeg, ffprobe, fixtures};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
-
-fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures")
-}
 
 /// Two seconds of a small H.264 picture with AAC sound in an MP4 (transcoded by the build).
 fn video_with_sound(ffmpeg: &Path) -> PathBuf {
@@ -73,10 +60,7 @@ fn streams(ffprobe: &Path, vob: &Path) -> Vec<String> {
 
 #[test]
 fn the_videos_own_sound_as_audio_1_builds_like_the_implicit_soundtrack() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };
@@ -134,10 +118,7 @@ fn the_videos_own_sound_as_audio_1_builds_like_the_implicit_soundtrack() {
 /// away) plays the clips' own sound on the disc too, as in the preview: one AC-3 stream, as long as the two clips.
 #[test]
 fn a_title_of_two_clips_without_tracks_has_their_sound() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };

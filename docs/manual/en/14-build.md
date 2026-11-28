@@ -23,6 +23,7 @@ Choose **Window ▸ Build** (F2), or **File ▸ Build ▸ Folder…** / **Image�
 | Disc Info | Usage bar, disc name, size, DVD-ROM / BD-ROM Content ([14.3](#143-disc-info)) |
 | Layer Break | Only for DVD-9. Automatic / Manual. For manual, set it via the timeline and position (timecode / frames / seconds, **Playhead**) |
 | Region Code | Only for DVD. All regions / Custom (1–8) and **Parental level** ([14.4](#144-region-and-parental-level)) |
+| Parental Control | Only for Blu-ray. **Parental level** ([14.4](#144-region-and-parental-level)) |
 | Project Check | Check results (the same rows as the Check Project window) |
 | Result | Errors, number of titles / chapters / size, **Simulate** (run a VM after building to a folder) |
 
@@ -78,6 +79,25 @@ is entered.
 > - Project Preview shows the version matching the player's parental level set in Preferences ▸ Preview. Monitor shows
 >   the original timeline
 > - The same level is written for all countries. Unverified on physical players
+
+For Blu-ray, you can set the same **Parental level** (None, or 1–8) under **Parental Control** in the Build panel. A
+Blu-ray player sets its parental control as an age, so each level is given an age: 1 all ages, 2 six, 3 ten, 4
+thirteen, 5 fifteen, 6 seventeen, 7 eighteen and 8 twenty-one. A player set below that age does not start the disc
+(it asks no password).
+
+> **Details**
+>
+> - The **Parental level** of timelines, slideshows and chapter playlists works the same way: on a player below it, a
+>   timeline plays its **When not playing due to restriction** link (another title or menu; if unset, it stops). Links
+>   to a chapter of that title are checked the same way
+> - A chapter's **Parental Alternative** works too: the title becomes versions by age (playlists of the title's
+>   chapters with the alternative video in place), chosen by the player's age. A link to a chapter plays that chapter
+>   of the version
+> - A playlist plays its items' titles in turn, as on a DVD, so each item asks its level and plays its version for
+>   the player's age
+> - A built Blu-ray opened in Project Preview plays as a player whose age is the parental level set in Preferences ▸
+>   Preview, by the same table, and shows the version for that age (with the alternative video). Unverified on
+>   physical players
 
 ## 14.5 Build Progress
 

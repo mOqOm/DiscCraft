@@ -244,43 +244,45 @@ impl DiscCraftApp {
                     let _ = self.run_command("menucolorset.delete", json!({ "name": name }));
                 }
             }
-            SetAction::Import => {
-                let Some(path) = rfd::FileDialog::new()
-                    .add_filter(tl!("Menu Color Set"), &["dcmenucolors"])
-                    .pick_file()
-                else {
-                    return;
-                };
-                let read = self.run_query(
-                    "menucolorset.read",
-                    json!({ "path": path.to_string_lossy() }),
-                );
-                if let Some(read) = read.and_then(|read| {
-                    serde_json::from_value::<ColorSet>(read.get("colorSet")?.clone()).ok()
-                }) {
-                    state.own = true;
-                    state.named = None;
-                    state.draft = read;
-                }
-            }
-            SetAction::Export => {
-                let Some(path) = rfd::FileDialog::new()
-                    .add_filter(tl!("Menu Color Set"), &["dcmenucolors"])
-                    .set_file_name("colors.dcmenucolors")
-                    .save_file()
-                else {
-                    return;
-                };
-                if self
-                    .run_query(
-                        "menucolorset.export",
-                        json!({ "path": path.to_string_lossy(), "colorSet": set }),
-                    )
-                    .is_some()
-                {
-                    self.status = tlf!("Exported: {path}", path = path.display());
-                }
-            }
+            SetAction::Import => crate::file_dialogs::ask(
+                craft_dialogs::FileDialog::open().filter(tl!("Menu Color Set"), &["dcmenucolors"]),
+                crate::file_dialogs::Then::MenuColorsImport,
+            ),
+            SetAction::Export => crate::file_dialogs::ask(
+                craft_dialogs::FileDialog::save()
+                    .filter(tl!("Menu Color Set"), &["dcmenucolors"])
+                    .file_name("colors.dcmenucolors"),
+                crate::file_dialogs::Then::MenuColorsExport(Box::new(set)),
+            ),
+        }
+    }
+
+    /// The menu colour set file chosen for Import…: its set becomes the dialog's draft.
+    pub(crate) fn menu_colors_import(&mut self, path: &std::path::Path) {
+        let read = self.run_query(
+            "menucolorset.read",
+            json!({ "path": path.to_string_lossy() }),
+        );
+        if let Some(read) = read
+            .and_then(|read| serde_json::from_value::<ColorSet>(read.get("colorSet")?.clone()).ok())
+            && let Some(state) = self.color_set_dialog.as_mut()
+        {
+            state.own = true;
+            state.named = None;
+            state.draft = read;
+        }
+    }
+
+    /// Writes `set` to the file chosen for Export….
+    pub(crate) fn menu_colors_export(&mut self, set: &serde_json::Value, path: &std::path::Path) {
+        if self
+            .run_query(
+                "menucolorset.export",
+                json!({ "path": path.to_string_lossy(), "colorSet": set }),
+            )
+            .is_some()
+        {
+            self.status = tlf!("Exported: {path}", path = path.display());
         }
     }
 }

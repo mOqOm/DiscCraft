@@ -6,18 +6,9 @@
 
 use disccraft_bd::build_bdmv;
 use disccraft_project::{BdVideo, DiscKind, Link, Project};
-use std::path::{Path, PathBuf};
+use disccraft_test_support::{ffmpeg, ffprobe};
+use std::path::Path;
 use std::process::Command;
-
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
 
 /// The codec, size and frame rate of `file`'s first video stream, as ffprobe reads them.
 fn video_of(ffprobe: &Path, file: &Path) -> String {
@@ -43,10 +34,7 @@ fn video_of(ffprobe: &Path, file: &Path) -> String {
 
 #[test]
 fn each_title_is_made_in_its_videos_format() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };

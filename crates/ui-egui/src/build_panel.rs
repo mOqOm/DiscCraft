@@ -5,8 +5,9 @@ use disccraft_build::{BuildOptions, BuildReport, OutputKind, STEP_IMAGE, build_w
 use disccraft_project::Project;
 use disccraft_vm::{Report, explore, load_video_ts};
 
+use crate::file_dialogs::{Then, ask};
+use craft_dialogs::FileDialog;
 use egui::{self, Ui};
-use rfd::FileDialog;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
@@ -415,26 +416,26 @@ impl DiscCraftApp {
     }
 
     pub(crate) fn pick_build_path(&mut self) {
-        let path = match self.build_output {
-            OutputKind::Folder | OutputKind::Ddp => FileDialog::new().pick_folder(),
-            OutputKind::Iso => FileDialog::new().add_filter("ISO", &["iso"]).save_file(),
+        let dialog = match self.build_output {
+            OutputKind::Folder | OutputKind::Ddp => FileDialog::folder(),
+            OutputKind::Iso => FileDialog::save().filter("ISO", &["iso"]),
         };
-
-        if let Some(path) = path {
-            self.build_path = path.to_string_lossy().to_string();
-        }
+        ask(dialog, Then::BuildPath);
     }
 
     /// Chooses the ROM content folder (Encore's DVD-ROM content / BD-ROM content ▸ Browse…).
     pub(crate) fn pick_rom_content(&mut self) {
-        if let Some(path) = FileDialog::new().pick_folder() {
-            let path = path.to_string_lossy().into_owned();
-            if self
-                .run_command("disc.setRomContent", serde_json::json!({ "path": path }))
-                .is_some()
-            {
-                self.refresh_usage();
-            }
+        ask(FileDialog::folder(), Then::RomContent);
+    }
+
+    /// The ROM content folder chosen.
+    pub(crate) fn rom_content_chosen(&mut self, path: &Path) {
+        let path = path.to_string_lossy().into_owned();
+        if self
+            .run_command("disc.setRomContent", serde_json::json!({ "path": path }))
+            .is_some()
+        {
+            self.refresh_usage();
         }
     }
 
@@ -880,22 +881,39 @@ impl DiscCraftApp {
             .assets
             .get(&asset)
             .and_then(|found| Path::new(&found.path).parent().map(Path::to_path_buf));
-        let mut dialog = FileDialog::new()
-            .set_title(title)
-            .add_filter(tl!("Video"), extensions);
+        let mut dialog = FileDialog::open()
+            .title(title)
+            .filter(tl!("Video"), extensions);
         if let Some(start) = start.filter(|folder| folder.is_dir()) {
-            dialog = dialog.set_directory(start);
+            dialog = dialog.directory(start);
         }
-        let Some(video) = dialog.pick_file() else {
-            return;
-        };
-        let mut sound = FileDialog::new()
-            .set_title(tl!("Its Sound (Cancel: None)"))
-            .add_filter(tl!("Sound"), &["ac3", "wav", "mpa", "mp2", "dts"]);
+        ask(dialog, Then::LocateVideo { asset, disc });
+    }
+
+    /// Locate Transcoded File: the video is chosen; asks for its sound (Cancel: none).
+    pub(crate) fn locate_transcoded_sound(
+        &mut self,
+        asset: disccraft_project::AssetId,
+        disc: &'static str,
+        video: PathBuf,
+    ) {
+        let mut sound = FileDialog::open()
+            .title(tl!("Its Sound (Cancel: None)"))
+            .filter(tl!("Sound"), &["ac3", "wav", "mpa", "mp2", "dts"]);
         if let Some(folder) = video.parent() {
-            sound = sound.set_directory(folder);
+            sound = sound.directory(folder);
         }
-        let sound = sound.pick_file();
+        ask(sound, Then::LocateSound { asset, disc, video });
+    }
+
+    /// Locate Transcoded File: links the chosen video (and sound) to `asset` for a `disc` build.
+    pub(crate) fn locate_transcoded_files(
+        &mut self,
+        asset: disccraft_project::AssetId,
+        disc: &'static str,
+        video: &Path,
+        sound: Option<&Path>,
+    ) {
         let mut params = Map::new();
         params.insert("asset".to_owned(), Value::from(asset.0));
         params.insert("disc".to_owned(), Value::from(disc));

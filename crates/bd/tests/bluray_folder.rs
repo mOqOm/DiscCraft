@@ -8,26 +8,13 @@ use disccraft_bdmv::mobj::NavCommand;
 use disccraft_project::{
     AudioTrack, DiscKind, Link, MenuBackground, MenuLoops, Project, SubtitleTrack, Tick, UserOp,
 };
+use disccraft_test_support::{ffmpeg, ffprobe, fixtures};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const TICKS_PER_SECOND: i64 = 254_016_000_000;
 /// ffmpeg's `bluray:` input ignores playlists shorter than 180 seconds.
 const SECONDS: u32 = 190;
-
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
-
-fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures")
-}
 
 /// A long, DVD-compliant MPEG-2 + AC-3 pair (passed through without transcoding).
 fn long_fixture(ffmpeg: &Path) -> (PathBuf, PathBuf) {
@@ -143,10 +130,7 @@ fn popup_reads_back(out: &Path) {
 
 #[test]
 fn project_becomes_a_bdmv_folder_that_libbluray_plays() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };
@@ -310,10 +294,7 @@ fn silent_wav(frames: u32) -> Vec<u8> {
 /// marks the loop point, and a movie object that plays it again from that mark.
 #[test]
 fn a_motion_menu_becomes_a_clip_that_loops_with_its_sound() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };
@@ -431,10 +412,7 @@ fn a_motion_menu_becomes_a_clip_that_loops_with_its_sound() {
 /// DVD tests make and ffmpeg / ffprobe; skipped without them.
 #[test]
 fn an_hd_title_joins_trimmed_clips() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };
@@ -523,10 +501,7 @@ fn an_hd_title_joins_trimmed_clips() {
 /// ffmpeg; skipped without.
 #[test]
 fn a_1080i_disc_is_mpeg2_hd() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };
@@ -651,10 +626,7 @@ fn a_1080i_disc_is_mpeg2_hd() {
 /// fixture and ffmpeg; skipped without.
 #[test]
 fn a_1080i_disc_can_be_interlaced_h264() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };
@@ -771,7 +743,7 @@ fn a_1080i_disc_can_be_interlaced_h264() {
 /// bottom centre the test picture is yellow and blue. Needs the `ntsc.m2v` fixture and ffmpeg; skipped without.
 #[test]
 fn a_subtitle_takes_its_colour_group_on_blu_ray() {
-    let Some(ffmpeg) = tool("DISCCRAFT_FFMPEG", "ffmpeg") else {
+    let Some(ffmpeg) = ffmpeg() else {
         eprintln!("ffmpeg not found; skipping");
         return;
     };
@@ -842,7 +814,7 @@ fn a_subtitle_takes_its_colour_group_on_blu_ray() {
 /// ffprobe; skipped without them.
 #[test]
 fn an_hd_slideshow_carries_its_slides_subtitles() {
-    let Some(ffprobe) = tool("DISCCRAFT_FFPROBE", "ffprobe") else {
+    let Some(ffprobe) = ffprobe() else {
         eprintln!("ffprobe not found; skipping");
         return;
     };
@@ -901,7 +873,7 @@ fn an_hd_slideshow_carries_its_slides_subtitles() {
 /// cache, and the clip has the pictures and the show's sound at the show's length.
 #[test]
 fn an_hd_slideshow_makes_no_dvd_encode() {
-    let Some(ffprobe) = tool("DISCCRAFT_FFPROBE", "ffprobe") else {
+    let Some(ffprobe) = ffprobe() else {
         eprintln!("ffprobe not found; skipping");
         return;
     };
@@ -977,7 +949,7 @@ fn an_hd_slideshow_makes_no_dvd_encode() {
 
 #[test]
 fn an_hd_title_makes_no_dvd_transcode() {
-    let Some(ffprobe) = tool("DISCCRAFT_FFPROBE", "ffprobe") else {
+    let Some(ffprobe) = ffprobe() else {
         eprintln!("ffprobe not found; skipping");
         return;
     };
@@ -1067,10 +1039,7 @@ fn interlaced_h264_in_an_mp4_goes_on_a_1080i_disc_as_it_is() {
 }
 
 fn interlaced_h264_goes_on_a_1080i_disc_as_it_is(container: &str, width: u32) {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };
@@ -1243,10 +1212,7 @@ fn tone_wav(rate: u32, channels: u16, mask: u32, seconds: u32) -> Vec<u8> {
 /// Digital): ffmpeg (a black box) reads 5.1 at 192 kHz, and hears each speaker's tone on that speaker.
 #[test]
 fn a_5_1_wav_at_192_khz_keeps_its_speakers() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("skipping: ffmpeg/ffprobe not found");
         return;
     };
@@ -1351,10 +1317,7 @@ fn short_video(ffmpeg: &Path) -> PathBuf {
 /// 48 kHz), and ffmpeg (a black box) reads the frames as the file's 5.1 DTS and decodes them without errors.
 #[test]
 fn a_dts_file_goes_on_a_blu_ray_as_it_is() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("skipping: ffmpeg/ffprobe not found");
         return;
     };

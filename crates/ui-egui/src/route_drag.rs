@@ -31,6 +31,22 @@ pub(crate) fn direction_name(direction: usize) -> &'static str {
     }
 }
 
+/// The button a route dragged to where the pointer is now goes to: the one under it other than its own.
+fn route_target(
+    menu: &Menu,
+    frame: (u16, u16),
+    canvas: egui::Rect,
+    drag: &RouteDrag,
+) -> Option<usize> {
+    menu.buttons
+        .iter()
+        .enumerate()
+        .find(|(index, button)| {
+            *index != drag.button && to_canvas(button.rect, frame, canvas).contains(drag.now)
+        })
+        .map(|(index, _)| index)
+}
+
 /// The side of one cell of a route cross (screen points; the cross keeps its size when the viewer zooms).
 const CELL: f32 = 15.0;
 
@@ -137,7 +153,8 @@ impl DiscCraftApp {
         }
     }
 
-    /// Draws the route being dragged (when routes are set by hand).
+    /// Draws the route being dragged (when routes are set by hand), and marks the button it would go to (M6.538;
+    /// Encore lights that button while the route is over it).
     pub(crate) fn draw_route_handles(
         &self,
         ui: &Ui,
@@ -153,6 +170,11 @@ impl DiscCraftApp {
         if let Some(drag) = self.route_drag.filter(|drag| drag.menu == menu.id)
             && let Some(button) = menu.buttons.get(drag.button)
         {
+            if let Some(target) =
+                route_target(menu, frame, canvas, &drag).and_then(|index| menu.buttons.get(index))
+            {
+                crate::pickwhip::mark_target(painter, to_canvas(target.rect, frame, canvas));
+            }
             let from = route_handle(to_canvas(button.rect, frame, canvas), drag.direction).center();
             painter.line_segment([from, drag.now], egui::Stroke::new(2.0, color));
         }
@@ -222,14 +244,7 @@ impl DiscCraftApp {
             return;
         }
         self.route_drag = None;
-        let target = menu
-            .buttons
-            .iter()
-            .enumerate()
-            .find(|(index, button)| {
-                *index != drag.button && to_canvas(button.rect, frame, canvas).contains(drag.now)
-            })
-            .map(|(index, _)| index);
+        let target = route_target(menu, frame, canvas, &drag);
         let number = target.map_or(0, |index| index.saturating_add(1));
         let _ = self.run_command(
             "button.setRoutes",

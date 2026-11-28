@@ -9,15 +9,24 @@ use disccraft_project::AssetId;
 use std::path::{Path, PathBuf};
 
 /// The file types DiscCraft imports as assets (the File ▸ Import ▸ Asset dialog's list).
-pub(crate) const MEDIA_EXTENSIONS: [&str; 48] = [
+pub(crate) const MEDIA_EXTENSIONS: [&str; 62] = [
     "mp4", "mov", "m4v", "avi", "mkv", "webm", "mxf", "m2v", "m1v", "mpg", "mpeg", "vob", "m2ts",
-    "mts", "m2t", "ts", "dv", "dif", "wav", "ac3", "dts", "mp3", "aac", "m4a", "mka", "mp2", "ogg",
-    "oga", "opus", "flac", "aif", "aiff", "png", "jpg", "jpeg", "bmp", "tif", "tiff", "psd", "psb",
-    "pcraft", "svg", "srt", "vtt", "idx", "sup", "ecproj", "scraft",
+    "mts", "m2t", "ts", "dv", "dif", "ogv", "3gp", "3g2", "wav", "ac3", "eac3", "ec3", "dts",
+    "mp3", "aac", "m4a", "mka", "mp2", "ogg", "oga", "opus", "flac", "aif", "aiff", "png", "jpg",
+    "jpeg", "bmp", "tif", "tiff", "psd", "psb", "pcraft", "svg", "srt", "vtt", "ass", "ssa", "scc",
+    "mcc", "stl", "ttml", "dfxp", "smi", "sami", "idx", "sup", "ecproj", "scraft",
 ];
 
 /// The most files one drop imports (a folder of thousands of pictures would otherwise stall the window).
 const MAX_DROPPED_FILES: usize = 500;
+
+/// Whether a dropped file is one DiscCraft imports: its name says so, or (M6.568) its first bytes name a format
+/// DiscCraft reads (a movie with no extension or a wrong one). The files inside a dropped folder go by their names.
+fn is_dropped_media(path: &Path) -> bool {
+    is_media(path)
+        || (path.is_file()
+            && disccraft_project::AssetKind::of_file(path) != disccraft_project::AssetKind::Other)
+}
 
 /// Whether `path` names a file type DiscCraft imports.
 pub(crate) fn is_media(path: &Path) -> bool {
@@ -47,7 +56,7 @@ pub(crate) fn media_files(dropped: &[PathBuf]) -> Vec<PathBuf> {
                 .unwrap_or_default();
             inside.sort();
             files.extend(inside);
-        } else if is_media(path) {
+        } else if is_dropped_media(path) {
             files.push(path.clone());
         }
     }

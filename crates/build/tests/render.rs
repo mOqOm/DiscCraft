@@ -5,13 +5,10 @@
 
 use disccraft_build::{BuildOptions, OutputKind, Render, build, render};
 use disccraft_project::{Link, MenuBackground, Project, Tick};
-use std::path::{Path, PathBuf};
+use disccraft_test_support::fixtures;
+use std::path::Path;
 
 const TICKS_PER_SECOND: i64 = 254_016_000_000;
-
-fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures")
-}
 
 /// The names of the files in `dir` that start with `prefix` and end with `suffix`.
 fn files(dir: &Path, prefix: &str, suffix: &str) -> Vec<String> {

@@ -5,29 +5,17 @@
 
 use disccraft_build::{BuildOptions, OutputKind, TranscodeStatus, build, transcode_status};
 use disccraft_project::{AudioTrack, Link, Project};
+use disccraft_test_support::{ffmpeg, ffprobe, fixtures};
 use std::path::PathBuf;
 use std::process::Command;
 
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
-
 #[test]
 fn a_96_khz_24_bit_wav_is_lpcm_on_a_dvd() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };
-    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures");
+    let fixtures = fixtures();
     let video = fixtures.join("sound_track.mp4");
     if !video.is_file() {
         eprintln!("sound_track.mp4 fixture not found; skipping");
@@ -126,14 +114,11 @@ fn a_96_khz_24_bit_wav_is_lpcm_on_a_dvd() {
 /// mono one, go on the disc as they are.
 #[test]
 fn a_24_bit_wav_is_lpcm_on_a_blu_ray() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };
-    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures");
+    let fixtures = fixtures();
     let video = fixtures.join("sound_track.mp4");
     if !video.is_file() {
         eprintln!("sound_track.mp4 fixture not found; skipping");
@@ -226,6 +211,116 @@ fn a_24_bit_wav_is_lpcm_on_a_blu_ray() {
         assert!(
             decoded[..same] == source[..same],
             "{name}: the samples differ"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M6.544: a 2.1 WAV (24 bits, 48 kHz) goes on a Blu-ray as LPCM on the 3/2-with-LFE assignment: a decoder (ffmpeg,
+/// the outside oracle) reads six channels, the file's left, right and LFE as they are and the others silent.
+#[test]
+fn a_2_1_wav_is_lpcm_on_a_blu_ray() {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
+        eprintln!("ffmpeg / ffprobe not found; skipping");
+        return;
+    };
+    let fixtures = fixtures();
+    let video = fixtures.join("sound_track.mp4");
+    if !video.is_file() {
+        eprintln!("sound_track.mp4 fixture not found; skipping");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("disccraft-lpcm-2-1-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let wav = dir.join("two_one.wav");
+    let made = Command::new(&ffmpeg)
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+        .arg("anoisesrc=sample_rate=48000:duration=3:amplitude=0.3:seed=11")
+        .args([
+            "-af",
+            "pan=2.1|FL=c0|FR=-1*c0|LFE=0.5*c0",
+            "-c:a",
+            "pcm_s24le",
+        ])
+        .arg(&wav)
+        .status()
+        .unwrap();
+    assert!(made.success());
+
+    let mut project = Project::default();
+    project.settings.kind = disccraft_project::DiscKind::BluRay;
+    project.settings.capacity = disccraft_project::Capacity::Bd25;
+    let v = project.add_asset(&video).unwrap();
+    let a = project.add_asset(&wav).unwrap();
+    let t = project.add_timeline(v, Some("Main".to_string())).unwrap();
+    project
+        .timeline_mut(t)
+        .unwrap()
+        .audio
+        .push(AudioTrack::of(a));
+    project.settings.first_play = Link::Timeline { id: t, chapter: 0 };
+    assert_eq!(
+        transcode_status(&project, None)[&a],
+        TranscodeStatus::Unneeded
+    );
+    let out = dir.join("bd");
+    let _ = build(
+        &project,
+        &BuildOptions {
+            output: OutputKind::Folder,
+            path: out.clone(),
+            cache: None,
+            audio_language: None,
+        },
+    )
+    .unwrap();
+    let stream = out.join("BDMV/STREAM/00001.m2ts");
+    let probe = Command::new(&ffprobe)
+        .args(["-v", "error", "-select_streams", "a:0", "-show_entries"])
+        .args(["stream=codec_name,sample_rate,channels", "-of", "csv=p=0"])
+        .arg(&stream)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&probe.stdout);
+    assert_eq!(
+        text.lines().next().unwrap_or_default().trim(),
+        "pcm_bluray,48000,6",
+        "{text}"
+    );
+    let raw = |input: &PathBuf| {
+        let output = Command::new(&ffmpeg)
+            .args(["-v", "error", "-xerror", "-i"])
+            .arg(input)
+            .args(["-map", "0:a:0", "-f", "s32le", "-"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+            .stdout
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| i32::from_le_bytes(*bytes))
+            .collect::<Vec<i32>>()
+    };
+    let (decoded, source) = (raw(&stream), raw(&wav));
+    // The decoder's 5.1 order: FL FR FC LFE and the two surrounds.
+    let frames = (source.len() / 3).min(decoded.len() / 6).min(48_000 * 2);
+    assert!(frames > 48_000, "{frames}");
+    for frame in 0..frames {
+        let (got, want) = (
+            &decoded[frame * 6..frame * 6 + 6],
+            &source[frame * 3..frame * 3 + 3],
+        );
+        assert_eq!(
+            (got[0], got[1], got[3], got[2], got[4], got[5]),
+            (want[0], want[1], want[2], 0, 0, 0),
+            "frame {frame}"
         );
     }
     let _ = std::fs::remove_dir_all(&dir);

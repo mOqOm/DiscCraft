@@ -5,22 +5,13 @@
 
 use disccraft_build::{BuildOptions, OutputKind, TranscodeStatus, build, transcode_status};
 use disccraft_project::{BdVideo, DiscKind, Link, Project};
+use disccraft_test_support::{ffmpeg, ffprobe, fixtures};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
-
 /// Four seconds of a busy picture (noise over a test pattern), so an encoder spends the bits it is given.
 fn busy_video(ffmpeg: &Path) -> Option<PathBuf> {
-    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures");
+    let fixtures = fixtures();
     let video = fixtures.join("busy.mp4");
     if video.is_file() {
         return Some(video);
@@ -57,10 +48,7 @@ fn video_bytes(ffprobe: &Path, file: &Path) -> u64 {
 
 #[test]
 fn an_assets_bit_rate_is_what_it_is_encoded_at() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };
@@ -212,14 +200,16 @@ fn an_assets_bit_rate_is_what_it_is_encoded_at() {
         rate(low),
         rate(middle)
     );
-    // The H.264 encoder stays under a short clip's target; the rates still follow the setting.
+    // The H.264 encoder stays under a short clip's target; the rates still follow the setting. M12.50: the noise
+    // reaches the encoder as it is (no longer smoothed by a round trip through RGB), so the 3 Mbit/s stream comes
+    // nearer its target (1.6 to 2.2 Mbit/s) and the two settings lie less far apart (1.7 to 1.3 times).
     assert!(
         (1_200_000..4_200_000).contains(&rate(low)),
         "{} bit/s",
         rate(low)
     );
     assert!(
-        rate(middle) * 10 > rate(low) * 15 && rate(middle) < 8_400_000,
+        rate(middle) * 10 > rate(low) * 12 && rate(middle) < 8_400_000,
         "{} bit/s",
         rate(middle)
     );
@@ -230,7 +220,7 @@ fn an_assets_bit_rate_is_what_it_is_encoded_at() {
 /// Four seconds of DVD-compliant MPEG-2 (720x480, 29.97, about 8 Mbit/s): a DVD takes it as it is. `vob`: in a
 /// program stream (as a DVD's VOB, with AC-3 sound), else an elementary stream.
 fn compliant_video(ffmpeg: &Path, vob: bool) -> Option<PathBuf> {
-    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures");
+    let fixtures = fixtures();
     let video = fixtures.join(if vob {
         "busy_compliant.vob"
     } else {
@@ -289,10 +279,7 @@ fn a_preset_transcodes_a_compliant_program_stream() {
 }
 
 fn a_preset_transcodes(vob: bool) {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };

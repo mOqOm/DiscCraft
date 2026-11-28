@@ -15,13 +15,14 @@ filmcraft-codecs
 filmcraft-project
 filmcraft-format
 
-Pinned revision: ba6fe10529c7bf5d2a9283f9de2e35c0ccff926c
+Pinned revision: a9429d82d2e5b87539eb38926d5fc0f2ddcd7724
 
 Source files ported from FilmCraft (same license; ported at da535c18433dbe046553733b0ab08ce9bd736a51, unchanged in
 FilmCraft up to the pinned revision above):
 crates/ui-egui/src/i18n.rs (from FilmCraft crates/ui-egui/src/i18n.rs: its tl!/tlf! macros and placeholder filling)
 crates/ui-egui/src/icons.rs (from FilmCraft crates/ui-egui/src/icons.rs at 19d46c0748cf5c0ef5b0b2a421b85e8ae6d99db6, the
-code-drawn icons the Craft apps share; FilmCraft's theme-bound `button` left out)
+code-drawn icons the Craft apps share; FilmCraft's theme-bound `button` left out; the Go To In / Out braces as at
+48fce6769713ae38a6a889ec87d38da8db3d793c)
 crates/ui-egui/src/craft_timeline.rs (from FilmCraft crates/ui-egui/src/panels/timeline/ruler.rs, layout.rs, scrollbars.rs,
 interact.rs, panels/timeline.rs, src/widgets.rs and src/theme.rs at 19d46c0748cf5c0ef5b0b2a421b85e8ae6d99db6: the Timeline's
 ruler strides, marker flag, playhead, zoom scroll bar, wheel, view easing and Medium theme colours, adapted to a title;
@@ -30,36 +31,174 @@ the track header badges and the caption colours)
 crates/ui-egui/src/monitor_controls.rs (from FilmCraft crates/ui-egui/src/panels/monitor.rs at
 19d46c0748cf5c0ef5b0b2a421b85e8ae6d99db6: the Program monitor's controls row, mini timeline and transport layout,
 adapted to a DiscCraft timeline's chapter points and playhead)
+crates/ui-egui/src/framework.rs (after FilmCraft crates/ui-egui/src/framework.rs at
+48fce6769713ae38a6a889ec87d38da8db3d793c: hosting craft-libs' UI runtime from the eframe App, F6 unbound from the
+runtime's pane moves, and an Escape noted in the raw input before the runtime routes it)
+crates/ui-egui/src/updates.rs (after FilmCraft crates/ui-egui/src/updates_ui.rs at
+a9429d82d2e5b87539eb38926d5fc0f2ddcd7724: driving craft-update's updater and its check dialog from the app, and when
+the check's result window shows)
 
 This product includes software from PhotoCraft (https://github.com/storytold/photocraft), licensed under the MIT License or the Apache License 2.0, at your option.
 Crates used: photocraft-io, photocraft-doc, photocraft-compose, photocraft-geom, photocraft-raster.
-Pinned revision: b609bc7d3c6bae486d80a21bfb32d25c990bd954
+Pinned revision: 391cb0171004a5cb6b7b5138ac96c1ceb5ed8ae1
 
 This product includes software from EffectCraft (https://github.com/storytold/effectcraft), licensed under the MIT License or the Apache License 2.0, at your option.
 Crates used: effectcraft-engine, effectcraft-host (and, through them, EffectCraft's project, render, media and export crates).
-Pinned revision: 86af5cba7f6976fe2b4561df4e8021ba807591f5
+Pinned revision: 1855d02c4727be0eea58f87a5ad5dc4ecdfd30a3
 
 This product includes software from SoundCraft (https://github.com/storytold/soundcraft), licensed under the MIT License or the Apache License 2.0, at your option.
 Crates used: soundcraft-engine, soundcraft-dsp.
-Pinned revision: 7391fc7465b45f0159c8044a521d77b0a309de7f
+Pinned revision: 0fce3e7aba3943b837d588637b713a660a911a87
 
 This product includes software from craft-libs (https://github.com/storytold/craft-libs), licensed under the MIT License
 or the Apache License 2.0, at your option. FilmCraft, PhotoCraft, EffectCraft and SoundCraft pull in its crates at their own
 revisions. DiscCraft uses directly craft-audio (its AC-3 encoder, which makes the transcoded soundtracks Dolby Digital, and its
 AC-3 decoder, with which a raw AC-3 file is heard in the monitor;
-revision 249a41bd9306a1b34330ac94e596a1a8b881378a), craft-video (its H.264 encoder, formerly FilmCraft's
+revision 6bfe8e7678dd470432b949154e78ec1f92fc64fc), craft-video (its H.264 encoder, formerly FilmCraft's
 filmcraft-h264enc, which makes the HD Blu-ray video, and, only in a build with the transcode crate's `hevc` feature,
 its HEVC encoder for Ultra HD video; the same revision; in tests also its MPEG-2 decoder), craft-media
 (its MPEG-2 Systems, Matroska and MP4 readers, which take out video and audio that fit a disc as they are; the same
-revision), craft-ui (its docking, which arranges the panels and workspaces; the same revision) craft-i18n (the
-translation lookup the Crafting Apps share; the same revision) and craft-menu with craft-keymap (the menu bar the
-Crafting Apps share; the same revision), and in tests
-only craft-psd (PSD writer, the same revision). craft-video and craft-media are taken from the fork https://github.com/mOqOm/craft-libs (branch
+revision), craft-ui (its docking, which arranges the panels and workspaces, on the UI runtime the Crafting Apps share,
+with craft-behavior's dock model, craft-host, craft-window and craft-theme; the same revision) craft-i18n (the
+translation lookup the Crafting Apps share; the same revision), craft-menu with craft-keymap (the menu bar the
+Crafting Apps share; the same revision), craft-captions (the caption files DiscCraft does not read itself: ASS / SSA,
+SCC, MCC, EBU STL, TTML / DFXP, SAMI; the same revision), craft-mcp-server (the MCP server machinery the Crafting
+Apps share, behind `disccraft-cli mcp`; the same revision), craft-sniff (an imported file's kind from its first
+bytes; the same revision), craft-settings (the settings file, config.toml, as the Crafting Apps keep theirs; the
+same revision), craft-dialogs (native file dialogs that never hold up a frame; the same
+revision), craft-update (Help > Check for Updates...: finding, downloading and installing a newer release; the
+same revision) and craft-fonts-build (embeds the craft-fonts faces a build is given, see below; the same revision),
+and in tests
+only craft-psd (PSD writer, the same revision) and craft-media-testkit with craft-testkit (where ffmpeg and ffprobe
+are for the tests that compare with them; the same revision). craft-video and craft-media are taken from the fork https://github.com/mOqOm/craft-libs (branch
 disccraft, under the same licences), which adds to that revision craft-libs pull requests #1992 and #2017 (H.264
 field pictures and MBAFF) by their authors, stores that keep Matroska and MPEG-2 transport stream indexes between runs, and interlaced (1080i) H.264 encoding. Its vendored Hayro crates (with the vello and
-linesweeper crates they draw with) are patched to revision 5c5e0d52c387c0a4ae2908a07e476d7584f60362 in Cargo.toml.
+linesweeper crates they draw with) are patched to revision 3eb5b528b08211844bc5c95c5a4fd169894d52ff in Cargo.toml.
+
+Builds made with craft-fonts (https://github.com/storytold/craft-fonts; DISCCRAFT_FONTS_DIR, which the release
+builds set, at revision b076417b5880bd4154bd22f00695b1d28c6bea83) also embed these fonts from it, unmodified, under the
+interface's own faces (M9.66), each licensed under the SIL Open Font License, Version 1.1 (its text is below):
+  Noto Sans Arabic, Noto Sans Thai, Noto Sans Georgian, Noto Sans Hebrew, Noto Sans Devanagari, Noto Sans Symbols and
+  Noto Sans Symbols 2: Copyright 2022 The Noto Project Authors (https://github.com/notofonts/arabic, /thai,
+  /georgian, /hebrew, /devanagari, /symbols)
+craft-fonts' CJK faces are embedded only as its interface faces (role "ui"), cut to the characters of DiscCraft's
+catalogs; its manifest at that revision has none, so none is embedded. The interface draws with craft-ui's own faces
+(M9.68), which craft-ui-contract bundles under the same licence: Inter Regular and Inter SemiBold, Copyright (c) 2016
+The Inter Project Authors (https://github.com/rsms/inter). The Japanese UI face it falls back on (Meiryo UI and the
+like) is read from the operating system and is not included.
+
+  -----------------------------------------------------------
+  SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
+  -----------------------------------------------------------
+
+  PREAMBLE
+  The goals of the Open Font License (OFL) are to stimulate worldwide
+  development of collaborative font projects, to support the font creation
+  efforts of academic and linguistic communities, and to provide a free and
+  open framework in which fonts may be shared and improved in partnership
+  with others.
+
+  The OFL allows the licensed fonts to be used, studied, modified and
+  redistributed freely as long as they are not sold by themselves. The
+  fonts, including any derivative works, can be bundled, embedded, 
+  redistributed and/or sold with any software provided that any reserved
+  names are not used by derivative works. The fonts and derivatives,
+  however, cannot be released under any other type of license. The
+  requirement for fonts to remain under this license does not apply
+  to any document created using the fonts or their derivatives.
+
+  DEFINITIONS
+  "Font Software" refers to the set of files released by the Copyright
+  Holder(s) under this license and clearly marked as such. This may
+  include source files, build scripts and documentation.
+
+  "Reserved Font Name" refers to any names specified as such after the
+  copyright statement(s).
+
+  "Original Version" refers to the collection of Font Software components as
+  distributed by the Copyright Holder(s).
+
+  "Modified Version" refers to any derivative made by adding to, deleting,
+  or substituting -- in part or in whole -- any of the components of the
+  Original Version, by changing formats or by porting the Font Software to a
+  new environment.
+
+  "Author" refers to any designer, engineer, programmer, technical
+  writer or other person who contributed to the Font Software.
+
+  PERMISSION & CONDITIONS
+  Permission is hereby granted, free of charge, to any person obtaining
+  a copy of the Font Software, to use, study, copy, merge, embed, modify,
+  redistribute, and sell modified and unmodified copies of the Font
+  Software, subject to the following conditions:
+
+  1) Neither the Font Software nor any of its individual components,
+  in Original or Modified Versions, may be sold by itself.
+
+  2) Original or Modified Versions of the Font Software may be bundled,
+  redistributed and/or sold with any software, provided that each copy
+  contains the above copyright notice and this license. These can be
+  included either as stand-alone text files, human-readable headers or
+  in the appropriate machine-readable metadata fields within text or
+  binary files as long as those fields can be easily viewed by the user.
+
+  3) No Modified Version of the Font Software may use the Reserved Font
+  Name(s) unless explicit written permission is granted by the corresponding
+  Copyright Holder. This restriction only applies to the primary font name as
+  presented to the users.
+
+  4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font
+  Software shall not be used to promote, endorse or advertise any
+  Modified Version, except to acknowledge the contribution(s) of the
+  Copyright Holder(s) and the Author(s) or with their explicit written
+  permission.
+
+  5) The Font Software, modified or unmodified, in part or in whole,
+  must be distributed entirely under this license, and must not be
+  distributed under any other license. The requirement for fonts to
+  remain under this license does not apply to any document created
+  using the Font Software.
+
+  TERMINATION
+  This license becomes null and void if any of the above conditions are
+  not met.
+
+  DISCLAIMER
+  THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
+  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
+  OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE
+  COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+  INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
+  DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+  FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
+  OTHER DEALINGS IN THE FONT SOFTWARE.
 
 This product includes translations from craft-i18n (https://github.com/storytold/craft-i18n), the Crafting Apps' shared
 interface catalogs, licensed under the MIT License or the Apache License 2.0, at your option:
 crates/ui-egui/i18n/locales/ja/common.tsv is its locales/ja/common.tsv, unchanged, at the revision in
 crates/ui-egui/i18n/craft-i18n.rev.
+
+This product includes values taken from NVIDIA's nvEncodeAPI.h (Video Codec Interface 13.1.24, the NVIDIA Video
+Codec SDK's encoder interface header): crates/platform/src/nvenc/layout.rs holds the header's structure sizes, field
+offsets, version numbers, enum values and GUIDs, as scripts/nvenc/nvenc_layout.c reads them from it. The header's
+notice, which applies to that header file only:
+
+  Copyright (c) 2010-2026 NVIDIA Corporation
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+  documentation files (the "Software"), to deal in the Software without restriction, including without limitation
+  the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the software, and to
+  permit persons to whom the software is furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all copies or substantial portions of
+  the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+  THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+  TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+The encoder itself (nvEncodeAPI64.dll) and CUDA (nvcuda.dll) are parts of the NVIDIA display driver on the user's
+computer; DiscCraft loads them when it encodes and does not include them.

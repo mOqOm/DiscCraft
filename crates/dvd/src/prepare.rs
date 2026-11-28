@@ -2756,10 +2756,20 @@ fn reshaped_wav(
     Ok(out)
 }
 
+/// Whether the file at `path` starts with an E-AC-3 syncframe (Dolby Digital Plus: `bsid` above 10, ATSC A/52
+/// Annex E), which no DVD carries.
+fn is_eac3_stream(path: &Path) -> bool {
+    let mut head = [0u8; 6];
+    let read =
+        fs::File::open(path).and_then(|mut file| std::io::Read::read_exact(&mut file, &mut head));
+    read.is_ok() && matches!(head, [0x0B, 0x77, _, _, _, bsi] if bsi >> 3 > 10)
+}
+
 /// Classify an audio asset by extension.
 fn audio_kind(path: &Path) -> AudioKind {
     match path.extension().and_then(|ext| ext.to_str()) {
-        Some(ext) if ext.eq_ignore_ascii_case("ac3") => AudioKind::Ac3,
+        // An E-AC-3 stream named .ac3 (M6.565) is converted like the other sound files (an .eac3 always is).
+        Some(ext) if ext.eq_ignore_ascii_case("ac3") && !is_eac3_stream(path) => AudioKind::Ac3,
         Some(ext) if ext.eq_ignore_ascii_case("dts") => AudioKind::Dts,
         // A WAV goes on the disc as LPCM only as 16-bit 48 kHz PCM; any other (44.1 kHz, 24-bit, float) is
         // converted like the other sound files.
@@ -2803,15 +2813,19 @@ pub(crate) fn wav_is_fine_lpcm(path: &Path, kind: DiscKind) -> Option<u32> {
             ((1..=8).contains(&channels) && bitrate <= 6_144_000).then_some(bitrate)?
         }
         DiscKind::BluRay => {
-            let bitrate = bd_lpcm_bitrate(channels, rate, bits);
-            (bd_layout(channels, mask) && bitrate <= disccraft_psmux::es::BD_LPCM_MAX_BITRATE)
-                .then_some(bitrate)?
+            // M6.544: the channels the stream stores (2.1, 4.1, 6.1 … on a larger assignment).
+            let stored = u8::try_from(channels)
+                .ok()
+                .and_then(|channels| disccraft_m2tsmux::bd_lpcm_stored(channels, mask))?;
+            let bitrate = bd_lpcm_bitrate(u16::from(stored), rate, bits);
+            (bitrate <= disccraft_psmux::es::BD_LPCM_MAX_BITRATE).then_some(bitrate)?
         }
     };
     hi_res.then(|| u32::try_from(bitrate).ok()).flatten()
 }
 
-/// Whether a Blu-ray's LPCM has a channel assignment for a WAV's `channels` on speakers `mask` (M6.347).
+/// Whether a Blu-ray's LPCM has a channel assignment for a WAV's `channels` on speakers `mask` (M6.347; M6.544: also
+/// on a larger one).
 fn bd_layout(channels: u16, mask: u32) -> bool {
     u8::try_from(channels)
         .ok()
@@ -2841,9 +2855,17 @@ pub(crate) fn dvd_mp2(path: &Path, project: &Project) -> Option<u32> {
     (rate == 48_000).then(|| kbps.checked_mul(1000)).flatten()
 }
 
-/// The bitrate of a WAV file's PCM (sampling frequency x word length x channels), from its `fmt ` chunk.
-fn wav_bitrate(path: &Path) -> Option<u32> {
-    let (_, channels, rate, bits, _) = wav_format(&read_head(path)?)?;
+/// The bitrate of a WAV file's PCM (sampling frequency x word length x channels), from its `fmt ` chunk; on a
+/// Blu-ray, of the channels its stream stores (M6.544: mono as two, 2.1 and the like on a larger assignment).
+fn wav_bitrate(path: &Path, kind: DiscKind) -> Option<u32> {
+    let (_, channels, rate, bits, mask) = wav_format(&read_head(path)?)?;
+    let channels = match kind {
+        DiscKind::Dvd => channels,
+        DiscKind::BluRay => u8::try_from(channels)
+            .ok()
+            .and_then(|channels| disccraft_m2tsmux::bd_lpcm_stored(channels, mask))
+            .map_or(channels, u16::from),
+    };
     u32::try_from(u64::from(rate) * u64::from(bits) * u64::from(channels)).ok()
 }
 
@@ -3257,7 +3279,9 @@ pub fn timeline_rates(project: &Project) -> Vec<TimelineRate> {
                             .and_then(|kbps| kbps.checked_mul(1000))
                             .unwrap_or(1_509_750),
                         // LPCM at its own rate (its channels, word length and sampling frequency).
-                        AudioKind::Wav => wav_bitrate(&path).unwrap_or(LPCM_STEREO_BITRATE),
+                        AudioKind::Wav => {
+                            wav_bitrate(&path, project.settings.kind).unwrap_or(LPCM_STEREO_BITRATE)
+                        }
                         AudioKind::Transcode => wav_is_fine_lpcm(&path, project.settings.kind)
                             .or_else(|| dvd_mp2(&path, project))
                             .unwrap_or(AC3_STEREO_BITRATE),
@@ -4722,13 +4746,25 @@ mod tests {
     }
 
     #[test]
-    fn prepared_audio_kind_by_extension() {
+    fn prepared_audio_kind_by_extension() -> Result<(), Box<dyn Error>> {
         assert!(matches!(audio_kind(Path::new("track.ac3")), AudioKind::Ac3));
+        // M6.565: Dolby Digital Plus is converted, also when it is named .ac3.
+        assert!(matches!(
+            audio_kind(Path::new("track.eac3")),
+            AudioKind::Transcode
+        ));
+        let plus = temp_path("ac3");
+        fs::write(&plus, [0x0B, 0x77, 0x00, 0x5F, 0x3F, 0x80, 0x00, 0x00])?;
+        assert!(matches!(audio_kind(&plus), AudioKind::Transcode));
+        fs::write(&plus, [0x0B, 0x77, 0x00, 0x00, 0x14, 0x40, 0x00, 0x00])?;
+        assert!(matches!(audio_kind(&plus), AudioKind::Ac3));
+        fs::remove_file(&plus)?;
         assert!(matches!(audio_kind(Path::new("track.WAV")), AudioKind::Wav));
         assert!(matches!(
             audio_kind(Path::new("track.mp3")),
             AudioKind::Transcode
         ));
+        Ok(())
     }
 
     #[test]
@@ -4788,17 +4824,19 @@ mod tests {
         let twenty = wav(2, 48_000, 20, None)?;
         assert_eq!(bd(&twenty), Some(2_304_000));
         assert_eq!(dvd(&twenty), Some(2_304_000));
-        // 2.1 has no channel assignment; seven channels that name no speakers neither.
+        // M6.544: 2.1 goes on 3/2 with LFE (six channels stored); seven channels that name no speakers are 6.1, on
+        // 3/4 with LFE (eight).
         let two_one = wav(3, 96_000, 24, Some(0b1011))?;
-        assert_eq!(bd(&two_one), None);
+        assert_eq!(bd(&two_one), Some(13_824_000));
         let unnamed = wav(7, 96_000, 16, None)?;
-        assert_eq!(bd(&unnamed), None);
-        // The 16-bit 48 kHz ones are the disc's plain LPCM (not "fine"): 5.1 stays LPCM on a Blu-ray, 2.1 is
-        // converted.
+        assert_eq!(bd(&unnamed), Some(12_288_000));
+        // The 16-bit 48 kHz ones are the disc's plain LPCM (not "fine"): 5.1 and 2.1 stay LPCM on a Blu-ray.
         let plain = wav(6, 48_000, 16, None)?;
         assert_eq!(bd(&plain), None);
         assert!(super::bd_layout(6, 0));
-        assert!(!super::bd_layout(3, 0b1011));
+        assert!(super::bd_layout(3, 0b1011));
+        // Speakers no assignment takes even so: converted.
+        assert!(!super::bd_layout(3, 0b1_0000_1100));
         for path in [most, five, seven, twenty, two_one, unnamed, plain] {
             fs::remove_file(&path).unwrap_or(());
         }

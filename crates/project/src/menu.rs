@@ -1498,7 +1498,7 @@ impl Menu {
                 .chapter_playlists
                 .get(id)
                 .map(|list| list.name.clone()),
-            Link::NotSet | Link::Stop | Link::LastMenu => None,
+            Link::NotSet | Link::Stop | Link::LastMenu | Link::Resume => None,
         }
     }
 

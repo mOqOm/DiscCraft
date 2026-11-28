@@ -16,6 +16,7 @@ use disccraft_vm::{
     load_video_ts,
 };
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// プレビューの状態。
@@ -42,10 +43,8 @@ pub(crate) struct Preview {
 pub(crate) struct BdPreview {
     disc: BdDisc,
     state: BdState,
-    /// プレイリスト 1 からこの数まではタイムラインのタイトル（画面はそのタイムラインの映像）。
-    timelines: u32,
-    /// メニューのプレイリストの最初の番号（プロジェクトのメニューの順に続く）。
-    menu_base: u32,
+    /// プレイリストの並び（[`bd_layout`]）。
+    layout: BdLayout,
     /// タイムラインごとのポップアップメニューのページ（メニューの順の 1 から。IG のページ n が n 番目）。
     popups: Vec<Vec<u16>>,
     /// ページを 1 つの IG にまとめたメニュー（M10.26）: まとまりごとのメニューの順（0 から、最初のページが先）。
@@ -53,32 +52,66 @@ pub(crate) struct BdPreview {
     groups: Vec<Vec<usize>>,
 }
 
-/// ビルドした Blu-ray のプレイリストの番号の並び（Blu-ray のビルドと同じ）: タイムラインとスライドショーの
-/// タイトル、中身のある再生リスト、中身のあるチャプター再生リスト、そしてメニューが 1 つずつ。タイムラインの数と、
-/// メニューの最初の番号。
-fn bd_layout(project: &Project) -> (u32, u32) {
+/// ビルドした Blu-ray のプレイリストの番号の並び（[`bd_layout`]）。
+struct BdLayout {
+    /// タイトルのプレイリストごとの、プレビューが知らせるタイトル（DVD と同じ番号: タイムライン、スライドショー、
+    /// チャプター再生リストの順）と、再生する視聴制限の版（[`disccraft_project::Timeline::parental_variants`] の
+    /// 番号。視聴制限のチャプターのあるタイムラインだけ）。
+    titles: BTreeMap<u32, (u32, Option<usize>)>,
+    /// タイムラインの数（そのタイトルが先頭に並ぶ）。
+    timelines: u32,
+    /// メニューのプレイリストの最初の番号（プロジェクトのメニューの順に続く）。
+    menu_base: u32,
+}
+
+/// ビルドした Blu-ray のプレイリストの番号の並び（Blu-ray のビルドと同じ）: タイムラインのタイトル、視聴制限の
+/// チャプターの代わりの映像の隠しタイトル（M6.548）、スライドショー、中身のあるチャプター再生リスト、視聴制限の版
+/// （M6.548）、そしてメニューが 1 つずつ（M6.555: 再生リストはプレイリストを持たず、項目のタイトルのプレイリストを
+/// 順に再生する）。M6.552: タイトルのプレイリストを、プレビューが知らせるタイトルの番号と版に読み替える表も（隠し
+/// タイトルはタイトルとして数えない。版はそのタイムラインのタイトルの別の版）。
+fn bd_layout(project: &Project) -> BdLayout {
     let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
     let timelines = count(project.timelines.len());
-    let titles = timelines.saturating_add(count(project.slideshows.len()));
-    let playlists = count(
+    let slideshows = count(project.slideshows.len());
+    let versions = project.bd_parental_versions();
+    // The hidden titles a build adds for parental chapters' alternative videos (after the timelines).
+    let hidden = count(
         project
-            .playlists
-            .values()
-            .filter(|list| !list.items.is_empty())
-            .count(),
+            .with_parental_clips()
+            .map_or(0, |(_, clips)| clips.len()),
     );
-    let chapter_playlists = count(
-        project
-            .chapter_playlists
-            .values()
-            .filter(|list| !list.chapters.is_empty())
-            .count(),
-    );
-    let menu_base = titles
-        .saturating_add(playlists)
-        .saturating_add(chapter_playlists)
-        .saturating_add(1);
-    (timelines, menu_base)
+    let mut titles = BTreeMap::new();
+    let title_of = |index: usize| count(index).saturating_add(1);
+    for (index, id) in project.timelines.keys().enumerate() {
+        let parental = versions.iter().any(|(timeline, _)| timeline == id);
+        titles.insert(title_of(index), (title_of(index), parental.then_some(0)));
+    }
+    let mut next = timelines.saturating_add(hidden).saturating_add(1);
+    for index in 0..project.slideshows.len() {
+        titles.insert(next, (timelines.saturating_add(title_of(index)), None));
+        next = next.saturating_add(1);
+    }
+    for (index, list) in project.chapter_playlists.values().enumerate() {
+        if list.chapters.is_empty() {
+            continue;
+        }
+        let title = timelines
+            .saturating_add(slideshows)
+            .saturating_add(title_of(index));
+        titles.insert(next, (title, None));
+        next = next.saturating_add(1);
+    }
+    for (timeline, variant) in versions {
+        if let Some(index) = project.timelines.keys().position(|id| *id == timeline) {
+            titles.insert(next, (title_of(index), Some(variant)));
+        }
+        next = next.saturating_add(1);
+    }
+    BdLayout {
+        titles,
+        timelines,
+        menu_base: next,
+    }
 }
 
 /// `path` がビルドした Blu-ray（`BDMV` か、それを入れたフォルダー）か。
@@ -90,14 +123,16 @@ impl BdPreview {
     fn open(
         path: &Path,
         project: &Project,
-        languages: (Option<[u8; 3]>, Option<[u8; 3]>),
+        (languages, parental): ((Option<[u8; 3]>, Option<[u8; 3]>), Option<u8>),
     ) -> Result<Self, String> {
         let disc = load_bdmv(path).map_err(|error| error.to_string())?;
-        let state = BdVm::start_with_languages(&disc, languages)
+        // M6.543: the player's parental level (1 to 8) as the age a Blu-ray reads in PSR13.
+        let age = parental.and_then(disccraft_project::bd_parental_age);
+        let state = BdVm::start_with_player(&disc, languages, age)
             .map_err(|error| error.to_string())?
             .state()
             .clone();
-        let (timelines, menu_base) = bd_layout(project);
+        let layout = bd_layout(project);
         let (popups, groups) = {
             let mut bluray = project.clone();
             bluray.settings.kind = DiscKind::BluRay;
@@ -109,8 +144,7 @@ impl BdPreview {
         Ok(Self {
             disc,
             state,
-            timelines,
-            menu_base,
+            layout,
             popups,
             groups,
         })
@@ -132,15 +166,26 @@ impl BdPreview {
                 Ok(())
             }
             "next" | "previous" => {
-                let BdLocation::Playing { mark, .. } = vm.state().location else {
+                let BdLocation::Playing { playlist, mark } = vm.state().location else {
                     return Err("not in a title".to_string());
                 };
-                let wanted = if key == "next" {
-                    mark.saturating_add(1)
+                let marks = self
+                    .disc
+                    .playlists
+                    .get(&playlist)
+                    .map_or(0, |found| found.marks);
+                if key == "next"
+                    && mark.saturating_add(1) >= marks
+                    && playlist < self.layout.menu_base
+                {
+                    // M6.555: Next on a title's last chapter ends its playlist (a project playlist goes on with its
+                    // next item, a title runs its end action), as in the DVD's preview.
+                    vm.finish()
+                } else if key == "next" {
+                    vm.jump_mark(mark.saturating_add(1))
                 } else {
-                    mark.saturating_sub(1)
-                };
-                vm.jump_mark(wanted)
+                    vm.jump_mark(mark.saturating_sub(1))
+                }
             }
             other => return Err(format!("unknown key \"{other}\"")),
         };
@@ -149,6 +194,7 @@ impl BdPreview {
         Ok(())
     }
 
+    /// プレーヤーのチャプター番号（画面の再生が次のチャプターへ進んだときも）: 再生中のプレイリストのマーク。
     fn chapter(&mut self, chapter: u16) -> Result<(), String> {
         let mut vm = BdVm::restore(&self.disc, self.state.clone());
         vm.jump_mark(u32::from(chapter.saturating_sub(1)))
@@ -166,6 +212,16 @@ impl BdPreview {
             Some(None) => self.state.subtitle.0 = false,
             None => {}
         }
+    }
+
+    /// プレイリスト `playlist` が知らせるタイトルと視聴制限の版（[`BdLayout::titles`]。表にないもの（隠しタイトル）
+    /// はその番号のまま）。
+    fn title(&self, playlist: u32) -> (u32, Option<usize>) {
+        self.layout
+            .titles
+            .get(&playlist)
+            .copied()
+            .unwrap_or((playlist, None))
     }
 
     /// DVD のプレビューと同じ形の状態。メニューのプレイリストはプロジェクトのメニューの順（`pgcn`）、
@@ -190,8 +246,8 @@ impl BdPreview {
         };
         let location = match self.state.location {
             BdLocation::Stopped => Value::String("stopped".to_string()),
-            BdLocation::Playing { playlist, .. } if playlist >= self.menu_base => {
-                let index = playlist - self.menu_base;
+            BdLocation::Playing { playlist, .. } if playlist >= self.layout.menu_base => {
+                let index = playlist - self.layout.menu_base;
                 // ページを 1 つの IG にまとめたメニューは、IG のページ n が n 番目のページ（0 ページ目は振り分け）。
                 let page = shown.map_or(0, |(_, view)| usize::from(view.page));
                 let pgcn = self
@@ -213,18 +269,24 @@ impl BdPreview {
                 })
             }
             BdLocation::Playing { playlist, mark } => json!({
-                "title": { "title": playlist, "chapter": mark.saturating_add(1) }
+                "title": { "title": self.title(playlist).0, "chapter": mark.saturating_add(1) }
             }),
         };
-        let popup_pages: &[u16] = match self.state.location {
-            BdLocation::Playing { playlist, .. } if playlist <= self.timelines => {
-                usize::try_from(playlist)
-                    .ok()
-                    .and_then(|title| title.checked_sub(1))
-                    .and_then(|index| self.popups.get(index))
-                    .map_or(&[], Vec::as_slice)
+        // M6.552: the title a parental version is of, and the version.
+        let (title, variant) = match self.state.location {
+            BdLocation::Playing { playlist, .. } if playlist < self.layout.menu_base => {
+                self.title(playlist)
             }
-            _ => &[],
+            _ => (0, None),
+        };
+        let popup_pages: &[u16] = if (1..=self.layout.timelines).contains(&title) {
+            usize::try_from(title)
+                .ok()
+                .and_then(|title| title.checked_sub(1))
+                .and_then(|index| self.popups.get(index))
+                .map_or(&[], Vec::as_slice)
+        } else {
+            &[]
         };
         // ページのあるポップアップは、IG のページ n が n 番目のページのメニュー。
         let popup = match shown {
@@ -246,6 +308,7 @@ impl BdPreview {
             "popup": popup,
             "popupAvailable": vm.has_popup() && !popup_pages.is_empty(),
             "audio": (self.state.audio > 0).then_some(self.state.audio),
+            "variant": variant,
             "subtitle": { "on": subtitle_on, "track": (subtitle_track > 0).then_some(subtitle_track) },
             "menus": [],
             "titles": [],
@@ -352,9 +415,9 @@ impl Preview {
         &mut self,
         path: &Path,
         project: &Project,
-        languages: (Option<[u8; 3]>, Option<[u8; 3]>),
+        player: ((Option<[u8; 3]>, Option<[u8; 3]>), Option<u8>),
     ) -> Result<(), String> {
-        let bd = BdPreview::open(path, project, languages)?;
+        let bd = BdPreview::open(path, project, player)?;
         self.model = None;
         self.location = Location::Stopped;
         self.registers = Registers::default();
@@ -650,7 +713,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "Open Preview",
         menu: &["Preview"],
         shortcut: None,
-        params: r#"{"path"?: "a VIDEO_TS folder (without it, from the project without building)", "menu"?: the VMGM's PGCN, "button"?: n (with menu, the button selected; from 1), "title"?: n, "chapter"?: n, "parentalLevel"?: 1..8 (the player's parental level), "audioLanguage"?: "en" and so on (a built Blu-ray: the player's audio language), "subtitleLanguage"?: the same for subtitles, "country"?: "JP" and so on (the player's country, ISO 3166, which picks a DVD parental block's version; default US)}"#,
+        params: r#"{"path"?: "a VIDEO_TS folder (without it, from the project without building)", "menu"?: the VMGM's PGCN, "button"?: n (with menu, the button selected; from 1), "title"?: n, "chapter"?: n, "parentalLevel"?: 1..8 (the player's parental level; a built Blu-ray reads it as an age in PSR13, M6.543), "audioLanguage"?: "en" and so on (a built Blu-ray: the player's audio language), "subtitleLanguage"?: the same for subtitles, "country"?: "JP" and so on (the player's country, ISO 3166, which picks a DVD parental block's version; default US)}"#,
         enabled: always_enabled,
         run: run_open,
         journal: false,
@@ -792,7 +855,7 @@ fn run_open(session: &mut Session, params: &Value) -> CommandResult {
             let languages = (language("audioLanguage")?, language("subtitleLanguage")?);
             session
                 .preview
-                .open_bd(Path::new(&path), &session.project, languages)?;
+                .open_bd(Path::new(&path), &session.project, (languages, parental))?;
         }
         Some(path) => {
             session.preview.open(Path::new(&path), start, parental)?;
@@ -932,6 +995,42 @@ mod tests {
         }
 
         None
+    }
+
+    /// M6.533: during a title, MENU shows the root menu; its Resume button (RSM), or MENU again, goes back to where
+    /// the title was (the preview kept only the place and the registers between keys, and lost that point).
+    #[test]
+    fn resume_goes_back_to_where_menu_was_pressed() -> Result<(), Box<dyn Error>> {
+        let mut disc = sample_disc();
+        if let Some(menu) = disc.vmgm.first_mut()
+            && let Some(button) = menu.buttons.first_mut()
+        {
+            button.command = [0x20, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10];
+        }
+        let mut preview = Preview::with_model(disc)?;
+        // The menu's second button plays the title; Next goes to its chapter 2.
+        preview.press("down")?;
+        preview.press("enter")?;
+        preview.press("next")?;
+        let playing = Location::Title {
+            title: 1,
+            chapter: 2,
+        };
+        assert_eq!(location_of(&preview.state()), Some(playing));
+        preview.press("menu")?;
+        // The menu opens on its first button, which resumes.
+        assert_eq!(
+            location_of(&preview.state()),
+            Some(Location::Menu { pgcn: 1, button: 1 })
+        );
+        preview.press("enter")?;
+        assert_eq!(location_of(&preview.state()), Some(playing));
+
+        // MENU, then MENU again in the menu: back to the title too.
+        preview.press("menu")?;
+        preview.press("menu")?;
+        assert_eq!(location_of(&preview.state()), Some(playing));
+        Ok(())
     }
 
     #[test]
@@ -1460,6 +1559,337 @@ mod tests {
             Some(2)
         );
         assert_eq!(session.preview.location(), title);
+        Ok(())
+    }
+
+    /// M6.552: a built Blu-ray's playlists read as the DVD's titles: the timelines first (one with parental chapters
+    /// plays its first version), the hidden title of the parental alternative not counted, the slideshow and the
+    /// chapter playlist after the timelines, the parental versions as their timeline's title; the menus after them.
+    /// M6.555: a project playlist has no playlist of its own (it plays its items' titles').
+    #[test]
+    fn a_built_blurays_playlists_read_as_the_dvds_titles() -> Result<(), Box<dyn Error>> {
+        use super::bd_layout;
+        use disccraft_project::{DiscKind, ParentalChapter, PlaylistItem, Project, Tick};
+        use std::path::Path;
+        let mut project = Project::default();
+        project.settings.kind = DiscKind::BluRay;
+        let movie = project.add_asset(Path::new("movie.m2v"))?;
+        let other = project.add_asset(Path::new("other.m2v"))?;
+        let plain = project.add_timeline(movie, Some("Plain".to_owned()))?;
+        let parental = project.add_timeline(movie, Some("Parental".to_owned()))?;
+        for at in [1, 2] {
+            project.add_chapter(parental, Tick(at * 254_016_000_000), None)?;
+        }
+        project
+            .timeline_mut(parental)
+            .ok_or("no timeline")?
+            .parental_chapters = vec![
+            ParentalChapter {
+                chapter: 1,
+                level: 6,
+                alternative: other,
+            },
+            ParentalChapter {
+                chapter: 2,
+                level: 4,
+                alternative: other,
+            },
+        ];
+        let show = project.add_slideshow(None)?;
+        let list = project.add_playlist(None)?;
+        project.add_playlist_item(list, plain)?;
+        let chapters = project.add_chapter_playlist(parental, None)?;
+        for chapter in [1, 2] {
+            project.add_chapter_playlist_entry(chapters, chapter, None)?;
+        }
+        for item in [
+            PlaylistItem::ChapterPlaylist(chapters),
+            PlaylistItem::Slideshow(show),
+            PlaylistItem::Timeline(parental),
+        ] {
+            project.add_playlist_entry(list, item, None)?;
+        }
+        project.add_menu(None)?;
+        let layout = bd_layout(&project);
+        // Playlists: 1 and 2 the timelines, 3 the hidden title, 4 the slideshow, 5 the chapter playlist, 6 and 7 the
+        // parental versions (for levels 4-5 and 1-3), 8 the menu.
+        let titles: Vec<(u32, (u32, Option<usize>))> = layout.titles.into_iter().collect();
+        assert_eq!(
+            titles,
+            [
+                (1, (1, None)),
+                (2, (2, Some(0))),
+                (4, (3, None)),
+                (5, (4, None)),
+                (6, (2, Some(1))),
+                (7, (2, Some(2))),
+            ]
+        );
+        assert_eq!((layout.timelines, layout.menu_base), (2, 8));
+        Ok(())
+    }
+
+    /// M6.552: a built Blu-ray whose title has a parental chapter plays the title's parental version (a playlist of
+    /// its own) on a player set below the chapter's level; the preview reports it as the title, in the version that
+    /// replaces the chapter (as the DVD's, M13.19), and its next chapter in the same version. Uses the video the
+    /// Blu-ray tests make, when it is there.
+    #[test]
+    fn a_built_blurays_parental_version_previews_as_its_title() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::{DiscKind, Link, ParentalChapter, Tick};
+        let video = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/fixtures/bd_preview.m2v");
+        if !video.is_file() {
+            println!(
+                "skipped: no target/fixtures/bd_preview.m2v (made by the Blu-ray tests with ffmpeg)"
+            );
+            return Ok(());
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "disccraft-preview-bd-parental-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir)?;
+        // The alternative: the same video as another file (another asset).
+        let alternative = dir.join("alternative.m2v");
+        std::fs::copy(&video, &alternative)?;
+        let mut session = Session::new();
+        let p = &mut session.project;
+        p.settings.kind = DiscKind::BluRay;
+        let asset = p.add_asset(&video)?;
+        let other = p.add_asset(&alternative)?;
+        let timeline = p.add_timeline(asset, None)?;
+        for at in [2, 4] {
+            p.add_chapter(timeline, Tick(at * 254_016_000_000), None)?;
+        }
+        // Chapter 2 for level 6 (17 years); below it, the alternative.
+        p.timeline_mut(timeline)
+            .ok_or("no timeline")?
+            .parental_chapters = vec![ParentalChapter {
+            chapter: 1,
+            level: 6,
+            alternative: other,
+        }];
+        p.settings.first_play = Link::Timeline {
+            id: timeline,
+            chapter: 0,
+        };
+        let out = dir.join("out");
+        let _ = disccraft_build::build(
+            &session.project,
+            &disccraft_build::BuildOptions {
+                output: disccraft_build::OutputKind::Folder,
+                path: out.clone(),
+                cache: None,
+                audio_language: None,
+            },
+        )?;
+        let path = out.to_string_lossy();
+        for (level, variant) in [(None, 0), (Some(8), 0), (Some(6), 0), (Some(4), 1)] {
+            let params = level.map_or_else(
+                || json!({ "path": path }),
+                |level| json!({ "path": path, "parentalLevel": level }),
+            );
+            let state = session.execute("preview.open", &params)?;
+            assert_eq!(
+                (
+                    state.pointer("/location/title/title"),
+                    state.pointer("/location/title/chapter"),
+                    state.get("variant"),
+                ),
+                (Some(&json!(1)), Some(&json!(1)), Some(&json!(variant))),
+                "level {level:?}"
+            );
+        }
+        let state = session.execute("preview.key", &json!({ "key": "next" }))?;
+        assert_eq!(
+            (
+                state.pointer("/location/title/title"),
+                state.pointer("/location/title/chapter"),
+                state.get("variant"),
+            ),
+            (Some(&json!(1)), Some(&json!(2)), Some(&json!(1)))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M6.553: a built Blu-ray's project playlist plays its items as the titles they are (M6.555: their own
+    /// playlists in turn, as a DVD's playlist does): a timeline at its chapters, the remote's chapter keys through
+    /// them, Next on the last chapter on into the next item, the end of an item the next item, the last ending the
+    /// playlist. Uses the video the Blu-ray tests make, when it is there.
+    #[test]
+    fn a_built_blurays_playlist_previews_its_items_as_their_titles() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::{DiscKind, Link, PlaylistItem, Tick};
+        let video = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/fixtures/bd_preview.m2v");
+        if !video.is_file() {
+            println!(
+                "skipped: no target/fixtures/bd_preview.m2v (made by the Blu-ray tests with ffmpeg)"
+            );
+            return Ok(());
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "disccraft-preview-bd-playlist-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir)?;
+        let mut session = Session::new();
+        let p = &mut session.project;
+        p.settings.kind = DiscKind::BluRay;
+        let asset = p.add_asset(&video)?;
+        let first = p.add_timeline(asset, None)?;
+        for at in [2, 4] {
+            p.add_chapter(first, Tick(at * 254_016_000_000), None)?;
+        }
+        let second = p.add_timeline(asset, None)?;
+        let chapters = p.add_chapter_playlist(first, None)?;
+        for chapter in [2, 0] {
+            p.add_chapter_playlist_entry(chapters, chapter, None)?;
+        }
+        let list = p.add_playlist(None)?;
+        for item in [
+            PlaylistItem::Timeline(first),
+            PlaylistItem::ChapterPlaylist(chapters),
+            PlaylistItem::Timeline(second),
+        ] {
+            p.add_playlist_entry(list, item, None)?;
+        }
+        p.settings.first_play = Link::Playlist { id: list };
+        let out = dir.join("out");
+        let _ = disccraft_build::build(
+            &session.project,
+            &disccraft_build::BuildOptions {
+                output: disccraft_build::OutputKind::Folder,
+                path: out.clone(),
+                cache: None,
+                audio_language: None,
+            },
+        )?;
+        let at = |state: &Value| {
+            (
+                state
+                    .pointer("/location/title/title")
+                    .and_then(Value::as_u64),
+                state
+                    .pointer("/location/title/chapter")
+                    .and_then(Value::as_u64),
+            )
+        };
+        // Titles: 1 and 2 the timelines, 3 the chapter playlist; the playlist plays their playlists in turn.
+        let state = session.execute("preview.open", &json!({ "path": out.to_string_lossy() }))?;
+        assert_eq!(at(&state), (Some(1), Some(1)));
+        // The picture has played into the first timeline's third chapter; Previous goes back through its chapters.
+        let state = session.execute("preview.chapter", &json!({ "chapter": 3 }))?;
+        assert_eq!(at(&state), (Some(1), Some(3)));
+        let state = session.execute("preview.key", &json!({ "key": "previous" }))?;
+        assert_eq!(at(&state), (Some(1), Some(2)));
+        // Its end: the chapter playlist, its first entry, then its second; Next on its last entry: the second
+        // timeline.
+        let state = session.execute("preview.key", &json!({ "key": "finish" }))?;
+        assert_eq!(at(&state), (Some(3), Some(1)));
+        let state = session.execute("preview.key", &json!({ "key": "next" }))?;
+        assert_eq!(at(&state), (Some(3), Some(2)));
+        let state = session.execute("preview.key", &json!({ "key": "next" }))?;
+        assert_eq!(at(&state), (Some(2), Some(1)));
+        // The last item's end ends the playlist.
+        let state = session.execute("preview.key", &json!({ "key": "finish" }))?;
+        assert_eq!(at(&state), (None, None));
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M6.555: a built Blu-ray's project playlist asks each item's parental level and plays its version for the
+    /// player's age, as the item's own title does (and a DVD's playlist): with no level set or at level 8 (21 years),
+    /// the first version and then the second timeline; at level 4 (13 years), the version for it, and below the second
+    /// timeline's own level 6 (17 years) what plays in its place (nothing set: the player stops). Uses the video the
+    /// Blu-ray tests make, when it is there.
+    #[test]
+    fn a_built_blurays_playlist_asks_each_items_parental_level() -> Result<(), Box<dyn Error>> {
+        use disccraft_project::{DiscKind, Link, ParentalChapter, PlaylistItem, Tick};
+        let video = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/fixtures/bd_preview.m2v");
+        if !video.is_file() {
+            println!(
+                "skipped: no target/fixtures/bd_preview.m2v (made by the Blu-ray tests with ffmpeg)"
+            );
+            return Ok(());
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "disccraft-preview-bd-playlist-parental-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir)?;
+        let alternative = dir.join("alternative.m2v");
+        std::fs::copy(&video, &alternative)?;
+        let mut session = Session::new();
+        let p = &mut session.project;
+        p.settings.kind = DiscKind::BluRay;
+        let asset = p.add_asset(&video)?;
+        let other = p.add_asset(&alternative)?;
+        let first = p.add_timeline(asset, None)?;
+        for at in [2, 4] {
+            p.add_chapter(first, Tick(at * 254_016_000_000), None)?;
+        }
+        p.timeline_mut(first)
+            .ok_or("no timeline")?
+            .parental_chapters = vec![ParentalChapter {
+            chapter: 1,
+            level: 6,
+            alternative: other,
+        }];
+        let second = p.add_timeline(asset, None)?;
+        p.timeline_mut(second).ok_or("no timeline")?.parental_level = Some(6);
+        let list = p.add_playlist(None)?;
+        for item in [
+            PlaylistItem::Timeline(first),
+            PlaylistItem::Timeline(second),
+        ] {
+            p.add_playlist_entry(list, item, None)?;
+        }
+        p.settings.first_play = Link::Playlist { id: list };
+        let out = dir.join("out");
+        let _ = disccraft_build::build(
+            &session.project,
+            &disccraft_build::BuildOptions {
+                output: disccraft_build::OutputKind::Folder,
+                path: out.clone(),
+                cache: None,
+                audio_language: None,
+            },
+        )?;
+        let path = out.to_string_lossy();
+        let at = |state: &Value| {
+            (
+                state
+                    .pointer("/location/title/title")
+                    .and_then(Value::as_u64),
+                state
+                    .pointer("/location/title/chapter")
+                    .and_then(Value::as_u64),
+            )
+        };
+        for (level, variant, second_plays) in
+            [(None, 0, true), (Some(8), 0, true), (Some(4), 1, false)]
+        {
+            let params = level.map_or_else(
+                || json!({ "path": path }),
+                |level| json!({ "path": path, "parentalLevel": level }),
+            );
+            let state = session.execute("preview.open", &params)?;
+            assert_eq!(
+                (at(&state), state.get("variant")),
+                ((Some(1), Some(1)), Some(&json!(variant))),
+                "level {level:?}"
+            );
+            let state = session.execute("preview.key", &json!({ "key": "finish" }))?;
+            let expected = if second_plays {
+                (Some(2), Some(1))
+            } else {
+                (None, None)
+            };
+            assert_eq!(at(&state), expected, "level {level:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 

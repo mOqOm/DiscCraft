@@ -39,6 +39,7 @@ mod located;
 mod menu;
 mod model;
 mod pages;
+mod parental_bd;
 mod quantize;
 mod remove;
 mod replace;
@@ -48,6 +49,7 @@ mod text_span;
 mod thumbnail;
 mod timecode;
 mod transition;
+pub use parental_bd::ParentalClip;
 
 mod user_ops;
 mod words;
@@ -123,7 +125,7 @@ pub use model::{
     MAX_COLOR_SETS, MAX_SUBTITLE_CUES, MAX_TIMELINE_CLIPS, SubtitleCue, SubtitleJustify,
 };
 pub use model::{FLOWCHART_DISC, FLOWCHART_LIMIT, FlowPoint, LayerBreakPoint};
-pub use model::{MAX_PARENTAL_CHAPTERS, ParentalChapter, ParentalVariant};
+pub use model::{MAX_PARENTAL_CHAPTERS, ParentalChapter, ParentalVariant, bd_parental_age};
 pub use quantize::reduce_colors;
 pub use replace::{DesignButton, MenuDesign};
 pub use rom::{MAX_ROM_DEPTH, MAX_ROM_ENTRIES, RomFile, rom_disc_bytes, rom_files};

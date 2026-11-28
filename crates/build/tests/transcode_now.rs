@@ -8,22 +8,13 @@ use disccraft_build::{
     transcode_status,
 };
 use disccraft_project::{BdVideo, DiscKind, Link, Project};
+use disccraft_test_support::{ffmpeg, fixtures};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
-
 /// Two seconds of a small H.264 picture with AAC sound in an MP4 (a build transcodes it).
 fn video(ffmpeg: &Path) -> PathBuf {
-    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures");
+    let fixtures = fixtures();
     let video = fixtures.join("sound_track.mp4");
     if video.is_file() {
         return video;
@@ -45,7 +36,7 @@ fn video(ffmpeg: &Path) -> PathBuf {
 
 #[test]
 fn transcode_now_fills_the_builds_cache() {
-    let Some(ffmpeg) = tool("DISCCRAFT_FFMPEG", "ffmpeg") else {
+    let Some(ffmpeg) = ffmpeg() else {
         eprintln!("ffmpeg not found; skipping");
         return;
     };

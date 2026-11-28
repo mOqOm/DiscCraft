@@ -58,6 +58,8 @@ pub struct Subtitle {
     pub pixels: Vec<u8>,
     /// Palette entries used by this subtitle.
     pub palette: Vec<PaletteEntry>,
+    /// M6.551: shown even with subtitles off ([`CompositionObject::forced`]; a DVD subpicture's forced start).
+    pub forced: bool,
 }
 
 /// A segment with its time stamps (90 kHz).
@@ -139,6 +141,7 @@ fn start_set(
         window_id: 0,
         x: sub.x,
         y: sub.y,
+        forced: sub.forced,
     }];
 
     let composition = Composition {
@@ -265,6 +268,7 @@ mod tests {
                 cb: 128,
                 alpha: 255,
             }],
+            forced: false,
         }
     }
 

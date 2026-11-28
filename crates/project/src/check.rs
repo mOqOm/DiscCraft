@@ -293,7 +293,7 @@ impl Project {
                     ));
                 }
             }
-            Link::NotSet | Link::Stop | Link::LastMenu => {}
+            Link::NotSet | Link::Stop | Link::LastMenu | Link::Resume => {}
         }
     }
 

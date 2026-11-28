@@ -16,8 +16,8 @@
 
 use crate::i18n::{self, Language, t};
 
-use craft_ui::docking::{Action, Node, Permissions};
-use craft_ui::layout::{SplitAxis, SplitSize};
+use craft_behavior::Axis;
+use craft_behavior::dock::{Action, DockError, Node, Permissions, SplitSize, Workspace};
 use disccraft_project::{TranscodeAudio, TranscodeMode, VideoStandard};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -137,10 +137,131 @@ impl Panel {
     }
 }
 
-/// パネルの並び（craft-ui のドッキング）。
-pub(crate) type DockLayout = craft_ui::docking::Layout<Panel>;
-/// ワークスペース: 今の並びと、閉じたパネルの戻り先、名前を付けたワークスペースのリセット先。
-pub(crate) type Dock = craft_ui::docking::Workspace<Panel>;
+/// パネルの並び（craft-libs のドッキングのモデル、craft-behavior の dock）。
+pub(crate) type DockLayout = craft_behavior::dock::Layout<Panel>;
+
+/// ワークスペース: 今の並びと閉じたパネルの戻り先（craft-behavior の `Workspace`。ドッキングの領域がそのまま
+/// 見せる）と、名前を付けたワークスペースのリセット先（保存したときの並び）。設定ファイルには `Workspace` の形に
+/// `saved` を足して書く（M9.54 より前の版のファイルもそのまま読める）。
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Dock {
+    /// 今の並び。ドッキングの領域に渡すので共有の形で持つ（変えるときは `Arc::make_mut`）。
+    workspace: std::sync::Arc<Workspace<Panel>>,
+    /// 名前を付けたワークスペースのリセット先。組み込みのワークスペースにはない。
+    pub(crate) saved: Option<DockLayout>,
+}
+
+impl Dock {
+    /// `layout` の並びで、閉じたパネルのないワークスペース。
+    pub(crate) fn new(layout: DockLayout) -> Self {
+        Dock {
+            workspace: std::sync::Arc::new(Workspace::new(layout)),
+            saved: None,
+        }
+    }
+
+    /// 今の並び。
+    pub(crate) fn layout(&self) -> &DockLayout {
+        self.workspace.layout()
+    }
+
+    /// ドッキングの領域に渡す今のワークスペース。
+    pub(crate) fn live(&self) -> std::sync::Arc<Workspace<Panel>> {
+        std::sync::Arc::clone(&self.workspace)
+    }
+
+    /// 並びの変更を 1 つ当てる（できなければ何も変えない）。閉じたパネルを返す。
+    #[cfg(test)]
+    pub(crate) fn apply(
+        &mut self,
+        action: Action<Panel>,
+        permissions: impl Fn(&Panel) -> Permissions,
+    ) -> Result<Vec<Panel>, DockError> {
+        self.apply_all([action], permissions)
+    }
+
+    /// 並びの変更をまとめて当てる（全部か、何もしないか）。閉じたパネルを返す。
+    pub(crate) fn apply_all(
+        &mut self,
+        actions: impl IntoIterator<Item = Action<Panel>>,
+        permissions: impl Fn(&Panel) -> Permissions,
+    ) -> Result<Vec<Panel>, DockError> {
+        let mut workspace = self.workspace.as_ref().clone();
+        let closed = workspace.apply_all(actions, false, permissions)?;
+        self.workspace = std::sync::Arc::new(workspace);
+        Ok(closed)
+    }
+
+    /// パネルを出す（閉じる前の場所へ。なければ `fallback` の隣）か、閉じる。
+    pub(crate) fn set_visible(
+        &mut self,
+        panel: Panel,
+        visible: bool,
+        fallback: Option<Panel>,
+        permissions: impl Fn(&Panel) -> Permissions,
+    ) -> Result<(), DockError> {
+        let mut workspace = self.workspace.as_ref().clone();
+        workspace.set_visible(panel, visible, fallback, false, permissions)?;
+        self.workspace = std::sync::Arc::new(workspace);
+        Ok(())
+    }
+
+    /// 並びとして正しいか（読み込んだ設定を使う前に確かめる）。
+    pub(crate) fn validate(&self) -> Result<(), DockError> {
+        self.workspace.validate()
+    }
+
+    /// リセット: 名前を付けたワークスペースは保存したときの並び、そうでなければ `default` に戻す。閉じたパネルの
+    /// 戻り先も忘れる。ドラッグの途中なら、そのドラッグは落とさずに終わる（`Workspace::replace`）。
+    pub(crate) fn reset(&mut self, default: &DockLayout) {
+        let layout = self.saved.clone().unwrap_or_else(|| default.clone());
+        let mut workspace = self.workspace.as_ref().clone();
+        workspace.replace(Workspace::new(layout));
+        self.workspace = std::sync::Arc::new(workspace);
+    }
+
+    /// 別のワークスペースに切り替える（ドラッグの途中なら、そのドラッグは落とさずに終わる）。
+    pub(crate) fn replace(&mut self, with: Dock) {
+        let mut workspace = self.workspace.as_ref().clone();
+        workspace.replace(with.workspace.as_ref().clone());
+        self.workspace = std::sync::Arc::new(workspace);
+        self.saved = with.saved;
+    }
+}
+
+impl Serialize for Dock {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Written<'a> {
+            #[serde(flatten)]
+            workspace: &'a Workspace<Panel>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            saved: Option<&'a DockLayout>,
+        }
+        Written {
+            workspace: &self.workspace,
+            saved: self.saved.as_ref(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Dock {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Read {
+            #[serde(flatten)]
+            workspace: Workspace<Panel>,
+            #[serde(default)]
+            saved: Option<DockLayout>,
+        }
+        let Read { workspace, saved } = Read::deserialize(deserializer)?;
+        Ok(Dock {
+            workspace: std::sync::Arc::new(workspace),
+            saved,
+        })
+    }
+}
 
 /// パネルの許可: どれも動かし、フローティングにし、閉じられる。
 pub(crate) fn permissions(_panel: &Panel) -> Permissions {
@@ -189,30 +310,17 @@ impl WorkspaceId {
 }
 
 fn tabs(panels: &[Panel], active: usize) -> Node<Panel> {
-    Node::Tabs {
-        panels: panels.to_vec(),
-        active,
-    }
+    Node::tabs(panels.to_vec(), active)
 }
 
 /// 左右に並べる（`ratio` は左の割合）。
 fn beside(ratio: f32, left: Node<Panel>, right: Node<Panel>) -> Node<Panel> {
-    Node::Split {
-        axis: SplitAxis::Horizontal,
-        size: SplitSize::Ratio(ratio),
-        first: Box::new(left),
-        second: Box::new(right),
-    }
+    Node::split(Axis::X, SplitSize::Ratio(ratio), left, right)
 }
 
 /// 上下に並べる（`ratio` は上の割合）。
 fn above(ratio: f32, top: Node<Panel>, bottom: Node<Panel>) -> Node<Panel> {
-    Node::Split {
-        axis: SplitAxis::Vertical,
-        size: SplitSize::Ratio(ratio),
-        first: Box::new(top),
-        second: Box::new(bottom),
-    }
+    Node::split(Axis::Y, SplitSize::Ratio(ratio), top, bottom)
 }
 
 /// Encore の既定の配置: 右の列が横幅の 22%（上下ほぼ半分）、その左の下に高さ 36% の下のグループ、上に左（全体の
@@ -231,10 +339,7 @@ pub(crate) fn standard_layout() -> DockLayout {
     let bottom = tabs(&[TimelineViewer, SlideshowViewer], 0);
     // 左は全体の 35%: 右の列を除いた 78% のうちの 0.45。
     let main = above(0.64, beside(0.45, left, center), bottom);
-    DockLayout {
-        root: Some(beside(0.78, main, right)),
-        floating: Vec::new(),
-    }
+    DockLayout::new(Some(beside(0.78, main, right)), Vec::new())
 }
 
 impl WorkspacePreset {
@@ -279,8 +384,8 @@ impl WorkspacePreset {
         let mut dock = Dock::new(standard_layout());
         let actions = front
             .iter()
-            .map(|panel| Action::Activate { panel: *panel })
-            .chain(closed.iter().map(|panel| Action::Close { panel: *panel }));
+            .map(|panel| Action::activate(*panel))
+            .chain(closed.iter().map(|panel| Action::close(*panel)));
         // 組み込みの配置なので失敗しない。失敗したら初期設定の配置のまま。
         if dock.apply_all(actions, permissions).is_err() {
             dock = Dock::new(standard_layout());
@@ -290,16 +395,66 @@ impl WorkspacePreset {
 
     /// プリセットの並び（リセットの戻り先）。
     pub(crate) fn layout(self) -> DockLayout {
-        self.dock().layout
+        self.dock().layout().clone()
     }
 }
 
-/// 設定ファイルの場所。取れないときは `None`（保存と読み込みをスキップする）。
-pub(crate) fn config_path() -> Option<PathBuf> {
-    let mut path = config_dir()?;
-    path.push("disccraft");
-    path.push("workspace.json");
-    Some(path)
+/// The settings file of the versions before M9.62, read once to make `config.toml` and then left as it is (an older
+/// build still finds it).
+const LEGACY_FILE: &str = "workspace.json";
+
+/// The folder of DiscCraft's settings (M9.62: `config.toml`, kept by craft-libs' craft-settings), beside its logs and
+/// media cache: `disccraft` in the user's config folder ([`config_dir`]: on Windows `%APPDATA%`, which the manual's
+/// captures and the GUI checks point at a folder of their own). `None`: nothing is read or written.
+///
+/// The unit tests create the app, which saves its layout and choices: they keep their settings in a temporary folder
+/// of their own, so a test run never writes the user's (before M9.62 it wrote `workspace.json`).
+pub(crate) fn settings_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        Some(std::env::temp_dir().join(format!("disccraft-test-settings-{}", std::process::id())))
+    }
+    #[cfg(not(test))]
+    {
+        config_dir().map(|dir| dir.join("disccraft"))
+    }
+}
+
+/// How the settings store is opened for the folder `dir`: `config.toml` there, with the settings file of the versions
+/// before M9.62 ([`LEGACY_FILE`]) imported when there is no `config.toml` yet. `None`: in memory only.
+fn store_options(dir: Option<&Path>) -> craft_settings::OpenOptions<Saved> {
+    let Some(dir) = dir else {
+        return craft_settings::OpenOptions::new(craft_settings::Location::Memory);
+    };
+    craft_settings::OpenOptions::new(craft_settings::Location::Dir(dir.to_path_buf())).legacy(vec![
+        craft_settings::LegacyFile {
+            path: dir.join(LEGACY_FILE),
+            parse: parse_legacy,
+        },
+    ])
+}
+
+/// The settings of a `workspace.json` (the versions before M9.62): read as they always were, a file that is not
+/// DiscCraft's settings refused.
+fn parse_legacy(bytes: &[u8]) -> Result<(Saved, Vec<craft_settings::SectionError>), String> {
+    serde_json::from_slice::<Saved>(bytes)
+        .map(|saved| (saved, Vec::new()))
+        .map_err(|error| error.to_string())
+}
+
+/// Opens the settings once at start (M9.62): a user's `workspace.json` from before is written to `config.toml` now, so
+/// nothing they set is lost, and the old file stays where it is. A damaged `config.toml` is moved aside (its values go
+/// back to the defaults, or to the backup craft-settings keeps).
+pub(crate) fn open_settings() {
+    open_settings_in(settings_dir().as_deref());
+}
+
+fn open_settings_in(dir: Option<&Path>) {
+    let (mut store, report) = craft_settings::SettingsStore::<Saved>::open_with(store_options(dir));
+    if matches!(report.source, craft_settings::Source::Legacy(_)) {
+        // Failing to write is not fatal: the old file is read again at the next start.
+        let _ = store.flush();
+    }
 }
 
 pub(crate) fn config_dir() -> Option<PathBuf> {
@@ -318,17 +473,14 @@ pub(crate) fn config_dir() -> Option<PathBuf> {
     }
 }
 
-/// 保存された設定を読む。失敗時は既定（プリセットは初期設定、言語はシステム言語）。
+/// 保存された設定を読む。失敗時は既定（プリセットは初期設定、言語はシステム言語）。M9.62: `config.toml` から
+/// （なければ前の版の `workspace.json` から）。値ごとに読み、読めない値だけが既定になる。
 pub(crate) fn load_settings() -> Saved {
-    let Some(path) = config_path() else {
-        return Saved::default();
-    };
+    load_settings_in(settings_dir().as_deref())
+}
 
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Saved::default();
-    };
-
-    serde_json::from_str::<Saved>(&text).unwrap_or_default()
+fn load_settings_in(dir: Option<&Path>) -> Saved {
+    craft_settings::SettingsStore::<Saved>::read(&store_options(dir)).0
 }
 
 /// 使っていたワークスペースとその並び、名前を付けて保存したワークスペースの名前を読む。並びが読めないとき
@@ -397,19 +549,18 @@ pub(crate) fn load_recent() -> Vec<PathBuf> {
     load_settings().recent
 }
 
-/// 設定を保存する。失敗しても編集は止めない。
+/// 設定を保存する。失敗しても編集は止めない。M9.62: craft-settings が `config.toml` に書く（一時ファイルから
+/// 置き換えるので途中で止まっても壊れず、前の内容は控えに残る。手で足した行やコメントは残る）。
 fn save(settings: &Saved) -> Result<(), String> {
-    let path = config_path().ok_or_else(|| t("Cannot find where to save settings").to_string())?;
+    let dir = settings_dir().ok_or_else(|| t("Cannot find where to save settings").to_string())?;
+    save_in(&dir, settings)
+}
 
-    if let Some(dir) = path.parent()
-        && let Err(error) = std::fs::create_dir_all(dir)
-    {
-        return Err(error.to_string());
-    }
-
-    let text = serde_json::to_string_pretty(settings).map_err(|error| error.to_string())?;
-
-    std::fs::write(&path, text).map_err(|error| error.to_string())
+fn save_in(dir: &Path, settings: &Saved) -> Result<(), String> {
+    let (mut store, _report) =
+        craft_settings::SettingsStore::<Saved>::open_with(store_options(Some(dir)));
+    store.set(settings.clone());
+    store.flush().map_err(|error| error.to_string())
 }
 
 /// 使っているワークスペースとその並び、名前を付けたワークスペースの一覧を保存する（ほかの設定は維持）。
@@ -724,6 +875,18 @@ pub(crate) fn load_hardware_encoder() -> bool {
     load_settings().hardware_encoder
 }
 
+/// Reads whether DiscCraft asks GitHub for a newer release at every start (Preferences ▸ General).
+pub(crate) fn load_check_updates_at_start() -> bool {
+    load_settings().check_updates_at_start
+}
+
+/// Saves whether DiscCraft asks GitHub for a newer release at every start (the other settings stay).
+pub(crate) fn save_check_updates_at_start(on: bool) -> Result<(), String> {
+    let mut settings = load_settings();
+    settings.check_updates_at_start = on;
+    save(&settings)
+}
+
 /// Saves whether HD H.264 is encoded on the hardware encoder (the other settings stay).
 pub(crate) fn save_hardware_encoder(on: bool) -> Result<(), String> {
     let mut settings = load_settings();
@@ -973,11 +1136,47 @@ pub(crate) fn forget_recent(path: &Path) -> Result<Vec<PathBuf>, String> {
 pub(crate) struct SavedDock {
     /// どのワークスペースの並びか。
     pub(crate) id: WorkspaceId,
-    /// craft-ui の `Workspace`。
+    /// craft-ui の `Workspace`。`config.toml` には JSON の文字列として書く（M9.62: 並びには TOML にない null がある）。
+    #[serde(with = "dock_text")]
     pub(crate) dock: serde_json::Value,
 }
 
-#[derive(Serialize, Deserialize, Default)]
+/// A saved arrangement as `config.toml` keeps it (M9.62): its JSON as a string, since the arrangement holds nulls,
+/// which TOML has no value for. Read back from that string, or, from a `workspace.json` of the versions before, from
+/// the JSON as it is; a string that is no JSON reads as null (the workspace's own arrangement is used).
+mod dock_text {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(
+        dock: &serde_json::Value,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&dock.to_string())
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<serde_json::Value, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Stored {
+            Text(String),
+            Json(serde_json::Value),
+        }
+        Ok(match Stored::deserialize(deserializer)? {
+            Stored::Text(text) => serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+            Stored::Json(value) => value,
+        })
+    }
+}
+
+/// DiscCraft's settings, as craft-settings keeps them (M9.62).
+impl craft_settings::Settings for Saved {
+    const APP_ID: &'static str = "disccraft";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Saved {
     /// 最後に使ったプリセット（前の版の設定ファイルはこれだけを持つ）。
@@ -1049,6 +1248,10 @@ pub(crate) struct Saved {
     /// Preferences ▸ Interface ▸ Brightness (M6.480). `None`: the dark look, as Encore starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) appearance: Option<crate::theme::Appearance>,
+    /// Preferences ▸ General: ask GitHub for a newer release at every start (M9.65). Off: DiscCraft asks only when
+    /// Help ▸ Check for Updates… is chosen.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) check_updates_at_start: bool,
 }
 
 #[cfg(test)]
@@ -1058,11 +1261,11 @@ mod tests {
         permissions, saved_dock, standard_layout,
     };
     use crate::i18n::{self, Language};
-    use craft_ui::docking::{Action, PanelState};
+    use craft_behavior::dock::{Action, DockPlacement, PanelState};
     use std::path::PathBuf;
 
     fn front(dock: &Dock, panel: Panel) -> bool {
-        dock.layout.panel_state(&panel) == PanelState::Front
+        dock.layout().panel_state(&panel) == PanelState::Front
     }
 
     /// Until the user chooses a language the system's is used at every start; a chosen one stays. A language an
@@ -1143,7 +1346,7 @@ mod tests {
         for panel in Panel::ALL {
             // The chapter playlist viewer opens with a playlist (Encore opens one per playlist).
             assert_eq!(
-                dock.layout.contains(&panel),
+                dock.layout().contains(&panel),
                 panel != Panel::ChapterPlaylist,
                 "{panel:?}"
             );
@@ -1159,7 +1362,7 @@ mod tests {
             }
         }
         assert_eq!(
-            dock.layout
+            dock.layout()
                 .root
                 .as_ref()
                 .and_then(|root| group_with(root, Panel::Properties)),
@@ -1187,15 +1390,15 @@ mod tests {
         let menu = WorkspacePreset::Menu.dock();
         assert!(front(&menu, Panel::Menus) && front(&menu, Panel::MenuViewer));
         assert!(front(&menu, Panel::Layers) && front(&menu, Panel::Properties));
-        assert!(!menu.layout.contains(&Panel::TimelineViewer));
+        assert!(!menu.layout().contains(&Panel::TimelineViewer));
 
         let navigation = WorkspacePreset::Navigation.dock();
         assert!(front(&navigation, Panel::Flowchart));
-        assert!(!navigation.layout.contains(&Panel::Library));
+        assert!(!navigation.layout().contains(&Panel::Library));
 
         let build = WorkspacePreset::Build.dock();
         assert!(front(&build, Panel::Build) && front(&build, Panel::Disc));
-        assert!(!build.layout.contains(&Panel::SlideshowViewer));
+        assert!(!build.layout().contains(&Panel::SlideshowViewer));
     }
 
     #[test]
@@ -1211,18 +1414,11 @@ mod tests {
         // Dragged into the left group, closed, and reopened: it goes back into the left group.
         let mut dock = WorkspacePreset::Standard.dock();
         let moved = dock.apply(
-            Action::Move {
-                panel: Panel::Disc,
-                anchor: Panel::Project,
-                placement: craft_ui::docking::Placement::Tab { before: None },
-            },
+            Action::move_beside(Panel::Disc, Panel::Project, DockPlacement::tab(None)),
             permissions,
         );
         assert!(moved.is_ok(), "{moved:?}");
-        assert!(
-            dock.apply(Action::Close { panel: Panel::Disc }, permissions)
-                .is_ok()
-        );
+        assert!(dock.apply(Action::close(Panel::Disc), permissions).is_ok());
         assert!(
             dock.set_visible(Panel::Disc, true, None, permissions)
                 .is_ok()
@@ -1234,13 +1430,8 @@ mod tests {
     fn arrangements_are_saved_per_workspace_and_bad_ones_fall_back() {
         let mut dock = WorkspacePreset::Standard.dock();
         assert!(
-            dock.apply(
-                Action::Close {
-                    panel: Panel::Library
-                },
-                permissions
-            )
-            .is_ok()
+            dock.apply(Action::close(Panel::Library), permissions)
+                .is_ok()
         );
         let id = WorkspaceId::User("Mine".to_owned());
         let settings = Saved {
@@ -1265,8 +1456,8 @@ mod tests {
         let menu = WorkspaceId::Preset(WorkspacePreset::Menu);
         assert_eq!(saved_dock(&read, &menu), None);
         assert_eq!(
-            default_dock(&read, &menu).layout,
-            WorkspacePreset::Menu.layout()
+            default_dock(&read, &menu).layout(),
+            &WorkspacePreset::Menu.layout()
         );
     }
 
@@ -1362,5 +1553,219 @@ mod tests {
         assert_eq!(WorkspacePreset::Standard.label(), "Default");
 
         i18n::set_current(Language::Ja);
+    }
+
+    /// A settings folder of a test's own (removed first).
+    fn settings_folder(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("disccraft-settings-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// Settings with every kind of value set: an arrangement with nulls and mixed lists (as craft-ui's dock writes
+    /// it), a named workspace, every preference, presets of each stored form.
+    fn every_setting() -> Saved {
+        use super::{PlaybackQuality, PreviewPrefs, StoredPreset, TimelinePrefs};
+        use disccraft_project::{TranscodeAudio, TranscodeMode, VideoStandard};
+        let dock = serde_json::json!({
+            "floated": [["library", {"anchor": "styles", "floating": null, "group": null,
+                "placement": {"Tab": {"before": "styles"}}, "sibling": [], "size": null, "stack": null}]],
+            "hidden": [],
+            "layout": {"floating": [{"active": 0, "id": 0, "panels": ["library"],
+                "rect": [300.0, 300.0, 400.0, 300.0]}],
+                "root": {"Tabs": {"active": 0, "panels": ["project", "menus"]}}},
+            "saved": null
+        });
+        Saved {
+            workspace: WorkspacePreset::Menu,
+            current: Some(WorkspaceId::User("Mine".to_owned())),
+            user_workspaces: vec!["Mine".to_owned(), "Other \"quoted\"".to_owned()],
+            arrangements: vec![
+                SavedDock {
+                    id: WorkspaceId::Preset(WorkspacePreset::Standard),
+                    dock: dock.clone(),
+                },
+                SavedDock {
+                    id: WorkspaceId::User("Mine".to_owned()),
+                    dock,
+                },
+            ],
+            column_widths: [
+                ("project:name".to_owned(), 180.5_f32),
+                ("assets:kind".to_owned(), 60.0),
+            ]
+            .into_iter()
+            .collect(),
+            language: Some(Language::En),
+            language_chosen: true,
+            recent: vec![
+                PathBuf::from(r"C:\discs\a.dcproj"),
+                PathBuf::from("/home/me/b.dcproj"),
+            ],
+            default_standard: Some(VideoStandard::Pal),
+            timeline_prefs: Some(TimelinePrefs {
+                still_seconds: 9,
+                subtitle_seconds: 3,
+                audio_language: "ja".to_owned(),
+                subtitle_language: "en".to_owned(),
+                snap_subtitles: true,
+            }),
+            preview_prefs: Some(PreviewPrefs {
+                tv_4x3: true,
+                pan_scan: true,
+                region: 2,
+                audio_language: "ja".to_owned(),
+                subtitle_language: "en".to_owned(),
+                parental_level: 5,
+                quality: Some(PlaybackQuality::Draft),
+            }),
+            audio_device: Some("Speakers (USB)".to_owned()),
+            parallel_transcodes: Some(3),
+            quality_presets: vec![
+                StoredPreset::Plain("Small".to_owned(), 3000),
+                StoredPreset::Encoded("Two pass".to_owned(), 5000, TranscodeMode::Vbr2Pass),
+                StoredPreset::Full(
+                    "Pcm".to_owned(),
+                    6000,
+                    TranscodeMode::Cbr,
+                    TranscodeAudio::Pcm,
+                ),
+                StoredPreset::Rated(
+                    "Rated".to_owned(),
+                    6500,
+                    TranscodeMode::Vbr,
+                    TranscodeAudio::DolbyDigital,
+                    3,
+                ),
+                StoredPreset::Bluray(
+                    "HD".to_owned(),
+                    18000,
+                    30000,
+                    TranscodeMode::Vbr,
+                    4,
+                    super::BlurayTag::Bluray,
+                ),
+            ],
+            video_output: Some(2),
+            video_output_in_background: true,
+            library_dir: Some(PathBuf::from(r"D:\library")),
+            media_cache_dir: Some(PathBuf::from(r"D:\cache")),
+            hide_tools: true,
+            hardware_encoder: true,
+            playback_quality: Some(PlaybackQuality::High),
+            appearance: Some(crate::theme::Appearance::Light),
+            check_updates_at_start: true,
+        }
+    }
+
+    /// M9.62: the `workspace.json` of the versions before becomes `config.toml` at start with every value, the old
+    /// file left as it is; from then on `config.toml` is read, and a save and a read give back every value, a value
+    /// cleared included.
+    #[test]
+    fn workspace_json_becomes_config_toml_with_every_value()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = settings_folder("migrate");
+        std::fs::create_dir_all(&dir)?;
+        let saved = every_setting();
+        let old = serde_json::to_string_pretty(&saved)?;
+        let legacy = dir.join(super::LEGACY_FILE);
+        std::fs::write(&legacy, &old)?;
+        // Read before it is written: the old file's values.
+        assert!(super::load_settings_in(Some(&dir)) == saved);
+        super::open_settings_in(Some(&dir));
+        let config = dir.join("config.toml");
+        let text = std::fs::read_to_string(&config)?;
+        assert!(
+            text.contains("schema_version") && text.contains("Speakers (USB)"),
+            "{text}"
+        );
+        assert_eq!(std::fs::read_to_string(&legacy)?, old);
+        // From now on config.toml decides, whatever the old file says.
+        std::fs::write(&legacy, "{}")?;
+        assert!(super::load_settings_in(Some(&dir)) == saved);
+        // The arrangement reads back as the dock it was.
+        let back = super::load_settings_in(Some(&dir));
+        assert!(super::saved_dock(&back, &WorkspaceId::User("Mine".to_owned())).is_some());
+        assert_eq!(
+            back.arrangements.first().map(|saved| &saved.dock),
+            saved.arrangements.first().map(|saved| &saved.dock)
+        );
+        // A save and a read: every value, values cleared and lists emptied included.
+        let mut changed = saved.clone();
+        changed.audio_device = None;
+        changed.user_workspaces.clear();
+        changed.arrangements.truncate(1);
+        changed.recent.insert(0, PathBuf::from(r"E:\new.dcproj"));
+        changed.timeline_prefs = None;
+        changed.language = Some(Language::Ja);
+        super::save_in(&dir, &changed)?;
+        assert!(super::load_settings_in(Some(&dir)) == changed);
+        let text = std::fs::read_to_string(&config)?;
+        assert!(!text.contains("Speakers (USB)"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M9.62: a damaged `config.toml` is no panic: it is moved aside when the settings open, and they save and read
+    /// again. Lines and comments written by hand survive a save. A first start with nothing saved reads the defaults.
+    #[test]
+    fn a_damaged_config_toml_is_set_aside() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = settings_folder("damaged");
+        assert!(super::load_settings_in(Some(&dir)) == Saved::default());
+        super::open_settings_in(Some(&dir));
+        assert!(
+            !dir.join("config.toml").exists(),
+            "nothing to migrate, nothing written"
+        );
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("config.toml"),
+            "schema_version = 1\nworkspace = [[[ not toml\x00",
+        )?;
+        let _ = super::load_settings_in(Some(&dir));
+        super::open_settings_in(Some(&dir));
+        let saved = every_setting();
+        super::save_in(&dir, &saved)?;
+        assert!(super::load_settings_in(Some(&dir)) == saved);
+        let config = dir.join("config.toml");
+        let text = std::fs::read_to_string(&config)?;
+        std::fs::write(&config, format!("# kept by hand\nhandMade = 1\n{text}"))?;
+        let mut changed = saved.clone();
+        changed.hide_tools = false;
+        super::save_in(&dir, &changed)?;
+        let text = std::fs::read_to_string(&config)?;
+        assert!(
+            text.contains("# kept by hand") && text.contains("handMade = 1"),
+            "{text}"
+        );
+        assert!(super::load_settings_in(Some(&dir)) == changed);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M9.62: the settings stay in DiscCraft's folder of the user's config folder (on Windows `%APPDATA%`, which the
+    /// manual's captures and the GUI checks point elsewhere), with no `config.toml` anywhere else; the unit tests keep
+    /// theirs in a temporary folder.
+    #[test]
+    fn the_settings_folder_follows_the_config_folder() {
+        #[cfg(windows)]
+        assert_eq!(
+            super::config_dir(),
+            std::env::var_os("APPDATA").map(PathBuf::from)
+        );
+        let dir = settings_folder("place");
+        let (store, _) =
+            craft_settings::SettingsStore::<Saved>::open_with(super::store_options(Some(&dir)));
+        assert_eq!(store.path(), Some(dir.join("config.toml").as_path()));
+        let (memory, _) =
+            craft_settings::SettingsStore::<Saved>::open_with(super::store_options(None));
+        assert_eq!(memory.path(), None);
+        assert!(
+            super::settings_dir().is_some_and(|test| test.starts_with(std::env::temp_dir())),
+            "{:?}",
+            super::settings_dir()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

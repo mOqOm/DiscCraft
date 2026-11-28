@@ -272,6 +272,11 @@ impl DiscCraftApp {
         if self.session.project.settings.kind == DiscKind::Dvd {
             self.layer_break_section(ui);
             self.region_section(ui);
+        } else {
+            // M6.543: a Blu-ray's parental level, asked of the player's age setting.
+            crate::theme::group_box(ui, "build_bd_parental", tl!("Parental Control"), |ui| {
+                self.parental_level_row(ui);
+            });
         }
 
         self.project_check_section(ui);
@@ -774,9 +779,13 @@ impl DiscCraftApp {
                 });
         })
         .response
-        .on_hover_text(tl!(
-            "A player set to a lower level asks for its password before the disc plays"
-        ));
+        .on_hover_text(if self.session.project.settings.kind == DiscKind::BluRay {
+            tl!(
+                "A Blu-ray player whose parental age is below the level's does not play the disc (levels 1 to 8: all ages, 6, 10, 13, 15, 17, 18 and 21)"
+            )
+        } else {
+            tl!("A player set to a lower level asks for its password before the disc plays")
+        });
         if let Some(level) = selected {
             let _ = self.run_command(
                 "disc.setParentalLevel",

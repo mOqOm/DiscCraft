@@ -89,6 +89,11 @@ impl DiscCraftApp {
                     self.run_pending(ctx, action);
                 }
             }
+            Choice::Save if self.session.path.is_none() => {
+                // The Save dialog answers on a later frame; the close or exit goes on once it is saved (M9.64).
+                let after = self.pending_action.take();
+                self.save_project_then(false, after);
+            }
             Choice::Save => {
                 self.save_project(false);
                 if self.session.dirty {
@@ -102,7 +107,7 @@ impl DiscCraftApp {
     }
 
     /// 保留していた操作を実行する。
-    fn run_pending(&mut self, ctx: &Context, action: PendingAction) {
+    pub(crate) fn run_pending(&mut self, ctx: &Context, action: PendingAction) {
         match action {
             PendingAction::CloseProject => self.close_project(),
             PendingAction::Exit => {
@@ -119,26 +124,26 @@ impl DiscCraftApp {
         }
     }
 
-    /// ウィンドウの × を確認ダイアログに回す。確認済みなら何もしない（そのまま閉じる）。
-    pub(crate) fn intercept_close(&mut self, ctx: &Context) {
-        if self.allow_close || !ctx.input(|input| input.viewport().close_requested()) {
-            return;
+    /// ウィンドウの ×（Alt+F4）で閉じてよいか（M9.54: UI のランタイムの閉じる道筋から、`logic` で聞かれる）。確認済み
+    /// なら閉じる。ディスクの書き込み中は閉じない（M9.35: 書きかけのディスクは使えない）。保存していない変更があれば
+    /// 閉じずに確認ダイアログに回す。
+    pub fn close_decision(&mut self) -> craft_ui::shell::embed::CloseDecision {
+        use craft_ui::shell::embed::CloseDecision;
+        if self.allow_close {
+            return CloseDecision::Close;
         }
-
-        // A disc half written cannot be used (M9.35): the window stays until the writing ends or is stopped.
         if self.disc.is_writing() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.status = crate::i18n::tl!(
                 "A disc is being written. Stop it or wait for it to finish first."
             )
             .to_owned();
-            return;
+            return CloseDecision::Hold;
         }
-
         if self.session.dirty {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.pending_action = Some(PendingAction::Exit);
+            return CloseDecision::Hold;
         }
+        CloseDecision::Close
     }
 }
 

@@ -1,7 +1,7 @@
 //! DiscCraft automation (L5).
 //!
 //! This crate provides an MCP stdio server that drives a DiscCraft engine
-//! session through JSON-RPC 2.0 messages.
+//! session through JSON-RPC 2.0 messages, on craft-libs' `craft-mcp-server` (M9.61).
 
 #![deny(
     clippy::unwrap_used,

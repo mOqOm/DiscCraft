@@ -7,23 +7,9 @@
 
 use disccraft_build::{BuildOptions, OutputKind, build};
 use disccraft_project::{Link, Project, VideoStandard};
+use disccraft_test_support::{ffmpeg, fixtures};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-fn ffmpeg() -> Option<PathBuf> {
-    let path =
-        std::env::var_os("DISCCRAFT_FFMPEG").map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
-
-fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures")
-}
 
 /// Two seconds of interlaced moving picture (fields of a picture at twice the rate) as DV, with a stereo tone.
 fn dv_fixture(

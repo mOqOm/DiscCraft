@@ -36,7 +36,7 @@ Other rules:
 - 16:9 menus on SD use the same 720×480 frame, stretched horizontally for display (HD Blu-ray uses a 1920×1080 frame).
   The aspect ratio of DVD menus is common across the entire disc.
 - Audio converts to Dolby Digital (AC-3) at 192 kbps. AC-3 and WAV assets can be used as-is. DTS (`.dts`) can also be
-  used as-is.
+  used as-is. Dolby Digital Plus (E-AC-3: `.eac3`, `.ec3`, or an `.ac3` holding E-AC-3) is converted to Dolby Digital.
 - MPEG-2 video compatible with DVD (widths of 720 / 704 / 352) is not transcoded. Clips within a single title must have
   the same width.
 - MPEG-1 video (VCD `.mpg`, `.m1v`) can be placed directly onto a DVD in 4:3 if it is 352x240 (NTSC) or 352x288 (PAL)

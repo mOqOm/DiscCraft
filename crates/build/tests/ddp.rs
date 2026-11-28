@@ -9,23 +9,9 @@
 use disccraft_build::{BuildOptions, OutputKind, build};
 use disccraft_ddp::{Layout, control_data, ddp_id};
 use disccraft_project::{DiscKind, Link, Project};
+use disccraft_test_support::{ffmpeg, fixtures};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-fn ffmpeg() -> Option<PathBuf> {
-    let path =
-        std::env::var_os("DISCCRAFT_FFMPEG").map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
-
-fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures")
-}
 
 /// Two seconds (59 frames at 29.97) of H.264 with AAC sound: transcoded by the build (the fixture of
 /// `chapter_frames.rs` and `layer_break.rs`).

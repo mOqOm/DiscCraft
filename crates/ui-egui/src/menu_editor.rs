@@ -1685,6 +1685,7 @@ pub(crate) fn link_label(project: &Project, link: &Link) -> String {
         Link::NotSet => tl!("Not set").to_string(),
         Link::Stop => tl!("Stop").to_string(),
         Link::LastMenu => tl!("Last menu").to_string(),
+        Link::Resume => tl!("Resume").to_string(),
         Link::Timeline { id, chapter } => timeline_link_label(project, *id, *chapter),
         Link::Menu { id, button } => menu_link_label(project, *id, *button),
         Link::Playlist { id } => project.playlists.get(id).map_or_else(

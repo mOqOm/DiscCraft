@@ -65,5 +65,5 @@ Workspace layout, display language, recent projects, and table column widths are
 
 | Location | Contents |
 |---|---|
-| Windows: `%APPDATA%\disccraft\workspace.json`<br>Other: `~/.config/disccraft/workspace.json` | Workspace, panel layout, display language, recent projects, default TV standard |
+| Windows: `%APPDATA%\disccraft\config.toml`<br>Other: `~/.config/disccraft/config.toml` | Workspace, panel layout, display language, recent projects, default TV standard, preferences. An older version's `workspace.json` is moved here the first time DiscCraft starts, and left where it is. Saving cannot leave the file half-written, and the previous contents are kept as a backup; a damaged file is set aside and the defaults are used |
 | `library.json` in the same folder | Your own menus, buttons, backgrounds, text items, layer sets, and replacement layers added to the Library |

@@ -136,6 +136,18 @@ impl DiscCraftApp {
         );
         let chapters = is_button || matches!(state.target, LinkTarget::Port(Port::MenuRemote(_)));
         let targets = link_targets(&self.session.project, chapters);
+        // M6.528: a menu's buttons and end action can resume the title the menu was called from.
+        let menu_link = is_button
+            || matches!(
+                state.target,
+                LinkTarget::EndAction(NodeId::Menu(_))
+                    | LinkTarget::Port(Port::EndAction(NodeId::Menu(_)))
+            );
+        let targets = if menu_link {
+            crate::properties::with_resume(&targets)
+        } else {
+            targets
+        };
         let project = self.session.project.clone();
         let mut done = None;
         let response = Modal::new(Id::unique("link_dialog")).show(ctx, |ui| {
@@ -293,7 +305,10 @@ fn link_list(ui: &mut Ui, targets: &[(String, Link)], filter: &str, chosen: &mut
         }),
         (tl!("Menus"), |link| matches!(link, Link::Menu { .. })),
         (tl!("Other"), |link| {
-            matches!(link, Link::NotSet | Link::Stop | Link::LastMenu)
+            matches!(
+                link,
+                Link::NotSet | Link::Stop | Link::LastMenu | Link::Resume
+            )
         }),
     ];
     for (heading, belongs) in groups {

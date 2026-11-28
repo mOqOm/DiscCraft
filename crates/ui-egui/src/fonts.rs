@@ -1,11 +1,26 @@
-use egui::{Context, FontData, FontDefinitions, FontFamily, FontId};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+//! The interface's fonts: craft-ui's font stack, the one every Craft app installs (M9.66), with the suite's faces since
+//! M9.68 (Encore's Tahoma and MS UI Gothic are no longer used).
+//!
+//! The stack's own order: the suite's interface faces (Inter, with its semibold and egui's monospace), the craft-fonts
+//! faces a build embeds (`build.rs`; release builds embed them) for the UI language and every other script the
+//! interface offers, then the installed system fonts (Japanese on a machine whose craft-fonts have no Japanese interface
+//! face) and the emoji faces.
 
-/// 日本語の書体の候補（ファイル、TTC の中の番号）。先に見つかったものを使う。Windows では Encore と同じ
-/// MS UI Gothic（[`ENCORE_JAPANESE`]）が先に使われ、これはそれに無い字を補う。
-///
-/// UI 向けの書体（Meiryo UI、Yu Gothic UI）を先に置く。
+use craft_ui::fonts::{EmbeddedFace, I18nScripts, Stack, UiFonts};
+use egui::{Context, FontData, FontId, Id};
+use std::sync::OnceLock;
+
+/// craft-fonts faces (OFL-1.1); empty unless built with a craft-fonts checkout (see `build.rs`).
+static CRAFT_FONTS: &[EmbeddedFace] = include!(concat!(env!("OUT_DIR"), "/craft_fonts.rs"));
+
+/// The languages the interface offers, whose scripts the stack keeps faces for.
+const LANGUAGES: [&str; 2] = ["en", "ja"];
+
+/// The name of the OS's Japanese interface face in the stack.
+const JP: &str = "jp";
+
+/// 日本語の書体の候補（ファイル、TTC の中の番号）。先に見つかったものを、どの書体の組でも最後の頼りとして
+/// 足す（FilmCraft と同じく、Craft の書体に無い日本語を描く）。UI 向けの書体（Meiryo UI、Yu Gothic UI）を先に置く。
 const FONT_CANDIDATES: &[(&str, u32)] = &[
     (r"C:\Windows\Fonts\meiryo.ttc", 2),  // Meiryo UI
     (r"C:\Windows\Fonts\YuGothM.ttc", 1), // Yu Gothic UI
@@ -17,31 +32,9 @@ const FONT_CANDIDATES: &[(&str, u32)] = &[
     ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 0),
 ];
 
-/// Encore の画面の英数字の書体の候補（M6.450 でフローチャートに、M6.461 で画面全体に）。Encore CS6 は名前も
-/// ボタンもプロパティも Tahoma の 11 ピクセルで描く。OS の書体を読むだけで、同梱はしない。
-const ENCORE_LATIN: &[(&str, u32)] = &[
-    (r"C:\Windows\Fonts\tahoma.ttf", 0),
-    ("/System/Library/Fonts/Supplemental/Tahoma.ttf", 0),
-];
-
-/// Encore の画面の日本語の書体の候補（M6.458、M6.461）。Encore の日本語は、Windows が Tahoma の代わりに
-/// MS UI Gothic で描いたもので、英数字の 11 に対して 12 の大きさ（「グロリアス」の幅が 45、Meiryo UI の 11
-/// では 41）。msgothic.ttc の 1 番目が MS UI Gothic。
-const ENCORE_JAPANESE: &[(&str, u32)] = &[(r"C:\Windows\Fonts\msgothic.ttc", 1)];
-
-/// 英数字の大きさに対する日本語の大きさ（Encore: 11 に 12）。
-const JAPANESE_SCALE: f32 = 12.0 / 11.0;
-
-/// Encore の英数字の書体（Tahoma）が見つかり、画面の文字をその大きさ（11）で描くか。
-static ENCORE_FONTS: AtomicBool = AtomicBool::new(false);
-
-/// 画面の文字の大きさの基準：Encore の書体があれば Encore と同じ 11、なければ今までの 12。
+/// The interface's text size, as in the other Craft apps (12 px).
 pub(crate) fn body_size() -> f32 {
-    if ENCORE_FONTS.load(Ordering::Relaxed) {
-        11.0
-    } else {
-        12.0
-    }
+    12.0
 }
 
 /// フローチャートの文字の書体（画面の文字と同じ組）。
@@ -49,30 +42,12 @@ pub(crate) fn chart_font(size: f32) -> FontId {
     FontId::proportional(size)
 }
 
-/// Encore の書体の描き方：横にも画素にそろえ、字を画素の境目に置く（M6.457）。Encore（Windows の GDI）の
-/// Tahoma のように縦の線が 1 画素でくっきりする。egui の既定は横をそろえず、11 ピクセルの縦の線が 2 画素に
-/// ぼける。
-fn encore_tweak(scale: f32) -> egui::epaint::text::FontTweak {
-    use egui::epaint::text::{FontTweak, HintingTarget, SmoothHinting};
-    FontTweak {
-        scale,
-        hinting: Some(true),
-        hinting_target: HintingTarget::Smooth(SmoothHinting {
-            light: false,
-            symmetric_rendering: false,
-            preserve_linear_metrics: false,
-        }),
-        subpixel_binning: Some(false),
-        ..FontTweak::default()
-    }
-}
-
-/// 候補のうち最初に読めたフォント。
+/// 候補のうち最初に読めたフォント。一度だけ読み、アプリが閉じるまで持つ（言語を替えて入れ直すときも同じ中身）。
 fn first_font(candidates: &[(&str, u32)]) -> Option<FontData> {
     candidates.iter().find_map(|(path, index)| {
         let mut bytes = std::fs::read(path).ok().filter(|bytes| !bytes.is_empty())?;
         let _ = hide_bitmaps(&mut bytes, *index);
-        let mut data = FontData::from_owned(bytes);
+        let mut data = FontData::from_static(Box::leak(bytes.into_boxed_slice()));
         data.index = *index;
         Some(data)
     })
@@ -133,109 +108,134 @@ fn hide_bitmaps(bytes: &mut [u8], index: u32) -> bool {
     renamed
 }
 
-/// 見つかった書体：日本語（Meiryo UI など）、Encore の英数字（Tahoma）と日本語（MS UI Gothic）。
-#[derive(Default)]
-struct Found {
-    japanese: Option<FontData>,
-    latin: Option<FontData>,
-    encore_japanese: Option<FontData>,
+/// The OS's Japanese interface face, read once.
+fn japanese() -> Option<&'static FontData> {
+    static FOUND: OnceLock<Option<FontData>> = OnceLock::new();
+    FOUND.get_or_init(|| first_font(FONT_CANDIDATES)).as_ref()
 }
 
-/// egui の既定の書体に、Encore の書体と日本語の書体を足した定義。
-///
-/// 文章用（Proportional）は Encore と同じく英数字が Tahoma、日本語が MS UI Gothic（英数字の 12/11 倍）で、どちらにも
-/// 無い字を日本語の書体（Meiryo UI など）と egui の内蔵フォントで補う。Tahoma が無ければ今までどおり日本語の書体を
-/// いちばん先にして、英数字も同じ書体で描く（英数字だけ egui の内蔵フォントになると、「本編A」のように和文と欧文の
-/// 基準線がずれて読みにくい）。等幅（タイムコードなど）は内蔵の等幅フォントを先に残し、日本語だけこの書体で補う。
-fn font_definitions(found: Found) -> FontDefinitions {
-    let mut fonts = FontDefinitions::default();
-    let mut front: Vec<String> = Vec::new();
-    let encore = found.latin.is_some();
-    for (name, data, tweak) in [
-        ("encore", found.latin, encore_tweak(1.0)),
-        (
-            "encore-ja",
-            found.encore_japanese,
-            encore_tweak(JAPANESE_SCALE),
-        ),
-    ] {
-        // The Japanese one only after Tahoma: alone, it would draw the letters too, a size larger.
-        if let Some(data) = data.filter(|_| encore) {
-            let _ = fonts
-                .font_data
-                .insert(name.to_owned(), Arc::new(data.tweak(tweak)));
-            front.push(name.to_owned());
+/// The interface's font stack for the UI language `language` (`en`, `ja`): the suite's, as every Craft app has it, with
+/// the OS's Japanese interface face `japanese` last in every family (before the system fonts), as FilmCraft adds its
+/// Japanese face.
+fn ui_fonts(language: &str, japanese: Option<&FontData>) -> Stack {
+    let mut stack = UiFonts::new(&I18nScripts)
+        .craft_faces(CRAFT_FONTS)
+        .languages(&LANGUAGES)
+        .ui_language(language)
+        .stack();
+    if let Some(japanese) = japanese {
+        let families: Vec<_> = stack
+            .weights()
+            .iter()
+            .map(|(family, _)| family.clone())
+            .collect();
+        for family in families {
+            let end = stack.chain(&family).len();
+            stack.insert(&family, end, JP, japanese.clone());
         }
     }
-    if let Some(data) = found.japanese {
-        let _ = fonts.font_data.insert("jp".to_owned(), Arc::new(data));
-        front.push("jp".to_owned());
-        fonts
-            .families
-            .entry(FontFamily::Monospace)
-            .or_default()
-            .push("jp".to_owned());
-    }
-    let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
-    for (at, name) in front.into_iter().enumerate() {
-        proportional.insert(at, name);
-    }
-    fonts
+    stack
 }
 
-/// 日本語の書体と Encore の書体を入れる。[`crate::apply_theme`] より先に呼ぶ（文字の大きさが書体で決まる）。
-pub fn install_fonts(ctx: &Context) {
-    let found = Found {
-        japanese: first_font(FONT_CANDIDATES),
-        latin: first_font(ENCORE_LATIN),
-        encore_japanese: first_font(ENCORE_JAPANESE),
-    };
-    ENCORE_FONTS.store(found.latin.is_some(), Ordering::Relaxed);
-    ctx.set_fonts(font_definitions(found));
+/// Where a context keeps the language its fonts were installed for.
+fn installed_language_id() -> Id {
+    Id::unique("disccraft-fonts-language")
+}
+
+/// Installs the stack for `language` through the UI runtime (M9.54), which notes what it holds for the framework's own
+/// text (the dock's tabs, the menu bar).
+fn install_for(ctx: &Context, language: &str) {
+    ui_fonts(language, japanese()).install(ctx);
+    ctx.data_mut(|data| data.insert_temp(installed_language_id(), language.to_owned()));
     ctx.request_repaint();
+}
+
+/// The interface's fonts. Call it before [`crate::apply_theme`] (the text sizes go with the fonts).
+pub fn install_fonts(ctx: &Context) {
+    install_for(ctx, crate::workspace::load_language().code());
+}
+
+/// Installs the fonts again when the interface language changed since they were installed in `ctx` (the stack orders
+/// the faces for the UI language). A context the fonts were never installed in (a test's) is left alone.
+pub(crate) fn follow_language(ctx: &Context, language: crate::i18n::Language) {
+    let installed = ctx.data(|data| data.get_temp::<String>(installed_language_id()));
+    if installed.is_some_and(|code| code != language.code()) {
+        install_for(ctx, language.code());
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use craft_ui::fonts::FontRef;
 
-    fn family(fonts: &FontDefinitions, family: &FontFamily) -> Vec<String> {
-        fonts.families.get(family).cloned().unwrap_or_default()
-    }
-
-    fn data() -> Option<FontData> {
+    fn data() -> FontData {
         // Any bytes do for the order; the fonts are parsed only when text is laid out.
-        Some(FontData::from_static(b"font"))
+        FontData::from_static(b"font")
     }
 
     #[test]
-    fn encore_fonts_come_first_then_the_japanese_one() {
-        let fonts = font_definitions(Found {
-            japanese: data(),
-            latin: data(),
-            encore_japanese: data(),
-        });
-        let proportional = family(&fonts, &FontFamily::Proportional);
-        assert_eq!(
-            proportional.get(..3),
-            Some(&["encore", "encore-ja", "jp"].map(String::from)[..])
+    fn the_suite_faces_lead_in_every_language() {
+        for language in ["en", "ja", "xx"] {
+            let stack = ui_fonts(language, Some(&data()));
+            let proportional = stack.chain(&FontRef::proportional());
+            assert_eq!(
+                proportional.first().map(String::as_str),
+                Some("Inter-Regular"),
+                "{language}: {proportional:?}"
+            );
+            for gone in ["encore", "encore-ja"] {
+                assert!(
+                    !proportional.iter().any(|name| name == gone),
+                    "{language}: {proportional:?}"
+                );
+            }
+            // The Japanese face is the last of every family's own faces.
+            for family in [FontRef::proportional(), FontRef::monospace()] {
+                assert_eq!(
+                    stack.chain(&family).last().map(String::as_str),
+                    Some(JP),
+                    "{language}: {:?}",
+                    stack.chain(&family)
+                );
+            }
+        }
+        // Without a Japanese face the suite's stack is as it is.
+        let stack = ui_fonts("ja", None);
+        assert!(
+            !stack
+                .chain(&FontRef::proportional())
+                .contains(&JP.to_owned())
         );
-        let monospace = family(&fonts, &FontFamily::Monospace);
-        assert_eq!(monospace.last().map(String::as_str), Some("jp"));
-        assert!(!monospace.contains(&"encore".to_owned()));
     }
 
+    /// A context with the interface's fonts installed for `language`, after the passes that apply them.
+    fn context(language: &str) -> Context {
+        let ctx = Context::default();
+        ui_fonts(language, japanese()).install(&ctx);
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(Default::default(), |_| {});
+            output.textures_delta.clear();
+        }
+        ctx
+    }
+
+    /// The menus' Japanese, the arrows and marks draw where the OS has a Japanese face (every Windows and macOS does).
     #[test]
-    fn without_tahoma_the_japanese_font_draws_everything() {
-        // MS UI Gothic alone would draw the letters a size larger: it is left out with Tahoma.
-        let fonts = font_definitions(Found {
-            japanese: data(),
-            latin: None,
-            encore_japanese: data(),
-        });
-        let proportional = family(&fonts, &FontFamily::Proportional);
-        assert_eq!(proportional.first().map(String::as_str), Some("jp"));
-        assert!(!proportional.contains(&"encore-ja".to_owned()));
+    fn the_interface_draws_every_character_of_its_japanese_menus() {
+        if !cfg!(any(windows, target_os = "macos")) {
+            return;
+        }
+        let ctx = context("ja");
+        let id = FontId::proportional(body_size());
+        for character in "ファイル(F) 編集(E) タイムライン(T) ▸ ▼ ✓ × … 「」".chars()
+        {
+            assert!(
+                ctx.fonts_mut(|fonts| fonts.has_glyph(&id, character)),
+                "missing U+{:04X}",
+                u32::from(character)
+            );
+        }
     }
 
     /// A font face's start: version, table count, the search fields, then a 16-byte record per tag.
@@ -288,12 +288,5 @@ mod tests {
         cut.truncate(14);
         assert!(!hide_bitmaps(&mut cut, 0));
         assert!(!hide_bitmaps(&mut [], 0));
-    }
-
-    #[test]
-    fn nothing_found_keeps_egui_fonts() {
-        let before = family(&FontDefinitions::default(), &FontFamily::Proportional);
-        let fonts = font_definitions(Found::default());
-        assert_eq!(family(&fonts, &FontFamily::Proportional), before);
     }
 }

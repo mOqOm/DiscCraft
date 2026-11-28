@@ -4,6 +4,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use disccraft_test_support::fixtures;
 use disccraft_transcode::{
     cached_blob, enable_probe_cache, media_open, probe_ready, probe_video, store_blob, warm,
     warming,
@@ -12,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 fn fixture() -> Option<PathBuf> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/ntsc.m2v");
+    let path = fixtures().join("ntsc.m2v");
     path.is_file().then_some(path)
 }
 

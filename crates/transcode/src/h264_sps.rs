@@ -24,6 +24,10 @@ pub struct Sps {
     pub timing: Option<(u32, u32)>,
     /// What a slice header's first fields depend on (M12.42, [`top_field_first_in_annex_b`]).
     pub slice: SliceSyntax,
+    /// M6.556: `video_full_range_flag` (E.2.1): the samples use the whole 0–255 rather than 16–235.
+    pub full_range: bool,
+    /// M6.556: `matrix_coefficients` (Table E-5: 1 BT.709, 2 unspecified, 5 and 6 BT.601), when the stream says it.
+    pub matrix: Option<u8>,
 }
 
 /// The fields of a sequence parameter set that a slice header's first fields depend on (7.3.3).
@@ -55,6 +59,8 @@ struct Extras {
     crop: Option<(u32, u32, u32, u32)>,
     pixel_aspect: Option<(u32, u32)>,
     timing: Option<(u32, u32)>,
+    full_range: bool,
+    matrix: Option<u8>,
 }
 
 /// The pixel shapes of `aspect_ratio_idc` 1 to 16 (Table E-1).
@@ -105,9 +111,11 @@ fn read_extras(bits: &mut Bits<'_>, frame_mbs_only: bool, extras: &mut Extras) -
         let _overscan_appropriate = bits.read(1)?;
     }
     if bits.read(1)? == 1 {
-        let _format_and_range = bits.read(4)?;
+        // video_format (3 bits), video_full_range_flag.
+        extras.full_range = bits.read(4)? & 1 == 1;
         if bits.read(1)? == 1 {
-            let _colour = bits.read(24)?;
+            // colour_primaries, transfer_characteristics, matrix_coefficients.
+            extras.matrix = u8::try_from(bits.read(24)? & 0xFF).ok();
         }
     }
     if bits.read(1)? == 1 {
@@ -193,6 +201,8 @@ pub fn parse(payload: &[u8]) -> Option<Sps> {
             log2_max_poc_lsb,
             separate_colour_plane,
         },
+        full_range: extras.full_range,
+        matrix: extras.matrix,
     })
 }
 
@@ -438,10 +448,29 @@ mod tests {
                     log2_max_poc_lsb: 5,
                     separate_colour_plane: false,
                 },
+                full_range: false,
+                matrix: Some(1),
             })
         );
         let rate = sps.and_then(|sps| sps.frame_rate()).unwrap_or_default();
         assert!((rate - 30_000.0 / 1001.0).abs() < 1e-9, "{rate}");
+    }
+
+    /// M6.556: a 1080p High@4.1 stream's sequence parameter set (libx264, 23.976) that says full range and the
+    /// BT.601 matrix (6, SMPTE 170M) in its VUI.
+    const SPS_1080P_FULL_601: [u8; 28] = [
+        0x64, 0x00, 0x29, 0xac, 0xd9, 0x40, 0x78, 0x02, 0x27, 0xe5, 0xc0, 0x5b, 0x81, 0x01, 0x03,
+        0x20, 0x00, 0x00, 0x7d, 0x20, 0x00, 0x17, 0x70, 0x01, 0xe3, 0x06, 0x32, 0xc0,
+    ];
+
+    /// M6.556: the VUI's video signal type is read: full range and the matrix.
+    #[test]
+    fn reads_the_range_and_matrix() {
+        let sps = parse(&SPS_1080P_FULL_601);
+        assert_eq!(
+            sps.map(|sps| (sps.width, sps.shown, sps.full_range, sps.matrix)),
+            Some((1920, (1920, 1080), true, Some(6)))
+        );
     }
 
     #[test]

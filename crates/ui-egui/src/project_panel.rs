@@ -162,8 +162,9 @@ impl ProjectColumn {
     }
 
     /// The column's width before it is dragged (M6.469): Encore's (名前 222, 種類 78, デュレーション 78, DVD トランスコード
-    /// ステータス 113, DVD トランスコード設定 223, the Blu-ray ones 78, as its Project panel opens) less the gap
-    /// between cells; the columns Encore hides at first take the width of one of the same sort.
+    /// ステータス 113, DVD トランスコード設定 223, the Blu-ray ones 78, as its Project panel opens) for its 11-pixel text,
+    /// grown with the interface's text (M9.68: 12 pixels, so that a duration still fits), less the gap between cells;
+    /// the columns Encore hides at first take the width of one of the same sort.
     pub(crate) fn encore_width(self) -> f32 {
         let encore: f32 = match self {
             ProjectColumn::Name | ProjectColumn::DvdSettings => 222.0,
@@ -177,7 +178,7 @@ impl ProjectColumn {
             | ProjectColumn::Size
             | ProjectColumn::Bitrate => 78.0,
         };
-        encore - CELL_GAP
+        (encore * crate::fonts::body_size() / 11.0).round() - CELL_GAP
     }
 }
 

@@ -204,12 +204,18 @@ impl crate::DiscCraftApp {
         if self.library_busy() {
             return;
         }
-        let Some(files) = rfd::FileDialog::new()
-            .add_filter(tl!("Library Files"), &LIBRARY_EXTENSIONS)
-            .pick_files()
-        else {
+        crate::file_dialogs::ask(
+            craft_dialogs::FileDialog::open_many()
+                .filter(tl!("Library Files"), &LIBRARY_EXTENSIONS),
+            crate::file_dialogs::Then::LibraryFiles,
+        );
+    }
+
+    /// The files chosen for the Library's Add Items from Files….
+    pub(crate) fn library_add_paths(&mut self, files: Vec<PathBuf>) {
+        if self.library_busy() {
             return;
-        };
+        }
         let files: Vec<PathBuf> = files
             .into_iter()
             .filter(|path| is_library_file(path))
@@ -225,10 +231,18 @@ impl crate::DiscCraftApp {
         if self.library_busy() {
             return;
         }
-        let Some(folder) = rfd::FileDialog::new().pick_folder() else {
+        crate::file_dialogs::ask(
+            craft_dialogs::FileDialog::folder(),
+            crate::file_dialogs::Then::LibraryFolder,
+        );
+    }
+
+    /// The folder chosen for the Library's Import Folder….
+    pub(crate) fn library_import_from(&mut self, folder: &Path) {
+        if self.library_busy() {
             return;
-        };
-        let sets = folder_sets(&folder);
+        }
+        let sets = folder_sets(folder);
         if sets.is_empty() {
             self.status = tl!("No library files (PSDs or pictures) in that folder").to_owned();
             return;

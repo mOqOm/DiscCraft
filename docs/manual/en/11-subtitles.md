@@ -9,8 +9,8 @@
 
 ## 11.1 Import
 
-- Choose **Timeline ▸ Import Subtitles ▸ Text Script…** (SRT / WebVTT / text with timecodes; UTF-8 / UTF-16 / Shift_JIS)
-  to add one subtitle track to the selected timeline.
+- Choose **Timeline ▸ Import Subtitles ▸ Text Script…** (SRT / WebVTT / text with timecodes; UTF-8 / UTF-16 / Shift_JIS;
+  ASS / SSA, SCC, MCC, EBU STL, TTML / DFXP and SAMI files can be chosen too) to add one subtitle track to the selected timeline.
 - You can import subtitles from images (JPG, GIF, PNG, TIF, BMP) using **Timeline ▸ Import Subtitles ▸ FAB Image Script…
   / Image Script…**.
 
@@ -28,17 +28,25 @@
   > - Image subtitles appear in the timeline by their file names, and the text cannot be edited.
   > - Moving and trimming work the same as for other subtitles.
 - Import a subtitle file as an asset, then drag it into the Timeline Viewer to create clips.
-- **Subtitles in the Video** (MKV subtitle tracks): When you create a timeline from such a video, the internal subtitles
-  become subtitle tracks (up to 32).
+- **Subtitles in the Video** (MKV subtitle tracks, MP4 / MOV text subtitles and VobSub): When you create a timeline
+  from such a video, the internal subtitles become subtitle tracks (up to 32).
 
   > **Details**
   >
-  > - Text subtitles (SRT, WebVTT, ASS / SSA) are extracted as `.srt`, and Blu-ray PGS as `.sup`. They are placed in the
-  >   `<Project Name>.subtitles` folder next to the project (or a temporary folder if the project is not yet saved),
-  >   becoming regular subtitle assets that can be edited.
+  > - Text subtitles (SRT, WebVTT, ASS / SSA, MP4 / MOV text (tx3g)) are extracted as `.srt`, Blu-ray PGS as `.sup`,
+  >   and DVD subtitles (VobSub) as `.idx` and `.sub`. They are placed in the `<Project Name>.subtitles` folder next to
+  >   the project (or a temporary folder if the project is not yet saved), becoming regular subtitle assets that can be
+  >   edited.
   > - ASS decorations (character positioning, color specifications, shapes) are removed, leaving only the text.
   > - The language is taken from what is written in the file.
-  > - PGS cannot be used on DVD, so it is not extracted for DVD projects.
+  > - A VobSub without a palette (such as an MKV made from a VOB alone) is extracted with a default palette that
+  >   shows white letters with a black edge.
+  > - In a Blu-ray project, each VobSub picture becomes a PGS subtitle (its colors and transparency as they are,
+  >   enlarged to the Blu-ray's frame).
+  > - In a DVD project, PGS pictures are turned into the DVD's four subtitle colors (transparent and three colors
+  >   chosen from the whole track). White letters with a black edge become white, black and the gray between.
+  > - Forced subtitles (shown even with subtitles turned off, such as translations of foreign-language lines) stay
+  >   forced either way.
   > - To add them later, choose **Timeline ▸ Import Subtitles ▸ Subtitles in the Video** (a DiscCraft-only item).
 - You can also read text scripts exported by Encore (UTF-16 LE). You can export as SRT / Text Script using **Timeline ▸
   Export Subtitles ▸ Subtitle Track**.

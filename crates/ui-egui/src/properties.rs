@@ -797,11 +797,10 @@ impl DiscCraftApp {
                 let _ = self.run_command("timeline.setPosterFrame", params);
             }
         });
-        // M13.18: another video for players below a parental level (a DVD parental block, M13.17).
-        if self.session.project.settings.kind == disccraft_project::DiscKind::Dvd {
-            ui.separator();
-            self.chapter_parental_rows(ui, id, index);
-        }
+        // M13.18: another video for players below a parental level (a DVD parental block, M13.17; M6.548: a
+        // Blu-ray's parental versions too).
+        ui.separator();
+        self.chapter_parental_rows(ui, id, index);
     }
 
     /// The chapter's parental alternative (M13.18): the video a player set below the level plays in the chapter's
@@ -924,7 +923,10 @@ impl DiscCraftApp {
         // Encore の「基本」と同じく名前の次にエンドアクション。デュレーションは「モーション」の項目。
         let targets = link_targets(&self.session.project, true);
         let port = Port::EndAction(NodeId::Menu(id));
-        if let Some(link) = self.link_row(ui, tl!("End Action:"), port, &menu.end_action, &targets)
+        // M6.528: a menu can resume the title it was called from (its override cannot, as in Encore).
+        let resumable = with_resume(&targets);
+        if let Some(link) =
+            self.link_row(ui, tl!("End Action:"), port, &menu.end_action, &resumable)
         {
             self.set_menu_end_action(id, &link);
         }
@@ -1905,7 +1907,9 @@ impl DiscCraftApp {
 
         let targets = link_targets(&self.session.project, true);
         let port = Port::Button { menu: id, index };
-        if let Some(link) = self.link_row(ui, tl!("Link:"), port, &button.link, &targets) {
+        // M6.528: a button can resume the title its menu was called from (its override cannot, as in Encore).
+        let resumable = with_resume(&targets);
+        if let Some(link) = self.link_row(ui, tl!("Link:"), port, &button.link, &resumable) {
             self.set_button_link(id, index, &link);
         }
         // 上書き: このボタンで再生したタイトルが終わったあとの行き先（リンクがタイトルのときだけ）。
@@ -3064,31 +3068,54 @@ impl DiscCraftApp {
         // 書き出し / 読み込み（Encore のカラーセットのダイアログのボタン）と、初期設定に戻す。
         ui.horizontal(|ui| {
             prop_label(ui, "");
-            if ui.button(tl!("Export…")).clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .add_filter(tl!("Subtitle Color Set"), &["dccolors"])
-                    .set_file_name("colors.dccolors")
-                    .save_file()
-            {
-                let _ = self.run_query(
-                    "colorset.export",
-                    json!({ owner: id, "path": path.to_string_lossy() }),
+            if ui.button(tl!("Export…")).clicked() {
+                crate::file_dialogs::ask(
+                    craft_dialogs::FileDialog::save()
+                        .filter(tl!("Subtitle Color Set"), &["dccolors"])
+                        .file_name("colors.dccolors"),
+                    crate::file_dialogs::Then::SubtitleColors {
+                        owner,
+                        id,
+                        export: true,
+                    },
                 );
             }
-            if ui.button(tl!("Import…")).clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .add_filter(tl!("Subtitle Color Set"), &["dccolors"])
-                    .pick_file()
-            {
-                let _ = self.run_command(
-                    "colorset.import",
-                    json!({ owner: id, "path": path.to_string_lossy() }),
+            if ui.button(tl!("Import…")).clicked() {
+                crate::file_dialogs::ask(
+                    craft_dialogs::FileDialog::open()
+                        .filter(tl!("Subtitle Color Set"), &["dccolors"]),
+                    crate::file_dialogs::Then::SubtitleColors {
+                        owner,
+                        id,
+                        export: false,
+                    },
                 );
             }
             if own.is_some() && ui.button(tl!("Reset to Default")).clicked() {
                 let _ = self.run_command(command, json!({ owner: id, "groups": null }));
             }
         });
+    }
+
+    /// Exports (`export`) or imports the subtitle colour set of `owner` `id` to or from the file chosen.
+    pub(crate) fn subtitle_colors_file(
+        &mut self,
+        owner: &'static str,
+        id: u64,
+        export: bool,
+        path: &std::path::Path,
+    ) {
+        if export {
+            let _ = self.run_query(
+                "colorset.export",
+                json!({ owner: id, "path": path.to_string_lossy() }),
+            );
+        } else {
+            let _ = self.run_command(
+                "colorset.import",
+                json!({ owner: id, "path": path.to_string_lossy() }),
+            );
+        }
     }
 
     /// タイムラインビューアで選んだ字幕（`id` のタイムラインの、字幕トラックと字幕の番号）。
@@ -3319,9 +3346,16 @@ impl DiscCraftApp {
                     });
             })
             .response
-            .on_hover_text(tl!(
-                "A player set to a lower level asks for its password before the title plays"
-            ));
+            .on_hover_text(
+                if self.session.project.settings.kind == disccraft_project::DiscKind::BluRay {
+                    // M6.543: a Blu-ray asks the player's age setting.
+                    tl!(
+                        "A Blu-ray player whose parental age is below the level's does not play the title (levels 1 to 8: all ages, 6, 10, 13, 15, 17, 18 and 21)"
+                    )
+                } else {
+                    tl!("A player set to a lower level asks for its password before the title plays")
+                },
+            );
         (chosen != current).then_some(chosen)
     }
 
@@ -3379,7 +3413,8 @@ impl DiscCraftApp {
             // タイムラインのチャプター）、前のメニューに戻る / 停止。
             let _ = ui
                 .menu_button("▶", |ui| {
-                    if let Some(link) = self.link_menu(ui, current, targets) {
+                    if let Some(link) = self.link_menu(ui, current, targets, link_back_here(&port))
+                    {
                         selected = Some(link);
                         ui.close();
                     }
@@ -3396,12 +3431,14 @@ impl DiscCraftApp {
         selected
     }
 
-    /// The ▶ menu of a link field. Returns the chosen link.
+    /// The ▶ menu of a link field. `here` is where "Link Back to Here" goes ([`link_back_here`]). Returns the chosen
+    /// link.
     pub(crate) fn link_menu(
         &mut self,
         ui: &mut Ui,
         current: &Link,
         targets: &[(String, Link)],
+        here: Option<Link>,
     ) -> Option<Link> {
         let mut chosen = None;
         let allowed = |link: &Link| targets.iter().any(|(_, target)| target == link);
@@ -3539,7 +3576,20 @@ impl DiscCraftApp {
             }
         }
         ui.separator();
-        for link in [Link::LastMenu, Link::Stop] {
+        // Encore's "Link Back to Here" (M6.527): the field's own item, so that it comes back to where it is.
+        let back = here.filter(|link| allowed(link));
+        if ui
+            .add_enabled(
+                back.is_some(),
+                egui::Button::new(tl!("Link Back to Here"))
+                    .selected(back.as_ref() == Some(current)),
+            )
+            .clicked()
+        {
+            chosen = back;
+        }
+        // Encore's order: Return to Last Menu, Resume (a menu's buttons and end action only), Stop.
+        for link in [Link::LastMenu, Link::Resume, Link::Stop] {
             if ui
                 .add_enabled(
                     allowed(&link),
@@ -3578,14 +3628,57 @@ fn sub_menu<R>(
     inner.map(|inner| inner.inner)
 }
 
+/// `targets` with Resume after the last menu (M6.528): the targets of a menu's buttons and end action, the links that
+/// run in a menu and can go back to the title the menu was called from.
+pub(crate) fn with_resume(targets: &[(String, Link)]) -> Vec<(String, Link)> {
+    let mut with = targets.to_vec();
+    let at = with
+        .iter()
+        .position(|(_, link)| *link == Link::LastMenu)
+        .map_or(with.len(), |index| index.saturating_add(1));
+    with.insert(at, (tl!("Resume").to_string(), Link::Resume));
+    with
+}
+
+/// Where Encore's "Link Back to Here" sends the field `port` (M6.527): back to the item the field belongs to. A
+/// button's own menu with that button highlighted, a timeline from its start, the menu, slideshow, playlist or chapter
+/// playlist itself. The disc's fields and a playlist's item list have no item to come back to.
+pub(crate) fn link_back_here(port: &Port) -> Option<Link> {
+    let node = match port {
+        Port::Button { menu, index } | Port::ButtonOverride { menu, index } => {
+            return Some(Link::Menu {
+                id: *menu,
+                button: u32::try_from(*index).ok(),
+            });
+        }
+        Port::EndAction(node) => *node,
+        Port::MenuRemote(id) | Port::Override(id) | Port::ParentalAlternative(id) => {
+            NodeId::Timeline(*id)
+        }
+        Port::MenuOverride(id) => NodeId::Menu(*id),
+        Port::ChapterPlaylistOverride(id) => NodeId::ChapterPlaylist(*id),
+        Port::FirstPlay | Port::TitleButton | Port::DiscOverride | Port::PlaylistItems(_) => {
+            return None;
+        }
+    };
+    Some(match node {
+        NodeId::Menu(id) => Link::Menu { id, button: None },
+        NodeId::Timeline(id) => Link::Timeline { id, chapter: 0 },
+        NodeId::Slideshow(id) => Link::Slideshow { id },
+        NodeId::Playlist(id) => Link::Playlist { id },
+        NodeId::ChapterPlaylist(id) => Link::ChapterPlaylist { id },
+        NodeId::FirstPlay => return None,
+    })
+}
+
 /// A link field's list has a filter box once it has more targets than this (M6.519).
 const LINK_FILTER_FROM: usize = 12;
 
 /// The heading a link target is listed under in a link field's list (English, translated when drawn); the actions
-/// (Not set, Stop, Last menu) come first, under none.
+/// (Not set, Stop, Last menu, Resume) come first, under none.
 fn link_group(link: &Link) -> Option<&'static str> {
     match link {
-        Link::NotSet | Link::Stop | Link::LastMenu => None,
+        Link::NotSet | Link::Stop | Link::LastMenu | Link::Resume => None,
         Link::Timeline { .. } => Some("Timelines"),
         Link::Menu { .. } => Some("Menus"),
         Link::Slideshow { .. } => Some("Slideshows"),
@@ -4137,6 +4230,53 @@ pub(crate) fn fps_text(fps: f64) -> String {
 mod tests {
     use super::{frame_rate_text, frame_size};
     use disccraft_project::VideoStandard;
+
+    /// M6.527: "Link Back to Here" goes back to the field's own item: a button's menu with that button, a timeline
+    /// from its start, a menu or a list itself; the disc's fields have none.
+    #[test]
+    fn link_back_here_is_the_fields_own_item() {
+        use super::link_back_here;
+        use crate::flowchart::{NodeId, Port};
+        use disccraft_project::{Link, MenuId, TimelineId};
+        assert_eq!(
+            link_back_here(&Port::Button {
+                menu: MenuId(2),
+                index: 3
+            }),
+            Some(Link::Menu {
+                id: MenuId(2),
+                button: Some(3)
+            })
+        );
+        assert_eq!(
+            link_back_here(&Port::EndAction(NodeId::Timeline(TimelineId(4)))),
+            Some(Link::Timeline {
+                id: TimelineId(4),
+                chapter: 0
+            })
+        );
+        assert_eq!(
+            link_back_here(&Port::MenuRemote(TimelineId(4))),
+            Some(Link::Timeline {
+                id: TimelineId(4),
+                chapter: 0
+            })
+        );
+        assert_eq!(
+            link_back_here(&Port::MenuOverride(MenuId(5))),
+            Some(Link::Menu {
+                id: MenuId(5),
+                button: None
+            })
+        );
+        assert_eq!(
+            link_back_here(&Port::EndAction(NodeId::Playlist(7))),
+            Some(Link::Playlist { id: 7 })
+        );
+        assert_eq!(link_back_here(&Port::FirstPlay), None);
+        assert_eq!(link_back_here(&Port::DiscOverride), None);
+        assert_eq!(link_back_here(&Port::PlaylistItems(7)), None);
+    }
 
     /// M6.519: a link field's list puts its targets under a heading for each kind (the actions first, under none),
     /// and its filter keeps a target when any part of its name matches, case ignored.

@@ -3,25 +3,12 @@
 
 use disccraft_dvd::build_video_ts_with;
 use disccraft_project::{Link, Project, Tick};
+use disccraft_test_support::{ffmpeg, ffprobe, fixtures};
 use disccraft_vm::{explore, load_video_ts};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const TICKS_PER_SECOND: i64 = 254_016_000_000;
-
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
-
-fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures")
-}
 
 fn mp4_fixture(ffmpeg: &Path) -> PathBuf {
     let path = fixtures().join("h264_aac.mp4");
@@ -89,10 +76,7 @@ fn project(mp4: &Path) -> Project {
 
 #[test]
 fn mp4_becomes_a_clean_menu_dvd() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("skipped: ffmpeg not found");
         return;
     };
@@ -235,10 +219,7 @@ fn mp4_becomes_a_clean_menu_dvd() {
 /// converted like any other video, and the title decodes without errors with all its frames.
 #[test]
 fn interlaced_h264_becomes_a_dvd() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };
@@ -317,10 +298,7 @@ fn interlaced_h264_becomes_a_dvd() {
 /// first. Scaled as whole frames, every line was a mix of the two bars.
 #[test]
 fn an_interlaced_source_keeps_its_fields_on_a_dvd() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };

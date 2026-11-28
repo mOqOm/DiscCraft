@@ -8,25 +8,12 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+use disccraft_test_support::{ffmpeg, ffprobe, fixtures};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use disccraft_transcode::RateMode;
 use disccraft_transcode::hd::{HdCodec, HdOptions, transcode_h264};
-
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|_| path)
-}
-
-fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures")
-}
 
 /// The moving bar as 1080i H.264 (the DVD test's fixture; M12.42: `bottom_first`, the bottom field first, as DV),
 /// made with ffmpeg when missing; `None` without libx264.
@@ -140,7 +127,7 @@ fn a_bottom_field_first_source_keeps_its_fields_and_order() {
 }
 
 fn keeps_its_fields(bottom_first: bool) {
-    let Some(ffmpeg) = tool("DISCCRAFT_FFMPEG", "ffmpeg") else {
+    let Some(ffmpeg) = ffmpeg() else {
         eprintln!("ffmpeg not found; skipping");
         return;
     };
@@ -227,7 +214,7 @@ fn keeps_its_fields(bottom_first: bool) {
     let luma = tenth_picture(&ffmpeg, &es, "h264", (720, 480));
     fields_apart(&luma, 720, &[200, 240, 300], (18.0 * sign, 10));
     // The H.264 says which field comes first.
-    if let Some(ffprobe) = tool("DISCCRAFT_FFPROBE", "ffprobe") {
+    if let Some(ffprobe) = ffprobe() {
         let probed = Command::new(ffprobe)
             .args(["-v", "error", "-f", "h264", "-read_intervals", "%+#5"])
             .args([

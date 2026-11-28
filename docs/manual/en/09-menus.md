@@ -40,6 +40,8 @@ PSD layer name conventions: Groups starting with `(+)` are buttons (including `(
 >   layer appears when selected
 > - Sets without highlight layers (images converted to buttons) do not show highlights when selected (buttons created in
 >   DiscCraft with no subpicture or text highlight display a frame instead)
+> - Moving, resizing, flipping or rotating a button moves its Layer Set's picture with it (as in Encore). Layers above
+>   the button sets in the PSD (such as a shade over the whole menu) stay on top of the buttons
 
 Top-level groups whose names start with `(#)` become menu pages. Each such group creates a page (those lower down come
 first; the name after `(#)` is irrelevant), and the buttons within that group are the buttons for that page.

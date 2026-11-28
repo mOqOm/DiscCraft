@@ -16,6 +16,9 @@ disccraft-project.workspace = true
 disccraft-dvd.workspace = true
 
 [dev-dependencies]
+# Where ffmpeg, ffprobe and the fixtures are for the tests that compare with them (M9.67).
+disccraft-test-support.workspace = true
+disccraft-spu.workspace = true
 # The tests ask the media reader what a build's sources are (their pixel aspect ratio, whether they are wide).
 disccraft-transcode.workspace = true
 

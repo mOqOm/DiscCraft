@@ -65,5 +65,5 @@ PSD を入れる場所）。
 
 | 場所 | 内容 |
 |---|---|
-| Windows: `%APPDATA%\disccraft\workspace.json`<br>ほか: `~/.config/disccraft/workspace.json` | ワークスペース、パネルの並び、表示言語、最近使ったプロジェクト、既定のテレビ方式 |
+| Windows: `%APPDATA%\disccraft\config.toml`<br>ほか: `~/.config/disccraft/config.toml` | ワークスペース、パネルの並び、表示言語、最近使ったプロジェクト、既定のテレビ方式、環境設定。前の版の `workspace.json` は、初めて起動したときにこちらへ移し、そのまま残す。書き込みは途中で止まっても壊れない方法で行い、前の内容を控えに残す。壊れていたときは脇へよけて既定から始める |
 | 同じフォルダの `library.json` | ライブラリに足した自分のメニュー、ボタン、背景、テキストアイテム、レイヤーセット、置換レイヤー |

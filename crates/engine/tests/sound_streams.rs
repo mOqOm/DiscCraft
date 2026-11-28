@@ -5,20 +5,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use disccraft_engine::Session;
+use disccraft_test_support::ffmpeg;
 use serde_json::json;
-use std::path::PathBuf;
 use std::process::Command;
-
-fn ffmpeg() -> Option<PathBuf> {
-    let path =
-        std::env::var_os("DISCCRAFT_FFMPEG").map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|_| path)
-}
 
 #[test]
 fn each_sound_stream_of_a_file_becomes_a_track() {

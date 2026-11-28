@@ -206,6 +206,30 @@ impl Placement {
     }
 }
 
+/// Blends `source` over `rgb` scaled into `rect` and mirrored and turned by `orientation`, as an image graphic is
+/// drawn (`rect` the drawn box, the free angle about its centre; M6.535: a PSD button set turned with its button).
+pub(crate) fn blend_oriented_into(
+    source: &SourceImage,
+    rect: Rect,
+    orientation: Orientation,
+    (width, height): (u16, u16),
+    rgb: &mut [u8],
+) {
+    let Some(area) = frame_area(rotated_bounds(rect, orientation.angle), width, height) else {
+        return;
+    };
+    let place = Placement::new(rect, orientation);
+    let frame_width = usize::from(width);
+    paint_image(
+        source,
+        &place,
+        orientation,
+        area,
+        1.0,
+        &mut |x, y, color, alpha| crate::draw::blend_pixel(rgb, frame_width, x, y, color, alpha),
+    );
+}
+
 /// The part of `rect` inside the frame, as `(x0, y0, x1, y1)` (exclusive ends).
 fn frame_area(rect: Rect, width: u16, height: u16) -> Option<(usize, usize, usize, usize)> {
     let x0 = usize::from(rect.x);

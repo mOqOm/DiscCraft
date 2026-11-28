@@ -20,6 +20,8 @@ disccraft-transcode.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# Where ffmpeg, ffprobe and the fixtures are for the tests that compare with them (M9.67).
+disccraft-test-support.workspace = true
 disccraft-vm.workspace = true
 
 [lints]

@@ -43,6 +43,12 @@ pub fn call_ss_vmgm_pgcn(p: u16, rsm_cell: u8) -> Cmd {
     [0x30, 0x08, hi(p), lo(p), rsm_cell & 0x0F, 0xC0, 0x00, 0x00]
 }
 
+/// Constructs `RSM` (M6.528): back to the title at the point the menu was called from it. Menu PGCs only (a Link
+/// instruction with sub-instruction 16; MPUCoder's VM instruction table).
+pub fn rsm() -> Cmd {
+    [0x20, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10]
+}
+
 /// Constructs `LinkPGCN p`.
 pub fn link_pgcn(p: u16) -> Cmd {
     [0x20, 0x04, 0x00, 0x00, 0x00, 0x00, hi(p), lo(p)]

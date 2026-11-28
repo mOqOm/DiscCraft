@@ -6,12 +6,11 @@
 
 use disccraft_build::{BuildOptions, OutputKind, build};
 use disccraft_project::{BdVideo, DiscKind, Link, Project};
-use std::path::PathBuf;
+use disccraft_test_support::fixtures;
 
 #[test]
 fn a_transport_stream_is_indexed_once_for_a_build() {
-    let video = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/fixtures/h264_1080i_tones.m2ts");
+    let video = fixtures().join("h264_1080i_tones.m2ts");
     if !video.is_file() {
         eprintln!("h264_1080i_tones.m2ts fixture not found; skipping");
         return;

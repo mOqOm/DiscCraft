@@ -516,6 +516,12 @@ struct NodeDrop {
     tray: bool,
     /// Where it was grabbed, from its top-left.
     grab: Vec2,
+    /// The place of the tree it was dragged from (the node or one of its repeats; `None` from the tray): the pick
+    /// whip's line runs from it (M6.537).
+    place: Option<AnchorItem>,
+    /// The link that place is reached by (its source and port), lined up when the drop links, as a click lines it
+    /// up (Encore: the press that starts the drag is a click on the node).
+    entry: Option<(NodeId, Port)>,
 }
 
 /// What dropping a node does.
@@ -1107,9 +1113,10 @@ fn is_title(id: NodeId) -> bool {
 }
 
 /// What dropping `drop` at `point` does, as Encore's selection tool does (measured 2026-11-23): on a menu's button
-/// row, a title takes that menu at that button as its end action; on another node (or a repeat of one) the dropped
-/// item takes that node as its end action, except that a menu dropped on a title becomes the title's end action, and
-/// one dropped on the disc becomes the first play; a tray item dropped anywhere else on the flowchart is put there
+/// row, a title takes that menu at that button as its end action (the disc, as its first play; 2026-11-27); on
+/// another node (or a repeat of one) the dropped item takes that node as its end action, except that a menu dropped
+/// on a title becomes the title's end action, one dropped on the disc becomes the first play, and the disc dropped on
+/// an item makes it the first play (2026-11-27); a tray item dropped anywhere else on the flowchart is put there
 /// (`origin` is the flowchart's top-left). `grips` are the buttons' rows (and the names' right ends).
 pub(crate) fn node_drop(
     placement: &Placement,
@@ -1124,14 +1131,13 @@ pub(crate) fn node_drop(
         _ => None,
     });
     let action = if let Some((menu, index)) = row {
+        let at = |button| Link::Menu {
+            id: menu,
+            button: Some(button),
+        };
         match u32::try_from(index) {
-            Ok(button) if is_title(dragged) => Some((
-                Port::EndAction(dragged),
-                Link::Menu {
-                    id: menu,
-                    button: Some(button),
-                },
-            )),
+            Ok(button) if is_title(dragged) => Some((Port::EndAction(dragged), at(button))),
+            Ok(button) if dragged == NodeId::FirstPlay => Some((Port::FirstPlay, at(button))),
             _ => None,
         }
     } else {
@@ -1146,20 +1152,88 @@ pub(crate) fn node_drop(
     }
 }
 
-/// The link `dragged` dropped on the node `target` makes (Encore): on the disc, the first play; a menu on a title,
-/// the title's end action; otherwise the dragged item's end action.
+/// The link `dragged` dropped on the node `target` makes (Encore): on the disc, the first play; the disc on an item,
+/// that item as the first play (2026-11-27); a menu on a title, the title's end action; otherwise the dragged item's
+/// end action.
 pub(crate) fn node_onto(dragged: NodeId, target: NodeId) -> Option<(Port, Link)> {
     match target {
         _ if target == dragged => None,
         NodeId::FirstPlay => link_to(dragged).map(|link| (Port::FirstPlay, link)),
+        target if dragged == NodeId::FirstPlay => {
+            link_to(target).map(|link| (Port::FirstPlay, link))
+        }
         target if matches!(dragged, NodeId::Menu(_)) && is_title(target) => {
             link_to(dragged).map(|link| (Port::EndAction(target), link))
         }
-        target if dragged != NodeId::FirstPlay => {
-            link_to(target).map(|link| (Port::EndAction(dragged), link))
-        }
+        target => link_to(target).map(|link| (Port::EndAction(dragged), link)),
+    }
+}
+
+/// What a node dragged from the tree is over (M6.537), for its line: a tray item or a place in sight (`visible`)
+/// where a drop links, a node it does not link to, or nothing.
+fn node_drop_aim(
+    (placement, grips, tray): (&Placement, &[(Port, Rect)], &[(NodeId, Rect)]),
+    payload: &NodeDrop,
+    point: Pos2,
+    (visible, origin): (Rect, Pos2),
+) -> crate::pickwhip::Aim {
+    use crate::pickwhip::Aim;
+    if let Some((id, _)) = tray.iter().find(|(_, rect)| rect.contains(point)) {
+        return if node_onto(payload.node, *id).is_some() {
+            Aim::Links
+        } else {
+            Aim::Refused
+        };
+    }
+    if !visible.contains(point) {
+        return Aim::Nothing;
+    }
+    let drop = (payload.node, payload.tray, payload.grab);
+    match node_drop(placement, grips, drop, point, origin) {
+        DropAction::Link(..) => Aim::Links,
+        _ if placement.hit_except(point, payload.node).is_some() => Aim::Refused,
+        _ => Aim::Nothing,
+    }
+}
+
+/// The node a port belongs to, when a dropped node's link leaves from it (its first play, its end action).
+fn port_node(port: &Port) -> Option<NodeId> {
+    match port {
+        Port::FirstPlay => Some(NodeId::FirstPlay),
+        Port::EndAction(node) => Some(*node),
         _ => None,
     }
+}
+
+/// Where the pick whip's line of a node dragged from the tree starts (M6.537; Encore: the right end of its name, the
+/// disc's from its label): the place's first-play or end-action port, else the middle of its name's right end.
+fn drop_line_start(
+    nodes: &[Node],
+    placement: &Placement,
+    centers: &[(Port, Pos2)],
+    place: AnchorItem,
+    m: &Metrics,
+) -> Option<Pos2> {
+    let (id, rect) = match place {
+        AnchorItem::Node(id) => {
+            let port = if id == NodeId::FirstPlay {
+                Port::FirstPlay
+            } else {
+                Port::EndAction(id)
+            };
+            if let Some(center) = center_of(centers, port) {
+                return Some(center);
+            }
+            (id, placement.rect_of(id)?)
+        }
+        AnchorItem::Repeat(link) => placement
+            .repeats
+            .iter()
+            .find(|(index, _, _)| *index == link)
+            .map(|(_, id, rect)| (*id, *rect))?,
+    };
+    let node = find(nodes, id)?;
+    Some(Pos2::new(rect.max.x, rect.min.y + entry_offset(node, m)))
 }
 
 /// What a link from `port` (a link drag, a pick whip) dropped at `point` links to: a tray item (`tray`, last frame's
@@ -1417,7 +1491,7 @@ fn resolve_target(project: &Project, link: &Link) -> Option<NodeId> {
             .chapter_playlists
             .contains_key(id)
             .then_some(NodeId::ChapterPlaylist(*id)),
-        Link::NotSet | Link::Stop | Link::LastMenu => None,
+        Link::NotSet | Link::Stop | Link::LastMenu | Link::Resume => None,
     }
 }
 
@@ -2236,8 +2310,15 @@ fn begin_node_drag(ui: &Ui, response: &Response, rects: &[(NodeId, Rect)], origi
 }
 
 /// Start dragging the node (or repeat) under the place the button was pressed, to drop it on another node or a
-/// button's row (Encore's selection tool; the disc stays).
-fn begin_node_drop(ui: &Ui, response: &Response, placement: &Placement) {
+/// button's row (Encore's selection tool; the disc too, to drop it on what it plays first, M6.537). As in Encore the
+/// press selects it (the Properties panel shows it), and the node stays where it is: a line runs from it to the
+/// pointer.
+fn begin_node_drop(
+    app: &mut DiscCraftApp,
+    ui: &Ui,
+    response: &Response,
+    (placement, edges): (&Placement, &[Edge]),
+) {
     if !response.drag_started_by(egui::PointerButton::Primary) {
         return;
     }
@@ -2247,20 +2328,30 @@ fn begin_node_drop(ui: &Ui, response: &Response, placement: &Placement) {
     else {
         return;
     };
-    let Some((node, rect)) = placement
-        .hit(point)
-        .filter(|(node, _)| *node != NodeId::FirstPlay)
-    else {
+    let Some((node, rect, link)) = placement.hit_link(point) else {
         return;
     };
+    let place = if placement.rects.contains(&(node, rect)) {
+        AnchorItem::Node(node)
+    } else {
+        AnchorItem::Repeat(link.unwrap_or_default())
+    };
+    let entry = link
+        .and_then(|index| edges.get(index))
+        .map(|edge| (edge.source, edge.from));
     egui::DragAndDrop::set_payload(
         ui.ctx(),
         NodeDrop {
             node,
             tray: false,
             grab: point - rect.min,
+            place: Some(place),
+            entry,
         },
     );
+    pick(app, crate::context_menus::node_selection(node), false);
+    // After the selection, which forgets the place clicked before (a repeat pressed glows, as a clicked one).
+    app.flow_clicked = Some(place);
 }
 
 /// Where a dragged node would link, to outline: the button's row under `point`, else the node (or repeat) there.
@@ -2420,12 +2511,12 @@ fn click_node(
 
 /// Select `selection` without bringing its viewer forward, and with `open` bring it forward (also when it was
 /// selected already, by the first click of a double click).
+/// The disc's selection is none (the Properties panel shows the disc when nothing is selected): picking it selects
+/// nothing (M6.537; it did nothing, so a click on the disc left the item selected before in the Properties panel,
+/// where Encore shows the disc), and opens no viewer.
 fn pick(app: &mut DiscCraftApp, selection: Selection, open: bool) {
-    if selection == Selection::None {
-        return;
-    }
     app.select_showing(selection, false);
-    if open {
+    if open && selection != Selection::None {
         app.show_viewer(selection);
     }
 }
@@ -2644,8 +2735,10 @@ impl DiscCraftApp {
             area = area.scroll_offset(to);
         }
         let output = area.show(&mut inside, |ui| {
-            // M6.525: also while a link is dragged from a port.
-            let linking = flow_drag_state(ui).is_some();
+            // M6.525: also while a link is dragged from a port; M6.537: and a node from the tree.
+            let linking = flow_drag_state(ui).is_some()
+                || egui::DragAndDrop::payload::<NodeDrop>(ui.ctx())
+                    .is_some_and(|payload| payload.place.is_some());
             crate::pickwhip::scroll_near_edges_for(ui, linking);
             self.flowchart_canvas(ui, &chart)
         });
@@ -2940,7 +3033,7 @@ impl DiscCraftApp {
             if self.tool == crate::menu_text::Tool::Move {
                 begin_node_drag(ui, &response, &placement.rects, origin);
             } else {
-                begin_node_drop(ui, &response, &placement);
+                begin_node_drop(self, ui, &response, (&placement, edges));
             }
         }
         let pointer = ui.ctx().pointer_hover_pos();
@@ -2950,6 +3043,27 @@ impl DiscCraftApp {
             .data(|data| data.get_temp(tray_rects_id()))
             .unwrap_or_default();
         let targets = (&placement, grips.as_slice(), tray_rects.as_slice());
+        // A node dragged from the tree: the pick whip's line from where its links leave to the pointer (M6.537; Encore
+        // draws it so, the node staying where it is).
+        if let Some(payload) = egui::DragAndDrop::payload::<NodeDrop>(ui.ctx())
+            && let Some(place) = payload.place
+            && let Some(point) = ui.ctx().pointer_latest_pos()
+            && let Some(from) = drop_line_start(nodes, &placement, &centers, place, m)
+        {
+            let visible = painter.clip_rect().intersect(response.rect);
+            let aim = node_drop_aim(targets, &payload, point, (visible, origin));
+            crate::pickwhip::draw_line(ui.ctx(), from, point, aim);
+            // M6.540: the dragged item's name beside the pointer (Encore shows it while the line is drawn).
+            if let Some(node) = find(nodes, payload.node) {
+                let _ = egui::Tooltip::always_open(
+                    ui.ctx().clone(),
+                    response.layer_id,
+                    response.id.with("node_drop_name"),
+                    egui::PopupAnchor::Pointer,
+                )
+                .show(|ui| ui.label(node.title.as_str()));
+            }
+        }
         drag = finish_flow_drag(self, ui, &response, drag, targets);
         drag = clear_stale_flow_drag(ui, drag);
         finish_node_drag(self, ui, &response, &placement, (origin, m.zoom));
@@ -2987,6 +3101,8 @@ impl DiscCraftApp {
         node_context_menu(self, ui, &response, &placement);
         if drag.is_none()
             && moving.is_none()
+            // A node being dragged names itself beside the pointer (M6.540), not what it is over.
+            && !egui::DragAndDrop::has_payload_of_type::<NodeDrop>(ui.ctx())
             && let Some(text) = response
                 .hover_pos()
                 .and_then(|point| placement.hit(point))
@@ -3048,6 +3164,7 @@ impl DiscCraftApp {
             let drop = (payload.node, payload.tray, payload.grab);
             match node_drop(placement, grips, drop, point, origin) {
                 DropAction::Link(port, link) => {
+                    self.line_up_drop(&payload, &port, Some((placement, origin)));
                     if let Some((command, base)) = command_for_port(&port) {
                         self.apply_link(command, base, &link);
                     }
@@ -3069,6 +3186,24 @@ impl DiscCraftApp {
             && let Some((command, base)) = command_for_port(&payload.0)
         {
             self.apply_link(command, base, &link);
+        }
+    }
+
+    /// After a node dragged from the tree linked (M6.537, as Encore): the place it was dragged from is lined up with
+    /// its own link, as a click lines it up, and stays where it is on the screen (`at`: the flowchart's places and
+    /// top-left when it was dropped on the tree), and the new link is lined up with the port it leaves from.
+    fn line_up_drop(&mut self, payload: &NodeDrop, port: &Port, at: Option<(&Placement, Pos2)>) {
+        if let Some((source, from)) = payload.entry {
+            let _ = self.flow_focus.insert(source, from);
+        }
+        if let Some(node) = port_node(port) {
+            let _ = self.flow_focus.insert(node, *port);
+        }
+        // A repeat is found by its link's number, which the new link can change: only a node is kept in place.
+        if let Some(place @ AnchorItem::Node(_)) = payload.place
+            && let Some((placement, origin)) = at
+        {
+            self.flow_anchor = FlowAnchor::at(placement, place, origin);
         }
     }
 
@@ -3134,6 +3269,7 @@ impl DiscCraftApp {
                     && let Some((port, link)) = node_onto(payload.node, *id)
                     && let Some((command, base)) = command_for_port(&port)
                 {
+                    self.line_up_drop(&payload, &port, None);
                     self.apply_link(command, base, &link);
                 }
                 let _ = self.pick_whip_target(ui, &response, *id);
@@ -3144,6 +3280,8 @@ impl DiscCraftApp {
                         node: *id,
                         tray: true,
                         grab: at - rect.min,
+                        place: None,
+                        entry: None,
                     });
                 }
                 if response.clicked() || response.double_clicked() {
@@ -3157,8 +3295,10 @@ impl DiscCraftApp {
         });
         // Where the items are, for a link dragged from the flowchart onto one (read there next frame).
         ui.data_mut(|data| data.insert_temp(tray_rects_id(), rects));
-        // The node being dragged and dropped follows the pointer.
+        // A tray item being dragged follows the pointer (it can be put anywhere on the flowchart; one of the tree draws
+        // a line from where it stays, M6.537).
         if let Some(payload) = egui::DragAndDrop::payload::<NodeDrop>(ui.ctx())
+            && payload.tray
             && let Some(pointer) = ui.ctx().pointer_interact_pos()
             && let Some(node) = find(&chart.nodes, payload.node)
         {
@@ -3396,6 +3536,7 @@ impl DiscCraftApp {
     pub(crate) fn apply_link(&mut self, command: &str, base: Map<String, Value>, link: &Link) {
         let project = &self.session.project;
         let placed = resolve_target(project, link).filter(|node| placed_from_tray(project, *node));
+        let steps = self.session.undo_depth();
         match with_target(base, link) {
             Ok(params) => {
                 let _ = match placed {
@@ -3409,6 +3550,7 @@ impl DiscCraftApp {
                     ),
                     None => self.run_command(command, params),
                 };
+                self.name_link_step(steps, link);
             }
             Err(error) => self.status = error,
         }
@@ -3821,6 +3963,99 @@ mod tests {
             DropAction::Place(tray_menu, vec2(895.0, 895.0))
         );
         assert_eq!(drop(title, false, at(900.0, 900.0)), DropAction::Nothing);
+        // M6.537 (Encore, 2026-11-27): the disc on an item plays it first; on a button's row, at that button.
+        assert_eq!(
+            drop(NodeId::FirstPlay, false, at(450.0, 20.0)),
+            DropAction::Link(
+                Port::FirstPlay,
+                Link::Menu {
+                    id: MenuId(7),
+                    button: None
+                }
+            )
+        );
+        assert_eq!(
+            drop(NodeId::FirstPlay, false, at(450.0, 80.0)),
+            DropAction::Link(
+                Port::FirstPlay,
+                Link::Menu {
+                    id: MenuId(7),
+                    button: Some(1)
+                }
+            )
+        );
+        assert_eq!(
+            drop(NodeId::FirstPlay, false, at(250.0, 20.0)),
+            DropAction::Link(
+                Port::FirstPlay,
+                Link::Timeline {
+                    id: TimelineId(3),
+                    chapter: 0
+                }
+            )
+        );
+        assert_eq!(
+            drop(NodeId::FirstPlay, false, at(900.0, 900.0)),
+            DropAction::Nothing
+        );
+    }
+
+    /// M6.537: the line of a node dragged from the tree says where a drop links (Encore draws it from the node): a
+    /// node it links to, a tray item, a button's row only a title or the disc goes to (red for a menu), nothing.
+    #[test]
+    fn a_dragged_nodes_line_says_where_it_links() {
+        use super::{AnchorItem, NodeDrop, node_drop_aim};
+        use crate::pickwhip::Aim;
+        let menu = NodeId::Menu(MenuId(7));
+        let other = NodeId::Menu(MenuId(8));
+        let title = NodeId::Timeline(TimelineId(3));
+        let rect = |x: f32, y: f32| Rect::from_min_size(Pos2::new(x, y), vec2(100.0, 50.0));
+        let placement = Placement {
+            rects: vec![
+                (NodeId::FirstPlay, rect(0.0, 0.0)),
+                (title, rect(200.0, 0.0)),
+                // The menu with its row of a button under its name.
+                (
+                    menu,
+                    Rect::from_min_size(Pos2::new(400.0, 0.0), vec2(100.0, 120.0)),
+                ),
+                (other, rect(200.0, 100.0)),
+            ],
+            ..Placement::default()
+        };
+        let grips = [(
+            Port::Button {
+                menu: MenuId(7),
+                index: 0,
+            },
+            rect(400.0, 60.0),
+        )];
+        let tray = [(NodeId::Menu(MenuId(9)), rect(0.0, 300.0))];
+        let dragged = |node| NodeDrop {
+            node,
+            tray: false,
+            grab: vec2(5.0, 5.0),
+            place: Some(AnchorItem::Node(node)),
+            entry: None,
+        };
+        let visible = Rect::from_min_size(Pos2::ZERO, vec2(600.0, 250.0));
+        let aim = |node, x, y| {
+            node_drop_aim(
+                (&placement, &grips, &tray),
+                &dragged(node),
+                Pos2::new(x, y),
+                (visible, Pos2::ZERO),
+            )
+        };
+        assert_eq!(aim(other, 450.0, 20.0), Aim::Links);
+        assert_eq!(aim(other, 20.0, 320.0), Aim::Links);
+        assert_eq!(aim(title, 450.0, 80.0), Aim::Links);
+        assert_eq!(aim(NodeId::FirstPlay, 450.0, 80.0), Aim::Links);
+        assert_eq!(aim(other, 450.0, 80.0), Aim::Refused);
+        assert_eq!(aim(other, 550.0, 200.0), Aim::Nothing);
+        assert_eq!(aim(other, 250.0, 120.0), Aim::Nothing);
+        // A node scrolled out of sight takes nothing.
+        assert_eq!(aim(other, 450.0, 280.0), Aim::Nothing);
     }
 
     /// M6.436 (a review): a link dragged (or a pick whip) onto a tray item links to it; onto a menu's button row, to

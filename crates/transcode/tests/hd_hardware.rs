@@ -4,12 +4,13 @@
 //! the size came out off the target a second at a corrected average, which replaces the first. A video whose encoder
 //! cannot start or fails on the way is encoded again on the CPU. M12.44: the same encoder makes
 //! HEVC Main 10 from P010 pictures, also when two passes were asked for (HEVC is made in one), and every access unit
-//! gets a delimiter and every IDR picture the parameter sets. A fake encoder stands for the hardware; ffmpeg makes
-//! the source (skipped without it).
+//! gets a delimiter and every IDR picture the parameter sets. M12.51: an interlaced format's H.264 goes to the
+//! hardware too, its frames to be coded as fields in the source's order. A fake encoder stands for the hardware;
+//! ffmpeg makes the source (skipped without it).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::path::PathBuf;
+use disccraft_test_support::ffmpeg;
 use std::process::Command;
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicUsize, Ordering};
 
@@ -74,6 +75,8 @@ impl HardwareVideo for Fake {
 }
 
 fn fake(config: &HardwareConfig) -> Result<Box<dyn HardwareVideo>, String> {
+    // Progressive formats: frames, not fields.
+    assert_eq!(config.fields, None);
     let (slices, bytes) = match config.codec {
         HardwareCodec::H264 => (4, 1),
         HardwareCodec::HevcMain10 => (1, 2),
@@ -134,19 +137,33 @@ fn sized(config: &HardwareConfig) -> Result<Box<dyn HardwareVideo>, String> {
     }))
 }
 
-fn refusing(_config: &HardwareConfig) -> Result<Box<dyn HardwareVideo>, String> {
-    Err("no hardware encoder".to_string())
+/// M12.51: the fields the last fielded fake was asked for: -1 none (frames), 0 the bottom field first, 1 the top.
+static FIELDS: AtomicI64 = AtomicI64::new(-2);
+
+/// A fake that takes any format and gives a unit a picture, the first a key frame.
+struct Fielded;
+
+impl HardwareVideo for Fielded {
+    fn encode(&mut self, _picture: &[u8], pts: i64) -> Result<Vec<HardwarePacket>, String> {
+        Ok(vec![HardwarePacket {
+            data: UNIT.to_vec(),
+            pts,
+            key: pts == 0,
+        }])
+    }
+
+    fn finish(&mut self) -> Result<Vec<HardwarePacket>, String> {
+        Ok(Vec::new())
+    }
 }
 
-fn ffmpeg() -> Option<PathBuf> {
-    let path =
-        std::env::var_os("DISCCRAFT_FFMPEG").map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|_| path)
+fn fielded(config: &HardwareConfig) -> Result<Box<dyn HardwareVideo>, String> {
+    FIELDS.store(config.fields.map_or(-1, i64::from), Ordering::SeqCst);
+    Ok(Box::new(Fielded))
+}
+
+fn refusing(_config: &HardwareConfig) -> Result<Box<dyn HardwareVideo>, String> {
+    Err("no hardware encoder".to_string())
 }
 
 /// The output of one transcode: its pictures, its index and its stream.
@@ -263,6 +280,42 @@ fn a_registered_hardware_encoder_makes_progressive_hd_h264() {
     assert_eq!(PICTURES.load(Ordering::SeqCst), before + 6);
     assert_eq!(units.len(), pictures);
     assert_ne!(bytes, UNIT.repeat(pictures));
+
+    // M12.51: 1080i from an interlaced source at its rate: the hardware makes it, as fields, the top one first from a
+    // source whose top field comes first and the bottom one from one whose bottom field does.
+    FAIL_AT.store(-1, Ordering::SeqCst);
+    for (order, top_first) in [("tff", true), ("bff", false)] {
+        let interlaced = dir.join(format!("{order}.ts"));
+        let made = Command::new(&ffmpeg)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("testsrc2=size=1920x1080:rate=60000/1001")
+            .args(["-t", "0.5", "-vf"])
+            .arg(format!("tinterlace=mode=interleave_top,setfield={order}"))
+            .args(["-c:v", "mpeg2video", "-flags", "+ildct+ilme"])
+            .arg(&interlaced)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        set_hardware_encoder(Some(fielded));
+        let options = HdOptions {
+            width: 1920,
+            height: 1080,
+            fps_num: 30_000,
+            fps_den: 1001,
+            interlaced: true,
+            ..options.clone()
+        };
+        let frames = transcode_h264(&interlaced, &es, &index, &options, &mut |_| {}).unwrap();
+        assert_eq!(
+            FIELDS.load(Ordering::SeqCst),
+            i64::from(top_first),
+            "{order}"
+        );
+        assert_eq!(
+            std::fs::read(&es).unwrap(),
+            UNIT.repeat(usize::try_from(frames).unwrap())
+        );
+    }
 
     // HEVC Main 10 (M12.44), asked for in two passes: the fake makes it in one, from P010 pictures; every unit
     // gets a delimiter, every IDR picture the parameter sets of the first.

@@ -5,23 +5,13 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+use disccraft_test_support::ffmpeg;
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use disccraft_transcode::RateMode;
 use disccraft_transcode::hd::{HdCodec, HdOptions, read_h264_index, transcode_h264};
-
-fn ffmpeg() -> Option<PathBuf> {
-    let path =
-        env::var_os("DISCCRAFT_FFMPEG").map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|_| path)
-}
 
 fn decodes(ffmpeg: &Path, stream: &Path, format: &str) {
     let output = Command::new(ffmpeg)

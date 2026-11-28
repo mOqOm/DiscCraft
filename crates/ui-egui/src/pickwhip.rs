@@ -147,7 +147,7 @@ pub(crate) fn dragged(ctx: &Context) -> Option<Port> {
 }
 
 /// Whether any pick whip is being dragged: a link field's or an asset field's.
-fn any_dragged(ctx: &Context) -> bool {
+pub(crate) fn any_dragged(ctx: &Context) -> bool {
     egui::DragAndDrop::has_payload_of_type::<PickWhip>(ctx)
         || egui::DragAndDrop::has_payload_of_type::<AssetWhip>(ctx)
 }
@@ -904,6 +904,49 @@ mod tests {
         output.textures_delta.clear();
         assert_eq!(seen.0, egui::Vec2::ZERO);
         assert!(seen.1.x < 0.0 && seen.1.y == 0.0, "{:?}", seen.1);
+    }
+
+    /// M6.530: a link set by a drop (or a link field) names its step after the place it goes to, so Edit ▸ Undo says
+    /// where; the name goes with the step to Redo.
+    #[test]
+    fn a_link_step_is_named_after_its_place() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::app::DiscCraftApp;
+        use serde_json::json;
+        use std::path::Path;
+        let mut app = DiscCraftApp::new(&egui::Context::default());
+        let asset = app.session.project.add_asset(Path::new("making.mp4"))?;
+        let timeline = app
+            .session
+            .project
+            .add_timeline(asset, Some("Making".to_string()))?;
+        let created = app
+            .session
+            .execute("menu.create", &json!({ "name": "Main" }))?;
+        let menu = MenuId(
+            created
+                .get("menu")
+                .and_then(Value::as_u64)
+                .ok_or("no menu id")?,
+        );
+        let _ = app.session.execute(
+            "menu.addButton",
+            &json!({ "menu": menu.0, "label": "Play" }),
+        )?;
+        let link = Link::Timeline {
+            id: timeline,
+            chapter: 0,
+        };
+        let (command, base, link) =
+            super::link_for_drop(Port::Button { menu, index: 0 }, NodeId::Timeline(timeline))
+                .map(|(command, base, _)| (command, base, link))
+                .ok_or("no link")?;
+        app.apply_link(command, base, &link);
+        let place = crate::menu_editor::link_label(&app.session.project, &link);
+        assert!(place.contains("Making"), "{place}");
+        assert_eq!(app.session.undo_detail(), Some(place.as_str()));
+        app.session.undo()?;
+        assert_eq!(app.session.redo_detail(), Some(place.as_str()));
+        Ok(())
     }
 
     #[test]

@@ -7,26 +7,12 @@
 
 use disccraft_bd::build_bdmv;
 use disccraft_project::{DiscKind, Link, Project, Tick};
+use disccraft_test_support::{ffmpeg, fixtures};
 use disccraft_vm::{BdLocation, BdVm, Key, load_bdmv};
 use std::path::PathBuf;
 use std::process::Command;
 
 const TICKS_PER_SECOND: i64 = 254_016_000_000;
-
-fn ffmpeg() -> Option<PathBuf> {
-    let path =
-        std::env::var_os("DISCCRAFT_FFMPEG").map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
-
-fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures")
-}
 
 /// Six seconds of DVD-compliant MPEG-2 (passed through).
 fn video() -> Option<PathBuf> {
@@ -482,4 +468,159 @@ fn a_popups_pages_turn_over_the_playing_title() {
     if std::env::var_os("DISCCRAFT_KEEP_OUTPUT").is_none() {
         let _ = std::fs::remove_dir_all(&out);
     }
+}
+
+/// M6.543: a title with a parental level asks the player's parental setting (PSR13, an age): a player set below
+/// its age plays what the title names in its place, one set to it or older (or with no setting) plays the title; a
+/// disc level the player is below stops it before anything plays.
+#[test]
+fn a_title_asks_the_players_age() {
+    let Some(video) = video() else {
+        eprintln!("ffmpeg not found; skipping");
+        return;
+    };
+    let mut p = Project::default();
+    p.settings.kind = DiscKind::BluRay;
+    let v = p.add_asset(&video).unwrap();
+    let main = p.add_timeline(v, Some("Main".to_string())).unwrap();
+    let kids = p.add_timeline(v, Some("Kids".to_string())).unwrap();
+    // Level 4 (thirteen); below it, the other title plays instead.
+    let timeline = p.timeline_mut(main).unwrap();
+    timeline.parental_level = Some(4);
+    timeline.parental_alternative = Link::Timeline {
+        id: kids,
+        chapter: 0,
+    };
+    p.settings.first_play = Link::Timeline {
+        id: main,
+        chapter: 0,
+    };
+
+    let out = fixtures().join("bd_parental_out");
+    let _ = build_bdmv(&p, &out).unwrap();
+    let disc = load_bdmv(&out).unwrap();
+    let playing = |age: Option<u8>| {
+        BdVm::start_with_player(&disc, (None, None), age)
+            .unwrap()
+            .state()
+            .location
+    };
+    let main_playlist = playing(None);
+    assert!(
+        matches!(main_playlist, BdLocation::Playing { .. }),
+        "{main_playlist:?}"
+    );
+    assert_eq!(playing(Some(13)), main_playlist);
+    assert_eq!(playing(Some(30)), main_playlist);
+    let instead = playing(Some(10));
+    assert!(matches!(instead, BdLocation::Playing { .. }), "{instead:?}");
+    assert_ne!(instead, main_playlist);
+
+    // The disc's own level (7: eighteen) stops a player of thirteen before anything plays; one of eighteen plays.
+    p.settings.parental_level = 7;
+    let out = fixtures().join("bd_parental_disc_out");
+    let _ = build_bdmv(&p, &out).unwrap();
+    let disc = load_bdmv(&out).unwrap();
+    let start = |age: Option<u8>| {
+        BdVm::start_with_player(&disc, (None, None), age)
+            .unwrap()
+            .state()
+            .location
+    };
+    assert!(
+        !matches!(start(Some(13)), BdLocation::Playing { .. }),
+        "{:?}",
+        start(Some(13))
+    );
+    assert!(matches!(start(Some(18)), BdLocation::Playing { .. }));
+}
+
+/// M6.548: a timeline's parental chapter on a Blu-ray: a player of the chapter's age or older (or with no setting)
+/// plays the title's own playlist; a younger one another playlist of the same chapters with the alternative video in
+/// place of that chapter, from the title's start and from a chapter link alike.
+#[test]
+fn a_parental_chapter_plays_its_version_by_age() {
+    let Some(video) = video() else {
+        eprintln!("ffmpeg not found; skipping");
+        return;
+    };
+    // The alternative: the same video as another file (another asset).
+    let alternative = fixtures().join("bd_parental_alternative.m2v");
+    std::fs::copy(&video, &alternative).unwrap();
+    let mut p = Project::default();
+    p.settings.kind = DiscKind::BluRay;
+    let v = p.add_asset(&video).unwrap();
+    let a = p.add_asset(&alternative).unwrap();
+    let t = p.add_timeline(v, Some("Main".to_string())).unwrap();
+    p.add_chapter(t, Tick(2 * TICKS_PER_SECOND), None).unwrap();
+    p.add_chapter(t, Tick(4 * TICKS_PER_SECOND), None).unwrap();
+    // Chapter 2 (index 1) for level 6 (seventeen); below it, the alternative.
+    p.timeline_mut(t).unwrap().parental_chapters = vec![disccraft_project::ParentalChapter {
+        chapter: 1,
+        level: 6,
+        alternative: a,
+    }];
+    p.settings.first_play = Link::Timeline { id: t, chapter: 0 };
+
+    let out = fixtures().join("bd_parental_chapter_out");
+    let _ = build_bdmv(&p, &out).unwrap();
+    let disc = load_bdmv(&out).unwrap();
+    let playing = |age: Option<u8>| {
+        BdVm::start_with_player(&disc, (None, None), age)
+            .unwrap()
+            .state()
+            .location
+    };
+    let own = playing(None);
+    let BdLocation::Playing {
+        playlist: own_playlist,
+        mark: 0,
+    } = own
+    else {
+        panic!("not playing the title: {own:?}");
+    };
+    assert_eq!(playing(Some(17)), own);
+    let BdLocation::Playing {
+        playlist: version,
+        mark: 0,
+    } = playing(Some(13))
+    else {
+        panic!("not playing a version");
+    };
+    assert_ne!(version, own_playlist);
+    // The version's playlist has the title's three chapters.
+    let list = disccraft_bdmv::mpls::read_mpls(
+        &std::fs::read(out.join("BDMV/PLAYLIST").join(format!("{version:05}.mpls"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(list.marks.len(), 3);
+    assert_eq!(list.items.len(), 3);
+    assert_ne!(list.items[1].clip, list.items[0].clip);
+    assert_eq!(list.items[2].clip, list.items[0].clip);
+
+    // A link to chapter 3 plays it in the version for the player's age.
+    p.settings.first_play = Link::Timeline { id: t, chapter: 2 };
+    let out = fixtures().join("bd_parental_chapter_link_out");
+    let _ = build_bdmv(&p, &out).unwrap();
+    let disc = load_bdmv(&out).unwrap();
+    let from = |age: Option<u8>| {
+        BdVm::start_with_player(&disc, (None, None), age)
+            .unwrap()
+            .state()
+            .location
+    };
+    assert_eq!(
+        from(None),
+        BdLocation::Playing {
+            playlist: own_playlist,
+            mark: 2
+        }
+    );
+    assert_eq!(
+        from(Some(10)),
+        BdLocation::Playing {
+            playlist: version,
+            mark: 2
+        }
+    );
 }

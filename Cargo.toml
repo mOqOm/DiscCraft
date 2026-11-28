@@ -29,6 +29,8 @@ disccraft-pgs = { path = "crates/pgs" }
 disccraft-udf = { path = "crates/udf" }
 disccraft-ddp = { path = "crates/ddp" }
 disccraft-dv = { path = "crates/dv" }
+disccraft-ffv1 = { path = "crates/ffv1" }
+disccraft-h263 = { path = "crates/h263" }
 disccraft-project = { path = "crates/project" }
 disccraft-vm = { path = "crates/vm" }
 disccraft-menu = { path = "crates/menu" }
@@ -46,6 +48,8 @@ disccraft-engine = { path = "crates/engine" }
 disccraft-ui-egui = { path = "crates/ui-egui" }
 disccraft-automation = { path = "crates/automation" }
 disccraft-platform = { path = "crates/platform" }
+# The tests' ffmpeg / ffprobe and fixture folder (M9.67). A dev-dependency only.
+disccraft-test-support = { path = "crates/test-support" }
 
 # 外部 crate
 serde = { version = "1", features = ["derive"] }
@@ -67,7 +71,6 @@ resvg = { version = "0.48", default-features = false, features = ["text", "syste
 # "experimental" only makes egui's widget themes public: Encore's light text fields are one (M6.465).
 egui = { version = "0.37", features = ["experimental"] }
 eframe = "0.37"
-rfd = "0.18"
 # The operating system's display language, for the interface language at startup.
 sys-locale = "0.3"
 cpal = "0.18.2"
@@ -77,51 +80,82 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 
 # FilmCraft（MIT OR Apache-2.0）。crates.io 未公開のため git 依存で rev を固定する。
 # 帰属は NOTICE。
-filmcraft-time = { git = "https://github.com/storytold/filmcraft", rev = "ba6fe10529c7bf5d2a9283f9de2e35c0ccff926c" }
-filmcraft-geom = { git = "https://github.com/storytold/filmcraft", rev = "ba6fe10529c7bf5d2a9283f9de2e35c0ccff926c" }
-filmcraft-color = { git = "https://github.com/storytold/filmcraft", rev = "ba6fe10529c7bf5d2a9283f9de2e35c0ccff926c" }
-filmcraft-bitstream = { git = "https://github.com/storytold/filmcraft", rev = "ba6fe10529c7bf5d2a9283f9de2e35c0ccff926c" }
-filmcraft-frame = { git = "https://github.com/storytold/filmcraft", rev = "ba6fe10529c7bf5d2a9283f9de2e35c0ccff926c" }
-filmcraft-media = { git = "https://github.com/storytold/filmcraft", rev = "ba6fe10529c7bf5d2a9283f9de2e35c0ccff926c" }
-filmcraft-text = { git = "https://github.com/storytold/filmcraft", rev = "ba6fe10529c7bf5d2a9283f9de2e35c0ccff926c" }
-filmcraft-audio-dsp = { git = "https://github.com/storytold/filmcraft", rev = "ba6fe10529c7bf5d2a9283f9de2e35c0ccff926c" }
-filmcraft-codecs = { git = "https://github.com/storytold/filmcraft", rev = "ba6fe10529c7bf5d2a9283f9de2e35c0ccff926c" }
+filmcraft-time = { git = "https://github.com/storytold/filmcraft", rev = "a9429d82d2e5b87539eb38926d5fc0f2ddcd7724" }
+filmcraft-geom = { git = "https://github.com/storytold/filmcraft", rev = "a9429d82d2e5b87539eb38926d5fc0f2ddcd7724" }
+filmcraft-color = { git = "https://github.com/storytold/filmcraft", rev = "a9429d82d2e5b87539eb38926d5fc0f2ddcd7724" }
+filmcraft-bitstream = { git = "https://github.com/storytold/filmcraft", rev = "a9429d82d2e5b87539eb38926d5fc0f2ddcd7724" }
+filmcraft-frame = { git = "https://github.com/storytold/filmcraft", rev = "a9429d82d2e5b87539eb38926d5fc0f2ddcd7724" }
+filmcraft-media = { git = "https://github.com/storytold/filmcraft", rev = "a9429d82d2e5b87539eb38926d5fc0f2ddcd7724" }
+filmcraft-text = { git = "https://github.com/storytold/filmcraft", rev = "a9429d82d2e5b87539eb38926d5fc0f2ddcd7724" }
+filmcraft-audio-dsp = { git = "https://github.com/storytold/filmcraft", rev = "a9429d82d2e5b87539eb38926d5fc0f2ddcd7724" }
+filmcraft-codecs = { git = "https://github.com/storytold/filmcraft", rev = "a9429d82d2e5b87539eb38926d5fc0f2ddcd7724" }
 # FilmCraft's project model and file format: DiscCraft reads a project's sequences and markers (chapters).
-filmcraft-project = { git = "https://github.com/storytold/filmcraft", rev = "ba6fe10529c7bf5d2a9283f9de2e35c0ccff926c" }
-filmcraft-format = { git = "https://github.com/storytold/filmcraft", rev = "ba6fe10529c7bf5d2a9283f9de2e35c0ccff926c" }
+filmcraft-project = { git = "https://github.com/storytold/filmcraft", rev = "a9429d82d2e5b87539eb38926d5fc0f2ddcd7724" }
+filmcraft-format = { git = "https://github.com/storytold/filmcraft", rev = "a9429d82d2e5b87539eb38926d5fc0f2ddcd7724" }
 # craft-libs (MIT OR Apache-2.0), at its HEAD (the Craft apps keep it there): the H.264 encoder (feature `h264-encode`,
 # FilmCraft's former filmcraft-h264enc) makes the HD Blu-ray video, and the MPEG-2 decoder (`mpeg2-decode`) checks our
 # encoder in tests. Each crate turns on the feature it needs.
-craft-video = { git = "https://github.com/storytold/craft-libs", rev = "249a41bd9306a1b34330ac94e596a1a8b881378a", default-features = false }
+craft-video = { git = "https://github.com/storytold/craft-libs", rev = "6bfe8e7678dd470432b949154e78ec1f92fc64fc", default-features = false }
 # craft-libs' AC-3 encoder (ETSI TS 102 366), the same revision: the transcoded soundtracks become Dolby Digital, as
 # Encore makes them. Used through its public API only.
-craft-audio = { git = "https://github.com/storytold/craft-libs", rev = "249a41bd9306a1b34330ac94e596a1a8b881378a", default-features = false, features = ["ac3-encode"] }
+craft-audio = { git = "https://github.com/storytold/craft-libs", rev = "6bfe8e7678dd470432b949154e78ec1f92fc64fc", default-features = false, features = ["ac3-encode"] }
 # craft-libs' MPEG-2 Systems demuxer, the same revision: program and transport streams whose MPEG-2 video and AC-3
 # can go on a DVD as they are are demuxed, not transcoded.
-craft-media = { git = "https://github.com/storytold/craft-libs", rev = "249a41bd9306a1b34330ac94e596a1a8b881378a", default-features = false, features = ["mpegts", "matroska", "isobmff"] }
+craft-media = { git = "https://github.com/storytold/craft-libs", rev = "6bfe8e7678dd470432b949154e78ec1f92fc64fc", default-features = false, features = ["mpegts", "matroska", "isobmff"] }
 # craft-libs' shared UI (MIT OR Apache-2.0), the same revision: its docking (tab groups that are dragged,
 # split, floated and closed, saved as workspaces), as the other Craft apps arrange their panels.
-craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "249a41bd9306a1b34330ac94e596a1a8b881378a", features = ["serde"] }
+craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "6bfe8e7678dd470432b949154e78ec1f92fc64fc" }
+# craft-libs' font embedding (MIT OR Apache-2.0), the same revision: ui-egui's build script embeds the craft-fonts faces
+# (OFL-1.1) a build is given in CRAFT_FONTS_DIR, which craft-ui's font stack puts under Encore's faces (M9.66).
+craft-fonts-build = { git = "https://github.com/storytold/craft-libs", rev = "6bfe8e7678dd470432b949154e78ec1f92fc64fc" }
 # craft-libs' translations (MIT OR Apache-2.0), the same revision: the lookup the Crafting Apps share (app rows over
 # craft-i18n's shared catalog, then English), over the catalogs in crates/ui-egui/i18n (M16.1).
-craft-i18n = { git = "https://github.com/storytold/craft-libs", rev = "249a41bd9306a1b34330ac94e596a1a8b881378a" }
+craft-i18n = { git = "https://github.com/storytold/craft-libs", rev = "6bfe8e7678dd470432b949154e78ec1f92fc64fc" }
 # craft-libs' menus (MIT OR Apache-2.0), the same revision: the menu bar the Crafting Apps share (its layouts for
 # Windows, Linux and macOS, keyboard access, mnemonics), with craft-keymap's chords for its shortcuts (M16.4).
-craft-menu = { git = "https://github.com/storytold/craft-libs", rev = "249a41bd9306a1b34330ac94e596a1a8b881378a" }
-craft-keymap = { git = "https://github.com/storytold/craft-libs", rev = "249a41bd9306a1b34330ac94e596a1a8b881378a", features = ["egui"] }
-photocraft-io = { git = "https://github.com/storytold/photocraft", rev = "b609bc7d3c6bae486d80a21bfb32d25c990bd954" }
-photocraft-doc = { git = "https://github.com/storytold/photocraft", rev = "b609bc7d3c6bae486d80a21bfb32d25c990bd954" }
-photocraft-compose = { git = "https://github.com/storytold/photocraft", rev = "b609bc7d3c6bae486d80a21bfb32d25c990bd954" }
-photocraft-geom = { git = "https://github.com/storytold/photocraft", rev = "b609bc7d3c6bae486d80a21bfb32d25c990bd954" }
-photocraft-raster = { git = "https://github.com/storytold/photocraft", rev = "b609bc7d3c6bae486d80a21bfb32d25c990bd954" }
+craft-menu = { git = "https://github.com/storytold/craft-libs", rev = "6bfe8e7678dd470432b949154e78ec1f92fc64fc" }
+craft-keymap = { git = "https://github.com/storytold/craft-libs", rev = "6bfe8e7678dd470432b949154e78ec1f92fc64fc", features = ["egui"] }
+# The UI runtime craft-ui and craft-menu are built on (M9.54): the dock model (craft-behavior), the app's host
+# (craft-host: its name, words and language for the framework's own words), the window services the runtime is
+# installed with (craft-window) and the theme mode (craft-theme). The same revision.
+craft-behavior = { git = "https://github.com/storytold/craft-libs", rev = "6bfe8e7678dd470432b949154e78ec1f92fc64fc" }
+craft-host = { git = "https://github.com/storytold/craft-libs", rev = "6bfe8e7678dd470432b949154e78ec1f92fc64fc" }
+craft-window = { git = "https://github.com/storytold/craft-libs", rev = "6bfe8e7678dd470432b949154e78ec1f92fc64fc" }
+craft-theme = { git = "https://github.com/storytold/craft-libs", rev = "6bfe8e7678dd470432b949154e78ec1f92fc64fc" }
+photocraft-io = { git = "https://github.com/storytold/photocraft", rev = "391cb0171004a5cb6b7b5138ac96c1ceb5ed8ae1" }
+photocraft-doc = { git = "https://github.com/storytold/photocraft", rev = "391cb0171004a5cb6b7b5138ac96c1ceb5ed8ae1" }
+photocraft-compose = { git = "https://github.com/storytold/photocraft", rev = "391cb0171004a5cb6b7b5138ac96c1ceb5ed8ae1" }
+photocraft-geom = { git = "https://github.com/storytold/photocraft", rev = "391cb0171004a5cb6b7b5138ac96c1ceb5ed8ae1" }
+photocraft-raster = { git = "https://github.com/storytold/photocraft", rev = "391cb0171004a5cb6b7b5138ac96c1ceb5ed8ae1" }
 # PhotoCraft's PSD writer moved to craft-libs: the same revision, for writing test PSDs.
-craft-psd = { git = "https://github.com/storytold/craft-libs", rev = "249a41bd9306a1b34330ac94e596a1a8b881378a" }
+craft-psd = { git = "https://github.com/storytold/craft-libs", rev = "6bfe8e7678dd470432b949154e78ec1f92fc64fc" }
+# craft-libs' caption files (MIT OR Apache-2.0), the same revision: the subtitle formats DiscCraft does not read
+# itself (M6.566: ASS / SSA, Scenarist SCC, MacCaption MCC, EBU STL, TTML / DFXP, SAMI).
+craft-captions = { git = "https://github.com/storytold/craft-libs", rev = "6bfe8e7678dd470432b949154e78ec1f92fc64fc" }
+# craft-libs' MCP server machinery (MIT OR Apache-2.0), the same revision: JSON-RPC 2.0 over stdio, the MCP lifecycle
+# and the tool argument checks the Craft apps share, behind `disccraft-cli mcp` (M9.61).
+craft-mcp-server = { git = "https://github.com/storytold/craft-libs", rev = "6bfe8e7678dd470432b949154e78ec1f92fc64fc" }
+# craft-libs' file signatures (MIT OR Apache-2.0), the same revision: an imported file's kind from its first bytes
+# where they name a format DiscCraft reads (M6.568), its name otherwise.
+craft-sniff = { git = "https://github.com/storytold/craft-libs", rev = "6bfe8e7678dd470432b949154e78ec1f92fc64fc" }
+# craft-libs' settings storage (MIT OR Apache-2.0), the same revision: DiscCraft's settings in a config.toml with
+# atomic saves, a backup, damaged-file recovery and schema migration, as the other Craft apps keep theirs (M9.62).
+craft-settings = { git = "https://github.com/storytold/craft-libs", rev = "6bfe8e7678dd470432b949154e78ec1f92fc64fc" }
+# craft-libs' file dialogs (MIT OR Apache-2.0), the same revision: native file dialogs that never hold up a frame,
+# asked for with what comes after them and answered on a later frame, as the other Craft apps show theirs (M9.64).
+craft-dialogs = { git = "https://github.com/storytold/craft-libs", rev = "6bfe8e7678dd470432b949154e78ec1f92fc64fc" }
+# craft-libs' updater (MIT OR Apache-2.0), the same revision: Help ▸ Check for Updates… asks GitHub for the newest
+# release and installs it (MSI, portable ZIP, AppImage…), with the update dialogs the other Craft apps show (M9.65).
+craft-update = { git = "https://github.com/storytold/craft-libs", rev = "6bfe8e7678dd470432b949154e78ec1f92fc64fc", features = ["ui"] }
+# craft-libs' oracle-test support (MIT OR Apache-2.0), the same revision: where ffmpeg and ffprobe are for the tests
+# that compare with them, through disccraft-test-support (M9.67). Tests only.
+craft-media-testkit = { git = "https://github.com/storytold/craft-libs", rev = "6bfe8e7678dd470432b949154e78ec1f92fc64fc" }
 # EffectCraft's engine and its headless session: a project's composition is rendered to a movie through its own
 # render queue (disccraft-motion).
-effectcraft-engine = { git = "https://github.com/storytold/effectcraft", rev = "86af5cba7f6976fe2b4561df4e8021ba807591f5" }
-effectcraft-host = { git = "https://github.com/storytold/effectcraft", rev = "86af5cba7f6976fe2b4561df4e8021ba807591f5" }
-soundcraft-engine = { git = "https://github.com/storytold/soundcraft", rev = "7391fc7465b45f0159c8044a521d77b0a309de7f" }
-soundcraft-dsp = { git = "https://github.com/storytold/soundcraft", rev = "7391fc7465b45f0159c8044a521d77b0a309de7f" }
+effectcraft-engine = { git = "https://github.com/storytold/effectcraft", rev = "1855d02c4727be0eea58f87a5ad5dc4ecdfd30a3" }
+effectcraft-host = { git = "https://github.com/storytold/effectcraft", rev = "1855d02c4727be0eea58f87a5ad5dc4ecdfd30a3" }
+soundcraft-engine = { git = "https://github.com/storytold/soundcraft", rev = "0fce3e7aba3943b837d588637b713a660a911a87" }
+soundcraft-dsp = { git = "https://github.com/storytold/soundcraft", rev = "0fce3e7aba3943b837d588637b713a660a911a87" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -140,32 +174,32 @@ type_complexity = "allow"
 # and the Craft apps' media readers) decodes interlaced H.264 (camcorder and broadcast 1080i). Back to the storytold
 # revision once those PRs are merged.
 [patch."https://github.com/storytold/craft-libs"]
-craft-video = { git = "https://github.com/mOqOm/craft-libs", rev = "d55169f553efccdcece4cdbca3354e012c2ffffd" }
-craft-media = { git = "https://github.com/mOqOm/craft-libs", rev = "d55169f553efccdcece4cdbca3354e012c2ffffd" }
+craft-video = { git = "https://github.com/mOqOm/craft-libs", rev = "02468c886acc84fc04fd9285f57e11e544a98657" }
+craft-media = { git = "https://github.com/mOqOm/craft-libs", rev = "02468c886acc84fc04fd9285f57e11e544a98657" }
 
 # craft-pdf (pulled in by PhotoCraft and EffectCraft) uses craft-libs' vendored Hayro trees (and the vello and
 # linesweeper crates they draw with); consumers patch the same craft-libs revision (craft-libs crates/pdf README): the one
 # PhotoCraft's HEAD uses, for those of its crates that are in DiscCraft's graph.
 [patch.crates-io]
-hayro = { git = "https://github.com/storytold/craft-libs", rev = "5c5e0d52c387c0a4ae2908a07e476d7584f60362" }
-hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "5c5e0d52c387c0a4ae2908a07e476d7584f60362" }
-hayro-interpret = { git = "https://github.com/storytold/craft-libs", rev = "5c5e0d52c387c0a4ae2908a07e476d7584f60362" }
-hayro-jbig2 = { git = "https://github.com/storytold/craft-libs", rev = "5c5e0d52c387c0a4ae2908a07e476d7584f60362" }
-linesweeper = { git = "https://github.com/storytold/craft-libs", rev = "5c5e0d52c387c0a4ae2908a07e476d7584f60362" }
-vello_common = { git = "https://github.com/storytold/craft-libs", rev = "5c5e0d52c387c0a4ae2908a07e476d7584f60362" }
-vello_cpu = { git = "https://github.com/storytold/craft-libs", rev = "5c5e0d52c387c0a4ae2908a07e476d7584f60362" }
+hayro = { git = "https://github.com/storytold/craft-libs", rev = "3eb5b528b08211844bc5c95c5a4fd169894d52ff" }
+hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "3eb5b528b08211844bc5c95c5a4fd169894d52ff" }
+hayro-interpret = { git = "https://github.com/storytold/craft-libs", rev = "3eb5b528b08211844bc5c95c5a4fd169894d52ff" }
+hayro-jbig2 = { git = "https://github.com/storytold/craft-libs", rev = "3eb5b528b08211844bc5c95c5a4fd169894d52ff" }
+linesweeper = { git = "https://github.com/storytold/craft-libs", rev = "3eb5b528b08211844bc5c95c5a4fd169894d52ff" }
+vello_common = { git = "https://github.com/storytold/craft-libs", rev = "3eb5b528b08211844bc5c95c5a4fd169894d52ff" }
+vello_cpu = { git = "https://github.com/storytold/craft-libs", rev = "3eb5b528b08211844bc5c95c5a4fd169894d52ff" }
 # The Craft suite's egui and winit (the same reviewed fork commits as FilmCraft and the other Craft apps), so the
 # suite's shared UI crates (craft-libs) and the UI ported from them work here as there.
-ecolor = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-emath = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-epaint = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-epaint_default_fonts = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-egui = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-egui-winit = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-egui-wgpu = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-egui_glow = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-egui_system_font_provider = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-eframe = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+ecolor = { git = "https://github.com/storytold/egui.git", rev = "932a73b28560acb1a695533307b2cd0d66a42081" }
+emath = { git = "https://github.com/storytold/egui.git", rev = "932a73b28560acb1a695533307b2cd0d66a42081" }
+epaint = { git = "https://github.com/storytold/egui.git", rev = "932a73b28560acb1a695533307b2cd0d66a42081" }
+epaint_default_fonts = { git = "https://github.com/storytold/egui.git", rev = "932a73b28560acb1a695533307b2cd0d66a42081" }
+egui = { git = "https://github.com/storytold/egui.git", rev = "932a73b28560acb1a695533307b2cd0d66a42081" }
+egui-winit = { git = "https://github.com/storytold/egui.git", rev = "932a73b28560acb1a695533307b2cd0d66a42081" }
+egui-wgpu = { git = "https://github.com/storytold/egui.git", rev = "932a73b28560acb1a695533307b2cd0d66a42081" }
+egui_glow = { git = "https://github.com/storytold/egui.git", rev = "932a73b28560acb1a695533307b2cd0d66a42081" }
+egui_system_font_provider = { git = "https://github.com/storytold/egui.git", rev = "932a73b28560acb1a695533307b2cd0d66a42081" }
+eframe = { git = "https://github.com/storytold/egui.git", rev = "932a73b28560acb1a695533307b2cd0d66a42081" }
 winit = { git = "https://github.com/storytold/winit.git", rev = "a517b3846ee8457d84ee4975110bfda6797c44dc" }
 
 # 開発ビルドとテストのデバッグ情報は行番号だけ（M6.353）。完全なデバッグ情報ではテストの実行ファイル 1 つの PDB が

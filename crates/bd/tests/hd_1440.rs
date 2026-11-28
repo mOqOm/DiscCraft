@@ -11,22 +11,9 @@
 
 use disccraft_bd::build_bdmv;
 use disccraft_project::{BdCodec, BdVideo, ClipTrim, DiscKind, Link, Project, SubtitleTrack};
+use disccraft_test_support::{ffmpeg, ffprobe, fixtures};
 use std::path::PathBuf;
 use std::process::Command;
-
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
-
-fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures")
-}
 
 /// What ffprobe says of a clip's stream `select`: its `entries`.
 fn probe(ffprobe: &PathBuf, stream: &PathBuf, select: &str, entries: &str) -> String {
@@ -127,10 +114,7 @@ fn project(video: &PathBuf) -> Project {
 
 #[test]
 fn the_1440_formats_are_coded_1440_wide() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };

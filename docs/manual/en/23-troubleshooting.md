@@ -46,4 +46,4 @@ The issues are grouped by type. If you cannot find your problem, also try search
 |---|---|
 | Want to report an issue | Use **Copy** in **Help ▸ System Compatibility Report…** for environment info, and **Help ▸ Reveal Log Files…** for the operation log since this launch, then attach them to **Help ▸ Report an Issue…**. If DiscCraft crashes unexpectedly, the log from that time remains in the log folder |
 | Want to investigate playback compatibility in detail | Open the written folder or image in a PC player (VLC and the like) to see where it stops |
-| Want to know if a new version is available | Check this version with **Help ▸ Check for Updates…** and open the Releases on GitHub (DiscCraft does not communicate on its own) |
+| Want to know if a new version is available | **Help ▸ Check for Updates…** asks GitHub. If there is a newer version, it is shown with **Download** (which opens its release page). A copy installed from the Linux AppImage, .deb, .rpm or Flatpak is replaced with **Update and Restart**. DiscCraft contacts GitHub only then, and at each start once that is turned on in [Preferences ▸ General](18-preferences.md#181-general) |

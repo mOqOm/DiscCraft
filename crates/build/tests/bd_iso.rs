@@ -5,26 +5,13 @@
 
 use disccraft_build::{BuildOptions, OutputKind, build};
 use disccraft_project::{DiscKind, Link, Project, Tick};
+use disccraft_test_support::{ffmpeg, ffprobe, fixtures};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const TICKS_PER_SECOND: i64 = 254_016_000_000;
 /// ffmpeg's `bluray:` input ignores playlists shorter than 180 seconds.
 const SECONDS: u32 = 185;
-
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
-
-fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures")
-}
 
 /// A long, DVD-compliant MPEG-2 elementary stream (passed through without transcoding).
 fn long_video(ffmpeg: &Path) -> PathBuf {
@@ -51,10 +38,7 @@ fn long_video(ffmpeg: &Path) -> PathBuf {
 
 #[test]
 fn blu_ray_iso_opens_in_libbluray() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };

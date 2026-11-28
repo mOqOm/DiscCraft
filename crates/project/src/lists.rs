@@ -506,6 +506,7 @@ impl PlaylistItem {
             Link::NotSet
             | Link::Stop
             | Link::LastMenu
+            | Link::Resume
             | Link::Menu { .. }
             | Link::Playlist { .. } => None,
         }

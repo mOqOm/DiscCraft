@@ -4386,11 +4386,11 @@ mod tests {
     /// M6.517: a PSD's button set is drawn where its button is, as Encore moves and scales a button set's layers with
     /// the button: moved or resized, its video frame and its text go with it (they stayed where the PSD had them,
     /// the video frame away from the video, GitHub reporter's test).
-    #[test]
-    fn a_psd_button_sets_layers_move_and_scale_with_the_button() -> Result<(), Box<dyn Error>> {
+    /// A menu imported from a 720x480 PSD with one button set, "(+) Chapter 1" (layer id 10): a grey `(%)` video
+    /// frame at (100, 80)-(300, 200) and a white text at (120, 210)-(280, 240) over a dark blue background.
+    fn menu_of_one_psd_set(dir: &std::path::Path) -> Result<(Session, MenuId), Box<dyn Error>> {
         use disccraft_photo::PsdLayer;
-        let dir = std::env::temp_dir().join(format!("disccraft-set-moves-{}", std::process::id()));
-        std::fs::create_dir_all(&dir)?;
+        std::fs::create_dir_all(dir)?;
         let (w, h) = (720u32, 480u32);
         let filled = |x0: u32, y0: u32, x1: u32, y1: u32, color: [u8; 4]| {
             let mut rgba = vec![0u8; (w * h * 4) as usize];
@@ -4437,14 +4437,158 @@ mod tests {
             &serde_json::json!({ "path": path.to_string_lossy() }),
         )?;
         let menu = MenuId(value_u64(&imported, "menu")?);
-        let at = |session: &Session, x: usize, y: usize| -> Result<[u8; 3], Box<dyn Error>> {
-            let drawn = disccraft_menu::render_menu(
-                &session.project,
-                session.project.menu(menu).ok_or("menu")?,
-            )?;
-            let i = (y * usize::from(drawn.width) + x) * 3;
-            Ok([drawn.rgb[i], drawn.rgb[i + 1], drawn.rgb[i + 2]])
+        Ok((session, menu))
+    }
+
+    /// The colour of the frame pixel (`x`, `y`) of the menu as it is drawn.
+    fn drawn_pixel(
+        session: &Session,
+        menu: MenuId,
+        x: usize,
+        y: usize,
+    ) -> Result<[u8; 3], Box<dyn Error>> {
+        let drawn = disccraft_menu::render_menu(
+            &session.project,
+            session.project.menu(menu).ok_or("menu")?,
+        )?;
+        let i = (y * usize::from(drawn.width) + x) * 3;
+        Ok([drawn.rgb[i], drawn.rgb[i + 1], drawn.rgb[i + 2]])
+    }
+
+    /// M6.536: a PSD's layers above its button sets (a shade over the lower part of the menu) are drawn over the
+    /// buttons, not under them, and a button set inside an ordinary group leaves nothing behind when its button moves
+    /// (the group's picture still had it).
+    #[test]
+    fn a_psd_shade_over_the_buttons_stays_over_them() -> Result<(), Box<dyn Error>> {
+        use disccraft_photo::PsdLayer;
+        let dir = std::env::temp_dir().join(format!("disccraft-set-over-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let (w, h) = (720u32, 480u32);
+        let filled = |x0: u32, y0: u32, x1: u32, y1: u32, color: [u8; 4]| {
+            let mut rgba = vec![0u8; (w * h * 4) as usize];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = ((y * w + x) * 4) as usize;
+                    rgba[i..i + 4].copy_from_slice(&color);
+                }
+            }
+            rgba
         };
+        let path = dir.join("Shade.psd");
+        disccraft_photo::write_layered_psd(
+            &path,
+            w,
+            h,
+            &[
+                PsdLayer::Raster {
+                    name: "Background".to_owned(),
+                    rgba: [20, 20, 60, 255].repeat((w * h) as usize),
+                    visible: true,
+                },
+                PsdLayer::Group {
+                    name: "MAIN".to_owned(),
+                    id: None,
+                    children: vec![PsdLayer::Group {
+                        name: "(+) Play".to_owned(),
+                        id: Some(10),
+                        children: vec![PsdLayer::Raster {
+                            name: "Play".to_owned(),
+                            rgba: filled(120, 210, 280, 240, [240, 240, 240, 255]),
+                            visible: true,
+                        }],
+                    }],
+                },
+                PsdLayer::Raster {
+                    name: "Shade".to_owned(),
+                    rgba: filled(0, 200, w, 260, [0, 0, 0, 128]),
+                    visible: true,
+                },
+            ],
+        )?;
+        let mut session = Session::new();
+        let imported = session.execute(
+            "menu.import",
+            &serde_json::json!({ "path": path.to_string_lossy() }),
+        )?;
+        let menu = MenuId(value_u64(&imported, "menu")?);
+        let at = |session: &Session, x: usize, y: usize| drawn_pixel(session, menu, x, y);
+        let shaded_white = |c: [u8; 3]| c.iter().all(|v| (90..=150).contains(v));
+        let shaded_background = |c: [u8; 3]| c[0] < 20 && c[2] < 45;
+        assert!(
+            shaded_white(at(&session, 200, 225)?),
+            "the shade over the button: {:?}",
+            at(&session, 200, 225)?
+        );
+
+        let rect = session.project.menu(menu).ok_or("menu")?.buttons[0].rect;
+        session.execute(
+            "button.setRect",
+            &serde_json::json!({"menu": menu.0, "button": 0,
+                "rect": {"x": rect.x + 300, "y": rect.y, "w": rect.w, "h": rect.h}}),
+        )?;
+        assert!(
+            shaded_white(at(&session, 500, 225)?),
+            "the moved button under the shade: {:?}",
+            at(&session, 500, 225)?
+        );
+        assert!(
+            shaded_background(at(&session, 200, 225)?),
+            "nothing left where the button was: {:?}",
+            at(&session, 200, 225)?
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M6.535: a PSD button set turned with its button. Half a turn takes the text above the frame; a quarter turn
+    /// clockwise lays the text down the button's left side (the set stayed upright while its highlight turned).
+    #[test]
+    fn a_psd_button_set_turns_with_the_button() -> Result<(), Box<dyn Error>> {
+        let dir = std::env::temp_dir().join(format!("disccraft-set-turns-{}", std::process::id()));
+        let (mut session, menu) = menu_of_one_psd_set(&dir)?;
+        let at = |session: &Session, x: usize, y: usize| drawn_pixel(session, menu, x, y);
+        let grey = |c: [u8; 3]| c.iter().all(|v| (100..=160).contains(v));
+        let white = |c: [u8; 3]| c.iter().all(|v| *v > 200);
+        assert!(grey(at(&session, 200, 95)?) && white(at(&session, 200, 225)?));
+
+        session.execute(
+            "menu.setAngle",
+            &serde_json::json!({"menu": menu.0, "buttons": [0], "degrees": 180}),
+        )?;
+        assert!(white(at(&session, 200, 95)?), "the text turned to the top");
+        assert!(
+            grey(at(&session, 200, 225)?),
+            "the frame turned to the bottom"
+        );
+
+        session.execute(
+            "menu.setAngle",
+            &serde_json::json!({"menu": menu.0, "buttons": [0], "degrees": 0}),
+        )?;
+        session.execute(
+            "menu.orient",
+            &serde_json::json!({"menu": menu.0, "buttons": [0], "rotate": 90}),
+        )?;
+        let button = &session.project.menu(menu).ok_or("menu")?.buttons[0];
+        assert!(
+            button.rect.h > button.rect.w,
+            "the button stands: {:?}",
+            button.rect
+        );
+        assert!(
+            white(at(&session, 135, 160)?),
+            "the text down the left side"
+        );
+        assert!(grey(at(&session, 230, 160)?), "the frame on the right");
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn a_psd_button_sets_layers_move_and_scale_with_the_button() -> Result<(), Box<dyn Error>> {
+        let dir = std::env::temp_dir().join(format!("disccraft-set-moves-{}", std::process::id()));
+        let (mut session, menu) = menu_of_one_psd_set(&dir)?;
+        let at = |session: &Session, x: usize, y: usize| drawn_pixel(session, menu, x, y);
         let grey = |c: [u8; 3]| c.iter().all(|v| (100..=160).contains(v));
         let white = |c: [u8; 3]| c.iter().all(|v| *v > 200);
         let background = |c: [u8; 3]| c[2] > c[0] + 20 && c[0] < 60;

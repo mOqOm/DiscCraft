@@ -297,6 +297,11 @@ fn check_end_action(
             }
         }
         Link::Stop | Link::LastMenu => {}
+        // M6.528: a slideshow or a playlist plays a title; only a menu can resume the title it was called from.
+        Link::Resume => problems.push(warning(
+            "resumeOutsideMenu",
+            format!("{context} {id} end action is Resume, which only a menu can do: playback stops there"),
+        )),
     }
 }
 
@@ -794,6 +799,20 @@ mod tests {
             playlist.order = crate::chapter_playlist::PlaybackOrder::Random;
         }
         assert!(!has_warning_code(&problems_for(&project), "playbackType"));
+        Ok(())
+    }
+
+    /// M6.528: a slideshow's end action cannot resume (only a menu can): Project Check says so.
+    #[test]
+    fn resume_outside_a_menu_warning() -> Result<(), Box<dyn Error>> {
+        let mut project = Project::default();
+        let id = project.add_slideshow(None)?;
+        if let Some(slideshow) = project.slideshow_mut(id) {
+            slideshow.end_action = Link::Resume;
+        }
+        let problems = problems_for(&project);
+        assert!(has_warning_code(&problems, "resumeOutsideMenu"));
+        assert!(!has_warning_code(&problems, "endActionNotSet"));
         Ok(())
     }
 

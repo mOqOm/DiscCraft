@@ -9,7 +9,7 @@
 )]
 
 use disccraft_ui_egui::{
-    DiscCraftApp, apply_theme, enable_media_cache, install_crash_log, install_fonts,
+    DiscCraftApp, apply_theme, enable_media_cache, framework, install_crash_log, install_fonts,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -26,6 +26,8 @@ struct AppWrapper {
 
 impl AppWrapper {
     fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> Self {
+        // The UI runtime the panels' docking and the menu bar are built on (M9.54), before the fonts, which it notes.
+        framework::install(&cc.egui_ctx);
         install_fonts(&cc.egui_ctx);
         apply_theme(&cc.egui_ctx);
 
@@ -43,21 +45,54 @@ impl AppWrapper {
 }
 
 impl eframe::App for AppWrapper {
-    fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
+        // The window's close goes through the UI runtime, which asks whether it may close (unsaved work, a disc being
+        // written).
+        framework::close_path(ctx, || self.app.close_decision());
+    }
+
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, frame: &mut eframe::Frame) {
+        framework::before_ui(ui.ctx(), frame);
         self.app.ui(ui);
+        // M9.64: the file dialog asked for this frame shows now, over the window.
+        self.app.show_dialogs(frame);
     }
 
     fn raw_input_hook(
         &mut self,
-        _ctx: &eframe::egui::Context,
+        ctx: &eframe::egui::Context,
         raw_input: &mut eframe::egui::RawInput,
     ) {
-        self.app.native_menu_input(raw_input);
+        self.app.native_menu_input(ctx);
         self.app.capture_input(raw_input);
+        self.app.framework_input(ctx);
+    }
+}
+
+/// M9.65: a ready update starts its helper once DiscCraft is going (craft-update; dropping its updater would too, this
+/// makes it independent of when eframe drops the app).
+impl Drop for AppWrapper {
+    fn drop(&mut self) {
+        self.app.exiting();
     }
 }
 
 fn main() -> ExitCode {
+    // M9.65: on Windows the update helper is a copy of this program started with `--finish-update`: it waits for
+    // DiscCraft to exit, installs the update and starts the new DiscCraft.
+    #[cfg(windows)]
+    {
+        let arguments: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        if let Some(result) =
+            craft_update::self_update::finish(&disccraft_ui_egui::UPDATE_APP, &arguments)
+        {
+            return if result.is_ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            };
+        }
+    }
     // A crash leaves the session log behind (Help ▸ Reveal Log Files… shows the folder).
     install_crash_log();
     let path = std::env::args().nth(1).map(PathBuf::from);

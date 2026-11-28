@@ -6,6 +6,7 @@
 
 use disccraft_build::{BuildOptions, OutputKind, build};
 use disccraft_project::{Link, Project, Tick};
+use disccraft_test_support::{ffmpeg, fixtures};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -13,21 +14,6 @@ use std::process::Command;
 const FRAME_TICKS: i64 = 8_475_667_200;
 /// 90 kHz ticks of one NTSC frame.
 const FRAME_90K: u64 = 3_003;
-
-fn ffmpeg() -> Option<PathBuf> {
-    let path =
-        std::env::var_os("DISCCRAFT_FFMPEG").map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
-
-fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures")
-}
 
 /// Two seconds (60 frames at 29.97) of H.264 with AAC sound: transcoded by the build.
 fn source(ffmpeg: &Path) -> PathBuf {

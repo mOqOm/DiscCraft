@@ -9,8 +9,9 @@ use crate::DiscCraftApp;
 use crate::i18n::{tl, tlf};
 use crate::track_dialog::TrackKind;
 
+use crate::file_dialogs::{Then, ask};
+use craft_dialogs::FileDialog;
 use disccraft_project::{AssetId, TimelineId};
-use rfd::FileDialog;
 use serde_json::{Value, json};
 
 /// 1 つの字幕（秒）。
@@ -332,13 +333,21 @@ impl DiscCraftApp {
             self.status = tl!("Select a timeline first").to_string();
             return;
         };
-        let Some(path) = FileDialog::new()
-            .add_filter(tl!("Subtitles"), &["srt", "vtt", "txt"])
-            .pick_file()
-        else {
-            return;
-        };
-        let imported = self.run_command("asset.import", crate::gui_params::import_asset(&path));
+        ask(
+            FileDialog::open().filter(
+                tl!("Subtitles"),
+                &[
+                    "srt", "vtt", "txt", "ass", "ssa", "scc", "mcc", "stl", "ttml", "dfxp", "smi",
+                    "sami",
+                ],
+            ),
+            Then::ImportSubtitles(timeline),
+        );
+    }
+
+    /// The subtitle file chosen for Timeline ▸ Import Subtitles ▸ Text Script… of `timeline`.
+    pub(crate) fn import_subtitles_from(&mut self, timeline: TimelineId, path: &Path) {
+        let imported = self.run_command("asset.import", crate::gui_params::import_asset(path));
         let Some(asset) = imported
             .and_then(|value| value.get("asset").and_then(Value::as_u64))
             .map(AssetId)
@@ -351,7 +360,7 @@ impl DiscCraftApp {
         if count == 0 {
             return;
         }
-        let language = language_from_name(&path).unwrap_or_else(|| "ja".to_owned());
+        let language = language_from_name(path).unwrap_or_else(|| "ja".to_owned());
         self.open_track_dialog_with(timeline, TrackKind::Subtitle, asset, language);
         self.status = tlf!("Read {n} subtitles", n = count);
     }
@@ -365,15 +374,18 @@ impl DiscCraftApp {
             .get(&asset)
             .map(|asset| asset.name.clone())
             .unwrap_or_else(|| "subtitles".to_owned());
-        let Some(path) = FileDialog::new()
-            .add_filter("SRT", &["srt"])
-            // Encore の「字幕の書き出し ▸ テキストスクリプト」と同じ形式（Encore に読み込める）。
-            .add_filter(tl!("Text Script"), &["txt"])
-            .set_file_name(format!("{name}.srt"))
-            .save_file()
-        else {
-            return;
-        };
+        ask(
+            FileDialog::save()
+                .filter("SRT", &["srt"])
+                // Encore の「字幕の書き出し ▸ テキストスクリプト」と同じ形式（Encore に読み込める）。
+                .filter(tl!("Text Script"), &["txt"])
+                .file_name(format!("{name}.srt")),
+            Then::ExportSubtitles(asset),
+        );
+    }
+
+    /// Writes the subtitles of `asset` to the file chosen for Export Subtitles.
+    pub(crate) fn export_subtitles_to(&mut self, asset: AssetId, path: &Path) {
         let target = path.to_string_lossy().into_owned();
         if self
             .run_query(

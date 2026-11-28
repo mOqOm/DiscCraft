@@ -3,12 +3,12 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use disccraft_test_support::fixtures;
 use disccraft_transcode::{AudioReader, probe_audio_seconds};
-use std::path::PathBuf;
 
 #[test]
 fn a_raw_ac3_file_is_heard() {
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/ntsc.ac3");
+    let fixture = fixtures().join("ntsc.ac3");
     if !fixture.is_file() {
         eprintln!("ntsc.ac3 fixture not found; skipping");
         return;
