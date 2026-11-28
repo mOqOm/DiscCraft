@@ -5,7 +5,8 @@ DV（ビデオカメラの 25 Mb/s と DVCPRO50 の 50 Mb/s の映像）のデ�
 絵（720 × 480 / 576、8 ビットの Y'CbCr）と音（16 ビットの 48 / 44.1 / 32 kHz、12 ビットの 32 kHz の音 1）を取り出す。
 民生用の DV と DVCAM（IEC 61834-2。525/60 は 4:1:1、625/50 は 4:2:0）と DVCPRO（SMPTE 314M の 25 Mb/s。どちらも 4:1:1）、
 DVCPRO50（SMPTE 314M の 50 Mb/s。4:2:2。M6.415）。
-4:3 と 16:9（VAUX の表示モード）。
+4:3 と 16:9（VAUX の表示モード）。フィールドの走査（VAUX のソースコントロールパックの IL と FS。M6.569）: インターレースで
+フィールド 1（フレームの下のフィールド）が先、フィールド 2（上）が先、プログレッシブ。パックがなければ下が先。
 AVI と `.dv` のファイル（M6.410）と `.mkv`（M6.416。craft-media の Matroska の読み取りのフレームの索引から）からフレームを
 取り出すのは disccraft-transcode（`dv_source`）。MOV の DV は、FilmCraft の
 メディアリーダーが disccraft-transcode の登録した `dv_decoder` でデコードする（M6.413）。

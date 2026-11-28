@@ -137,3 +137,42 @@ fn field_types_are_what_ffprobe_says() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(checked >= 2, "only {checked} cases could be made");
 }
+
+/// M6.569: DV's field order is its first frame's (the VAUX source control pack's FS flag), in a raw DV file and in
+/// MOV and AVI: ffmpeg writes FS = 0 for upper field first and FS = 1 for lower; ffprobe (a black box) reads it back
+/// the same way frame by frame.
+#[test]
+fn dv_field_order_is_its_first_frames() {
+    let Some(ffmpeg) = ffmpeg() else {
+        eprintln!("ffmpeg not found; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("disccraft-dv-field-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (size, rate, pixels) in [
+        ("720x480", "30000/1001", "yuv411p"),
+        ("720x576", "25", "yuv420p"),
+    ] {
+        for (order, expected) in [
+            ("tff", FieldType::UpperFirst),
+            ("bff", FieldType::LowerFirst),
+        ] {
+            for (extension, format) in [("dv", "dv"), ("mov", "mov"), ("avi", "avi")] {
+                let file = dir.join(format!("{order}-{pixels}.{extension}"));
+                let made = Command::new(&ffmpeg)
+                    .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+                    .arg(format!("testsrc2=size={size}:rate={rate}"))
+                    .args(["-vf", &format!("setfield={order}"), "-t", "0.2"])
+                    .args(["-c:v", "dvvideo", "-pix_fmt", pixels, "-f", format])
+                    .arg(&file)
+                    .status()
+                    .unwrap()
+                    .success();
+                assert!(made, "ffmpeg could not make {}", file.display());
+                assert_eq!(field_type(&file), Some(expected), "{}", file.display());
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -186,7 +186,8 @@ DV is read using DiscCraft's own decoder. Supported formats include AVI captured
 >
 > - Supported formats: NTSC (4:1:1), PAL (4:2:0), DVCPRO PAL (4:1:1), DVCPRO50 (4:2:2, 50 Mb/s). Aspect ratios 4:3 and
 >   16:9. DVCPRO HD is not supported.
-> - For discs, conversion preserves the field order (bottom-field-first).
+> - For discs, conversion preserves the field order, read from the DV frames' own flag (usually bottom-field-first;
+>   a top-field-first or progressive flag is followed).
 > - Audio: Type 2 AVI uses its PCM stream. Audio within DV frames (Type 1 AVI, raw DV files) reads 16-bit (48, 44.1, 32
 >   kHz) and 12-bit / 32 kHz. The second 12-bit audio channel (for dubbing), if recorded, becomes the file's second
 >   audio stream. For DVCPRO50, CH3 / CH4 is the second stream.

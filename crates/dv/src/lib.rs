@@ -100,6 +100,18 @@ pub enum Sampling {
     C422,
 }
 
+/// How a frame's two fields are scanned (the VAUX source control pack's IL and FS flags, BT.1618-1 Table 14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scan {
+    /// Interlaced, field 1 output first (FS = 1). Field 1 is the lower field of the frame (the first line of each
+    /// pair of a DCT block's lines belongs to field 2, Fig. 15): DV's usual order, and the order without the pack.
+    LowerFieldFirst,
+    /// Interlaced, field 2 (the upper field) output first (FS = 0).
+    UpperFieldFirst,
+    /// Not interlaced (IL = 0).
+    Progressive,
+}
+
 /// What a frame's header and auxiliary data say about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
@@ -107,6 +119,8 @@ pub struct Header {
     pub sampling: Sampling,
     /// The picture is 16:9 (squeezed into the 720 pixels), not 4:3.
     pub wide: bool,
+    /// How its fields are scanned.
+    pub scan: Scan,
 }
 
 impl Header {
@@ -173,12 +187,20 @@ pub fn header(frame: &[u8]) -> Result<Header, DvError> {
             _ => Sampling::C411,
         }
     };
-    // The VAUX source control pack's display select mode: 010 is 16:9.
-    let wide = vaux_pack(frame, system, 0x61).is_some_and(|pack| pack[2] & 0x07 == 0b010);
+    // The VAUX source control pack (Table 14): PC2's display select mode (010 is 16:9), PC3's interlace flag (bit 4)
+    // and first/second field flag (bit 6).
+    let control = vaux_pack(frame, system, 0x61);
+    let wide = control.is_some_and(|pack| pack[2] & 0x07 == 0b010);
+    let scan = match control.map(|pack| pack[3]) {
+        Some(flags) if flags & 0x10 == 0 => Scan::Progressive,
+        Some(flags) if flags & 0x40 == 0 => Scan::UpperFieldFirst,
+        _ => Scan::LowerFieldFirst,
+    };
     Ok(Header {
         system,
         sampling,
         wide,
+        scan,
     })
 }
 

@@ -2,7 +2,8 @@
 //! even / lower field first), read from its headers without decoding it: an MPEG-2 stream's sequence extension and
 //! first picture coding extension (ISO/IEC 13818-2 6.2.2.3, 6.2.3.1), or an H.264 sequence parameter set's
 //! frame_mbs_only_flag (ITU-T H.264 7.3.2.1.1), found as Annex B or in an `avcC` record (an MP4's or a Matroska
-//! file's decoder configuration, ISO/IEC 14496-15 5.2.4.1). DV (M6.410) is interlaced, the lower field first.
+//! file's decoder configuration, ISO/IEC 14496-15 5.2.4.1). DV (M6.410) by its first frame's VAUX source control pack
+//! (ITU-R BT.1618-1 Table 14: interlaced or not, which field first); the lower field first when no frame is found.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -43,7 +44,7 @@ pub fn field_type(path: &Path) -> Option<FieldType> {
     // DV before the others: its compressed bytes can hold anything, start codes too. In a MOV the sample
     // description may be at the end (M6.413).
     if crate::dv_source::is_dv(&head) || crate::dv_source::names_dv(&head) {
-        return Some(FieldType::LowerFirst);
+        return Some(dv_scan(&head).unwrap_or(FieldType::LowerFirst));
     }
     // MPEG first: its slice start codes (00 00 01 07, …) would pass for H.264 parameter sets.
     if let Some(found) = mpeg2(&head)
@@ -59,9 +60,26 @@ pub fn field_type(path: &Path) -> Option<FieldType> {
     let mut tail = Vec::new();
     let _ = file.take(PART).read_to_end(&mut tail).ok()?;
     if crate::dv_source::names_dv(&tail) {
-        return Some(FieldType::LowerFirst);
+        return Some(dv_scan(&head).unwrap_or(FieldType::LowerFirst));
     }
     h264_avcc(&tail)
+}
+
+/// The scan of the first DV frame in `bytes` (a DV file, or a container's samples): where its header, subcode and VAUX
+/// DIF blocks start a DIF sequence (M6.569). `None` when no whole DIF sequence of one is there.
+fn dv_scan(bytes: &[u8]) -> Option<FieldType> {
+    let at = bytes
+        .array_windows::<3>()
+        .enumerate()
+        .filter(|(_, id)| id[0] >> 5 == 0 && id[1] >> 4 == 0 && id[2] == 0)
+        .map(|(at, _)| at)
+        .find(|&at| bytes.get(at..).is_some_and(disccraft_dv::sniff))?;
+    let header = disccraft_dv::header(bytes.get(at..)?).ok()?;
+    Some(match header.scan {
+        disccraft_dv::Scan::LowerFieldFirst => FieldType::LowerFirst,
+        disccraft_dv::Scan::UpperFieldFirst => FieldType::UpperFirst,
+        disccraft_dv::Scan::Progressive => FieldType::Progressive,
+    })
 }
 
 /// The positions of the start codes (00 00 01) in `data`.
