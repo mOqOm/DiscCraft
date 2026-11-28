@@ -136,6 +136,10 @@ disccraft-cli build project.dcproj --iso disc.iso
 
 規格に合わない素材はビルドのときに変換し、出力先の `disccraft-cache` に残す（2 回目からは変換を飛ばす）。
 
+開発の道具は `cargo xtask`（コマンドの一覧）。`cargo xtask ci` が品質ゲートで、整形の検査、clippy、テスト、crate の層、
+素材のライセンス、マニュアルのリンクと画像を順に検査する。ffmpeg があれば、DiscCraft の出力を ffmpeg と比べるテストも動く
+（なければその比較だけを飛ばす）。
+
 使い方は [ユーザーマニュアル](docs/manual/ja/README.md) にある。まだできないことは [残りの課題と予定](docs/open-issues.ja.md) にまとめた。版ごとの変更は [変更履歴](CHANGELOG.ja.md) にある。
 
 ## AI エージェントから使う（MCP）
@@ -178,7 +182,8 @@ DiscCraft/
 │  ├─ ui-egui/
 │  ├─ automation/
 │  └─ platform/
-└─ assets/
+├─ assets/
+└─ xtask/
 ```
 
 ## FilmCraft の再利用
