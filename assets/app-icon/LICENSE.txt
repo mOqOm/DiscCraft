@@ -12,4 +12,4 @@ at your option.
 
 SPDX-License-Identifier: MIT OR Apache-2.0
 
-The derived files are regenerated with the development tools of the source repository.
+Regenerate the derived files with `cargo xtask icons`.

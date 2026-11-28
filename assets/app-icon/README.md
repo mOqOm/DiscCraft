@@ -27,5 +27,5 @@ The app also sets the window icon (the 256 px PNG) and the Wayland app ID / X11 
 
 ## Regenerate
 
-Replace `disccraft.png`, then regenerate the other files with the development tools of the source repository. Each size is reduced from the master with a Lanczos 3
+Replace `disccraft.png`, then run `cargo xtask icons`. Each size is reduced from the master with a Lanczos 3
 filter, the alpha premultiplied so the see-through corners do not darken the edges.

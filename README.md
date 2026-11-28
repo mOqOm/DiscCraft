@@ -145,6 +145,11 @@ Example `commands.jsonl` (a DVD with one video and one menu):
 Material that doesn't meet the spec is converted at build time and kept in `disccraft-cache` in the output folder (later
 builds skip the conversion).
 
+The development tools are `cargo xtask` (it lists its commands). `cargo xtask ci` is the quality gate: the format check,
+clippy, the tests, the crates' layers, the assets' licences, and the manual's links and pictures, in that order. With
+ffmpeg installed, the tests that compare DiscCraft's output with ffmpeg run too (without it only those comparisons are
+skipped).
+
 The [user manual](docs/manual/en/README.md) explains how to use it. What is not done yet is in [open issues](docs/open-issues.md). What changed in each version is in the [changelog](CHANGELOG.md).
 
 ## Driving it from an AI agent (MCP)
@@ -187,7 +192,8 @@ DiscCraft/
 │  ├─ ui-egui/
 │  ├─ automation/
 │  └─ platform/
-└─ assets/
+├─ assets/
+└─ xtask/
 ```
 
 ## Reusing FilmCraft

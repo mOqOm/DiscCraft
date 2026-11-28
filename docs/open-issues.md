@@ -71,6 +71,10 @@ DiscCraft writes VIDEO_TS / BDMV folders and ISO images, and on Windows also wri
 |---|---|
 | Needs a decision | Threading text from a frame's overset "+" into another frame. Encore's documentation only has the text reflow inside its box when the box is made bigger with a text tool; no threading into another frame was found. Whether to add what Encore does not have |
 | Upstream | A menu of the menu bar opened with Alt+letter (Alt held while the letter is pressed, the usual way) does not take its items' letters; the arrow keys and Enter work. It comes from the menu bar of craft-libs, reported as [issue #4003](https://github.com/storytold/craft-libs/issues/4003) |
+| Needs a decision | The interface's colours (theme) as the other Craft apps have them, with the theme choice shared (Encore's colours now; the typefaces became the Craft ones in 0.1.0-alpha.18) |
+| Needs a decision | Dialogs, preferences, buttons and other parts as the other Craft apps have them (craft-ui). A large piece of work, and the screens would look less like Encore's |
+| Large | Driving a running DiscCraft from outside, for agents and tests (the other Craft apps' control channel). Today only the command line's MCP server (no window) |
+| Large | Colour conversion and scaling of the video on the GPU (converted on the CPU today, then handed to the hardware encoder) |
 
 ## 6. Releases and packages
 

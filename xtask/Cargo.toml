@@ -1,0 +1,20 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json.workspace = true
+toml = "0.9"
+# `cargo xtask icons`: the application icon's sizes (assets/app-icon).
+image = { version = "0.25", default-features = false, features = ["png"] }
+# `cargo xtask manual --pdf`: the user manual's Markdown as HTML, for a browser to print as a PDF (M15.4).
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+# Whether the tests find ffmpeg, looked for as they look for it (M9.67).
+disccraft-test-support.workspace = true
