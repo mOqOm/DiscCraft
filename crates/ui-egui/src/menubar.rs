@@ -8,12 +8,10 @@ use crate::actions::{Action, pasted_text, pressed_actions};
 use crate::app::Selection;
 use crate::i18n::{Language, tl, tlf};
 use crate::menu_editor::HighlightPreview;
-use crate::menu_model::{
-    self, Commands, MenuCommand, MenuSink, ModelSink, english_title, layout_label,
-};
+use crate::menu_model::{self, Commands, MenuCommand, MenuSink, ModelSink, layout_label};
 use crate::track_dialog::TrackKind;
 use crate::workspace::Panel;
-use craft_menu::{Gate, ItemRole, Labeled, LayoutOptions, MenuBarUi, MenuRole, Platforms, Target};
+use craft_menu::{Gate, ItemRole, LayoutOptions, MenuBarUi, MenuRole, Platforms, Target};
 
 use crate::orient::OrientChange;
 use disccraft_build::OutputKind;
@@ -42,11 +40,9 @@ impl DiscCraftApp {
         let ctx = ui.ctx().clone();
         // Ctrl+V の文字列は、貼り付けのイベントが消費される前に取っておく。
         let pasted = pasted_text(&ctx);
-        // While a menu is open or the keyboard is on the bar (Alt, F10), the keys drive the bar; a command shortcut
-        // takes them off it and runs.
-        let bar_has_keys = craft_menu::bar::is_open(&ctx)
-            || (craft_menu::bar::is_focused(&ctx) && !craft_menu::bar::leave_for_shortcut(&ctx));
-        let pressed = if bar_has_keys {
+        // While a menu is open or the keyboard is on the bar (Alt, F10), the keys drive the bar.
+        let bar_has_keys = craft_menu::bar::is_open(&ctx) || craft_menu::bar::is_focused(&ctx);
+        let mut pressed = if bar_has_keys {
             Vec::new()
         } else {
             pressed_actions(&ctx)
@@ -54,44 +50,48 @@ impl DiscCraftApp {
         if pressed.contains(&Action::Paste) {
             self.pasted_text = pasted;
         }
+        // M9.55: the shortcuts pressed in a panel's own OS window in the last frame.
+        pressed.append(&mut self.queued_actions);
 
+        // The rows chosen in the menus the last frame showed come back from the UI runtime as fired commands (M9.54);
+        // each names a row of the menus as that frame laid them out.
+        let fired = std::mem::take(&mut self.fired_menu);
+        let mut chosen: Vec<MenuCommand> = fired
+            .iter()
+            .filter_map(|command| self.menu_commands.get(command).cloned())
+            .collect();
         let mut commands = Commands::default();
         let model = self.menu_model(&mut commands);
-        let options = LayoutOptions {
-            label: &layout_label,
-            ..LayoutOptions::new("DiscCraft")
-        };
-        let gate = Gate {
-            modal: ctx.memory(|memory| memory.top_modal_layer().is_some()),
-            recording_shortcut: false,
-            text_editing: ctx.text_edit_focused(),
-        };
-        let chosen = if let Some(native) = self.native_menu.as_mut() {
+        let options = LayoutOptions::new("DiscCraft").label(&layout_label);
+        let gate = Gate::default()
+            .modal(ctx.memory(|memory| memory.top_modal_layer().is_some()))
+            .text_editing(ctx.text_edit_focused());
+        if let Some(native) = self.native_menu.as_mut() {
             // macOS: the system's menu bar, kept up to date with what the menus show.
             native.set_gate(gate);
-            let _ = native.sync(craft_menu::mac_layout(&model, &options));
-            native.take_clicks(&ctx)
+            let key = craft_ui::contract::Tracked::new(model.clone());
+            let _ = native.sync_with(&key, || craft_menu::mac_layout(&model, &options));
+            chosen.extend(
+                native
+                    .take_clicks(&ctx)
+                    .iter()
+                    .filter_map(|command| commands.get(command).cloned()),
+            );
         } else {
             let laid_out = craft_menu::layout(&model, Target::current(), &options).bar;
-            let english = |labeled: Labeled<'_>| match labeled {
-                Labeled::Command(command) => commands.english(command),
-                Labeled::Title(title) => english_title(title),
-            };
+            if *self.menu_bar_model != laid_out {
+                self.menu_bar_model.edit(|bar| *bar = laid_out);
+            }
             // Room around the menus' names, as before (the names were packed together).
             ui.spacing_mut().button_padding = egui::vec2(9.0, 3.0);
-            MenuBarUi::new(&laid_out)
-                .gate(gate)
-                .label(&layout_label)
-                .english(&english)
-                .show(ui)
-        };
+            let _ = MenuBarUi::new(&self.menu_bar_model)
+                .keyboard(!gate.modal)
+                .show(ui);
+        }
+        self.menu_commands = commands;
 
         let mut run: Vec<MenuCommand> = pressed.into_iter().map(MenuCommand::Action).collect();
-        run.extend(
-            chosen
-                .iter()
-                .filter_map(|command| commands.get(command).cloned()),
-        );
+        run.extend(chosen);
         for command in run {
             self.run_menu_command(ui, command);
         }
@@ -108,10 +108,7 @@ impl DiscCraftApp {
         {
             let mut commands = Commands::default();
             let model = self.menu_model(&mut commands);
-            let options = LayoutOptions {
-                label: &layout_label,
-                ..LayoutOptions::new("DiscCraft")
-            };
+            let options = LayoutOptions::new("DiscCraft").label(&layout_label);
             self.native_menu =
                 craft_menu::mac::install(ctx, &craft_menu::mac_layout(&model, &options).bar);
         }
@@ -121,9 +118,9 @@ impl DiscCraftApp {
 
     /// The key equivalents the macOS menu bar took, given back to egui as the key presses they were (eframe's
     /// `raw_input_hook`).
-    pub fn native_menu_input(&mut self, raw: &mut egui::RawInput) {
+    pub fn native_menu_input(&mut self, ctx: &egui::Context) {
         if let Some(native) = self.native_menu.as_mut() {
-            native.raw_input(raw);
+            native.poll(ctx);
         }
     }
 
@@ -362,9 +359,9 @@ impl DiscCraftApp {
     /// Encore と同じく、取り消し / クリップボード / 名前の変更 / 消去と選択 / 環境設定 の順。
     fn edit_menu(&self, m: &mut dyn MenuSink) {
         // 取り消す / やり直す操作の名前を出す（「元に戻す: ボタンを追加」「やり直せません」）。
-        let undo = undo_text(self.session.undo_label(), true);
+        let undo = undo_text(self.session.undo_label(), self.session.undo_detail(), true);
         m.action_as(&undo, Action::Undo, self.session.can_undo());
-        let redo = undo_text(self.session.redo_label(), false);
+        let redo = undo_text(self.session.redo_label(), self.session.redo_detail(), false);
         m.action_as(&redo, Action::Redo, self.session.can_redo());
         self.history_menu(m);
         m.separator();
@@ -832,8 +829,8 @@ impl DiscCraftApp {
             Action::RemoveAudioTrack => self.remove_last_track(TrackKind::Audio),
             Action::RemoveSubtitleTrack => self.remove_last_track(TrackKind::Subtitle),
             Action::ImportSubtitles => self.import_subtitles(),
-            Action::ImportFabImageScript => self.import_image_script(ui.ctx(), true),
-            Action::ImportImageScript => self.import_image_script(ui.ctx(), false),
+            Action::ImportFabImageScript => self.import_image_script(true),
+            Action::ImportImageScript => self.import_image_script(false),
             Action::ImportFilmCraftMarkers => self.import_filmcraft_markers(),
             Action::ImportSourceSubtitles => {
                 if let Some(timeline) = self.viewer_timeline() {
@@ -881,7 +878,7 @@ impl DiscCraftApp {
             Action::ReportIssue => self.open_link(ui.ctx(), crate::help::ISSUES),
             Action::RevealLogFiles => self.reveal_log_files(),
             Action::SystemReport => self.system_report_open = true,
-            Action::CheckForUpdates => self.update_open = true,
+            Action::CheckForUpdates => self.check_for_updates(ui.ctx()),
             Action::Help => {
                 let url = crate::help::manual_url(self.language);
                 self.open_link(ui.ctx(), url);
@@ -1439,6 +1436,11 @@ impl DiscCraftApp {
     fn history_menu(&self, m: &mut dyn MenuSink) {
         let redo = self.session.redo_labels();
         let undo = self.session.undo_labels();
+        let (redo_details, undo_details) =
+            (self.session.redo_details(), self.session.undo_details());
+        let named = |label: &str, detail: Option<&Option<String>>| {
+            step_name(label, detail.and_then(Option::as_deref))
+        };
         m.submenu(
             tl!("History"),
             !redo.is_empty() || !undo.is_empty(),
@@ -1448,7 +1450,10 @@ impl DiscCraftApp {
                 }
                 for (index, label) in redo.iter().enumerate() {
                     m.command(
-                        tlf!("Redo {action}", action = crate::i18n::t(label)),
+                        tlf!(
+                            "Redo {action}",
+                            action = named(label, redo_details.get(index))
+                        ),
                         MenuCommand::History {
                             undo: false,
                             steps: redo.len().saturating_sub(index),
@@ -1458,8 +1463,12 @@ impl DiscCraftApp {
                     );
                 }
                 for (index, label) in undo.iter().rev().enumerate() {
+                    let detail = undo
+                        .len()
+                        .checked_sub(index.saturating_add(1))
+                        .and_then(|at| undo_details.get(at));
                     m.command(
-                        tlf!("Undo {action}", action = crate::i18n::t(label)),
+                        tlf!("Undo {action}", action = named(label, detail)),
                         MenuCommand::History {
                             undo: true,
                             steps: index.saturating_add(1),
@@ -1473,11 +1482,21 @@ impl DiscCraftApp {
     }
 }
 
+/// A step's name: the command's English label, translated, and what the step did when it was named (M6.530:
+/// "Set Link → Making: Chapter 1").
+fn step_name(label: &str, detail: Option<&str>) -> String {
+    let label = crate::i18n::t(label);
+    match detail {
+        Some(detail) => format!("{label} → {detail}"),
+        None => label.to_owned(),
+    }
+}
+
 /// Edit ▸ Undo / Redo with the name of the step ("Undo Add Button"); the command's English label is translated.
-fn undo_text(label: Option<&str>, undo: bool) -> String {
+fn undo_text(label: Option<&str>, detail: Option<&str>, undo: bool) -> String {
     match (label, undo) {
-        (Some(label), true) => tlf!("Undo {action}", action = crate::i18n::t(label)),
-        (Some(label), false) => tlf!("Redo {action}", action = crate::i18n::t(label)),
+        (Some(label), true) => tlf!("Undo {action}", action = step_name(label, detail)),
+        (Some(label), false) => tlf!("Redo {action}", action = step_name(label, detail)),
         (None, true) => tl!("Can't Undo").to_owned(),
         (None, false) => tl!("Can't Redo").to_owned(),
     }
@@ -1521,6 +1540,7 @@ mod tests {
                 craft_menu::Node::Submenu { label, .. } => format!("{label} ▸"),
                 craft_menu::Node::Separator => "-".to_owned(),
                 craft_menu::Node::Standard { label, .. } => label.clone(),
+                _ => "?".to_owned(),
             })
             .collect()
     }

@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 disccraft-engine.workspace = true
+# M9.61: the MCP machinery the Craft apps share.
+craft-mcp-server.workspace = true
 serde_json.workspace = true
 
 [lints]

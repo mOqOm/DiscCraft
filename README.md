@@ -212,8 +212,12 @@ FilmCraft's crates build on the craft-libs crates (https://github.com/storytold/
 video and audio decoding. DiscCraft uses craft-libs' craft-audio (the AC-3 encoder that turns converted audio into Dolby Digital),
 craft-video (the H.264 encoder for Blu-ray video, which used to be FilmCraft's filmcraft-h264enc; in tests also its MPEG-2 decoder,
 verifying the MPEG-2 encoder's output), craft-media (reading MPEG-2 program and transport streams, Matroska and MP4, to take out video and audio that fit the format
-without converting them) and craft-ui (panel and workspace docking), and in tests also craft-psd (writing PSD files
-for tests).
+without converting them), craft-ui (panel and workspace docking), craft-captions (subtitle files in ASS / SSA, SCC, MCC, EBU STL,
+TTML / DFXP and SAMI), craft-mcp-server (the MCP server of `disccraft-cli mcp`), craft-sniff (an imported file's kind from its first bytes),
+craft-settings (the settings file, `config.toml`), craft-dialogs (native file dialogs that never hold up a frame), craft-update (Help ▸ Check for Updates…: finding, downloading and installing a newer release) and craft-fonts-build
+(the build embeds craft-fonts' faces, which craft-ui's font stack puts under Encore's), and in tests also craft-psd (writing PSD files
+for tests) and craft-media-testkit (finding ffmpeg and ffprobe for the tests that compare with them). Release builds embed fonts from craft-fonts (https://github.com/storytold/craft-fonts, OFL-1.1) for the scripts the
+interface's own faces lack (Arabic, Thai, Hebrew, symbols and others); NOTICE lists them with their licence.
 
 ## Trademarks
 

@@ -6,18 +6,9 @@
 
 use disccraft_bd::build_bdmv;
 use disccraft_project::{BdVideo, BlurayTranscode, DiscKind, Link, Project};
-use std::path::{Path, PathBuf};
+use disccraft_test_support::{ffmpeg, ffprobe};
+use std::path::Path;
 use std::process::Command;
-
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
 
 /// The MD5 of the decoded pictures of `file`'s first video stream.
 fn video_md5(ffmpeg: &Path, file: &Path) -> String {
@@ -46,10 +37,7 @@ fn video_bytes(ffprobe: &Path, file: &Path) -> u64 {
 
 #[test]
 fn a_blu_ray_preset_encodes_video_that_fits_the_disc() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };

@@ -32,7 +32,7 @@
 | Ctrl+A / Shift+Ctrl+A | Select All / Deselect All |
 | Alt+Ctrl+R | **Rename…** |
 | Ctrl+E | **Edit Original** |
-| Ctrl+W | **Close** (Empties the viewer for the selected menu, timeline, slideshow, or chapter playlist. The items remain.) |
+| Ctrl+W | **Close** (Closes the selected menu, timeline, slideshow, or chapter playlist in its viewer; the one opened there before it is shown, if any. The items remain.) |
 | Shift+Delete | **Ripple Delete** (Removes the video clip under the playhead in the Timeline Viewer and closes the gap behind it) |
 | Alt+Shift+Ctrl+R / Alt+Shift+Ctrl+H | **Replace Asset…** / **Locate Asset…** (For the asset selected in the Project panel) |
 | Shift+`*` on the numeric keypad | **Set Poster Frame** (For the chapter at the playhead. Pressing only `*` on the numeric keypad, or `*` on the main keyboard, adds a chapter point) |

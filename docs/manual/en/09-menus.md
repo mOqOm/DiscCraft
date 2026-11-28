@@ -40,6 +40,8 @@ PSD layer name conventions: Groups starting with `(+)` are buttons (including `(
 >   layer appears when selected
 > - Sets without highlight layers (images converted to buttons) do not show highlights when selected (buttons created in
 >   DiscCraft with no subpicture or text highlight display a frame instead)
+> - Moving, resizing, flipping or rotating a button moves its Layer Set's picture with it (as in Encore). Layers above
+>   the button sets in the PSD (such as a shade over the whole menu) stay on top of the buttons
 
 Top-level groups whose names start with `(#)` become menu pages. Each such group creates a page (those lower down come
 first; the name after `(#)` is irrelevant), and the buttons within that group are the buttons for that page.
@@ -313,7 +315,7 @@ Set Normal / Selected / Activated colors (highlight frames, text, subpictures) v
 
 Set in the menu sheet of Properties (**Basic / Motion / Pop-up**).
 
-- Background is color / image / video asset (not timeline). Video makes it a Motion Menu
+- Background is color / image / video asset (not timeline). Video makes it a Motion Menu. The Motion tab's Video and Audio can also be filled by dragging the circle on the left of the field (the pick whip) onto an asset in the Project panel (an asset of the right kind is marked gold; over anything else the line turns red). A button's transition Asset and the Basic tab's Background (a picture or a video) work the same way
 - Adding video to PSD-created menus replaces the bottom PSD layer (background); other layers (buttons, text,
   decorations) remain on top. Setting Video to **None** in Motion tab restores PSD background. Editing in PhotoCraft or
   exporting uses PSD as-is; reloading keeps video. Multi-page menus apply video to all pages with same background

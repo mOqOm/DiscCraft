@@ -12,7 +12,7 @@
 The **First Play** is what runs first when you insert the disc, and the **Title Button** is where it goes when you press
 the title button. These are set automatically when you create the first timeline or menu. To change them, right-click an
 item in the Project panel or the Flowchart panel and choose **Set as First Play** (for the Title Button, specify it in
-Properties).
+Properties). In the Flowchart panel, you can also drag the disc onto the item's box.
 
 ## 10.2 Flowchart
 
@@ -47,8 +47,12 @@ from the disc.
 - With the **Move Tool**, you can drag boxes to move them. Use **Auto Layout** / **Auto Layout All** to return to the
   original arrangement.
 - With other tools, dragging a box onto another box sets the End Action of the dragged item to that item (dropping a
-  menu on a timeline sets it as the timeline's End Action; dropping on the disc sets it as First Play). Dropping a
-  timeline onto a button row in a menu makes that button its End Action. Dropping an item from the Tray into empty space
+  menu on a timeline sets it as the timeline's End Action; dropping on the disc sets it as First Play). Dropping the
+  disc on a box makes that item the First Play. Dropping a timeline onto a button row in a menu makes that button its
+  End Action (dropping the disc there starts the disc at that button). The box you press is selected (Properties shows
+  it) and stays where it is, a line runs from the right end of its name to the pointer (gold where a drop links, red
+  over a box it does not link to), and its name shows beside the pointer. After the drop, the box you pressed stays put on the screen, and the new link's
+  target lines up level with where the link leaves. Dropping an item from the Tray into empty space
   places it there with its links (using **Auto Layout** on that box returns it to the Tray). If linked from somewhere,
   it enters the tree next to that link.
 - Dragging from a button row or the right edge of a box's name onto a menu, timeline, slideshow, or playlist (a faint

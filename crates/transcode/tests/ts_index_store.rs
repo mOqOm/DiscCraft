@@ -4,6 +4,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use disccraft_test_support::fixtures;
 use std::path::{Path, PathBuf};
 
 fn open(path: &Path) -> craft_media::mpegts::File {
@@ -22,8 +23,7 @@ fn units(file: &craft_media::mpegts::File) -> Vec<usize> {
 /// One test: the cache folder and the index store are the process's.
 #[test]
 fn transport_stream_indexes_are_kept_in_the_cache() {
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/fixtures/h264_1080i_short.m2ts");
+    let fixture = fixtures().join("h264_1080i_short.m2ts");
     if !fixture.is_file() {
         eprintln!("h264_1080i_short.m2ts fixture not found; skipping");
         return;

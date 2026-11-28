@@ -3,9 +3,10 @@
 //! Premiere Pro のチャプターマーカーをチャプターにするのと同じ役目。
 
 use crate::DiscCraftApp;
+use crate::file_dialogs::{Then, ask};
 use crate::i18n::{tl, tlf};
+use craft_dialogs::FileDialog;
 use disccraft_project::TimelineId;
-use rfd::FileDialog;
 use serde_json::{Value, json};
 
 /// One sequence offered in the dialog.
@@ -76,12 +77,14 @@ impl DiscCraftApp {
             self.status = tl!("Select a timeline first").to_string();
             return;
         };
-        let Some(path) = FileDialog::new()
-            .add_filter(tl!("FilmCraft Project"), &["fcproj"])
-            .pick_file()
-        else {
-            return;
-        };
+        ask(
+            FileDialog::open().filter(tl!("FilmCraft Project"), &["fcproj"]),
+            Then::FilmcraftMarkers(timeline),
+        );
+    }
+
+    /// The FilmCraft project chosen for the markers of `timeline`.
+    pub(crate) fn filmcraft_markers_from(&mut self, timeline: TimelineId, path: &std::path::Path) {
         let path = path.to_string_lossy().into_owned();
         let Some(listed) = self.run_command("filmcraft.sequences", json!({ "path": path })) else {
             return;
@@ -292,12 +295,14 @@ impl DiscCraftApp {
             self.status = tl!("FilmCraft (filmcraft-cli) was not found.").to_owned();
             return;
         }
-        let Some(path) = FileDialog::new()
-            .add_filter(tl!("FilmCraft Project"), &["fcproj"])
-            .pick_file()
-        else {
-            return;
-        };
+        ask(
+            FileDialog::open().filter(tl!("FilmCraft Project"), &["fcproj"]),
+            Then::FilmcraftTimeline,
+        );
+    }
+
+    /// The FilmCraft project chosen for a new timeline from one of its sequences.
+    pub(crate) fn filmcraft_timeline_from(&mut self, path: &std::path::Path) {
         let path = path.to_string_lossy().into_owned();
         let Some(listed) = self.run_command("filmcraft.sequences", json!({ "path": path })) else {
             return;

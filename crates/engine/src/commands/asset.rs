@@ -1057,7 +1057,7 @@ fn run_locate_transcoded(session: &mut Session, params: &Value) -> CommandResult
                 if !found.is_file() {
                     return Err(format!("{what} file does not exist: {path}"));
                 }
-                if AssetKind::guess_from_path(found) != wanted {
+                if AssetKind::of_file(found) != wanted {
                     return Err(format!("not a {what} file: {path}"));
                 }
                 Ok(std::path::absolute(found)
@@ -1180,6 +1180,7 @@ fn run_probe(session: &mut Session, params: &Value) -> CommandResult {
                                 "format": match subtitle.format {
                                     disccraft_transcode::EmbeddedFormat::Text => "text",
                                     disccraft_transcode::EmbeddedFormat::Pgs => "pgs",
+                                    disccraft_transcode::EmbeddedFormat::VobSub => "vobsub",
                                 },
                                 "language": subtitle
                                     .language
@@ -2047,13 +2048,12 @@ mod tests {
     /// An MKV of MPEG-4 Part 2 video (DivX / Xvid, which craft-video does not decode) and AC-3, made with ffmpeg
     /// into the fixtures (as the player's tests make it); `None` without ffmpeg.
     fn mpeg4_part2_fixture() -> Option<std::path::PathBuf> {
-        let fixtures =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures");
+        let fixtures = disccraft_test_support::fixtures();
         let video = fixtures.join("mpeg4_part2_ac3.mkv");
         if video.is_file() {
             return Some(video);
         }
-        let ffmpeg = std::env::var_os("DISCCRAFT_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
+        let ffmpeg = disccraft_test_support::ffmpeg()?;
         std::fs::create_dir_all(&fixtures).ok()?;
         let part = fixtures.join(format!("mpeg4_part2_ac3.a{}.mkv", std::process::id()));
         let made = std::process::Command::new(ffmpeg)

@@ -57,6 +57,52 @@ fn check_menu(project: &Project, menu: &Menu, problems: &mut Vec<Problem>) {
     check_buttons(project, menu, problems);
     check_duration(menu, problems);
     check_audio(project, menu, problems);
+    check_resume(project, menu, problems);
+}
+
+/// M6.529: a menu's Resume (a button's, or its end action) goes back to a title only when the menu is shown from
+/// one. On a DVD that is a title's Menu button (its menu remote: this menu, or the last menu) or the Title button;
+/// on a Blu-ray, a pop-up over the title, or the menu the Top Menu key opens (the Title button's, else the first
+/// menu). Shown any other way, Resume does nothing there.
+fn check_resume(project: &Project, menu: &Menu, problems: &mut Vec<Problem>) {
+    let resumes = menu.end_action == Link::Resume
+        || menu
+            .buttons
+            .iter()
+            .any(|button| button.link == Link::Resume);
+    if !resumes {
+        return;
+    }
+    let root = project.menu_root(menu.id);
+    let shows_this =
+        |link: &Link| matches!(link, Link::Menu { id, .. } if project.menu_root(*id) == root);
+    let reached = if project.settings.kind == crate::model::DiscKind::BluRay {
+        let title_button = &project.settings.title_remote;
+        let top_menu = if matches!(title_button, Link::Menu { .. }) {
+            shows_this(title_button)
+        } else {
+            project
+                .menus
+                .keys()
+                .next()
+                .is_some_and(|first| project.menu_root(*first) == root)
+        };
+        menu.popup || top_menu
+    } else {
+        shows_this(&project.settings.title_remote)
+            || project.timelines.values().any(|timeline| {
+                shows_this(&timeline.menu_remote) || timeline.menu_remote == Link::LastMenu
+            })
+    };
+    if !reached {
+        problems.push(warning(
+            "resumeUnreachable",
+            format!(
+                "menu {} has Resume, but no title's Menu button or the Title button shows it: Resume does nothing there",
+                menu.id.0
+            ),
+        ));
+    }
 }
 
 /// Menu audio must be an audio asset, or (M6.430) the video of the menu's motion background, whose sound it is (a
@@ -322,7 +368,7 @@ fn check_button_link(
                 );
             }
         }
-        Link::NotSet | Link::Stop | Link::LastMenu => {}
+        Link::NotSet | Link::Stop | Link::LastMenu | Link::Resume => {}
     }
 }
 
@@ -421,6 +467,70 @@ mod tests {
     use crate::model::Project;
     use std::error::Error;
     use std::path::Path;
+
+    /// M6.529: Resume on a DVD menu that no title's Menu button nor the Title button shows does nothing: a warning,
+    /// gone once a title's menu remote shows it. On a Blu-ray a pop-up resumes, and so does the menu the Top Menu
+    /// key opens (with no Title button menu, the first).
+    #[test]
+    fn resume_needs_a_menu_shown_from_a_title() -> Result<(), Box<dyn Error>> {
+        let mut project = Project::default();
+        let asset = project.add_asset(Path::new("movie.mp4"))?;
+        let timeline = project.add_timeline(asset, None)?;
+        let first = project.add_menu(Some("Main".to_string()))?;
+        project.add_button(
+            first,
+            "Play".to_string(),
+            None,
+            Link::Timeline {
+                id: timeline,
+                chapter: 0,
+            },
+        )?;
+        let menu = project.add_menu(Some("Pause".to_string()))?;
+        project.add_button(menu, "Back".to_string(), None, Link::Resume)?;
+        if let Some(found) = project.timeline_mut(timeline) {
+            found.menu_remote = Link::NotSet;
+        }
+        assert!(has_warning_code(
+            &problems_for(&project),
+            "resumeUnreachable"
+        ));
+        if let Some(found) = project.timeline_mut(timeline) {
+            found.menu_remote = Link::Menu {
+                id: menu,
+                button: None,
+            };
+        }
+        assert!(!has_warning_code(
+            &problems_for(&project),
+            "resumeUnreachable"
+        ));
+
+        project.settings.kind = crate::model::DiscKind::BluRay;
+        assert!(has_warning_code(
+            &problems_for(&project),
+            "resumeUnreachable"
+        ));
+        if let Some(found) = project.menu_mut(menu) {
+            found.popup = true;
+        }
+        assert!(!has_warning_code(
+            &problems_for(&project),
+            "resumeUnreachable"
+        ));
+        if let Some(found) = project.menu_mut(menu) {
+            found.popup = false;
+        }
+        project.settings.title_remote = Link::Menu {
+            id: menu,
+            button: None,
+        };
+        assert!(!has_warning_code(
+            &problems_for(&project),
+            "resumeUnreachable"
+        ));
+        Ok(())
+    }
 
     fn problems_for(project: &Project) -> Vec<Problem> {
         let mut problems = Vec::new();

@@ -5,6 +5,11 @@
 //!
 //! Decoding is craft-audio's (ATSC A/52), through its public API; the downmix to two channels is A/52 7.8.2's
 //! Lo/Ro with the usual -3 dB centre and surround levels.
+//!
+//! A raw Dolby Digital Plus file (E-AC-3, `.eac3` / `.ec3`, M6.565) goes the same way: craft-audio's decoder reads
+//! its independent substream 0 (A/52 Annex E); the frames of dependent substreams (the channels beyond 5.1) and of
+//! further programs are left out. A disc never gets it as it is: a DVD cannot carry it, so it is converted to Dolby
+//! Digital like the other sound files.
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -14,20 +19,27 @@ use craft_audio::ac3::{Decoder, parse_header};
 
 use crate::{TranscodeError, io_error};
 
-/// The most bytes of one syncframe (Table 5.18: 1920 words at 32 kHz).
-const MAX_FRAME_BYTES: usize = 3840;
+/// The most bytes of one syncframe: AC-3's is 1920 words at 32 kHz (Table 5.18), E-AC-3's `frmsiz` counts up to
+/// 2048 words (Annex E, §E2.3.1.3).
+const MAX_FRAME_BYTES: usize = 4096;
 /// A WAV file's limit for its sound.
 const MAX_WAV_BYTES: u64 = u32::MAX as u64 - 36;
 
-/// Whether `path` is named as a raw AC-3 file.
+/// Whether `path` is named as a raw AC-3 or E-AC-3 file.
 pub(crate) fn is_raw_ac3(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("ac3"))
+        .is_some_and(|extension| {
+            ["ac3", "eac3", "ec3"]
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known))
+        })
 }
 
-/// The length in seconds of a raw AC-3 file, from its first frame and its size (the stream has one frame size
-/// throughout); `None` when it does not start with an AC-3 frame.
+/// The length in seconds of a raw AC-3 or E-AC-3 file; `None` when it does not start with a syncframe. An AC-3
+/// stream has one frame size throughout, so its first frame and its size tell it. An E-AC-3 stream's frames may
+/// change size and interleave dependent substreams, so its frame headers are walked and the samples of the frames
+/// that are heard counted.
 pub(crate) fn seconds(path: &Path) -> Option<f64> {
     let mut file = File::open(path).ok()?;
     let mut head = [0u8; 16];
@@ -36,8 +48,32 @@ pub(crate) fn seconds(path: &Path) -> Option<f64> {
     if header.frame_bytes == 0 || header.sample_rate == 0 {
         return None;
     }
-    let frames = file.metadata().ok()?.len() / header.frame_bytes as u64;
-    Some(frames as f64 * header.samples() as f64 / f64::from(header.sample_rate))
+    if !header.is_eac3() {
+        let frames = file.metadata().ok()?.len() / header.frame_bytes as u64;
+        return Some(frames as f64 * header.samples() as f64 / f64::from(header.sample_rate));
+    }
+    let rate = header.sample_rate;
+    let mut reader = BufReader::with_capacity(1 << 16, file);
+    reader.seek(SeekFrom::Start(0)).ok()?;
+    let mut samples = 0u64;
+    let mut at = [0u8; 8];
+    // Each step passes at least 8 bytes, so the walk ends with the file.
+    while reader.read_exact(&mut at).is_ok() {
+        let Ok(header) = parse_header(&at) else {
+            break;
+        };
+        if header.frame_bytes < 8 {
+            break;
+        }
+        if header.is_primary() && header.sample_rate == rate {
+            samples += header.samples() as u64;
+        }
+        let rest = i64::try_from(header.frame_bytes - 8).ok()?;
+        if reader.seek_relative(rest).is_err() {
+            break;
+        }
+    }
+    Some(samples as f64 / f64::from(rate))
 }
 
 /// How much of each decoded channel goes to the left and to the right of the two-channel mix. The channels come
@@ -105,6 +141,10 @@ pub(crate) fn decode_to_wav(input: &Path, out: &Path) -> Result<(), TranscodeErr
         };
         if header.frame_bytes < 8 || reader.read_exact(rest).is_err() {
             break;
+        }
+        // An E-AC-3 dependent substream or further program: not heard (see the module's notes).
+        if !header.is_primary() {
+            continue;
         }
         if sample_rate == 0 {
             sample_rate = header.sample_rate;
@@ -197,6 +237,7 @@ mod tests {
         let junk = dir.join("junk.ac3");
         std::fs::write(&junk, b"this is not dolby digital at all").unwrap();
         assert!(is_raw_ac3(&junk) && !is_raw_ac3(Path::new("a.wav")));
+        assert!(is_raw_ac3(Path::new("a.EAC3")) && is_raw_ac3(Path::new("a.ec3")));
         assert!(seconds(&junk).is_none());
         assert!(decode_to_wav(&junk, &dir.join("out.wav")).is_err());
         let _ = std::fs::remove_dir_all(&dir);

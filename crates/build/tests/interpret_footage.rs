@@ -6,18 +6,9 @@
 
 use disccraft_build::{BuildOptions, OutputKind, TranscodeStatus, build, transcode_status};
 use disccraft_project::{Link, Project};
-use std::path::{Path, PathBuf};
+use disccraft_test_support::ffmpeg;
+use std::path::Path;
 use std::process::Command;
-
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
 
 /// The mean brightness of each of the 480 rows of the first picture of `vob` (720 pixels a row).
 fn rows(ffmpeg: &Path, vob: &Path) -> Vec<u32> {
@@ -39,7 +30,7 @@ fn rows(ffmpeg: &Path, vob: &Path) -> Vec<u32> {
 
 #[test]
 fn a_chosen_pixel_aspect_ratio_is_how_the_build_sees_the_pictures() {
-    let Some(ffmpeg) = tool("DISCCRAFT_FFMPEG", "ffmpeg") else {
+    let Some(ffmpeg) = ffmpeg() else {
         eprintln!("ffmpeg not found; skipping");
         return;
     };

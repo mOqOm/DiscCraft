@@ -23,7 +23,7 @@ taken from the first image, and the slide duration defaults to 6 s).
 | Create Subtitle | Turns each slide's name and description into subtitles (use **Include Next** to include the next slide's name as well). You can choose Highlight (Group), Stroke, and Align for each slide; colors are determined by the slideshow's Color Set |
 
 Reorder slides by dragging them, and delete them with **Edit ▸ Clear** (Delete). Adding audio allows you to match the
-length. Write the slide's name and description in Properties (if set as subtitles, they also become chapter names on the
+length (drag the circle below the audio list, the pick whip, onto audio in the Project panel to add it). Write the slide's name and description in Properties (if set as subtitles, they also become chapter names on the
 disc).
 
 ![Slideshow Properties](../images/en/slideshows/properties-slideshow.png)

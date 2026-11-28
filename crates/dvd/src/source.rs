@@ -312,6 +312,8 @@ fn load_subtitles(
                 }
                 (units, None)
             }
+            // M6.546: a Blu-ray's SD title takes a VobSub as PGS (`streams::subtitle_tracks`), as a `.sup`.
+            SubtitleFile::VobSub if project.settings.kind == DiscKind::BluRay => (Vec::new(), None),
             SubtitleFile::VobSub => {
                 let vobsub = crate::vobsub::read_vobsub(path)?;
                 let mut units = Vec::with_capacity(vobsub.units.len());
@@ -325,11 +327,16 @@ fn load_subtitles(
             // M6.422: a Blu-ray's SD title takes the PGS segments themselves (`streams::subtitle_tracks`, which
             // replaces these units), so nothing is drawn for it here (this stopped such a build before).
             SubtitleFile::Pgs if project.settings.kind == DiscKind::BluRay => (Vec::new(), None),
+            // M6.541: on a DVD, each picture drawn in the DVD's four colours (`pgs_spu`).
             SubtitleFile::Pgs => {
-                return Err(DvdError::Unsupported(format!(
-                    "{}: PGS (.sup) subtitles are a Blu-ray's; a DVD takes VobSub (.idx/.sub) or text subtitles",
-                    path.display()
-                )));
+                let pgs = crate::pgs_spu::read_pgs_for_dvd(path, (720, height))?;
+                let mut units = Vec::with_capacity(pgs.units.len());
+                for (pts, mut spu) in pgs.units {
+                    palette.remap(&mut spu, &pgs.palette)?;
+                    let pts = first_pts.saturating_add(pts.saturating_mul(300));
+                    units.push(SubpictureUnit { pts, data: spu });
+                }
+                (units, None)
             }
         };
         streams.push(units);
@@ -1031,6 +1038,77 @@ mod subtitle_tests {
         assert_eq!((decoded.params.x, decoded.params.y), (105, 402));
         assert_eq!((decoded.bitmap.width, decoded.bitmap.height), (20, 6));
         assert!(decoded.bitmap.pixels.iter().all(|value| *value == 1));
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// M6.541: a Blu-ray's PGS subtitles (`.sup`) on a DVD: each picture a subpicture unit at its time, its white
+    /// and black in the title's palette (they were refused before).
+    #[test]
+    fn a_blurays_pgs_subtitles_go_on_a_dvd() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = std::env::temp_dir().join(format!("disccraft-dvd-pgs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let (width, height) = (120u16, 30u16);
+        let pixels: Vec<u8> = (0..usize::from(width) * usize::from(height))
+            .map(|at| {
+                let (x, y) = (at % usize::from(width), at / usize::from(width));
+                if x < 6 || y < 6 || x >= 114 || y >= 24 {
+                    2
+                } else {
+                    1
+                }
+            })
+            .collect();
+        let subtitle = disccraft_pgs::Subtitle {
+            forced: false,
+            start: 90_000,
+            end: 180_000,
+            x: 900,
+            y: 960,
+            width,
+            height,
+            pixels,
+            palette: vec![
+                disccraft_pgs::rgba_to_entry(0, 0, 0, 0, 0),
+                disccraft_pgs::rgba_to_entry(1, 255, 255, 255, 255),
+                disccraft_pgs::rgba_to_entry(2, 0, 0, 0, 255),
+            ],
+        };
+        let sup = dir.join("movie.1.ja.sup");
+        std::fs::write(
+            &sup,
+            disccraft_pgs::to_sup(&disccraft_pgs::encode_subtitles(&[subtitle], 1920, 1080)?),
+        )?;
+        let mut project = Project::default();
+        let video = project.add_asset(Path::new("movie.mkv"))?;
+        let subs = project.add_asset(&sup)?;
+        let timeline = project.add_timeline(video, None)?;
+        let timeline = project.timeline_mut(timeline).ok_or("timeline")?;
+        timeline.subtitles.push(SubtitleTrack {
+            asset: subs,
+            language: "ja".to_owned(),
+            group: 0,
+        });
+        let timeline = timeline.clone();
+        let loaded = load_subtitles(&project, &timeline, 0, VideoStandard::Ntsc)?;
+        let units = loaded.streams.first().ok_or("no stream")?;
+        assert_eq!(units.len(), 1);
+        // One second (90 kHz in the file) on the 27 MHz clock.
+        assert_eq!(units[0].pts, 27_000_000);
+        let decoded = disccraft_spu::decode_spu(&units[0].data)?;
+        // 900 × 0.375 and 960 × 4/9.
+        assert_eq!((decoded.params.x, decoded.params.y), (337, 426));
+        let entry = |value: u8| {
+            loaded.palette[usize::from(decoded.params.colors[usize::from(value)])] >> 16 & 0xFF
+        };
+        let middle = decoded.bitmap.pixels[usize::from(decoded.bitmap.height / 2)
+            * usize::from(decoded.bitmap.width)
+            + usize::from(decoded.bitmap.width / 2)];
+        let corner = decoded.bitmap.pixels[0];
+        // White (Y 235) in the middle, black (Y 16) at the edge.
+        assert!(entry(middle) >= 230, "{:06x?}", loaded.palette);
+        assert!(entry(corner) <= 20, "{:06x?}", loaded.palette);
+        assert_eq!(loaded.languages, vec![Some(*b"ja")]);
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

@@ -4,8 +4,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use disccraft_test_support::{ffmpeg, fixtures};
 use disccraft_transcode::AudioReader;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 /// Crossings of zero in half a second of the left channel from `from` seconds: the tone's frequency.
@@ -34,8 +35,7 @@ fn heard(path: &Path) {
 
 #[test]
 fn the_sound_of_an_interlaced_m2ts_is_heard() {
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/fixtures/h264_1080i_tones.m2ts");
+    let fixture = fixtures().join("h264_1080i_tones.m2ts");
     if !fixture.is_file() {
         eprintln!("h264_1080i_tones.m2ts fixture not found; skipping");
         return;
@@ -47,25 +47,25 @@ fn the_sound_of_an_interlaced_m2ts_is_heard() {
     heard(&ac3);
 
     // The same with Blu-ray LPCM, when ffmpeg is there to make it.
-    let ffmpeg =
-        std::env::var_os("DISCCRAFT_FFMPEG").map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
     let lpcm = dir.join("camera_lpcm.m2ts");
-    let made = Command::new(&ffmpeg)
-        .args(["-v", "error", "-y", "-i"])
-        .arg(&ac3)
-        .args([
-            "-c:v",
-            "copy",
-            "-c:a",
-            "pcm_bluray",
-            "-f",
-            "mpegts",
-            "-mpegts_m2ts_mode",
-            "1",
-        ])
-        .arg(&lpcm)
-        .status()
-        .is_ok_and(|status| status.success());
+    let made = ffmpeg().is_some_and(|ffmpeg| {
+        Command::new(ffmpeg)
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&ac3)
+            .args([
+                "-c:v",
+                "copy",
+                "-c:a",
+                "pcm_bluray",
+                "-f",
+                "mpegts",
+                "-mpegts_m2ts_mode",
+                "1",
+            ])
+            .arg(&lpcm)
+            .status()
+            .is_ok_and(|status| status.success())
+    });
     if made {
         heard(&lpcm);
     } else {

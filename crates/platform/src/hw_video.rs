@@ -4,7 +4,8 @@
 //! Encoder" and "H.265 / HEVC Video Encoder" describe: unlocked with `MF_TRANSFORM_ASYNC_UNLOCK`, the output type
 //! (H.264 or HEVC, size, rate, profile, level) set before the input type (NV12, or P010 for 10-bit HEVC), the rate
 //! control and GOP through `ICodecAPI`, then a frame in for each `METransformNeedInput` event and a packet out for
-//! each `METransformHaveOutput`. Other systems have none yet.
+//! each `METransformHaveOutput`. M12.51: an interlaced format's H.264 (each frame coded as its two fields), which the
+//! NVIDIA encoder MFT refuses, through NVIDIA's own interface instead ([`crate::nvenc`]). Other systems have none yet.
 
 /// The stream a hardware encoder makes, and the pictures it takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +45,10 @@ pub struct HwVideoConfig {
     pub sar: (u32, u32),
     /// Constant bit rate: the average is the peak.
     pub cbr: bool,
+    /// M12.51: `Some(top_first)` for an interlaced format's H.264, each frame (its two fields interleaved, line by
+    /// line) coded as two field pictures, the top one first or not, through NVIDIA's encoder interface (NVENC); `None`
+    /// for progressive frames.
+    pub fields: Option<bool>,
 }
 
 /// One coded picture: an Annex B access unit and its times (100 ns units, as the encoder was given them).
@@ -105,6 +110,7 @@ pub fn transcode_factory(
         slices: config.slices,
         sar: config.sar,
         cbr: config.cbr,
+        fields: config.fields,
     })?;
     Ok(Box::new(ForTranscodes(encoder)))
 }
@@ -139,31 +145,48 @@ fn for_transcodes(packets: Vec<HwPacket>) -> Vec<disccraft_transcode::hd::Hardwa
 
 /// A hardware video encoder at work.
 pub struct HwVideoEncoder {
-    inner: imp::Encoder,
+    inner: Inner,
+}
+
+/// The system's encoder (Media Foundation), or NVIDIA's own interface for fields (M12.51).
+enum Inner {
+    System(imp::Encoder),
+    Fields(crate::nvenc::NvencEncoder),
 }
 
 impl std::fmt::Debug for HwVideoEncoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HwVideoEncoder")
-            .field("name", &self.inner.name())
+            .field("name", &self.name())
             .finish()
     }
 }
 
 impl HwVideoEncoder {
-    /// The first hardware encoder the system offers for `config.codec`, set up for `config`.
+    /// The first hardware encoder the system offers for `config.codec`, set up for `config`; for fields
+    /// (`config.fields`, H.264 only), NVIDIA's encoder through its own interface (M12.51).
     ///
     /// # Errors
     ///
     /// When there is none, or it refuses the settings.
     pub fn open(config: &HwVideoConfig) -> Result<Self, String> {
-        imp::Encoder::open(config).map(|inner| Self { inner })
+        let inner = match config.fields {
+            Some(_) if config.codec != HwCodec::H264 => {
+                return Err("fields are coded in H.264 only".to_string());
+            }
+            Some(top_first) => Inner::Fields(crate::nvenc::NvencEncoder::open(config, top_first)?),
+            None => Inner::System(imp::Encoder::open(config)?),
+        };
+        Ok(Self { inner })
     }
 
     /// The encoder's name.
     #[must_use]
     pub fn name(&self) -> &str {
-        self.inner.name()
+        match &self.inner {
+            Inner::System(encoder) => encoder.name(),
+            Inner::Fields(_) => "NVIDIA NVENC (fields)",
+        }
     }
 
     /// Encodes one picture in the codec's layout ([`HwCodec`]: NV12 or P010) shown at `pts` (100 ns), a key frame
@@ -173,7 +196,11 @@ impl HwVideoEncoder {
     ///
     /// When the encoder fails.
     pub fn encode(&mut self, picture: &[u8], pts: i64, key: bool) -> Result<Vec<HwPacket>, String> {
-        self.inner.encode(picture, pts, key)
+        match &mut self.inner {
+            Inner::System(encoder) => encoder.encode(picture, pts, key),
+            // The key frames are the GOP's (NVENC's own decision, every `gop` frames).
+            Inner::Fields(encoder) => encoder.encode(picture, pts),
+        }
     }
 
     /// The packets still held back, at the end of the stream.
@@ -182,7 +209,10 @@ impl HwVideoEncoder {
     ///
     /// When the encoder fails.
     pub fn finish(&mut self) -> Result<Vec<HwPacket>, String> {
-        self.inner.finish()
+        match &mut self.inner {
+            Inner::System(encoder) => encoder.finish(),
+            Inner::Fields(encoder) => encoder.finish(),
+        }
     }
 }
 

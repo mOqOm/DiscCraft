@@ -195,18 +195,24 @@ impl DiscCraftApp {
             .project
             .timeline(id)
             .map_or_else(|| "frame".to_owned(), |timeline| timeline.name.clone());
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("PNG", &["png"])
-            .set_file_name(format!("{name}.png"))
-            .save_file()
-        else {
-            return;
-        };
+        crate::file_dialogs::ask(
+            craft_dialogs::FileDialog::save()
+                .filter("PNG", &["png"])
+                .file_name(format!("{name}.png")),
+            crate::file_dialogs::Then::SaveFrame {
+                asset: clip.asset,
+                seconds: local,
+            },
+        );
+    }
+
+    /// Writes `asset`'s frame at `seconds` to the PNG file chosen for Save Frame as File….
+    pub(crate) fn save_frame_to(&mut self, asset: AssetId, seconds: f64, path: &std::path::Path) {
         let saved = self.run_query(
             "asset.saveFrame",
             serde_json::json!({
-                "asset": clip.asset.0,
-                "seconds": local,
+                "asset": asset.0,
+                "seconds": seconds,
                 "path": path.to_string_lossy(),
             }),
         );

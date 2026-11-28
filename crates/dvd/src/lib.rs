@@ -18,6 +18,7 @@ mod demux_mp4;
 mod h264_cut;
 mod output;
 mod parental;
+mod pgs_spu;
 mod prepare;
 mod preview;
 mod sup;

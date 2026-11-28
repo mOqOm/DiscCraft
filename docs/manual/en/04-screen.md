@@ -87,7 +87,9 @@ By default, panels are arranged as follows.
   > - Below the bar is a scrubber with chapter flags.
   > - Home / End moves the playhead to the start / end.
   > - Poster frames are set in the Timeline menu.
-- **Menu Viewer**: The canvas for menus. Tab names match the open menu's name.
+- **Menu Viewer**: The canvas for menus. Tab names match the open menu's name. The tab's ▼ lists **Close** (closes this
+  menu in the viewer and shows the one opened before it), **Close All** (empties the viewer) and the menus opened in
+  this viewer (choose one to switch to it; the other viewers' tabs work the same way).
 
   > **Details**
   >
@@ -139,8 +141,10 @@ By default, panels are arranged as follows.
 
 ## 4.4 Rearranging Panels and Workspaces
 
-Tabs can be dragged to reorder, move to other groups, split, or float. Close them with middle-click or ×. Reopening from
-the **Window** menu restores their previous location. Layouts are automatically saved per workspace.
+Tabs can be dragged to reorder, move to other groups, split, or float. A floating panel is a window of its own, which
+can go outside DiscCraft's window or onto another monitor (drag its tab onto a group to dock it again). Close tabs with
+middle-click or ×. Reopening from the **Window** menu restores their previous location. Right-clicking a tab opens a
+menu with the Panel Menu's items plus **Close Other Panels in Frame**. Layouts are automatically saved per workspace.
 
 The **≡** at the right end of each group's tab strip opens the Panel Menu: **Undock Panel**, **Undock Frame** (for the
 whole group), **Close Panel**, **Close Frame**, **Maximize Frame** (the group fills the window; click again, now showing

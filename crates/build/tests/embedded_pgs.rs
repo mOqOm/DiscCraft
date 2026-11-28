@@ -7,18 +7,9 @@
 
 use disccraft_build::{BuildOptions, OutputKind, build};
 use disccraft_project::{DiscKind, Link, Project, SubtitleTrack};
+use disccraft_test_support::{ffmpeg, ffprobe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
 
 /// A Blu-ray of `video` with the subtitle asset file `subtitles` (language `ja`), built into `out`; its title's clip.
 fn bluray_with(video: &Path, subtitles: &Path, out: &Path) -> PathBuf {
@@ -61,6 +52,33 @@ fn bluray_with(video: &Path, subtitles: &Path, out: &Path) -> PathBuf {
         .unwrap()
 }
 
+/// The packets' bytes in ffprobe's `-show_packets -show_data` output (hex dump lines `00000000: 0046 0028 ...  text`).
+fn packet_data(dump: &str) -> Vec<Vec<u8>> {
+    let mut packets = Vec::new();
+    for line in dump.lines() {
+        if line == "[PACKET]" {
+            packets.push(Vec::new());
+        }
+        let Some((offset, rest)) = line.split_once(": ") else {
+            continue;
+        };
+        if offset.len() != 8 || !offset.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+        let hex: String = rest
+            .split("  ")
+            .next()
+            .unwrap()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let bytes =
+            (0..hex.len() / 2).map(|at| u8::from_str_radix(&hex[2 * at..2 * at + 2], 16).unwrap());
+        packets.last_mut().unwrap().extend(bytes);
+    }
+    packets
+}
+
 /// The (presentation time, segment) pairs of a `.sup`.
 fn segments(sup: &[u8]) -> Vec<(u32, Vec<u8>)> {
     let mut found = Vec::new();
@@ -78,10 +96,7 @@ fn segments(sup: &[u8]) -> Vec<(u32, Vec<u8>)> {
 
 #[test]
 fn an_mkvs_pgs_comes_out_as_the_sup_ffmpeg_takes_out() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };
@@ -203,5 +218,141 @@ fn an_mkvs_pgs_comes_out_as_the_sup_ffmpeg_takes_out() {
             String::from_utf8_lossy(&decode.stderr)
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M6.546: a DVD's subtitles (VobSub) on a Blu-ray: the clip carries them as a PGS stream (ffmpeg, the outside oracle,
+/// finds it and decodes it without an error), M6.551: a forced unit as a forced one.
+#[test]
+fn a_vobsub_goes_on_a_blu_ray_as_pgs() {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
+        eprintln!("ffmpeg / ffprobe not found; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("disccraft-vobsub-bd-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let video = dir.join("video.m2v");
+    let ok = Command::new(&ffmpeg)
+        .args([
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=720x480:rate=30000/1001",
+        ])
+        .args([
+            "-t",
+            "4",
+            "-c:v",
+            "mpeg2video",
+            "-b:v",
+            "4M",
+            "-maxrate",
+            "8M",
+            "-bufsize",
+            "1835k",
+        ])
+        .args([
+            "-g",
+            "15",
+            "-bf",
+            "2",
+            "-pix_fmt",
+            "yuv420p",
+            "-aspect",
+            "4:3",
+            "-f",
+            "mpeg2video",
+        ])
+        .arg(&video)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok);
+    // Two subpictures, a second each; the first forced (M6.551).
+    let unit = |x: u16| {
+        let bitmap = disccraft_spu::Bitmap {
+            width: 60,
+            height: 12,
+            pixels: (0..720).map(|at| if at % 60 < 4 { 2 } else { 1 }).collect(),
+        };
+        let params = disccraft_spu::SpuParams {
+            x,
+            y: 400,
+            colors: [0, 1, 2, 3],
+            alpha: [0, 15, 15, 0],
+            forced: x == 100,
+            stop_delay: Some(disccraft_spu::spu_delay_from_90k(90_000)),
+        };
+        disccraft_spu::encode_spu(&bitmap, &params).unwrap()
+    };
+    let header = "size: 720x480\npalette: 000000, ffffff, 202020, 000000, 000000, 000000, 000000, 000000, \
+                  000000, 000000, 000000, 000000, 000000, 000000, 000000, 000000\n";
+    let (idx, sub) = disccraft_transcode::vobsub_files(
+        header,
+        Some("ja"),
+        &[(0.5, unit(100)), (2.0, unit(300))],
+    );
+    let idx_path = dir.join("subs.idx");
+    std::fs::write(&idx_path, idx).unwrap();
+    std::fs::write(idx_path.with_extension("sub"), sub).unwrap();
+    let clip = bluray_with(&video, &idx_path, &dir.join("bd"));
+    let probe = Command::new(&ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "compact",
+        ])
+        .arg(&clip)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&probe.stdout);
+    assert!(text.contains("hdmv_pgs_subtitle"), "{text}");
+    let decode = Command::new(&ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(&clip)
+        .args(["-map", "0:s", "-c:s", "dvdsub", "-f", "null", "-"])
+        .output()
+        .unwrap();
+    assert!(
+        decode.status.success() && decode.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&decode.stderr)
+    );
+    // M6.551: ffmpeg reads the PGS's forced flag: made into DVD subpictures, the first starts with the forced start
+    // command and the second with the ordinary one.
+    let dvdsub = dir.join("dvdsub.mkv");
+    let ok = Command::new(&ffmpeg)
+        .args(["-v", "error", "-y", "-i"])
+        .arg(&clip)
+        .args(["-map", "0:s", "-c:s", "dvdsub"])
+        .arg(&dvdsub)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok);
+    let dump = Command::new(&ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "s",
+            "-show_packets",
+            "-show_data",
+        ])
+        .arg(&dvdsub)
+        .output()
+        .unwrap();
+    let forced: Vec<bool> = packet_data(&String::from_utf8_lossy(&dump.stdout))
+        .iter()
+        .map(|unit| disccraft_spu::decode_spu(unit).unwrap().params.forced)
+        .collect();
+    assert_eq!(forced, [true, false]);
     let _ = std::fs::remove_dir_all(&dir);
 }

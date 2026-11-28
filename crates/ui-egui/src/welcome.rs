@@ -42,6 +42,13 @@ impl Welcome {
     }
 
     /// Open the Project Settings dialog for the open project.
+    /// The folder chosen with the New Project dialog's Browse… (M9.64: the answer comes on a later frame).
+    pub(crate) fn set_location(&mut self, folder: String) {
+        if let Some(form) = self.new_project.as_mut() {
+            form.location = folder;
+        }
+    }
+
     pub(crate) fn start_project_settings(&mut self, form: NewProjectForm) {
         self.new_project = Some(form);
     }

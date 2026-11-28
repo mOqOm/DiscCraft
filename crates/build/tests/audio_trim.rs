@@ -6,18 +6,9 @@
 
 use disccraft_build::{BuildOptions, OutputKind, build};
 use disccraft_project::{AudioClip, AudioTrack, Link, Project};
-use std::path::{Path, PathBuf};
+use disccraft_test_support::{ffmpeg, ffprobe};
+use std::path::Path;
 use std::process::Command;
-
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
 
 /// The first sound of `file` as 16-bit mono samples at 48 kHz.
 fn samples(ffmpeg: &Path, file: &Path) -> Vec<i16> {
@@ -57,7 +48,7 @@ fn pitch(samples: &[i16], from: f64, to: f64) -> (f64, i32) {
 
 #[test]
 fn a_trimmed_audio_clip_is_that_part_of_its_file() {
-    let Some(ffmpeg) = tool("DISCCRAFT_FFMPEG", "ffmpeg") else {
+    let Some(ffmpeg) = ffmpeg() else {
         eprintln!("ffmpeg not found; skipping");
         return;
     };
@@ -133,7 +124,7 @@ fn a_trimmed_audio_clip_is_that_part_of_its_file() {
         // Its second second alone (frames 30 to 60 of the file): 880 Hz for a second, then nothing.
         let middle = build_with(&format!("{kind}-middle"), audio, (0, 30, Some(60)));
         // M6.308: a trimmed WAV stays PCM; Dolby Digital stays Dolby Digital.
-        if let Some(ffprobe) = tool("DISCCRAFT_FFPROBE", "ffprobe") {
+        if let Some(ffprobe) = ffprobe() {
             let codec = Command::new(&ffprobe)
                 .args(["-v", "error", "-select_streams", "a:0", "-show_entries"])
                 .args(["stream=codec_name", "-of", "csv=p=0"])
@@ -198,7 +189,7 @@ fn a_trimmed_audio_clip_is_that_part_of_its_file() {
 
     // M6.308: clips of WAV and Dolby Digital are joined as Dolby Digital; two WAV clips stay PCM.
     let codec = |out: &Path| -> Option<String> {
-        let ffprobe = tool("DISCCRAFT_FFPROBE", "ffprobe")?;
+        let ffprobe = ffprobe()?;
         let output = Command::new(&ffprobe)
             .args(["-v", "error", "-select_streams", "a:0", "-show_entries"])
             .args(["stream=codec_name", "-of", "csv=p=0"])

@@ -81,8 +81,9 @@ pub(crate) fn draw_background(
 /// Draws over the frame the button sets of the menu's page of its PSD background (M10.27: page 0 the top level's
 /// buttons, page n the n-th `(#)` group), each where its button is now (M6.517): Encore's button set, whose layers
 /// move and scale with the button (they stayed where the PSD had them when the button was moved or resized, the
-/// video frame away from the video). A set whose button is gone stays where the PSD has it. Nothing for a menu
-/// whose background is no PSD.
+/// video frame away from the video). A set whose button is mirrored or turned is drawn so too (M6.535: it stayed
+/// upright while the button's highlight and video turned), its video frame turned with the button's video. A set
+/// whose button is gone stays where the PSD has it. Nothing for a menu whose background is no PSD.
 pub(crate) fn draw_psd_page(
     project: &Project,
     menu: &Menu,
@@ -111,23 +112,82 @@ pub(crate) fn draw_psd_page(
                 set.frame.as_ref().map(|(bounds, _)| to_frame(*bounds)),
             ),
         };
-        // The video frame under the set's other layers, where the button's video goes.
+        let turned = button.filter(|button| !button.orientation.is_identity());
+        // The video frame under the set's other layers, where the button's video goes: turned as the video is, by
+        // the free angle about the content's centre.
         if let (Some((_, frame)), Some(frame_place)) = (&set.frame, frame_place) {
-            blend_scaled_into(
-                &rgba_source(frame.clone())?,
-                frame_place,
-                width,
-                height,
-                rgb,
-            );
+            let frame = rgba_source(frame.clone())?;
+            match turned {
+                Some(button) => {
+                    let angle = button.orientation.angle;
+                    let only_angle = Orientation::default().with_angle(i32::from(angle));
+                    let moved = turned_place(frame_place, button.content_centre(), angle);
+                    crate::graphic::blend_oriented_into(
+                        &frame,
+                        moved,
+                        only_angle,
+                        (width, height),
+                        rgb,
+                    );
+                }
+                None => blend_scaled_into(&frame, frame_place, width, height, rgb),
+            }
         }
-        blend_scaled_into(
-            &rgba_source(set.picture.clone())?,
-            place,
-            width,
-            height,
-            rgb,
-        );
+        let picture = rgba_source(set.picture.clone())?;
+        match turned {
+            Some(button) => crate::graphic::blend_oriented_into(
+                &picture,
+                place,
+                button.orientation,
+                (width, height),
+                rgb,
+            ),
+            None => blend_scaled_into(&picture, place, width, height, rgb),
+        }
+    }
+    Ok(())
+}
+
+/// `rect` moved so that its centre is where turning it by `angle` about `pivot` takes it: turned about its own
+/// centre after that, it lies as the rect turned about `pivot` does.
+fn turned_place(rect: Rect, pivot: (f32, f32), angle: i16) -> Rect {
+    let centre = (
+        f32::from(rect.x) + f32::from(rect.w) * 0.5,
+        f32::from(rect.y) + f32::from(rect.h) * 0.5,
+    );
+    let (cx, cy) = turned_about(centre, pivot, angle);
+    // `as` saturates into the frame's coordinates (a place off the top or left edge stays at it).
+    Rect {
+        x: (cx - f32::from(rect.w) * 0.5).round().max(0.0) as u16,
+        y: (cy - f32::from(rect.h) * 0.5).round().max(0.0) as u16,
+        ..rect
+    }
+}
+
+/// Draws over the button sets the layers of the menu's PSD that lie above them all (M6.536: a shade or a frame over
+/// the whole menu was drawn under the buttons), when the PSD is drawn in parts and `shared_drawn` says its picture
+/// under the buttons was drawn (not for a pop-up over its title, nor a picture given in place of the background). A
+/// still menu drawn whole, as its PSD's picture, has them already.
+pub(crate) fn draw_psd_over(
+    project: &Project,
+    menu: &Menu,
+    (width, height): (u16, u16),
+    rgb: &mut [u8],
+    shared_drawn: bool,
+) -> Result<(), MenuError> {
+    if !shared_drawn {
+        return Ok(());
+    }
+    let Some(pages) = document_pages(project, menu)? else {
+        return Ok(());
+    };
+    if matches!(menu.background, MenuBackground::Image { .. })
+        && button_page(menu, &pages).is_none()
+    {
+        return Ok(());
+    }
+    if let Some(over) = &pages.over {
+        blend_scaled(&rgba_source(over.clone())?, width, height, rgb);
     }
     Ok(())
 }

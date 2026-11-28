@@ -114,6 +114,9 @@ pub struct BdState {
     pub location: BdLocation,
     /// The movie object waiting for the playing playlist to end, and the command to go on from.
     pub resume: Option<(u16, usize)>,
+    /// The title the Top Menu key suspended (M6.528: its movie object has the resume intention): the object and
+    /// command it waits at, and the playlist and mark it played. Branch_Resume goes back to it.
+    pub suspended: Option<(u16, usize, u32, u32)>,
     /// The menu on screen.
     pub menu: Option<BdMenuView>,
     /// The general purpose registers that are not 0.
@@ -130,6 +133,9 @@ pub struct BdState {
     pub chosen: (bool, bool),
     /// The player's audio and subtitle languages (PSR16 / PSR17: ISO 639-2), when it has them.
     pub languages: (Option<[u8; 3]>, Option<[u8; 3]>),
+    /// M6.543: the player's parental setting (PSR13: an age in years), when it has one; without one it reads 255
+    /// (no limit).
+    pub parental_age: Option<u8>,
 }
 
 /// Load the navigation of a built disc: `dir` is the `BDMV` folder or the folder that holds it.
@@ -260,6 +266,10 @@ enum Command {
     Set(SetOp, u32, Operand),
     SetStream(u32),
     SetButtonPage(u32, u32),
+    /// Branch_Resume (M6.528).
+    Resume,
+    /// Set_PopupOff (M6.528).
+    PopupOff,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +333,7 @@ fn decode(command: &disccraft_bdmv::mobj::NavCommand) -> Result<Command, VmError
         (0, 1) => match (op >> 16) & 0xF {
             0 => Ok(Command::JumpObject(dst)),
             1 => Ok(Command::JumpTitle(dst)),
+            4 => Ok(Command::Resume),
             _ => Err(unsupported()),
         },
         (0, 2) => match (op >> 16) & 0xF {
@@ -382,6 +393,7 @@ fn decode(command: &disccraft_bdmv::mobj::NavCommand) -> Result<Command, VmError
         (2, 1) => match op & 0x1F {
             1 => Ok(Command::SetStream(dst)),
             3 => Ok(Command::SetButtonPage(dst, src)),
+            7 => Ok(Command::PopupOff),
             _ => Err(unsupported()),
         },
         _ => Err(unsupported()),
@@ -425,10 +437,25 @@ impl<'a> BdVm<'a> {
         disc: &'a BdDisc,
         languages: (Option<[u8; 3]>, Option<[u8; 3]>),
     ) -> Result<Self, VmError> {
+        Self::start_with_player(disc, languages, None)
+    }
+
+    /// [`BdVm::start_with_languages`] on a player with a parental setting (PSR13: an age in years, M6.543): a title
+    /// that asks for an older age plays what the disc puts in its place, or stops.
+    ///
+    /// # Errors
+    ///
+    /// As [`BdVm::start`].
+    pub fn start_with_player(
+        disc: &'a BdDisc,
+        languages: (Option<[u8; 3]>, Option<[u8; 3]>),
+        parental_age: Option<u8>,
+    ) -> Result<Self, VmError> {
         let mut vm = Self {
             disc,
             state: BdState {
                 languages,
+                parental_age,
                 ..BdState::default()
             },
             shown: false,
@@ -588,6 +615,19 @@ impl<'a> BdVm<'a> {
     ///
     /// As [`BdVm::press`].
     pub fn top_menu(&mut self) -> Result<(), VmError> {
+        // M6.528: a title whose movie object has the resume intention is suspended, for Branch_Resume.
+        self.state.suspended = match (self.state.location, self.state.resume) {
+            (BdLocation::Playing { playlist, mark }, Some((object, line)))
+                if self
+                    .disc
+                    .objects
+                    .get(usize::from(object))
+                    .is_some_and(|found| found.resume_intention) =>
+            {
+                Some((object, line, playlist, mark))
+            }
+            _ => None,
+        };
         self.run_object(self.disc.top_menu, 0)?;
         self.settle()
     }
@@ -627,6 +667,7 @@ impl<'a> BdVm<'a> {
         self.state.location = BdLocation::Stopped;
         self.state.menu = None;
         self.state.resume = None;
+        self.state.suspended = None;
     }
 
     /// Run movie object `object` from command `line`.
@@ -765,6 +806,21 @@ impl<'a> BdVm<'a> {
                         );
                     }
                 }
+                Command::Resume => {
+                    // Back to the suspended title where it was; with none, nothing happens.
+                    if let Some((title_object, title_line, playlist, mark)) =
+                        self.state.suspended.take()
+                    {
+                        self.play(playlist, mark)?;
+                        self.state.resume = Some((title_object, title_line));
+                        return Ok(Ran::Playing);
+                    }
+                }
+                Command::PopupOff => {
+                    if let Some(view) = self.state.menu.as_mut() {
+                        view.open = false;
+                    }
+                }
                 Command::SetButtonPage(button, page) => {
                     let button = (button & 0x8000_0000 != 0)
                         .then(|| u16::try_from(button & 0xFFFF).unwrap_or(NO_BUTTON));
@@ -895,6 +951,8 @@ impl<'a> BdVm<'a> {
                         }
                 }
                 10 => u32::from(self.state.menu.map_or(NO_BUTTON, |view| view.button)),
+                // M6.543: the player's parental setting, 255 for none.
+                13 => u32::from(self.state.parental_age.unwrap_or(u8::MAX)),
                 11 => u32::from(self.state.menu.map_or(0, |view| view.page)),
                 _ => 0,
             },
@@ -1202,6 +1260,89 @@ mod tests {
         let mut french = BdVm::start_with_languages(&disc, (Some(*b"fra"), None))?;
         french.play(1, 0)?;
         assert_eq!(french.state().audio, 0);
+        Ok(())
+    }
+
+    /// M6.528: the Top Menu key suspends a title whose movie object has the resume intention, and the menu's
+    /// Branch_Resume goes back to it where it was (its object then goes on when it ends); without the intention
+    /// there is nothing to go back to and the menu stays. A pop-up's Set_PopupOff closes it over the playing title.
+    #[test]
+    fn resume_goes_back_to_the_suspended_title() -> Result<(), Box<dyn std::error::Error>> {
+        let mut disc = disc();
+        if let Some(title) = disc.objects.get_mut(2) {
+            title.resume_intention = true;
+        }
+        let set_commands =
+            |menu: &mut Option<super::BdMenu>, index: usize, commands: Vec<NavCommand>| {
+                if let Some(button) = menu
+                    .as_mut()
+                    .and_then(|menu| menu.pages.first_mut())
+                    .and_then(|page| page.buttons.get_mut(index))
+                {
+                    button.commands = commands.iter().map(|command| command.0).collect();
+                }
+            };
+        if let Some(playlist) = disc.playlists.get_mut(&2) {
+            set_commands(&mut playlist.menu, 1, vec![NavCommand::resume()]);
+        }
+        if let Some(playlist) = disc.playlists.get_mut(&1) {
+            set_commands(&mut playlist.menu, 0, vec![NavCommand::popup_off()]);
+        }
+        let menu = BdLocation::Playing {
+            playlist: 2,
+            mark: 0,
+        };
+        let chapter_two = BdLocation::Playing {
+            playlist: 1,
+            mark: 1,
+        };
+
+        let mut vm = BdVm::start(&disc)?;
+        vm.press(Key::Enter)?;
+        vm.jump_mark(1)?;
+        assert_eq!(vm.state().location, chapter_two);
+        vm.top_menu()?;
+        assert_eq!(vm.state().location, menu);
+        vm.press(Key::Down)?;
+        vm.press(Key::Enter)?;
+        assert_eq!(vm.state().location, chapter_two);
+        // The title's object goes on when it ends: back to the menu.
+        vm.finish()?;
+        assert_eq!(vm.state().location, menu);
+        // Resume again: nothing is suspended now, the menu stays.
+        vm.press(Key::Down)?;
+        vm.press(Key::Enter)?;
+        assert_eq!(vm.state().location, menu);
+
+        // The pop-up's PopupOff closes it; the title plays on.
+        vm.press(Key::Up)?;
+        vm.press(Key::Enter)?;
+        vm.popup_key();
+        assert!(
+            vm.menu()
+                .is_some_and(|(menu, view)| menu.popup && view.open)
+        );
+        vm.press(Key::Enter)?;
+        assert!(vm.menu().is_none());
+        assert_eq!(
+            vm.state().location,
+            BdLocation::Playing {
+                playlist: 1,
+                mark: 0
+            }
+        );
+
+        // Without the resume intention the Top Menu key ends the title: Resume has nowhere to go.
+        let mut plain = disc.clone();
+        if let Some(title) = plain.objects.get_mut(2) {
+            title.resume_intention = false;
+        }
+        let mut vm = BdVm::start(&plain)?;
+        vm.press(Key::Enter)?;
+        vm.top_menu()?;
+        vm.press(Key::Down)?;
+        vm.press(Key::Enter)?;
+        assert_eq!(vm.state().location, menu);
         Ok(())
     }
 

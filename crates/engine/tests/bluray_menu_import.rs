@@ -8,23 +8,13 @@
 use disccraft_build::{BuildOptions, OutputKind, build};
 use disccraft_engine::Session;
 use disccraft_project::{DiscKind, Link, MenuBackground, Project, Rect, Tick, TimelineId};
+use disccraft_test_support::ffmpeg;
 use serde_json::json;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 /// Ticks of one NTSC frame.
 const FRAME: i64 = 8_475_667_200;
-
-fn ffmpeg() -> Option<PathBuf> {
-    let path =
-        std::env::var_os("DISCCRAFT_FFMPEG").map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|_| path)
-}
 
 fn video(ffmpeg: &Path, out: &Path, seconds: u32) {
     let ok = Command::new(ffmpeg)

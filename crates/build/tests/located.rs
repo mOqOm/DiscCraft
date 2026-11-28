@@ -5,11 +5,7 @@
 
 use disccraft_build::{BuildOptions, OutputKind, TranscodeStatus, build, transcode_status};
 use disccraft_project::{Link, LocatedTranscode, Project};
-use std::path::PathBuf;
-
-fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures")
-}
+use disccraft_test_support::fixtures;
 
 #[test]
 fn located_transcodes_build_in_place_of_a_source_that_is_gone() {

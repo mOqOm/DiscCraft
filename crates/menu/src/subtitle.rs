@@ -657,7 +657,7 @@ fn choose_family() -> String {
     "Inter".to_string()
 }
 
-fn strip_tags_text(text: &str) -> String {
+pub(crate) fn strip_tags_text(text: &str) -> String {
     let mut out = String::new();
 
     for line in text.split('\n') {

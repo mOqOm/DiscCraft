@@ -394,7 +394,17 @@ impl DiscCraftApp {
         };
         let mut chosen = None;
         let _ = ui.menu_button(indented(tl!("Specify Link")), |ui| {
-            chosen = self.link_menu(ui, &current, &targets);
+            let port = if node == NodeId::FirstPlay {
+                crate::flowchart::Port::FirstPlay
+            } else {
+                crate::flowchart::Port::EndAction(node)
+            };
+            chosen = self.link_menu(
+                ui,
+                &current,
+                &targets,
+                crate::properties::link_back_here(&port),
+            );
             if chosen.is_some() {
                 ui.close();
             }
@@ -1006,7 +1016,7 @@ pub(crate) fn link_to_item(link: &disccraft_project::Link) -> Option<Selection> 
         Link::Slideshow { id } => Some(Selection::Slideshow(*id)),
         Link::Playlist { id } => Some(Selection::Playlist(*id)),
         Link::ChapterPlaylist { id } => Some(Selection::ChapterPlaylist(*id)),
-        Link::NotSet | Link::Stop | Link::LastMenu => None,
+        Link::NotSet | Link::Stop | Link::LastMenu | Link::Resume => None,
     }
 }
 

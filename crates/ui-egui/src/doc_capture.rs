@@ -18,10 +18,20 @@
 //! - `{"prefs": "Media"}`: the page of Preferences.
 //! - `{"preview": {"menu": 1, "button": 1}}`: open the Project Preview there (`preview.open`'s start: a menu's PGCN
 //!   and button, or a title and chapter; `{}` from First Play).
-//! - `{"remote": "Enter"}`: a key of the Project Preview's remote (Up, Down, Left, Right, Enter, Title, Menu).
+//! - `{"remote": "Enter"}`: a key of the Project Preview's remote (Up, Down, Left, Right, Enter, Title, Menu; Next and
+//!   Previous are its chapter buttons, M6.558).
 //! - `{"key": "Escape"}`: a key press, by egui's name for the key, with modifiers before it (`Alt+F` opens the
 //!   File menu, `ArrowDown`, `Enter`).
-//! - `{"wait": 30}`: frames to wait; `{"sleep": 1500}`: milliseconds to wait (media loading, playback).
+//! - `{"press": "Escape"}`: a key press as `key`, but given to the next frame's input as a real key is (so that egui
+//!   itself sees it: a pick whip taken back with Escape, arrow keys moving through an open list).
+//! - `{"text": "abc"}`: typed text, in the next frame's input (a field with the keyboard takes it).
+//! - `{"pointer": [x, y]}`: the mouse pointer moves there (points), `"button": "press"` / `"release"` also presses or
+//!   lets go of the left button there; moves in between a press and a release drag (the pick whip, M6.518).
+//!   `"rightPress"` / `"rightRelease"` do the same with the right button (a tab's menu, M9.54).
+//!   `{"pointer": null}` takes the pointer off the window (no hover in the pictures that follow).
+//! - `{"wait": 30}`: frames to wait; `{"sleep": 1500}`: milliseconds to wait (media loading, playback);
+//!   `{"built": 600000}`: wait until the build a `build` step started has ended, at most that many milliseconds
+//!   (M6.560; a build still going then is a failure in the log).
 //! - `{"shot": "name.png", ...}`: a picture saved in the output folder (`DISCCRAFT_CAPTURE_OUT`, else the script's
 //!   folder), of the whole window, or cut to `"panel": "Timeline"` (a panel's contents), `"area": "prefs_window"`
 //!   (a dialog, by its id), or `"rect": [x, y, w, h]` (points); `"pad": 8` widens the cut. `"viewport": "preview"`
@@ -33,6 +43,15 @@
 //!   which a picture for others should not show).
 //! - `{"marks": [[x, y, "1"], ...]}`: numbered marks drawn over the window (points) for the pictures that follow, to
 //!   name its parts in the text; `{"marks": []}` takes them away.
+//! - `{"expect": "/menus/14/endAction", "is": "notSet"}`: a check (M6.534): the value at that place in the project
+//!   as it is saved (`/`-separated keys and array indices; a place that is not there is `null`) must be `is`.
+//!   `{"expect": "pickWhip", "is": false}` checks whether a pick whip is being dragged; `"selection"` what is
+//!   selected (`{"menu": 14}` as `select` names it, `"none"`: the disc), and `"viewer/menu"` (`timeline`,
+//!   `slideshow`, `chapterPlaylist`) the id the viewer shows, `null` when it is empty (M6.540); `"preview/title"` the
+//!   Project Preview's title and chapter (`[3, 1]`, `null` when no title plays; M6.558), and `"preview/variant"` the
+//!   parental version it plays (M6.560: `0` the first, `null` for a title without parental chapters). A check that
+//!   does not hold is a failure in the log, so a check script (`scripts/manual/checks/`) says by itself whether what
+//!   it does works.
 //! - `{"quit": true}`: leave without asking to save.
 //!
 //! What was done and what failed goes to `capture.log` beside the pictures.
@@ -48,6 +67,8 @@ use std::sync::{Arc, Mutex};
 const MAX_SCRIPT_BYTES: u64 = 4 << 20;
 /// The most frames one `wait` asks for.
 const MAX_WAIT_FRAMES: u64 = 3_600;
+/// The longest `built` wait, in milliseconds (M6.560).
+const MAX_BUILD_WAIT_MS: u64 = 3_600_000;
 /// The longest `sleep`, in milliseconds.
 const MAX_SLEEP_MS: u64 = 120_000;
 /// How long a screenshot may take to come back before the script goes on without it.
@@ -71,11 +92,15 @@ pub(crate) struct DocCapture {
     wait_frames: u64,
     /// The time to wait until before the next step.
     wait_until: Option<std::time::Instant>,
+    /// M6.560: waiting for the build to end, until this time at the most.
+    wait_build: Option<std::time::Instant>,
     pending: Option<PendingShot>,
     /// Whether other windows are drawn inside the main one yet.
     embedded: bool,
     /// Numbered marks drawn over the window: where (points) and what.
     marks: Vec<(egui::Pos2, String)>,
+    /// Pointer events of a `pointer` step, for the next frame's input (egui reads the pointer before a frame).
+    input: Vec<egui::Event>,
     out: PathBuf,
     log: Option<std::fs::File>,
 }
@@ -115,9 +140,11 @@ fn load(script: &Path) -> Result<DocCapture, String> {
         next: 0,
         wait_frames: 0,
         wait_until: None,
+        wait_build: None,
         pending: None,
         embedded: false,
         marks: Vec::new(),
+        input: Vec::new(),
         out,
         log,
     })
@@ -155,6 +182,34 @@ fn selection(kind: &str, id: u64) -> Option<Selection> {
         "chapterPlaylist" => Selection::ChapterPlaylist(id),
         _ => return None,
     })
+}
+
+/// `selection` as a check names it (M6.540): `{"menu": 14}`, as the `select` step names it, or `"none"` (the disc).
+fn selection_value(selection: Selection) -> Value {
+    let (kind, id) = match selection {
+        Selection::None => return Value::from("none"),
+        Selection::Asset(id) => ("asset", id.0),
+        Selection::Timeline(id) => ("timeline", id.0),
+        Selection::Menu(id) => ("menu", id.0),
+        Selection::Slideshow(id) => ("slideshow", id),
+        Selection::Playlist(id) => ("playlist", id),
+        Selection::ChapterPlaylist(id) => ("chapterPlaylist", id),
+    };
+    serde_json::json!({ kind: id })
+}
+
+impl DiscCraftApp {
+    /// The id the viewer of `kind` shows (`null` when it is empty), for a check (M6.540); `None` for no such viewer.
+    fn viewer_value(&self, kind: &str) -> Option<Value> {
+        let id = match kind {
+            "menu" => self.viewer_menu().map(|id| id.0),
+            "timeline" => self.viewer_timeline().map(|id| id.0),
+            "slideshow" => self.viewer_slideshow(),
+            "chapterPlaylist" => self.viewer_chapter_playlist(),
+            _ => return None,
+        };
+        Some(id.map_or(Value::Null, Value::from))
+    }
 }
 
 /// `rect` (points) in an image of `size` pixels at `scale` pixels a point, widened by `pad` points and kept inside
@@ -243,6 +298,13 @@ impl DocCapture {
 
 impl DiscCraftApp {
     /// Plays the next step of the capture script, if one is running (called once a frame, before anything is drawn).
+    /// The pointer events of the script's last `pointer` step, into the next frame's input (eframe's raw input hook).
+    pub fn capture_input(&mut self, raw: &mut egui::RawInput) {
+        if let Some(capture) = self.doc_capture.as_mut() {
+            raw.events.append(&mut capture.input);
+        }
+    }
+
     pub(crate) fn play_capture(&mut self, ui: &Ui) {
         let Some(mut capture) = self.doc_capture.take() else {
             return;
@@ -291,6 +353,9 @@ impl DiscCraftApp {
                 return true;
             }
             capture.wait_until = None;
+        }
+        if self.capture_waits_for_build(capture) {
+            return true;
         }
         let Some(step) = capture.steps.get(capture.next).cloned() else {
             capture.note("end of script");
@@ -391,6 +456,9 @@ impl DiscCraftApp {
         } else if let Some(start) = step.get("preview") {
             self.open_project_preview(start.clone());
             capture.wait_frames = 20;
+        } else if let Some(name @ ("Next" | "Previous")) = text("remote") {
+            self.capture_chapter_key(name == "Next");
+            capture.wait_frames = 10;
         } else if let Some(name) = text("remote") {
             use crate::monitor::RemoteKey;
             let key = match name {
@@ -418,8 +486,33 @@ impl DiscCraftApp {
                     });
                 });
             }
+        } else if let Some(name) = text("press") {
+            let (key, modifiers) = key_press(name).ok_or_else(|| format!("no key {name}"))?;
+            capture.input = [true, false]
+                .into_iter()
+                .map(|pressed| egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers,
+                })
+                .collect();
+            capture.wait_frames = 2;
+        } else if let Some(typed) = text("text") {
+            capture.input = vec![egui::Event::Text(typed.to_owned())];
+            capture.wait_frames = 2;
+        } else if let Some(at) = step.get("pointer") {
+            capture.input = pointer_events(at, text("button"))?;
+            capture.wait_frames = 2;
         } else if let Some(frames) = step.get("wait").and_then(Value::as_u64) {
             capture.wait_frames = frames.min(MAX_WAIT_FRAMES);
+        } else if let Some(ms) = step.get("built").and_then(Value::as_u64) {
+            capture.wait_build = Some(
+                std::time::Instant::now()
+                    + std::time::Duration::from_millis(ms.min(MAX_BUILD_WAIT_MS)),
+            );
+            capture.wait_frames = 10;
         } else if let Some(ms) = step.get("sleep").and_then(Value::as_u64) {
             capture.wait_until = Some(
                 std::time::Instant::now() + std::time::Duration::from_millis(ms.min(MAX_SLEEP_MS)),
@@ -453,6 +546,14 @@ impl DiscCraftApp {
                 })
                 .collect();
             capture.wait_frames = 5;
+        } else if let Some(place) = text("expect") {
+            let wanted = step.get("is").cloned().unwrap_or(Value::Null);
+            let found = self.expected_place(ctx, place)?;
+            if found != wanted {
+                return Err(format!("expected {place} to be {wanted}, it is {found}"));
+            }
+            capture.note("  ok");
+            capture.wait_frames = 0;
         } else if step.get("quit").is_some() {
             self.session.dirty = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -461,6 +562,57 @@ impl DiscCraftApp {
             return Err("unknown step".to_owned());
         }
         Ok(true)
+    }
+
+    /// M6.560: whether a `built` step still waits for the build (it goes on when the build has ended, or at its
+    /// deadline with a failure in the log).
+    fn capture_waits_for_build(&self, capture: &mut DocCapture) -> bool {
+        let Some(deadline) = capture.wait_build else {
+            return false;
+        };
+        let running = self.build_job.is_running();
+        if running && std::time::Instant::now() < deadline {
+            return true;
+        }
+        capture.wait_build = None;
+        if running {
+            capture.note("  failed: the build did not end in time");
+        }
+        false
+    }
+
+    /// M6.558: the Project Preview's chapter button, Next (`next`) or Previous, as its window's button presses it.
+    fn capture_chapter_key(&mut self, next: bool) {
+        self.preview_paused = false;
+        let key = if next { "next" } else { "previous" };
+        if let Some(state) = self.run_query("preview.key", serde_json::json!({ "key": key })) {
+            self.preview = crate::monitor::parse_preview_state(&state);
+        }
+    }
+
+    /// What an `expect` step's `place` is now (see the module's notes).
+    fn expected_place(&self, ctx: &Context, place: &str) -> Result<Value, String> {
+        Ok(if place == "pickWhip" {
+            Value::Bool(crate::pickwhip::any_dragged(ctx))
+        } else if place == "selection" {
+            selection_value(self.selection)
+        } else if place == "preview/variant" {
+            self.preview
+                .variant
+                .map_or(Value::Null, |variant| serde_json::json!(variant))
+        } else if place == "preview/title" {
+            // M6.558: the title and chapter the Project Preview plays.
+            self.preview.title.map_or(Value::Null, |(title, chapter)| {
+                serde_json::json!([title, chapter])
+            })
+        } else if let Some(kind) = place.strip_prefix("viewer/") {
+            self.viewer_value(kind)
+                .ok_or_else(|| format!("no viewer {kind}"))?
+        } else {
+            let project =
+                serde_json::to_value(&self.session.project).map_err(|error| error.to_string())?;
+            value_at(&project, place).cloned().unwrap_or(Value::Null)
+        })
     }
 
     /// Asks for the picture of `step` (see the module's notes), saved as `name` in the output folder.
@@ -538,6 +690,48 @@ impl DiscCraftApp {
     }
 }
 
+/// A pointer step's events: a move to `at` (`[x, y]` in points), then a press or a release of the left button there.
+/// The value at `place` in `root`: `/`-separated keys of objects and indices of arrays (`/menus/14/buttons/0/link`);
+/// `None` when it is not there.
+fn value_at<'a>(root: &'a Value, place: &str) -> Option<&'a Value> {
+    place
+        .split('/')
+        .filter(|key| !key.is_empty())
+        .try_fold(root, |value, key| match value {
+            Value::Object(map) => map.get(key),
+            Value::Array(items) => items.get(key.parse::<usize>().ok()?),
+            _ => None,
+        })
+}
+
+fn pointer_events(at: &Value, button: Option<&str>) -> Result<Vec<egui::Event>, String> {
+    if at.is_null() {
+        return Ok(vec![egui::Event::PointerGone]);
+    }
+    let point = at
+        .as_array()
+        .and_then(|xy| Some((xy.first()?.as_f64()?, xy.get(1)?.as_f64()?)))
+        .filter(|(x, y)| x.is_finite() && y.is_finite())
+        .ok_or_else(|| format!("pointer {at}: not [x, y]"))?;
+    let pos = egui::pos2(point.0 as f32, point.1 as f32);
+    let mut events = vec![egui::Event::PointerMoved(pos)];
+    let (button, pressed) = match button {
+        None => return Ok(events),
+        Some("press") => (egui::PointerButton::Primary, true),
+        Some("release") => (egui::PointerButton::Primary, false),
+        Some("rightPress") => (egui::PointerButton::Secondary, true),
+        Some("rightRelease") => (egui::PointerButton::Secondary, false),
+        Some(other) => return Err(format!("no button {other}")),
+    };
+    events.push(egui::Event::PointerButton {
+        pos,
+        button,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    });
+    Ok(events)
+}
+
 /// A key step's key and modifiers: `Escape`, `Alt+F`, `Ctrl+Shift+S` (egui's key names).
 fn key_press(name: &str) -> Option<(egui::Key, egui::Modifiers)> {
     let mut modifiers = egui::Modifiers::NONE;
@@ -559,7 +753,7 @@ fn key_press(name: &str) -> Option<(egui::Key, egui::Modifiers)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{crop_pixels, parse, selection};
+    use super::{Value, crop_pixels, parse, pointer_events, selection, selection_value, value_at};
 
     #[test]
     fn scripts_are_json_lines_with_comments() {
@@ -569,6 +763,61 @@ mod tests {
         assert!(parse("{nope}\n").is_err());
         assert!(selection("menu", 2).is_some());
         assert!(selection("button", 2).is_none());
+    }
+
+    /// M6.534: a check finds its place in the project as it is saved; M6.540: a selection is named as `select`
+    /// names it.
+    #[test]
+    fn a_check_finds_its_place_in_the_project() {
+        use crate::app::Selection;
+        assert_eq!(
+            selection_value(Selection::Menu(disccraft_project::MenuId(14))),
+            serde_json::json!({ "menu": 14 })
+        );
+        assert_eq!(selection_value(Selection::None), Value::from("none"));
+        assert_eq!(
+            selection_value(Selection::ChapterPlaylist(3)),
+            serde_json::json!({ "chapterPlaylist": 3 })
+        );
+        let project = serde_json::json!({
+            "menus": { "14": { "endAction": "notSet", "buttons": [{ "link": { "timeline": 11 } }] } }
+        });
+        assert_eq!(
+            value_at(&project, "/menus/14/endAction"),
+            Some(&Value::from("notSet"))
+        );
+        assert_eq!(
+            value_at(&project, "/menus/14/buttons/0/link"),
+            Some(&serde_json::json!({ "timeline": 11 }))
+        );
+        assert_eq!(value_at(&project, "/menus/14/buttons/1/link"), None);
+        assert_eq!(value_at(&project, "/menus/14/endAction/x"), None);
+        assert_eq!(value_at(&project, "/"), Some(&project));
+    }
+
+    /// M6.518: a pointer step moves the pointer, and presses or lets go of the left button there.
+    #[test]
+    fn pointer_steps_move_press_and_release() {
+        let at = serde_json::json!([120, 48.5]);
+        let moved = egui::Event::PointerMoved(egui::pos2(120.0, 48.5));
+        assert_eq!(pointer_events(&at, None), Ok(vec![moved.clone()]));
+        let pressed = pointer_events(&at, Some("press")).unwrap_or_default();
+        assert!(matches!(
+            pressed.as_slice(),
+            [_, egui::Event::PointerButton { pressed: true, .. }]
+        ));
+        let released = pointer_events(&at, Some("release")).unwrap_or_default();
+        assert!(matches!(
+            released.as_slice(),
+            [_, egui::Event::PointerButton { pressed: false, .. }]
+        ));
+        assert!(pointer_events(&at, Some("double")).is_err());
+        assert!(pointer_events(&serde_json::json!([1]), None).is_err());
+        assert_eq!(
+            pointer_events(&serde_json::Value::Null, None),
+            Ok(vec![egui::Event::PointerGone])
+        );
+        assert!(pointer_events(&serde_json::json!("1, 2"), None).is_err());
     }
 
     #[test]

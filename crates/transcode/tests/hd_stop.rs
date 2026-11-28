@@ -4,25 +4,14 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use disccraft_test_support::ffmpeg;
 use std::env;
-use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc;
 use std::time::Duration;
 
 use disccraft_transcode::hd::{HdCodec, HdOptions, transcode_h264};
 use disccraft_transcode::{RateMode, TranscodeError};
-
-fn ffmpeg() -> Option<PathBuf> {
-    let path =
-        env::var_os("DISCCRAFT_FFMPEG").map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|_| path)
-}
 
 #[test]
 fn a_stopped_hd_encode_returns_instead_of_hanging() {

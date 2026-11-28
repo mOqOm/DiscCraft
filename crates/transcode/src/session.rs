@@ -108,8 +108,8 @@ enum Craft {
     Session,
     /// An EffectCraft project: rendered to an MP4.
     Composition,
-    /// A raw Dolby Digital file (not a Craft document, but opened the same way): decoded to a stereo WAV, for the
-    /// monitor's sound and the waveform (`crate::raw_ac3`).
+    /// A raw Dolby Digital or Dolby Digital Plus file (not a Craft document, but opened the same way): decoded to a
+    /// stereo WAV, for the monitor's sound, the waveform and a conversion (`crate::raw_ac3`).
     Ac3,
 }
 

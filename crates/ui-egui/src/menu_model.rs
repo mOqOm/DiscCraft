@@ -74,16 +74,16 @@ pub(crate) trait MenuSink {
 /// The commands of the rows [`ModelSink`] wrote, by the index each row's [`CommandRef`] carries.
 #[derive(Default)]
 pub(crate) struct Commands {
-    rows: Vec<(MenuCommand, Option<String>)>,
+    rows: Vec<MenuCommand>,
 }
 
 /// The id of every row's command; its `row` parameter is the index in [`Commands`].
 const ROW: &str = "disccraft.menu";
 
 impl Commands {
-    fn add(&mut self, command: MenuCommand, english: Option<String>) -> CommandRef {
+    fn add(&mut self, command: MenuCommand) -> CommandRef {
         let index = self.rows.len();
-        self.rows.push((command, english));
+        self.rows.push(command);
         CommandRef::with_params(ROW, serde_json::json!({ "row": index }))
     }
 
@@ -93,18 +93,7 @@ impl Commands {
             return None;
         }
         let index = command.params.get("row")?.as_u64()?;
-        self.rows
-            .get(usize::try_from(index).ok()?)
-            .map(|(command, _)| command)
-    }
-
-    /// A row's English label, for the mnemonics of a translated one ("ファイル(F)").
-    pub(crate) fn english(&self, command: &CommandRef) -> Option<String> {
-        if command.id != ROW {
-            return None;
-        }
-        let index = usize::try_from(command.params.get("row")?.as_u64()?).ok()?;
-        self.rows.get(index)?.1.clone()
+        self.rows.get(usize::try_from(index).ok()?)
     }
 }
 
@@ -122,16 +111,26 @@ impl<'c> ModelSink<'c> {
         }
     }
 
-    /// The rows written, as a top-level menu.
+    /// The rows written, as a top-level menu. A translated title carries its English name, whose letter the bar takes
+    /// as its mnemonic ("ファイル(F)").
     pub(crate) fn menu(self, title: &str, role: MenuRole) -> Menu {
-        Menu::new(title, craft_menu::tidy(self.nodes)).role(role)
+        let mut nodes = self.nodes;
+        craft_menu::tidy(&mut nodes);
+        let menu = Menu::new(title, nodes).role(role);
+        match english_title(title) {
+            Some(english) if english != title => menu.english(english),
+            _ => menu,
+        }
     }
 
     fn action_item(&mut self, label: &str, action: Action, enabled: bool) -> Item {
-        let command = self
-            .commands
-            .add(MenuCommand::Action(action), Some(english_label(action)));
+        let english = english_label(action);
+        let command = self.commands.add(MenuCommand::Action(action));
         let mut item = Item::new(command, label).enabled(enabled);
+        // A translated label carries its English one, whose letter the menu takes as the row's mnemonic.
+        if english != label {
+            item = item.english(english);
+        }
         if let Some(chord) = chord(action) {
             item = item.shortcut(chord);
         }
@@ -163,7 +162,7 @@ impl MenuSink for ModelSink<'_> {
     }
 
     fn command(&mut self, label: String, command: MenuCommand, enabled: bool, radio: Option<bool>) {
-        let command = self.commands.add(command, None);
+        let command = self.commands.add(command);
         let mut item = Item::new(command, label).enabled(enabled);
         if let Some(selected) = radio {
             item = item.radio(selected);
@@ -172,7 +171,7 @@ impl MenuSink for ModelSink<'_> {
     }
 
     fn note(&mut self, text: &str) {
-        let command = self.commands.add(MenuCommand::Action(Action::Help), None);
+        let command = self.commands.add(MenuCommand::Action(Action::Help));
         self.nodes
             .push(Item::new(command, text).enabled(false).into());
     }
@@ -216,7 +215,7 @@ fn disable(node: &mut Node) {
     match node {
         Node::Item(item) => item.enabled = false,
         Node::Submenu { children, .. } => children.iter_mut().for_each(disable),
-        Node::Separator | Node::Standard { .. } => {}
+        _ => {}
     }
 }
 
@@ -321,10 +320,7 @@ pub(crate) fn layout_label(english: &'static str) -> String {
 /// The menu bar's model: its top-level menus, in Encore's order (File, Edit, Object, Menu, Timeline, View, Window,
 /// Help), with the roles the layouts need.
 pub(crate) fn bar(menus: Vec<Menu>) -> MenuBar {
-    MenuBar {
-        menus,
-        documents: Vec::new(),
-    }
+    MenuBar::new(menus)
 }
 
 /// The English titles of the top-level menus, for the mnemonics of the translated ones.

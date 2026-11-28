@@ -29,18 +29,21 @@ mod bd_subtitles;
 pub use bd_subtitles::{BdSubtitlePart, extract_bd_subtitle};
 mod embedded_subtitles;
 pub use embedded_subtitles::{
-    EmbeddedFormat, EmbeddedSubtitle, embedded_subtitles, extract_embedded_subtitle,
+    EmbeddedFormat, EmbeddedSubtitle, embedded_subtitles, extract_embedded_subtitle, vobsub_files,
 };
 pub mod h264_sps;
 pub mod hd;
 mod media_cache;
 mod mkv_probe;
+mod own_source;
+mod own_video;
 pub use media_cache::{
     cached_blob, clear_probe_cache, enable_probe_cache, media_open, probe_cache_dir, probe_ready,
     store_blob, warm, warming,
 };
 mod picture;
 mod pixel_aspect;
+mod plane_colour;
 mod pulldown;
 mod raw_ac3;
 mod resample;

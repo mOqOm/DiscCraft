@@ -250,7 +250,13 @@ pub struct CompositionObject {
     pub x: u16,
     /// Y coordinate.
     pub y: u16,
+    /// M6.551: shown even while the stream is not (the forced_on_flag: a player with subtitles off still shows it
+    /// from the selected stream).
+    pub forced: bool,
 }
+
+/// The composition object flag of [`CompositionObject::forced`] (forced_on_flag; 0x80 is object_cropped_flag).
+const FORCED_ON: u8 = 0x40;
 
 /// A presentation composition.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,7 +292,7 @@ pub fn pcs(c: &Composition) -> Result<Vec<u8>, PgsError> {
     for object in &c.objects {
         body.extend_from_slice(&object.object_id.to_be_bytes());
         body.push(object.window_id);
-        body.push(0x00);
+        body.push(if object.forced { FORCED_ON } else { 0x00 });
         body.extend_from_slice(&object.x.to_be_bytes());
         body.extend_from_slice(&object.y.to_be_bytes());
     }
@@ -353,6 +359,7 @@ mod tests {
                 window_id: 0,
                 x: 1,
                 y: 2,
+                forced: false,
             }],
         };
 

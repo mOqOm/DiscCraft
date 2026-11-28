@@ -8,22 +8,21 @@ use std::sync::Mutex;
 use disccraft_dvd::build_video_ts;
 use disccraft_ifo::{read_vmgi, read_vtsi};
 use disccraft_project::{AudioTrack, DiscKind, Project, Tick, VideoStandard};
+use disccraft_test_support::{ffmpeg, ffprobe, fixtures};
 
 const TICKS_PER_SECOND: i64 = 254_016_000_000;
 static FIXTURE_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn builds_ntsc_ac3_dvd() -> Result<(), Box<dyn Error>> {
-    let ffmpeg = ffmpeg_path();
-    let ffprobe = ffprobe_path();
-    if !tool_available(&ffmpeg) || !tool_available(&ffprobe) {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         println!("skipped: ffmpeg not found");
         return Ok(());
-    }
+    };
 
     let _guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
 
-    let fixtures = fixtures_dir();
+    let fixtures = fixtures();
     fs::create_dir_all(&fixtures)?;
 
     let m2v = fixtures.join("ntsc.m2v");
@@ -49,16 +48,14 @@ fn builds_ntsc_ac3_dvd() -> Result<(), Box<dyn Error>> {
 /// set's audio attributes, and ffmpeg decodes the whole track without an error.
 #[test]
 fn builds_ntsc_dts_dvd() -> Result<(), Box<dyn Error>> {
-    let ffmpeg = ffmpeg_path();
-    let ffprobe = ffprobe_path();
-    if !tool_available(&ffmpeg) || !tool_available(&ffprobe) {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         println!("skipped: ffmpeg not found");
         return Ok(());
-    }
+    };
 
     let _guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
 
-    let fixtures = fixtures_dir();
+    let fixtures = fixtures();
     fs::create_dir_all(&fixtures)?;
     let m2v = fixtures.join("ntsc.m2v");
     let dts = fixtures.join("ntsc51.dts");
@@ -142,16 +139,14 @@ fn builds_ntsc_dts_dvd() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn builds_ntsc_lpcm_dvd() -> Result<(), Box<dyn Error>> {
-    let ffmpeg = ffmpeg_path();
-    let ffprobe = ffprobe_path();
-    if !tool_available(&ffmpeg) || !tool_available(&ffprobe) {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         println!("skipped: ffmpeg not found");
         return Ok(());
-    }
+    };
 
     let _guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
 
-    let fixtures = fixtures_dir();
+    let fixtures = fixtures();
     fs::create_dir_all(&fixtures)?;
 
     let m2v = fixtures.join("ntsc.m2v");
@@ -178,14 +173,12 @@ fn builds_ntsc_lpcm_dvd() -> Result<(), Box<dyn Error>> {
 /// and the disc's pictures are the source's own (the same picture types in the same order).
 #[test]
 fn a_dvd_compliant_program_stream_is_repackaged() -> Result<(), Box<dyn Error>> {
-    let ffmpeg = ffmpeg_path();
-    let ffprobe = ffprobe_path();
-    if !tool_available(&ffmpeg) || !tool_available(&ffprobe) {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         println!("skipped: ffmpeg not found");
         return Ok(());
-    }
+    };
     let _guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
-    let fixtures = fixtures_dir();
+    let fixtures = fixtures();
     fs::create_dir_all(&fixtures)?;
     let mpg = fixtures.join("dvd_compliant.mpg");
     if !mpg.is_file() {
@@ -291,14 +284,12 @@ fn a_dvd_compliant_program_stream_is_repackaged() -> Result<(), Box<dyn Error>> 
 /// MPEG-1 video whose pictures are the source's, and the 44.1 kHz sound is converted.
 #[test]
 fn a_vcd_mpeg1_stream_goes_on_as_it_is() -> Result<(), Box<dyn Error>> {
-    let ffmpeg = ffmpeg_path();
-    let ffprobe = ffprobe_path();
-    if !tool_available(&ffmpeg) || !tool_available(&ffprobe) {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         println!("skipped: ffmpeg not found");
         return Ok(());
-    }
+    };
     let _guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
-    let fixtures = fixtures_dir();
+    let fixtures = fixtures();
     fs::create_dir_all(&fixtures)?;
     let mpg = fixtures.join("vcd_mpeg1.mpg");
     if !mpg.is_file() {
@@ -356,14 +347,12 @@ fn a_vcd_mpeg1_stream_goes_on_as_it_is() -> Result<(), Box<dyn Error>> {
 /// fits (1.856 Mbit/s); a faster one is converted.
 #[test]
 fn a_variable_mpeg1_stream_is_measured() -> Result<(), Box<dyn Error>> {
-    let ffmpeg = ffmpeg_path();
-    let ffprobe = ffprobe_path();
-    if !tool_available(&ffmpeg) || !tool_available(&ffprobe) {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         println!("skipped: ffmpeg not found");
         return Ok(());
-    }
+    };
     let _guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
-    let fixtures = fixtures_dir();
+    let fixtures = fixtures();
     fs::create_dir_all(&fixtures)?;
     let make =
         |path: &Path, source: &str, quality: &str, seconds: &str| -> Result<(), Box<dyn Error>> {
@@ -442,14 +431,12 @@ fn a_variable_mpeg1_stream_is_measured() -> Result<(), Box<dyn Error>> {
 /// clips and the gap, decodes without errors, and a picture from the gap is black.
 #[test]
 fn a_gap_between_clips_plays_black() -> Result<(), Box<dyn Error>> {
-    let ffmpeg = ffmpeg_path();
-    let ffprobe = ffprobe_path();
-    if !tool_available(&ffmpeg) || !tool_available(&ffprobe) {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         println!("skipped: ffmpeg not found");
         return Ok(());
-    }
+    };
     let _guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
-    let fixtures = fixtures_dir();
+    let fixtures = fixtures();
     fs::create_dir_all(&fixtures)?;
     let m2v = fixtures.join("ntsc.m2v");
     if !m2v.is_file() {
@@ -533,14 +520,12 @@ fn a_gap_between_clips_plays_black() -> Result<(), Box<dyn Error>> {
 /// a chapter at the join) is one title that plays both: twice the frames, decodable without errors.
 #[test]
 fn builds_a_timeline_of_two_clips() -> Result<(), Box<dyn Error>> {
-    let ffmpeg = ffmpeg_path();
-    let ffprobe = ffprobe_path();
-    if !tool_available(&ffmpeg) || !tool_available(&ffprobe) {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         println!("skipped: ffmpeg not found");
         return Ok(());
-    }
+    };
     let _guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
-    let fixtures = fixtures_dir();
+    let fixtures = fixtures();
     fs::create_dir_all(&fixtures)?;
     let m2v = fixtures.join("ntsc.m2v");
     if !m2v.is_file() {
@@ -648,13 +633,12 @@ fn builds_a_timeline_of_two_clips() -> Result<(), Box<dyn Error>> {
 /// mask and the disc's parental table say so, a player at level 4 plays the second PGC, the VOB decodes whole.
 #[test]
 fn a_chapter_with_a_parental_alternative_makes_a_parental_block() -> Result<(), Box<dyn Error>> {
-    let ffmpeg = ffmpeg_path();
-    if !tool_available(&ffmpeg) {
+    let Some(ffmpeg) = ffmpeg() else {
         println!("skipped: ffmpeg not found");
         return Ok(());
-    }
+    };
     let _guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
-    let fixtures = fixtures_dir();
+    let fixtures = fixtures();
     fs::create_dir_all(&fixtures)?;
     let m2v = fixtures.join("ntsc.m2v");
     if !m2v.is_file() {
@@ -794,11 +778,13 @@ fn a_chapter_with_a_parental_alternative_makes_a_parental_block() -> Result<(), 
 /// the title plays both.
 #[test]
 fn joins_a_clip_that_needs_a_transcode() -> Result<(), Box<dyn Error>> {
-    let ffmpeg = ffmpeg_path();
-    let ffprobe = ffprobe_path();
-    let fixtures = fixtures_dir();
+    let fixtures = fixtures();
     let (m2v, mp4) = (fixtures.join("ntsc.m2v"), fixtures.join("h264_aac.mp4"));
-    if !tool_available(&ffmpeg) || !tool_available(&ffprobe) || !m2v.is_file() || !mp4.is_file() {
+    let (Some(ffmpeg), Some(_)) = (ffmpeg(), ffprobe()) else {
+        println!("skipped: ffmpeg or fixtures not found");
+        return Ok(());
+    };
+    if !m2v.is_file() || !mp4.is_file() {
         println!("skipped: ffmpeg or fixtures not found");
         return Ok(());
     }
@@ -1063,39 +1049,6 @@ fn run_success(cmd: &Path, args: &[&str], output_path: &Path) -> Result<(), Box<
     Ok(())
 }
 
-fn tool_available(cmd: &Path) -> bool {
-    Command::new(cmd)
-        .arg("-version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn ffmpeg_path() -> PathBuf {
-    env::var_os("DISCCRAFT_FFMPEG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("ffmpeg"))
-}
-
-fn ffprobe_path() -> PathBuf {
-    env::var_os("DISCCRAFT_FFPROBE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("ffprobe"))
-}
-
-fn workspace_root() -> PathBuf {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest
-        .parent()
-        .and_then(|p| p.parent())
-        .map(PathBuf::from)
-        .unwrap_or(manifest)
-}
-
-fn fixtures_dir() -> PathBuf {
-    workspace_root().join("target").join("fixtures")
-}
-
 fn temp_dir(name: &str) -> PathBuf {
     env::temp_dir().join(format!("disccraft-dvd-{}-{}", std::process::id(), name))
 }
@@ -1122,13 +1075,12 @@ fn expect_contains(haystack: &str, needle: &str) -> Result<(), Box<dyn Error>> {
 fn a_blu_ray_conversion_says_why() -> Result<(), Box<dyn Error>> {
     use disccraft_dvd::{BdMismatch, BdVideoFormat, bd_mismatch};
     use disccraft_project::BdVideo;
-    let ffmpeg = ffmpeg_path();
-    if !tool_available(&ffmpeg) {
+    let Some(ffmpeg) = ffmpeg() else {
         println!("skipped: ffmpeg not found");
         return Ok(());
-    }
+    };
     let _guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
-    let fixtures = fixtures_dir();
+    let fixtures = fixtures();
     fs::create_dir_all(&fixtures)?;
     let make = |name: &str, codec: &[&str]| -> Result<PathBuf, Box<dyn Error>> {
         let path = fixtures.join(name);

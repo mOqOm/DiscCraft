@@ -642,7 +642,9 @@ impl DiscCraftApp {
 
         // キーボードでも操作できるようにする。ただしテキスト入力中にフォーカスが
         // あるときは矢印キーを奪わない。
-        let typing = ui.ctx().memory(|m| m.focused().is_some());
+        // M6.519: nor while a list or menu is open (it takes the arrow keys and Enter).
+        let typing =
+            ui.ctx().memory(|m| m.focused().is_some()) || egui::Popup::is_any_open(ui.ctx());
 
         if !typing {
             for key in RemoteKey::ALL {

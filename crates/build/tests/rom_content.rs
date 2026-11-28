@@ -6,23 +6,10 @@
 
 use disccraft_build::{BuildOptions, OutputKind, build};
 use disccraft_project::{DiscKind, Link, Project};
+use disccraft_test_support::{ffmpeg, fixtures};
 use disccraft_udf::read::{list_iso9660, list_udf};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures")
-}
-
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
 
 /// The files of the test content: path and bytes.
 fn content() -> Vec<(&'static str, Vec<u8>)> {
@@ -136,7 +123,7 @@ fn a_dvd_image_holds_the_rom_content_beside_the_video() {
     assert_eq!(video(&udf), video(&list_udf(&plain_iso).unwrap()));
 
     // The disc still plays: ffmpeg's DVD reader (libdvdread's own UDF reader) decodes the title.
-    if let Some(ffmpeg) = tool("DISCCRAFT_FFMPEG", "ffmpeg") {
+    if let Some(ffmpeg) = ffmpeg() {
         let decode = Command::new(ffmpeg)
             .args(["-v", "error", "-f", "dvdvideo", "-i"])
             .arg(&iso)

@@ -32,10 +32,12 @@ mod doc_capture;
 mod dock;
 mod effects_dialog;
 mod extra_panels;
+mod file_dialogs;
 mod file_drop;
 mod filmcraft;
 mod flowchart;
 mod fonts;
+pub mod framework;
 mod gui_params;
 mod guides;
 mod help;
@@ -83,6 +85,7 @@ mod timeline_view;
 mod tool_icons;
 mod track_dialog;
 mod transcode_settings;
+mod updates;
 mod user_library;
 mod user_ops;
 mod video_out;
@@ -94,6 +97,7 @@ pub use app::DiscCraftApp;
 pub use fonts::install_fonts;
 pub use help::{enable_media_cache, install_crash_log};
 pub use theme::apply_theme;
+pub use updates::UPDATE_APP;
 
 #[cfg(test)]
 mod tests {

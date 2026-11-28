@@ -266,6 +266,11 @@ pub fn build_bdmv_with(
     if project.settings.kind != DiscKind::BluRay {
         return Err(invalid("project is not a Blu-ray project"));
     }
+    // M6.548: the videos that play in place of parental chapters, as hidden titles (their clips).
+    let (expanded, parental_clips) = project
+        .with_parental_clips()
+        .map_err(|error| invalid(&error.to_string()))?;
+    let project = &expanded;
 
     let dirs = prepare_directories(out_dir)?;
     // In HD (and in SD as H.264, M10.41) the timelines' video is encoded below; their SD MPEG-2 would be made only to
@@ -285,8 +290,19 @@ pub fn build_bdmv_with(
 
     let mut output = BuildOutput::default();
     let pending = write_title_clips(project, (&titles, &hd_titles), &dirs, &mut output)?;
-    let next_playlist = write_project_playlists(project, &dirs, &mut output)?;
-    let next_playlist = write_chapter_playlists(project, &dirs, &mut output, next_playlist)?;
+    let next_title = write_project_playlists(project, &mut output)?;
+    let first_playlist = u16_from_usize(
+        output
+            .built
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| invalid("too many titles"))?,
+        "playlist number",
+    )?;
+    let next_playlist =
+        write_chapter_playlists(project, &dirs, &mut output, (next_title, first_playlist))?;
+    let next_playlist =
+        write_parental_versions(project, &parental_clips, &dirs, &mut output, next_playlist)?;
     let menu_navs = build_menu_navs(project, next_playlist)?;
 
     let map = TitleMap {
@@ -294,6 +310,7 @@ pub fn build_bdmv_with(
         slideshows: output.slideshow_titles.clone(),
         playlists: output.playlist_titles.clone(),
         chapter_playlists: output.chapter_playlist_titles.clone(),
+        disc_age: disccraft_project::bd_parental_age(project.settings.parental_level),
     };
     let first_streams: Vec<disccraft_bdmv::mobj::NavCommand> = stream_command(
         project.settings.audio_default,
@@ -564,6 +581,13 @@ fn popup_commands(
                 .iter()
                 .enumerate()
                 .map(|(number, button)| {
+                    // M6.528: Resume on a pop-up closes it; the title under it plays on.
+                    if button.link == Link::Resume {
+                        return Ok(stream_command(button.audio, button.subtitle)
+                            .into_iter()
+                            .chain([mobj::NavCommand::popup_off()])
+                            .collect());
+                    }
                     let own = || {
                         own.get(number)
                             .cloned()
@@ -742,6 +766,13 @@ fn push_title_nav(
                     &timeline.end_action,
                     timeline.override_link.as_ref(),
                 ),
+                parental: title_parental(
+                    project,
+                    timeline.parental_level,
+                    &timeline.parental_alternative,
+                ),
+                versions: Vec::new(),
+                items: Vec::new(),
             });
         }
         TitleSource::Slideshow(id) => {
@@ -754,6 +785,9 @@ fn push_title_nav(
                 playlist: u32::from(number),
                 end_action: slideshow.end_action.clone(),
                 end_override: None,
+                parental: title_parental(project, slideshow.parental_level, &Link::NotSet),
+                versions: Vec::new(),
+                items: Vec::new(),
             });
         }
     }
@@ -761,81 +795,62 @@ fn push_title_nav(
     Ok(())
 }
 
-fn write_project_playlists(
-    project: &Project,
-    dirs: &Directories,
-    output: &mut BuildOutput,
-) -> Result<u16, BdError> {
-    let original_count = output.built.len();
+/// Project playlists (M6.555): a title each, whose movie object plays its items' titles in turn as a DVD's playlist
+/// does (`TitleNav::items`): each item asks its own parental level and plays its version for the player's age, a
+/// timeline keeps its chapters, a chapter playlist its Random or Shuffle, a slideshow its held slides. A playlist
+/// writes no PlayList of its own. Title numbers continue after the built titles; returns the next title number.
+fn write_project_playlists(project: &Project, output: &mut BuildOutput) -> Result<u16, BdError> {
     let mut next_title = u16_from_usize(
-        original_count
+        output
+            .built
+            .len()
             .checked_add(1)
             .ok_or_else(|| invalid("too many titles"))?,
         "title number",
     )?;
-    let mut next_playlist = next_title;
 
     for playlist in project.playlists.values() {
         if playlist.items.is_empty() {
             continue;
         }
-
-        let Some((items, marks, duration_90k)) = build_playlist_items(playlist, project, output)?
-        else {
+        let Some((chapters, duration_90k)) = playlist_extent(playlist, project, output)? else {
             continue;
         };
-
-        let chapters = marks.len();
-        let playlist_number = next_playlist;
-        let playlist_name = format!("{playlist_number:05}.mpls");
-        let playlist_path = dirs.playlist.join(&playlist_name);
-        let playlist_bytes = mpls::write_mpls(&mpls::PlayList {
-            items,
-            marks,
-            uo_mask: uo::uo_mask(&[&project.settings.prohibited_ops]),
-            playback: mpls::Playback::Sequential,
-        })
-        .map_err(|error| BdError::Bdmv(error.to_string()))?;
-        let playlist_size = write_bytes(&playlist_path, &playlist_bytes)?;
-        add_total(output, playlist_size)?;
-        output.backup_files.push((
-            playlist_path,
-            Path::new("PLAYLIST").join(playlist_name),
-            playlist_size,
-        ));
 
         let title_number = next_title;
         output.reports.push(BdTitleReport {
             title: title_number,
-            playlist: playlist_number,
+            playlist: 0,
             chapters,
             duration_90k,
         });
         output.navs.push(TitleNav {
-            playlist: u32::from(playlist_number),
+            playlist: 0,
             end_action: playlist.end_action.clone(),
             end_override: None,
+            parental: None,
+            versions: Vec::new(),
+            items: playlist.items.clone(),
         });
         output.playlist_titles.insert(playlist.id, title_number);
 
         next_title = next_title
             .checked_add(1)
             .ok_or_else(|| invalid("too many titles"))?;
-        next_playlist = next_playlist
-            .checked_add(1)
-            .ok_or_else(|| invalid("too many playlists"))?;
     }
 
-    Ok(next_playlist)
+    Ok(next_title)
 }
 
 /// Chapter playlists: one PlayList each, whose PlayItems are the chapter spans of the master clip in the chosen
-/// order (random and shuffle play in order on a Blu-ray). Title and playlist numbers continue from `start`.
+/// order (Random and Shuffle as the PlayList's playback type, M6.166). Title and playlist numbers continue from
+/// `start` (M6.555: apart, as the project playlists before them take titles but no playlists); returns the next
+/// playlist number.
 fn write_chapter_playlists(
     project: &Project,
     dirs: &Directories,
     output: &mut BuildOutput,
-    start: u16,
+    (mut next_title, start): (u16, u16),
 ) -> Result<u16, BdError> {
     let mut next = start;
 
@@ -877,7 +892,7 @@ fn write_chapter_playlists(
         ));
 
         output.reports.push(BdTitleReport {
-            title: number,
+            title: next_title,
             playlist: number,
             chapters,
             duration_90k,
@@ -886,14 +901,128 @@ fn write_chapter_playlists(
             playlist: u32::from(number),
             end_action: playlist.end_action.clone(),
             end_override: effective_override(&playlist.end_action, playlist.override_link.as_ref()),
+            parental: title_parental(project, playlist.parental_level, &Link::NotSet),
+            versions: Vec::new(),
+            items: Vec::new(),
         });
-        output.chapter_playlist_titles.insert(playlist.id, number);
+        output
+            .chapter_playlist_titles
+            .insert(playlist.id, next_title);
 
-        next = next
+        next_title = next_title
             .checked_add(1)
             .ok_or_else(|| invalid("too many titles"))?;
+        next = next
+            .checked_add(1)
+            .ok_or_else(|| invalid("too many playlists"))?;
     }
 
+    Ok(next)
+}
+
+/// M6.548: the playlists of the parental versions below the top one of each timeline with parental chapters (the
+/// title's chapters in order, each the master clip's span or, where the version replaces it, the whole clip of its
+/// alternative's hidden title `clips`), numbered from `start`; each title's navigation gets its versions, the top
+/// one (its own playlist) first, each with the age a player's setting must reach for it.
+fn write_parental_versions(
+    project: &Project,
+    clips: &[disccraft_project::ParentalClip],
+    dirs: &Directories,
+    output: &mut BuildOutput,
+    start: u16,
+) -> Result<u16, BdError> {
+    let mut next = start;
+    for timeline in project.timelines.values() {
+        let variants = timeline.parental_variants();
+        if variants.len() < 2 || !clips.iter().any(|clip| clip.timeline == timeline.id) {
+            continue;
+        }
+        let Some(title) = output.timeline_titles.get(&timeline.id.0).copied() else {
+            continue;
+        };
+        let age = |level: u8| disccraft_project::bd_parental_age(level).unwrap_or(0);
+        // Each version's play items and marks, read from the built clips before the playlists are written.
+        let mut lists: Vec<(u8, Vec<mpls::PlayItem>, Vec<mpls::PlayListMark>)> = Vec::new();
+        {
+            let Some(master) = built_clip(output, title)? else {
+                continue;
+            };
+            for variant in variants.iter().skip(1) {
+                let mut items = Vec::new();
+                let mut marks = Vec::new();
+                let mut duration_90k = 0_u64;
+                for chapter in 0..master.marks.len() {
+                    let replaced = timeline
+                        .parental_chapters
+                        .iter()
+                        .zip(&variant.replaced)
+                        .find(|(parental, replaced)| **replaced && parental.chapter == chapter)
+                        .and_then(|(parental, _)| {
+                            clips.iter().find(|clip| {
+                                clip.timeline == timeline.id && clip.asset == parental.alternative
+                            })
+                        });
+                    let item = match replaced {
+                        Some(clip) => {
+                            let hidden = output
+                                .timeline_titles
+                                .get(&clip.hidden.0)
+                                .copied()
+                                .ok_or_else(|| invalid("a parental alternative was not built"))?;
+                            built_clip(output, hidden)?
+                                .map(|built| built.play_item.clone())
+                                .ok_or_else(|| invalid("a parental alternative was not built"))?
+                        }
+                        None => {
+                            let chapter =
+                                u32::try_from(chapter).map_err(|_| invalid("too many chapters"))?;
+                            chapter_span_items(master, &[chapter])?
+                                .into_iter()
+                                .next()
+                                .ok_or_else(|| invalid("empty chapter"))?
+                        }
+                    };
+                    push_play_item(&mut items, &mut marks, &mut duration_90k, item)?;
+                }
+                lists.push((age(variant.levels.0), items, marks));
+            }
+        }
+        let mut versions = vec![(
+            age(variants.first().map_or(1, |variant| variant.levels.0)),
+            u32::from(title),
+        )];
+        for (version_age, items, marks) in lists {
+            let number = next;
+            let playlist_name = format!("{number:05}.mpls");
+            let playlist_path = dirs.playlist.join(&playlist_name);
+            let playlist_bytes = mpls::write_mpls(&mpls::PlayList {
+                items,
+                marks,
+                uo_mask: uo::uo_mask(&[&timeline.prohibited_ops, &project.settings.prohibited_ops]),
+                playback: mpls::Playback::Sequential,
+            })
+            .map_err(|error| BdError::Bdmv(error.to_string()))?;
+            let playlist_size = write_bytes(&playlist_path, &playlist_bytes)?;
+            add_total(output, playlist_size)?;
+            output.backup_files.push((
+                playlist_path,
+                Path::new("PLAYLIST").join(playlist_name),
+                playlist_size,
+            ));
+            versions.push((version_age, u32::from(number)));
+            next = next
+                .checked_add(1)
+                .ok_or_else(|| invalid("too many playlists"))?;
+        }
+        let index = usize::from(
+            title
+                .checked_sub(1)
+                .ok_or_else(|| invalid("invalid title number"))?,
+        );
+        if let Some(nav) = output.navs.get_mut(index) {
+            nav.versions = versions;
+        }
+    }
     Ok(next)
 }
 
@@ -958,15 +1087,14 @@ fn push_play_item(
     Ok(())
 }
 
-/// The PlayItems of a project playlist: whole clips for timelines and slideshows, the chapter spans of the
-/// master clip for chapter playlists. `None` when an item has not been built.
-fn build_playlist_items(
+/// A project playlist's chapters and length, as its items' titles play them (for the build report): a timeline's or
+/// slideshow's marks and clip, a chapter playlist's entries and their spans. `None` when an item has not been built.
+fn playlist_extent(
     playlist: &disccraft_project::Playlist,
     project: &Project,
     output: &BuildOutput,
-) -> Result<Option<(Vec<mpls::PlayItem>, Vec<mpls::PlayListMark>, u64)>, BdError> {
-    let mut items = Vec::new();
-    let mut marks = Vec::new();
+) -> Result<Option<(usize, u64)>, BdError> {
+    let mut chapters = 0_usize;
     let mut duration_90k = 0_u64;
 
     for item in &playlist.items {
@@ -982,12 +1110,8 @@ fn build_playlist_items(
                 let Some(built) = built_clip(output, title_number)? else {
                     return Ok(None);
                 };
-                push_play_item(
-                    &mut items,
-                    &mut marks,
-                    &mut duration_90k,
-                    built.play_item.clone(),
-                )?;
+                chapters = chapters.saturating_add(built.marks.len().max(1));
+                duration_90k = add_item_duration(duration_90k, &built.play_item)?;
             }
             PlaylistItem::ChapterPlaylist(id) => {
                 let Some(chapter_playlist) = project.chapter_playlists.get(id) else {
@@ -1004,13 +1128,14 @@ fn build_playlist_items(
                     return Ok(None);
                 };
                 for play_item in chapter_span_items(built, &chapter_playlist.chapters)? {
-                    push_play_item(&mut items, &mut marks, &mut duration_90k, play_item)?;
+                    chapters = chapters.saturating_add(1);
+                    duration_90k = add_item_duration(duration_90k, &play_item)?;
                 }
             }
         }
     }
 
-    Ok(Some((items, marks, duration_90k)))
+    Ok(Some((chapters, duration_90k)))
 }
 
 fn built_clip(output: &BuildOutput, title_number: u16) -> Result<Option<&BuiltClip>, BdError> {
@@ -1116,6 +1241,15 @@ fn chapter_playback(order: disccraft_project::PlaybackOrder, count: usize) -> mp
         disccraft_project::PlaybackOrder::Random => mpls::Playback::Random { count },
         disccraft_project::PlaybackOrder::Shuffle => mpls::Playback::Shuffle { count },
     }
+}
+
+/// M6.543: what a title with its own parental level `own` (`None`: the disc's, as on a DVD) asks on a Blu-ray: the
+/// age of its level ([`disccraft_project::bd_parental_age`]) and what plays in its place below it (`refused`).
+fn title_parental(project: &Project, own: Option<u8>, refused: &Link) -> Option<(u8, Link)> {
+    let level = own.unwrap_or(project.settings.parental_level);
+    disccraft_project::bd_parental_age(level)
+        .filter(|age| *age > 0)
+        .map(|age| (age, refused.clone()))
 }
 
 /// The override of a link (Encore's 上書き), when it applies: the link plays a title, and the override is set.
@@ -1408,6 +1542,32 @@ pub(crate) fn frame_rate(standard: VideoStandard) -> u8 {
 mod tests {
     use super::{frame_rate, invalid, u16_from_usize, video_format};
     use disccraft_project::VideoStandard;
+
+    /// M6.528: a pop-up's Resume button closes the pop-up (Set_PopupOff) over the playing title, after its audio and
+    /// subtitle choice; its other buttons keep the navigation's commands.
+    #[test]
+    fn a_popups_resume_closes_it() -> Result<(), Box<dyn std::error::Error>> {
+        use disccraft_bdmv::mobj::NavCommand;
+        use disccraft_project::{Link, Project};
+        let mut project = Project::default();
+        let menu = project.add_menu(Some("Pop".to_string()))?;
+        project.add_button(menu, "Back".to_string(), None, Link::Resume)?;
+        project.add_button(menu, "Stop".to_string(), None, Link::Stop)?;
+        let found = project.menu(menu).ok_or("no menu")?;
+        let own = vec![vec![NavCommand::nop()], vec![NavCommand::jump_title(1)]];
+        let navigation = super::nav::Navigation {
+            first_playback: 0,
+            top_menu: 1,
+            titles: Vec::new(),
+            objects: Vec::new(),
+            button_commands: vec![own.clone()],
+        };
+        let commands = super::popup_commands(&[found], &[0], &navigation)?;
+        let buttons = commands.first().ok_or("no page")?;
+        assert_eq!(buttons.first(), Some(&vec![NavCommand::popup_off()]));
+        assert_eq!(buttons.get(1), own.get(1));
+        Ok(())
+    }
 
     #[test]
     fn video_format_and_frame_rate() {

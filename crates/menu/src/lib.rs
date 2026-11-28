@@ -259,6 +259,13 @@ fn render(
     draw::draw_motion_layers(project, menu, width, height, &mut rgb)?;
     // A PSD shown by page draws the page's own layers over the background (M10.27).
     draw::draw_psd_page(project, menu, width, height, &mut rgb)?;
+    // Then the PSD's layers above its buttons, where its picture under them was drawn (M6.536).
+    let shared_drawn = match &menu.background {
+        disccraft_project::MenuBackground::Video { layers, .. } => layers.is_some(),
+        disccraft_project::MenuBackground::Image { .. } => pictures.background.is_none(),
+        disccraft_project::MenuBackground::Color { .. } => false,
+    };
+    draw::draw_psd_over(project, menu, (width, height), &mut rgb, shared_drawn)?;
     // A pop-up over the picture it is given (the title it pops up over): its PSD's buttons, not its background
     // (M6.407).
     if pictures.background.is_some() {
@@ -399,6 +406,12 @@ pub fn menu_background_rgb(
     });
     if !scaled {
         draw::draw_background(project, menu, width, height, &mut rgb)?;
+        // A PSD's layers above its buttons are part of its background as before (M6.536).
+        let still = matches!(
+            menu.background,
+            disccraft_project::MenuBackground::Image { .. }
+        );
+        draw::draw_psd_over(project, menu, (width, height), &mut rgb, still)?;
     }
     Ok((rgb, width, height))
 }

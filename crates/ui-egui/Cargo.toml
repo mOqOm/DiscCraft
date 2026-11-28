@@ -16,17 +16,32 @@ disccraft-menu.workspace = true
 disccraft-photo.workspace = true
 disccraft-vm.workspace = true
 egui.workspace = true
+# eframe's `Frame`, which the UI runtime takes each pass (framework::before_ui).
+eframe.workspace = true
 craft-ui.workspace = true
 craft-i18n.workspace = true
 craft-menu.workspace = true
 craft-keymap.workspace = true
-rfd.workspace = true
+craft-behavior.workspace = true
+craft-host.workspace = true
+craft-window.workspace = true
+craft-theme.workspace = true
+# M9.62: the settings file (config.toml), kept as the other Craft apps keep theirs.
+craft-settings.workspace = true
+# M9.64: native file dialogs that never hold up a frame.
+craft-dialogs.workspace = true
+# M9.65: checking for, downloading and installing a newer release.
+craft-update.workspace = true
 sys-locale.workspace = true
 cpal.workspace = true
 chrono.workspace = true
 png.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[build-dependencies]
+# M9.66: the craft-fonts faces of a build with CRAFT_FONTS_DIR; the CJK interface faces cut to the catalogs' characters.
+craft-fonts-build = { workspace = true, features = ["subset"] }
 
 [lints]
 workspace = true

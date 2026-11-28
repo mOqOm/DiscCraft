@@ -12,7 +12,7 @@ aligned in a right-justified column, and descriptions appear in small text below
 
 ![Preferences (General)](../images/en/preferences/prefs-general.png)
 
-Settings other than menus are saved to this computer's configuration (`workspace.json`) and apply to all projects. Menu
+Settings other than menus are saved to this computer's configuration (`config.toml`) and apply to all projects. Menu
 settings are saved with the project.
 
 ## 18.1 General
@@ -21,6 +21,8 @@ settings are saved with the project.
 - **Playback Quality** (High / Draft / Automatic): The image size when playing titles in the Monitor. High uses the
   disc's frame size, Draft uses half that size, and Automatic (default) halves only HD larger than 1280 × 720 (so
   1080-line titles play smoothly).
+- **Check for Updates at Startup** (default off): Asks GitHub for a newer release each time DiscCraft starts. When off,
+  DiscCraft asks only when you choose **Help ▸ Check for Updates…** ([23. Troubleshooting](23-troubleshooting.md#23-troubleshooting)).
 
 ## 18.2 Audio/Video Output
 
@@ -95,7 +97,9 @@ which computer builds it).
   convert multiple titles simultaneously, using memory for each conversion; reduce the number if you want to leave
   memory for other applications.
 - **Use the hardware encoder for HD H.264** (Windows. Selectable only when a graphics card encoder is found. Off by
-  default): Encodes Blu-ray 1080p and 720p H.264 using hardware instead of the processor.
+  default): Encodes Blu-ray 1080p and 720p H.264 using hardware instead of the processor. 1080i H.264 is encoded by
+  hardware only on an NVIDIA graphics card that can encode fields (the Blackwell generation, such as the RTX 50
+  series).
 
 > **Details**
 >
@@ -103,7 +107,9 @@ which computer builds it).
 >   size deviates from the target by more than 2% (4–6 times faster than processor 2-pass, with equal or better
 >   quality).
 > - Video matching the disc's dimensions and color space passes decoded frames directly to the encoder.
-> - 1080i, SD, and videos that fail to open or encounter errors during encoding are converted by the processor.
+> - 1080i H.264 (1440 × 1080 too) is encoded by the NVIDIA encoder, each frame as its two fields (about 2.6 times as
+>   fast as the processor, with the same quality). On cards that cannot encode fields, the processor converts it.
+> - SD and videos that fail to open or encounter errors during encoding are converted by the processor.
 > - On the command line, use the environment variable `DISCCRAFT_HARDWARE_ENCODER=1`.
 
 ## 18.8 Interface

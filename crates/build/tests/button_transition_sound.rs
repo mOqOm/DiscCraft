@@ -6,22 +6,13 @@
 
 use disccraft_build::{BuildOptions, OutputKind, build};
 use disccraft_project::{DiscKind, Link, Project};
+use disccraft_test_support::{ffmpeg, ffprobe, fixtures};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
-
 /// `seconds` of a test picture with a tone of `hertz`, as H.264 and AAC.
 fn video_with_sound(ffmpeg: &Path, name: &str, seconds: u32, hertz: u32) -> Option<PathBuf> {
-    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures");
+    let fixtures = fixtures();
     let video = fixtures.join(name);
     if video.is_file() {
         return Some(video);
@@ -97,10 +88,7 @@ fn near(hertz: f64, want: f64) -> bool {
 
 #[test]
 fn a_button_transition_keeps_its_sound() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };

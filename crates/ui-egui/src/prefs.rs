@@ -1,7 +1,7 @@
 //! 環境設定ダイアログ（Encore と同じ形。編集 ▸ 環境設定、Ctrl+K。[docs/ui-parity.md](../../../docs/ui-parity.md) §3.5）。
 //!
 //! 左に分類の一覧、右にその設定を置く。「一般」はテレビ方式の初期設定（新規プロジェクトの既定）、
-//! 「表示方法」は表示言語。設定は `workspace.json` に保存する。
+//! 「表示方法」は表示言語。設定は `config.toml` に保存する（M9.62。前は `workspace.json`）。
 //!
 //! M6.512: 並べ方はほかの Craft アプリの環境設定（FilmCraft）と同じ: 角の丸い枠と上の題名の帯、左は枠のある一覧で
 //! 選んだ行を行の幅いっぱいに塗る、右はラベルを右寄せにした列とそろった入力欄、説明は薄く小さい文字で入力欄の列に、
@@ -358,6 +358,24 @@ impl DiscCraftApp {
                 "How large the Monitor plays a title's pictures: High at full size, Draft at half, Automatic at half only for HD larger than 1280 × 720."
             ),
         );
+        // M9.65: off until the user turns it on; Help ▸ Check for Updates… asks at any time.
+        let mut at_start = crate::workspace::load_check_updates_at_start();
+        let toggled = field(ui, "", |ui| {
+            ui.checkbox(&mut at_start, tl!("Check for updates at startup"))
+                .changed()
+        });
+        note(
+            ui,
+            tl!(
+                "Asks GitHub for a newer release each time DiscCraft starts. Off: DiscCraft asks only when you choose Help ▸ Check for Updates…."
+            ),
+        );
+        if toggled {
+            match crate::workspace::save_check_updates_at_start(at_start) {
+                Ok(()) => self.updates.set_startup_check(at_start),
+                Err(error) => self.status = error,
+            }
+        }
     }
 
     /// 「タイムライン」（Encore: 静止画デュレーション / 字幕デュレーション / オーディオの言語 / 字幕の言語）。
@@ -530,11 +548,12 @@ impl DiscCraftApp {
     fn prefs_media(&mut self, ui: &mut Ui) {
         // One place, in a group of its own: where it is, Browse… to choose another, Default to go back, Show in
         // Explorer (and `more`, the group's other buttons). Returns the change asked for: `Some(None)` is back to
-        // the default.
+        // the default. Browse… asks for the folder, which comes to `browse` on a later frame (M9.64).
         let folder_group = |app: &mut Self,
                             ui: &mut Ui,
                             title: &str,
                             (folder, is_default): (Option<std::path::PathBuf>, bool),
+                            browse: crate::file_dialogs::Then,
                             more: &mut dyn FnMut(&mut Self, &mut Ui)|
          -> Option<Option<std::path::PathBuf>> {
             let mut change = None;
@@ -562,13 +581,11 @@ impl DiscCraftApp {
                         .add(crate::theme::dialog_button(tl!("Browse…")))
                         .clicked()
                     {
-                        let mut dialog = rfd::FileDialog::new();
+                        let mut dialog = craft_dialogs::FileDialog::folder();
                         if let Some(folder) = folder.as_ref().filter(|folder| folder.is_dir()) {
-                            dialog = dialog.set_directory(folder);
+                            dialog = dialog.directory(folder);
                         }
-                        if let Some(chosen) = dialog.pick_folder() {
-                            change = Some(Some(chosen));
-                        }
+                        crate::file_dialogs::ask(dialog, browse.clone());
                     }
                     if ui
                         .add_enabled(!is_default, crate::theme::dialog_button(tl!("Default")))
@@ -600,6 +617,7 @@ impl DiscCraftApp {
             ui,
             tl!("Library Content"),
             (library, is_default),
+            crate::file_dialogs::Then::LibraryContentFolder,
             &mut |_, _| {},
         ) {
             self.move_library(chosen.as_deref());
@@ -627,24 +645,30 @@ impl DiscCraftApp {
             ui,
             tl!("Media Cache Database"),
             (cache, is_default),
+            crate::file_dialogs::Then::MediaCacheFolder,
             &mut clean,
         ) {
-            match crate::workspace::save_media_cache_dir(chosen.as_deref()) {
-                Ok(()) => {
-                    // From now on what is learnt of media files is kept there (what the folder already holds
-                    // is used; the old folder is left as it is).
-                    if let Some(dir) = crate::workspace::media_cache_dir() {
-                        disccraft_engine::enable_media_cache(&dir);
-                    }
+            self.set_media_cache_dir(chosen.as_deref());
+        }
+    }
+
+    /// Keeps what is learnt of media files in `folder` (`None`: the default place).
+    pub(crate) fn set_media_cache_dir(&mut self, folder: Option<&std::path::Path>) {
+        match crate::workspace::save_media_cache_dir(folder) {
+            Ok(()) => {
+                // From now on what is learnt of media files is kept there (what the folder already holds
+                // is used; the old folder is left as it is).
+                if let Some(dir) = crate::workspace::media_cache_dir() {
+                    disccraft_engine::enable_media_cache(&dir);
                 }
-                Err(error) => self.status = error,
             }
+            Err(error) => self.status = error,
         }
     }
 
     /// Puts the library content in `folder` (`None`: back beside the settings). A folder that has a library
     /// already is opened as it is; an empty one gets the items the library has now.
-    fn move_library(&mut self, folder: Option<&std::path::Path>) {
+    pub(crate) fn move_library(&mut self, folder: Option<&std::path::Path>) {
         if let Err(error) = crate::workspace::save_library_dir(folder) {
             self.status = error;
             return;

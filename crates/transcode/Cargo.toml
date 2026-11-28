@@ -18,15 +18,22 @@ disccraft-m2tsmux.workspace = true
 disccraft-dv.workspace = true
 # The AC-3 decoder: a raw .ac3 file is decoded for the monitor's sound and its waveform (never for the disc).
 craft-audio = { workspace = true, features = ["ac3-decode"] }
-craft-media.workspace = true
+# `ogg`: the Theora stream of an Ogg file (M6.567).
+craft-media = { workspace = true, features = ["ogg"] }
 # Inflates the zlib-compressed subtitle tracks of a Matroska file (M6.422).
 miniz_oxide.workspace = true
+# PNG frames in a MOV, an AVI or a Matroska file (M6.561): each frame a whole PNG image.
+png.workspace = true
+# FFV1 (M6.562) and H.263 (M6.563): the media reader lists them but has no decoder for them.
+disccraft-ffv1.workspace = true
+disccraft-h263.workspace = true
 filmcraft-media.workspace = true
 filmcraft-codecs.workspace = true
 filmcraft-frame.workspace = true
 filmcraft-color.workspace = true
 filmcraft-time.workspace = true
-craft-video = { workspace = true, features = ["h264-encode"] }
+# Hap, uncompressed 10-bit RGB and Theora (M6.567): the media reader lists them but has no decoder for them.
+craft-video = { workspace = true, features = ["h264-encode", "hap", "rawvideo", "theora-decode"] }
 thiserror.workspace = true
 rayon.workspace = true
 
@@ -35,6 +42,10 @@ rayon.workspace = true
 # by default (M12.45): left out of the published programs until the patent check of AGENTS.md rule 6; without it an
 # HEVC transcode is refused. `cargo test -p disccraft-transcode --features hevc` runs its tests.
 hevc = ["craft-video/hevc-encode"]
+
+[dev-dependencies]
+# Where ffmpeg, ffprobe and the fixtures are for the tests that compare with them (M9.67).
+disccraft-test-support.workspace = true
 
 [lints]
 workspace = true

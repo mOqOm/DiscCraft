@@ -48,28 +48,153 @@ const LAYOUTS: [(u8, &[u32]); 11] = [
     (11, &[FL, FR, FC, SL, BL, BR, SR, LFE]),
 ];
 
-/// The speakers of a WAV's `channels` when the file names none: the usual ones of that count (none for seven,
-/// whose usual layouts differ).
+/// The speakers of a WAV's `channels` when the file names none: the usual ones of that count (seven: 6.1, M6.544).
 fn usual_speakers(channels: u8) -> Option<u32> {
     match channels {
         3 => Some(FL | FR | FC),
         4 => Some(FL | FR | BL | BR),
         5 => Some(FL | FR | FC | BL | BR),
         6 => Some(FL | FR | FC | LFE | BL | BR),
+        7 => Some(FL | FR | FC | LFE | BC | SL | SR),
         8 => Some(FL | FR | FC | LFE | BL | BR | SL | SR),
         _ => None,
     }
 }
 
+/// Where a channel of a BD LPCM stream comes from (M6.544).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LpcmSource {
+    /// The WAV's channel, as it is.
+    Channel(usize),
+    /// The WAV's channel 3 dB down (one channel shared by two speakers).
+    Halved(usize),
+    /// Silence (a speaker the WAV has no channel for).
+    Silent,
+}
+
+/// Speakers the assignments do not have, put on one that does (M6.544): 2.1, 3.1, 2/1 and 3/1 with LFE and 4.1 on
+/// 3/2 with LFE (9), the missing speakers silent and a single surround shared by both, 3 dB down; 6.1 on 3/4 with
+/// LFE (11), its back centre shared by both back speakers, 3 dB down. Each: the WAV's speakers, the code, and each
+/// stream channel's speaker (0: silent) with whether it is shared.
+const EXTRA_LAYOUTS: [(u32, u8, &[(u32, bool)]); 8] = [
+    (
+        FL | FR | LFE,
+        9,
+        &[
+            (FL, false),
+            (FR, false),
+            (0, false),
+            (0, false),
+            (0, false),
+            (LFE, false),
+        ],
+    ),
+    (
+        FL | FR | FC | LFE,
+        9,
+        &[
+            (FL, false),
+            (FR, false),
+            (FC, false),
+            (0, false),
+            (0, false),
+            (LFE, false),
+        ],
+    ),
+    (
+        FL | FR | BC | LFE,
+        9,
+        &[
+            (FL, false),
+            (FR, false),
+            (0, false),
+            (BC, true),
+            (BC, true),
+            (LFE, false),
+        ],
+    ),
+    (
+        FL | FR | FC | BC | LFE,
+        9,
+        &[
+            (FL, false),
+            (FR, false),
+            (FC, false),
+            (BC, true),
+            (BC, true),
+            (LFE, false),
+        ],
+    ),
+    (
+        FL | FR | BL | BR | LFE,
+        9,
+        &[
+            (FL, false),
+            (FR, false),
+            (0, false),
+            (BL, false),
+            (BR, false),
+            (LFE, false),
+        ],
+    ),
+    (
+        FL | FR | SL | SR | LFE,
+        9,
+        &[
+            (FL, false),
+            (FR, false),
+            (0, false),
+            (SL, false),
+            (SR, false),
+            (LFE, false),
+        ],
+    ),
+    (
+        FL | FR | FC | LFE | BC | SL | SR,
+        11,
+        &[
+            (FL, false),
+            (FR, false),
+            (FC, false),
+            (SL, false),
+            (BC, true),
+            (BC, true),
+            (SR, false),
+            (LFE, false),
+        ],
+    ),
+    (
+        FL | FR | FC | LFE | BL | BR | BC,
+        11,
+        &[
+            (FL, false),
+            (FR, false),
+            (FC, false),
+            (BL, false),
+            (BC, true),
+            (BC, true),
+            (BR, false),
+            (LFE, false),
+        ],
+    ),
+];
+
+/// The WAV channel of speaker `speaker` among `mask`'s (a WAV's channels are in the order of their speakers' bits).
+fn wav_channel(mask: u32, speaker: u32) -> Option<usize> {
+    usize::try_from((mask & speaker.wrapping_sub(1)).count_ones()).ok()
+}
+
 /// The BD LPCM channel assignment of a WAV's `channels` on speakers `mask` (its `dwChannelMask`; 0, or a mask of
-/// another count, for the usual ones), and for each channel of the stream, in the stream's order, the WAV channel
-/// it is. One channel is mono and two stereo whatever their speakers. `None` for speakers no assignment has (2.1,
-/// 4.1, 6.1, seven channels that name none).
+/// another count, for the usual ones), and for each channel of the stream, in the stream's order, where it comes
+/// from. One channel is mono and two stereo whatever their speakers. Speakers no assignment has (2.1, 4.1, 6.1 …)
+/// go on a larger one ([`EXTRA_LAYOUTS`], M6.544). `None` for others.
 #[must_use]
-pub fn bd_lpcm_layout(channels: u8, mask: u32) -> Option<(u8, Vec<usize>)> {
+pub fn bd_lpcm_layout(channels: u8, mask: u32) -> Option<(u8, Vec<LpcmSource>)> {
     match channels {
-        1 => return Some((1, vec![0])),
-        2 => return Some((3, vec![0, 1])),
+        1 => return Some((1, vec![LpcmSource::Channel(0)])),
+        2 => {
+            return Some((3, vec![LpcmSource::Channel(0), LpcmSource::Channel(1)]));
+        }
         _ => {}
     }
     let mask = if mask.count_ones() == u32::from(channels) {
@@ -77,15 +202,50 @@ pub fn bd_lpcm_layout(channels: u8, mask: u32) -> Option<(u8, Vec<usize>)> {
     } else {
         usual_speakers(channels)?
     };
-    let (code, speakers) = LAYOUTS
+    if let Some((code, speakers)) = LAYOUTS
         .iter()
-        .find(|(_, speakers)| speakers.iter().fold(0, |all, speaker| all | speaker) == mask)?;
-    // A WAV's channels are in the order of their speakers' bits.
-    let order = speakers
+        .find(|(_, speakers)| speakers.iter().fold(0, |all, speaker| all | speaker) == mask)
+    {
+        let order = speakers
+            .iter()
+            .map(|speaker| wav_channel(mask, *speaker).map(LpcmSource::Channel))
+            .collect::<Option<Vec<_>>>()?;
+        return Some((*code, order));
+    }
+    let (_, code, slots) = EXTRA_LAYOUTS
         .iter()
-        .map(|speaker| usize::try_from((mask & speaker.wrapping_sub(1)).count_ones()).ok())
+        .find(|(speakers, _, _)| *speakers == mask)?;
+    let order = slots
+        .iter()
+        .map(|(speaker, shared)| match (*speaker, *shared) {
+            (0, _) => Some(LpcmSource::Silent),
+            (speaker, false) => wav_channel(mask, speaker).map(LpcmSource::Channel),
+            (speaker, true) => wav_channel(mask, speaker).map(LpcmSource::Halved),
+        })
         .collect::<Option<Vec<_>>>()?;
     Some((*code, order))
+}
+
+/// The channels a BD LPCM stream of a WAV's `channels` on speakers `mask` stores (an even count; M6.544: a layout
+/// put on a larger assignment stores its channels); `None` when it has no assignment.
+#[must_use]
+pub fn bd_lpcm_stored(channels: u8, mask: u32) -> Option<u8> {
+    let (_, order) = bd_lpcm_layout(channels, mask)?;
+    u8::try_from(order.len().max(2).next_multiple_of(2)).ok()
+}
+
+/// Appends the big-endian signed sample `sample` (2 or 3 bytes) 3 dB down (× 0.7071, rounded).
+fn push_halved(out: &mut Vec<u8>, sample: &[u8]) {
+    let value = sample
+        .iter()
+        .fold(0i32, |value, byte| (value << 8) | i32::from(*byte));
+    // Sign-extend from the sample's width.
+    let shift = 32 - 8 * i32::try_from(sample.len()).unwrap_or(4);
+    let value = (value << shift) >> shift;
+    // `as` after rounding a value inside the sample's range.
+    let scaled = (f64::from(value) * std::f64::consts::FRAC_1_SQRT_2).round() as i32;
+    let bytes = scaled.to_be_bytes();
+    out.extend_from_slice(bytes.get(4 - sample.len()..).unwrap_or_default());
 }
 
 /// What a BD LPCM unit's header says (M6.366: the sound of a transport stream is read back as a WAV).
@@ -176,7 +336,7 @@ pub fn bd_lpcm_units_of(
         24 => (3, 3),
         _ => return Err(M2tsError("BD LPCM is 16 or 24 bits".to_string())),
     };
-    let stored = usize::from(channels.max(2).next_multiple_of(2));
+    let stored = order.len().max(2).next_multiple_of(2);
     let stored_bits = u64::from(sample_rate) * u64::from(bits) * stored as u64;
     if stored_bits > MAX_BITRATE {
         return Err(M2tsError("BD LPCM is at most 27.648 Mbit/s".to_string()));
@@ -184,7 +344,8 @@ pub fn bd_lpcm_units_of(
     // What a unit holds: its frames of the stored channels.
     let unit_payload = frames_per_unit * stored * sample_bytes;
 
-    let frame_bytes = usize::from(channels) * sample_bytes;
+    let channel_count = usize::from(channels);
+    let frame_bytes = channel_count * sample_bytes;
 
     if !samples.len().is_multiple_of(frame_bytes) {
         return Err(M2tsError(
@@ -196,10 +357,11 @@ pub fn bd_lpcm_units_of(
     let unit_count = total_frames.div_ceil(frames_per_unit);
     let header = bd_header(assignment, unit_payload, rate_code, bits_code)?;
     // Channels in the WAV's order need no reordering.
-    let in_order = order
-        .iter()
-        .enumerate()
-        .all(|(slot, channel)| slot == *channel);
+    let in_order = order.len() == channel_count
+        && order
+            .iter()
+            .enumerate()
+            .all(|(slot, source)| *source == LpcmSource::Channel(slot));
     let silent = vec![0_u8; (stored - order.len()) * sample_bytes];
 
     let mut units = Vec::with_capacity(unit_count);
@@ -220,9 +382,16 @@ pub fn bd_lpcm_units_of(
             data.extend_from_slice(chunk);
         } else {
             for frame in chunk.chunks_exact(frame_bytes) {
-                for channel in &order {
-                    let at = channel * sample_bytes;
-                    data.extend_from_slice(frame.get(at..at + sample_bytes).unwrap_or_default());
+                for source in &order {
+                    let sample = |channel: usize| {
+                        let at = channel * sample_bytes;
+                        frame.get(at..at + sample_bytes).unwrap_or_default()
+                    };
+                    match *source {
+                        LpcmSource::Channel(channel) => data.extend_from_slice(sample(channel)),
+                        LpcmSource::Halved(channel) => push_halved(&mut data, sample(channel)),
+                        LpcmSource::Silent => data.extend(std::iter::repeat_n(0, sample_bytes)),
+                    }
                 }
                 data.extend_from_slice(&silent);
             }
@@ -279,7 +448,7 @@ fn unit_pts(start_pts: u64, index: usize) -> Result<u64, M2tsError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BC, BL, BR, FC, FL, FR, SL, SR, bd_lpcm_units};
+    use super::{BC, BL, BR, FC, FL, FR, LFE, SL, SR, bd_lpcm_layout, bd_lpcm_units};
     use crate::M2tsError;
 
     /// M6.366: a header written for a WAV is read back as that WAV's channels, rate and sample size.
@@ -315,7 +484,12 @@ mod tests {
             // The stream's channel i is the WAV's channel the writer took it from.
             let (_, order) =
                 bd_lpcm_layout(channels, mask).ok_or_else(|| M2tsError("no layout".to_string()))?;
-            assert_eq!(read.wav_order, order, "{channels}");
+            let wanted: Vec<super::LpcmSource> = read
+                .wav_order
+                .iter()
+                .map(|channel| super::LpcmSource::Channel(*channel))
+                .collect();
+            assert_eq!(wanted, order, "{channels}");
         }
         assert_eq!(read_bd_lpcm_header(&[0, 0, 0x30, 0x40]), None);
         assert_eq!(read_bd_lpcm_header(&[0, 0, 0x21, 0x40]), None);
@@ -346,9 +520,9 @@ mod tests {
         // What a Blu-ray's stream here does not hold.
         assert!(bd_lpcm_units_of(&[0; 12], 2, 0, (20, 48_000), 0).is_err());
         assert!(bd_lpcm_units_of(&[0; 12], 2, 0, (16, 44_100), 0).is_err());
-        // Seven channels that name no speakers, and 2.1, have no assignment.
-        assert!(bd_lpcm_units_of(&[0; 14], 7, 0, (16, 48_000), 0).is_err());
-        assert!(bd_lpcm_units_of(&[0; 6], 3, 0b1011, (16, 48_000), 0).is_err());
+        // Speakers no assignment takes, even on a larger one (front centre and LFE only).
+        assert!(bd_lpcm_units_of(&[0; 4], 2, 0, (16, 48_000), 0).is_ok());
+        assert!(bd_lpcm_layout(3, FC | LFE | BC).is_none());
         // Eight channels of 24 bits at 192 kHz are past 27.648 Mbit/s.
         assert!(bd_lpcm_units_of(&[0; 24], 8, 0, (24, 192_000), 0).is_err());
         Ok(())
@@ -358,7 +532,7 @@ mod tests {
     /// silent channel more; 192 kHz units are 960 sample frames.
     #[test]
     fn channels_go_in_the_streams_order() -> Result<(), M2tsError> {
-        use super::{bd_lpcm_layout, bd_lpcm_units_of};
+        use super::{LpcmSource::Channel, bd_lpcm_layout, bd_lpcm_units_of};
         // 16-bit samples: channel n's sample is n + 1.
         let frame = |channels: u16| -> Vec<u8> {
             (1..=channels)
@@ -387,21 +561,86 @@ mod tests {
         assert_eq!(units[0].data[2], 0xB1);
         assert_eq!(values(&units[0].data, 8), [1, 2, 3, 7, 5, 6, 8, 4]);
         // The other assignments by the speakers a file names.
-        assert_eq!(bd_lpcm_layout(3, FL | FR | BC), Some((5, vec![0, 1, 2])));
+        let channels = |order: &[usize]| {
+            order
+                .iter()
+                .map(|channel| Channel(*channel))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            bd_lpcm_layout(3, FL | FR | BC),
+            Some((5, channels(&[0, 1, 2])))
+        );
         assert_eq!(
             bd_lpcm_layout(4, FL | FR | FC | BC),
-            Some((6, vec![0, 1, 2, 3]))
+            Some((6, channels(&[0, 1, 2, 3])))
         );
-        assert_eq!(bd_lpcm_layout(4, 0), Some((7, vec![0, 1, 2, 3])));
-        assert_eq!(bd_lpcm_layout(5, 0), Some((8, vec![0, 1, 2, 3, 4])));
+        assert_eq!(bd_lpcm_layout(4, 0), Some((7, channels(&[0, 1, 2, 3]))));
+        assert_eq!(bd_lpcm_layout(5, 0), Some((8, channels(&[0, 1, 2, 3, 4]))));
         assert_eq!(
             bd_lpcm_layout(7, FL | FR | FC | BL | BR | SL | SR),
-            Some((10, vec![0, 1, 2, 5, 3, 4, 6]))
+            Some((10, channels(&[0, 1, 2, 5, 3, 4, 6])))
         );
         // 192 kHz stereo: 960 frames of 4 bytes, sampling frequency code 5.
         let units = bd_lpcm_units_of(&[0; 4], 2, 0, (16, 192_000), 0)?;
         assert_eq!(&units[0].data[..4], &[0x0F, 0x00, 0x35, 0x40]);
         assert_eq!(units[0].data.len(), 4 + 3840);
+        Ok(())
+    }
+
+    /// M6.544: speakers no assignment has go on a larger one: 2.1 and 4.1 on 3/2 with LFE (the missing speakers
+    /// silent), 6.1 on 3/4 with LFE (the back centre in both back speakers, 3 dB down), a lone surround in both
+    /// surrounds 3 dB down; seven channels that name none are 6.1. The stream stores the larger layout's channels.
+    #[test]
+    fn layouts_without_an_assignment_go_on_a_larger_one() -> Result<(), M2tsError> {
+        use super::{bd_lpcm_stored, bd_lpcm_units_of};
+        // 16-bit samples: channel n's sample is 1000 × (n + 1).
+        let frame = |channels: i16| -> Vec<u8> {
+            (1..=channels)
+                .flat_map(|channel| (channel * 1000).to_be_bytes())
+                .collect()
+        };
+        let values = |data: &[u8], count: usize| -> Vec<i16> {
+            data[4..4 + 2 * count]
+                .chunks(2)
+                .map(|pair| i16::from_be_bytes([pair[0], pair[1]]))
+                .collect()
+        };
+        // 2.1 (FL FR LFE): L R, silent C Ls Rs, LFE; assignment 9.
+        let units = bd_lpcm_units_of(&frame(3), 3, FL | FR | LFE, (16, 48_000), 0)?;
+        assert_eq!(units[0].data[2] >> 4, 9);
+        assert_eq!(values(&units[0].data, 6), [1000, 2000, 0, 0, 0, 3000]);
+        assert_eq!(units[0].data.len(), 4 + 240 * 6 * 2);
+        // 4.1 (FL FR LFE BL BR): L R, silent C, Ls Rs, LFE.
+        let units = bd_lpcm_units_of(&frame(5), 5, FL | FR | LFE | BL | BR, (16, 48_000), 0)?;
+        assert_eq!(values(&units[0].data, 6), [1000, 2000, 0, 4000, 5000, 3000]);
+        // 6.1 (FL FR FC LFE BC SL SR): L R C Ls, BC in both backs 3 dB down, Rs, LFE; assignment 11. Unnamed seven
+        // channels are the same.
+        for mask in [FL | FR | FC | LFE | BC | SL | SR, 0] {
+            let units = bd_lpcm_units_of(&frame(7), 7, mask, (16, 48_000), 0)?;
+            assert_eq!(units[0].data[2] >> 4, 11);
+            assert_eq!(
+                values(&units[0].data, 8),
+                [1000, 2000, 3000, 6000, 3536, 3536, 7000, 4000]
+            );
+        }
+        // 2/1 with LFE (FL FR LFE BC): the surround in both, 3 dB down; a negative 24-bit sample stays negative.
+        let sample = (-800_000i32).to_be_bytes();
+        let mut frame24 = Vec::new();
+        for value in [100i32, 200, 300] {
+            frame24.extend_from_slice(&value.to_be_bytes()[1..]);
+        }
+        frame24.extend_from_slice(&sample[1..]);
+        let units = bd_lpcm_units_of(&frame24, 4, FL | FR | LFE | BC, (24, 48_000), 0)?;
+        let at = |slot: usize| {
+            let bytes = &units[0].data[4 + 3 * slot..7 + 3 * slot];
+            (i32::from_be_bytes([bytes[0], bytes[1], bytes[2], 0])) >> 8
+        };
+        assert_eq!((at(0), at(1), at(2), at(5)), (100, 200, 0, 300));
+        assert_eq!((at(3), at(4)), (-565_685, -565_685));
+        assert_eq!(bd_lpcm_stored(3, FL | FR | LFE), Some(6));
+        assert_eq!(bd_lpcm_stored(7, 0), Some(8));
+        assert_eq!(bd_lpcm_stored(3, 0), Some(4));
         Ok(())
     }
 

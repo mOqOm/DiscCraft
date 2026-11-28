@@ -5,14 +5,14 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use disccraft_test_support::fixtures;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// One test: the cache folder and the index store are the process's.
 #[test]
 fn matroska_indexes_are_kept_in_the_cache() {
-    let fixture =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/h264_1080i.mkv");
+    let fixture = fixtures().join("h264_1080i.mkv");
     if !fixture.is_file() {
         eprintln!("h264_1080i.mkv fixture not found; skipping");
         return;

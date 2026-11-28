@@ -20,6 +20,7 @@
 	Saved: {path}	保存しました: {path}
 	Save cancelled	保存をキャンセルしました
 	Import cancelled	読み込みをキャンセルしました
+	The file dialog could not be shown: {why}	ファイルのダイアログを出せませんでした: {why}
 	Created a new project	新規プロジェクトを作成しました
 	DiscCraft started	DiscCraft を起動しました
 
@@ -181,7 +182,7 @@
 	Timeline: {name}	タイムライン: {name}
 	Playhead: {time}	再生ヘッド: {time}
 	Duration: {time}	長さ: {time}
-	Drag onto a menu, timeline, slideshow or playlist in the Project panel to link it	プロジェクトパネル内のメニュー、タイムライン、スライドショーまたはプレイリストにドラッグしてリンクします
+	Drag onto an item in the Project panel, a box in the Flowchart, a button in the Menu Viewer or a chapter marker to link it	プロジェクトパネルの項目、フローチャートの箱、メニュービューアーのボタン、チャプターマーカーへドラッグしてリンクする
 	New Timeline	新規タイムライン
 	Select a video asset in the Project panel first	先にプロジェクトパネルでビデオアセットを選択してください
 	Slideshow	スライドショー
@@ -430,9 +431,35 @@
 	VIDEO_TS folder / ISO: MPEG-2, AC-3, LPCM, DTS (as it is), subpictures	VIDEO_TS フォルダー / ISO: MPEG-2、AC-3、LPCM、DTS (そのまま)、サブピクチャ
 	BDMV folder / ISO: MPEG-2 (SD), H.264 1080p / 720p, AC-3, LPCM, PG subtitles, IG menus	BDMV フォルダー / ISO: MPEG-2 (SD)、H.264 1080p / 720p、AC-3、LPCM、PG 字幕、IG メニュー
 	Copies the report, to paste into a problem report.	不具合の報告に貼り付けられるよう、レポートをコピーします。
-	This version: {version}	このバージョン: {version}
-	DiscCraft does not look for updates by itself. New releases are published on GitHub.	DiscCraft は自分では更新を探しません。新しいリリースは GitHub で公開しています。
-	Open the Releases on GitHub	GitHub のリリースを開く
+	Update available	更新があります
+	{app} {version} is available. You have {running}.	{app} {version} を入手できます。お使いの版は {running} です。
+	Update and Restart	更新して再起動
+	Restart to Update	再起動して更新
+	Save and Update	保存して更新
+	Saving your work…	作業を保存しています…
+	All releases are listed at	すべてのリリースの一覧:
+	by {developer}	作成: {developer}
+	Installing…	インストールしています…
+	Checking for updates…	更新を確認しています…
+	{app} {running} is the newest version.	{app} {running} は最新の版です。
+	The update check failed.	更新を確認できませんでした。
+	GitHub's request limit was reached. Try again later.	GitHub への問い合わせの上限に達しました。しばらくしてからもう一度お試しください。
+	Check Again	もう一度確認
+	Check Now	今すぐ確認
+	Updates have not been checked yet.	まだ更新を確認していません。
+	Cannot auto-update this installation type. Please download manually.	この種類のインストールは自動では更新できません。ダウンロードしてインストールしてください。
+	Release Notes	リリースノート
+	Update ready. Close {app} to install it.	更新の準備ができました。{app} を閉じるとインストールします。
+	The update is installed. Close {app} to finish; it restarts by itself.	更新をインストールしました。{app} を閉じると仕上げて、自動で起動し直します。
+	{app} {running} follows the version chosen in the launcher, so it does not update itself.	{app} {running} はランチャーで選んだ版を使うため、自分では更新しません。
+	{app} updated to {version}.	{app} を {version} に更新しました。
+	The update could not be installed: {reason}	更新をインストールできませんでした: {reason}
+	Couldn't start the update ({error})	更新を始められませんでした（{error}）
+	Save or close your open work first; the update restarts the app.	先に開いている作業を保存するか閉じてください。更新するとアプリが起動し直します。
+	The update failed unexpectedly.	更新が思わぬところで失敗しました。
+	The update stopped unexpectedly.	更新が思わぬところで止まりました。
+	Check for updates at startup	起動時に更新を確認する
+	Asks GitHub for a newer release each time DiscCraft starts. Off: DiscCraft asks only when you choose Help ▸ Check for Updates….	DiscCraft を起動するたびに、GitHub に新しいリリースがないかを問い合わせます。切っているときは、ヘルプ ▸ 更新を確認… を選んだときだけ問い合わせます。
 	Add Audio Track	オーディオトラックを追加
 	Add Subtitle Track	字幕トラックを追加
 	Asset:	アセット:
@@ -822,6 +849,7 @@
 	Previous Clip	前のクリップ
 	Next Clip	次のクリップ
 	Cannot arrange the panels: {error}	パネルを配置できません: {error}
+	Drag the tab to move the panel	パネルを移すには、タブをドラッグしてください
 	Too many workspaces; delete one first.	ワークスペースが多すぎます。先に 1 つ削除してください。
 	A workspace with this name is replaced.	この名前のワークスペースは置き換えられます。
 	Reset “{name}”	「{name}」をリセット
@@ -1666,6 +1694,11 @@ xmp:tiff	Copyright	著作権
 	What the disc adds to the video and sound: the headers of its packs and a navigation pack every half second	ディスクがビデオと音声に足すもの: パックのヘッダーと、0.5 秒ごとのナビゲーションパック
 	Arrows and Enter of the remote	リモコンの矢印と決定
 	Last built image: {name}	最後にビルドしたイメージ: {name}
+	No matches	一致するものはありません
+	Link Back to Here	この項目へ戻る
+	The end action is Resume, which only a menu can do: playback stops here.	終了時の動作が再開ですが、再開できるのはメニューだけです。ここで再生が止まります。
+	Resume does nothing here: no title's Menu button nor the Title button shows this menu.	ここでは再開は何もしません。このメニューを出すタイトルのメニューボタンもタイトルボタンもありません。
+	Drag onto an asset in the Project panel to use it	プロジェクトパネルのアセットへドラッグして使う
 
 # Command names (the Edit menu's Undo / Redo and History, the command list)
 	Add Audio Clip	オーディオクリップを追加
@@ -1871,3 +1904,6 @@ xmp:tiff	Copyright	著作権
 	Quit	終了
 	Bring All to Front	すべてを手前に移動
 	Close Window	ウィンドウを閉じる
+	Parental Control	視聴制限
+	A Blu-ray player whose parental age is below the level's does not play the disc (levels 1 to 8: all ages, 6, 10, 13, 15, 17, 18 and 21)	プレーヤーの視聴制限の年齢がこのレベルの年齢に届かないと、ディスクは再生されない（レベル 1〜8: 全年齢・6・10・13・15・17・18・21 歳）
+	A Blu-ray player whose parental age is below the level's does not play the title (levels 1 to 8: all ages, 6, 10, 13, 15, 17, 18 and 21)	プレーヤーの視聴制限の年齢がこのレベルの年齢に届かないと、タイトルは再生されない（レベル 1〜8: 全年齢・6・10・13・15・17・18・21 歳）

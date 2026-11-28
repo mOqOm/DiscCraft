@@ -17,8 +17,10 @@ use craft_video::h264::{
 use filmcraft_frame::VideoFrame;
 use filmcraft_time::Tick;
 
+use crate::plane_colour::{PlanePicture, colour_map, plane_picture};
 use crate::source::Source;
 use crate::{TICKS_PER_SECOND, TranscodeError, io_error};
+use std::borrow::Cow;
 
 /// HD encoding settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +158,9 @@ pub struct HardwareConfig {
     pub slices: u32,
     /// The shape of a pixel (the VUI's sample aspect ratio).
     pub sar: (u32, u32),
+    /// M12.51: `Some(top_first)` for an interlaced format's H.264: each frame (its two fields interleaved) coded as
+    /// two field pictures, the top one first or not; `None` for progressive frames.
+    pub fields: Option<bool>,
 }
 
 /// Makes a [`HardwareVideo`] encoder for an HD stream, or says why it cannot.
@@ -164,10 +169,10 @@ pub type HardwareFactory = fn(&HardwareConfig) -> Result<Box<dyn HardwareVideo>,
 static HARDWARE: std::sync::RwLock<Option<HardwareFactory>> = std::sync::RwLock::new(None);
 
 /// Uses `factory`'s hardware encoders for the HD H.264 (M12.40) and HEVC (M12.44) the transcodes make, or none
-/// (`None`, the default): progressive formats in one pass (VBR or CBR; HEVC is always one pass), and a two-pass H.264 as
-/// the encoder's one pass and, when its size came out off the target, once more at a corrected average (M12.47); an
-/// interlaced format stays on the CPU, and so does a video whose hardware encode cannot start or fails (it is encoded
-/// again on the CPU).
+/// (`None`, the default): one pass (VBR or CBR; HEVC is always one pass), and a two-pass H.264 as the encoder's one pass
+/// and, when its size came out off the target, once more at a corrected average (M12.47); an interlaced format's H.264
+/// as fields (M12.51: [`HardwareConfig::fields`], which only some encoders take); a video whose hardware encode cannot
+/// start or fails is encoded again on the CPU.
 pub fn set_hardware_encoder(factory: Option<HardwareFactory>) {
     if let Ok(mut slot) = HARDWARE.write() {
         *slot = factory;
@@ -204,7 +209,11 @@ fn second_pass_mean(first_mean: u32, max: u32, target: u64, written: u64) -> Opt
 
 /// The hardware encoder's settings for `options`: the CPU's GOP, slices and pixel shape; 90 % of the target as the
 /// average (a hardware encoder overshot it by about a tenth on detailed pictures, M12.39).
-fn hardware_config(options: &HdOptions, codec: HardwareCodec) -> HardwareConfig {
+fn hardware_config(
+    options: &HdOptions,
+    codec: HardwareCodec,
+    kept: Option<bool>,
+) -> HardwareConfig {
     let cbr = options.mode == crate::RateMode::Cbr;
     let target = options.target_kbps.saturating_mul(1000);
     HardwareConfig {
@@ -226,7 +235,14 @@ fn hardware_config(options: &HdOptions, codec: HardwareCodec) -> HardwareConfig 
             HardwareCodec::HevcMain10 => 1,
         },
         sar: output_pixel_aspect(options.width, options.height, options.wide),
+        fields: hardware_fields(options, codec, kept),
     }
+}
+
+/// M12.51: an interlaced format's H.264 is coded as fields, the top one first unless the source keeps its bottom field
+/// first ([`kept_fields`], as the CPU's encoder marks it).
+fn hardware_fields(options: &HdOptions, codec: HardwareCodec, kept: Option<bool>) -> Option<bool> {
+    (codec == HardwareCodec::H264 && options.interlaced).then_some(kept != Some(false))
 }
 
 /// A hardware encoder at work and where it is: one frame in 100 ns units, and the pictures given out so far; for
@@ -463,30 +479,31 @@ impl HdEncoder {
         Self::with_pass(options, HdPass::Single, None)
     }
 
-    /// The registered hardware encoder for a video's progressive H.264 (M12.40) or HEVC (M12.44) in one pass; `None`
-    /// when there is none, the stream is not one it makes, or it cannot start.
-    fn hardware(options: &HdOptions, pass: &HdPass) -> Option<Self> {
+    /// The registered hardware encoder for a video's H.264 (M12.40; M12.51 an interlaced format's as fields, `kept`
+    /// saying which comes first) or HEVC (M12.44) in one pass; `None` when there is none, the stream is not one it
+    /// makes, or it cannot start.
+    fn hardware(options: &HdOptions, pass: &HdPass, kept: Option<bool>) -> Option<Self> {
         let factory = hardware_encoder()?;
         let codec = match options.codec {
-            HdCodec::H264 if !options.interlaced => HardwareCodec::H264,
+            HdCodec::H264 => HardwareCodec::H264,
             // HEVC only with the `hevc` feature (M12.45).
             HdCodec::Hevc if cfg!(feature = "hevc") => HardwareCodec::HevcMain10,
-            HdCodec::H264 | HdCodec::Hevc | HdCodec::Mpeg2 => return None,
+            HdCodec::Hevc | HdCodec::Mpeg2 => return None,
         };
         if !matches!(pass, HdPass::Single) {
             return None;
         }
-        Self::hardware_at(options, codec, None, factory)
+        Self::hardware_at(options, codec, None, factory, kept)
     }
 
     /// The hardware H.264 encoder at the average `mean` (bit/s) instead of [`hardware_config`]'s: the second of two
     /// passes (M12.47, [`second_pass_mean`]).
-    fn hardware_at_mean(options: &HdOptions, mean: u32) -> Option<Self> {
+    fn hardware_at_mean(options: &HdOptions, mean: u32, kept: Option<bool>) -> Option<Self> {
         let factory = hardware_encoder()?;
-        if options.codec != HdCodec::H264 || options.interlaced {
+        if options.codec != HdCodec::H264 {
             return None;
         }
-        Self::hardware_at(options, HardwareCodec::H264, Some(mean), factory)
+        Self::hardware_at(options, HardwareCodec::H264, Some(mean), factory, kept)
     }
 
     fn hardware_at(
@@ -494,8 +511,9 @@ impl HdEncoder {
         codec: HardwareCodec,
         mean: Option<u32>,
         factory: HardwareFactory,
+        kept: Option<bool>,
     ) -> Option<Self> {
-        let mut config = hardware_config(options, codec);
+        let mut config = hardware_config(options, codec, kept);
         if let Some(mean) = mean {
             config.bitrate = mean;
         }
@@ -1002,7 +1020,7 @@ pub fn transcode_h264_range(
     if (options.mode != crate::RateMode::Vbr2Pass
         || options.codec == HdCodec::Hevc
         || hardware_two_pass)
-        && let Some(mut encoder) = HdEncoder::hardware(options, &HdPass::Single)
+        && let Some(mut encoder) = HdEncoder::hardware(options, &HdPass::Single, kept)
     {
         let first_span = if hardware_two_pass { 0.5 } else { 1.0 };
         let made = hardware_pass(
@@ -1017,7 +1035,7 @@ pub fn transcode_h264_range(
                 if hardware_two_pass {
                     second_hardware_pass(
                         (&source, range_start, frames),
-                        (options, fields),
+                        (options, kept),
                         written,
                         (es_out, index_out),
                         &mut |fraction| progress(0.5 + fraction * 0.5),
@@ -1100,7 +1118,7 @@ fn hardware_pass(
 /// (but for a stop) leaves the first, a whole stream a little off its size.
 fn second_hardware_pass(
     (source, range_start, frames): (&Source, Tick, u64),
-    (options, fields): (&HdOptions, bool),
+    (options, kept): (&HdOptions, Option<bool>),
     written: u64,
     (es_out, index_out): (&Path, &Path),
     progress: &mut dyn FnMut(f32),
@@ -1109,7 +1127,8 @@ fn second_hardware_pass(
         u128::from(frames) * u128::from(options.target_kbps) * 1000 * u128::from(options.fps_den)
             / u128::from(options.fps_num.max(1))
             / 8;
-    let first = hardware_config(options, HardwareCodec::H264);
+    let fields = kept.is_some();
+    let first = hardware_config(options, HardwareCodec::H264, kept);
     let Some(mean) = second_pass_mean(
         first.bitrate,
         first.max_bitrate,
@@ -1118,7 +1137,7 @@ fn second_hardware_pass(
     ) else {
         return Ok(());
     };
-    let Some(mut encoder) = HdEncoder::hardware_at_mean(options, mean) else {
+    let Some(mut encoder) = HdEncoder::hardware_at_mean(options, mean, kept) else {
         return Ok(());
     };
     let with = |path: &Path, ending: &str| {
@@ -1226,9 +1245,9 @@ fn encode_range<W: Write>(
     finish_encoder(encoder, options, packets)
 }
 
-/// The stream's picture at `time` of `source`: the decoded frame's own planes when it is not mixed with the next one
-/// and already the stream's size and colours ([`direct_planes`], M12.46), otherwise rendered (scaled with bars, frames
-/// mixed, fields kept apart) and converted.
+/// The stream's picture at `time` of `source`: made from the decoded frame's own planes when it is not mixed with
+/// the next one ([`plane_planes`]: as they are, scaled, their colours moved), otherwise rendered (frames mixed, fields
+/// kept apart, or what the planes do not take) and converted.
 fn picture_planes(
     source: &Source,
     time: Tick,
@@ -1238,9 +1257,7 @@ fn picture_planes(
     let mixed = options.rendering.frame_blend && source.between(time).is_some();
     if !fields && !mixed {
         let frame = source.video_frame(time)?;
-        if let Some(planes) =
-            direct_planes(&frame, options).or_else(|| scaled_planes(&frame, options))
-        {
+        if let Some(planes) = plane_planes(&frame, options) {
             return Ok(planes);
         }
         let rgb = render_rgb_frame(&frame, options)?;
@@ -1701,81 +1718,98 @@ pub(crate) fn render_fit(
     )
 }
 
-/// The decoded picture's own 8-bit 4:2:0 planes, when they already are what the stream takes (M12.46): the output's
-/// size filled edge to edge (no bars), BT.709 at 16–235, no alpha. Nothing is then scaled, nor turned into RGB and back:
-/// that round trip took 7 of a 1080p frame's 8 milliseconds before the encoder (the hardware encoder waited on it), and
-/// lost a little in each direction (the colour averaged again from the RGB). `None`: the picture is rendered.
-fn direct_planes(frame: &VideoFrame, options: &HdOptions) -> Option<YuvPlanes> {
-    let filmcraft_frame::PixelData::Yuv8 {
-        planes: [y, u, v],
-        chroma: filmcraft_frame::Chroma::C420,
-        alpha: None,
-    } = &frame.data
-    else {
-        return None;
-    };
-    if frame.width != options.width
-        || frame.height != options.height
-        || frame.color.matrix != filmcraft_color::Matrix::Bt709
-        || frame.color.range != filmcraft_color::Range::Limited
-    {
-        return None;
+/// The stream's planes made from the decoded picture's own, without turning it into RGB and back: brought to 8-bit
+/// 4:2:0 ([`plane_picture`], M12.50), as they are when the picture fills the stream's frame ([`direct_planes`],
+/// M12.46) or scaled in the planes ([`scaled_planes`], M12.49), and their colours moved to BT.709 at 16–235
+/// ([`crate::plane_colour::ColourMap`], M12.50) where there are fewer pixels: before a picture is made larger, after one is made smaller.
+/// `None`: the picture is rendered through RGB (RGB, 4:4:4, alpha, BT.2020 or HDR colours, odd sizes or places).
+fn plane_planes(frame: &VideoFrame, options: &HdOptions) -> Option<YuvPlanes> {
+    let map = colour_map(frame.color)?;
+    let mut picture = plane_picture(frame)?;
+    let output = usize::try_from(options.width)
+        .ok()?
+        .checked_mul(usize::try_from(options.height).ok()?)?;
+    let before = map.filter(|_| picture.width.saturating_mul(picture.height) <= output);
+    if let Some(map) = before {
+        let (mut y, mut u, mut v) = (
+            picture.y.into_owned(),
+            picture.u.into_owned(),
+            picture.v.into_owned(),
+        );
+        map.apply((&mut y, &mut u, &mut v), (picture.width, picture.height))?;
+        picture = PlanePicture {
+            y: Cow::Owned(y),
+            u: Cow::Owned(u),
+            v: Cow::Owned(v),
+            ..picture
+        };
     }
-    let geometry = target_geometry(
-        frame.width,
-        frame.height,
-        frame.par,
-        options.width,
-        (options.height, options.wide),
-    )?;
+    let after = map.filter(|_| before.is_none());
+    let mut planes = match direct_planes(picture, frame, options) {
+        Ok(planes) => planes,
+        Err(picture) => scaled_planes(&picture, frame, options, after.map_or(16, |map| map.black))?,
+    };
+    if let Some(map) = after {
+        let size = (
+            usize::try_from(options.width).ok()?,
+            usize::try_from(options.height).ok()?,
+        );
+        map.apply((&mut planes.y, &mut planes.u, &mut planes.v), size)?;
+    }
+    Some(planes)
+}
+
+/// The decoded picture's own planes (8-bit 4:2:0, [`plane_picture`]) when the picture already fills the stream's
+/// frame (M12.46): the output's size, edge to edge (no bars). Nothing is then scaled, nor turned into RGB and back:
+/// that round trip took 7 of a 1080p frame's 8 milliseconds before the encoder (the hardware encoder waited on it),
+/// and lost a little in each direction (the colour averaged again from the RGB). `Err`: the picture, to be scaled.
+fn direct_planes<'a>(
+    picture: PlanePicture<'a>,
+    frame: &VideoFrame,
+    options: &HdOptions,
+) -> Result<YuvPlanes, PlanePicture<'a>> {
     let full = Geometry {
         x: 0,
         y: 0,
         width: options.width,
         height: options.height,
     };
-    if geometry != full {
-        return None;
+    let fills = frame.width == options.width
+        && frame.height == options.height
+        && target_geometry(
+            frame.width,
+            frame.height,
+            frame.par,
+            options.width,
+            (options.height, options.wide),
+        ) == Some(full);
+    if !fills {
+        return Err(picture);
     }
-    let width = usize::try_from(options.width).ok()?;
-    let height = usize::try_from(options.height).ok()?;
-    if width % 2 != 0 || height % 2 != 0 {
-        return None;
-    }
-    let chroma = (width / 2).checked_mul(height / 2)?;
-    if y.len() != width.checked_mul(height)? || u.len() != chroma || v.len() != chroma {
-        return None;
-    }
-    Some(YuvPlanes {
-        y: y.to_vec(),
-        u: u.to_vec(),
-        v: v.to_vec(),
+    let width = picture.width;
+    Ok(YuvPlanes {
+        y: picture.y.into_owned(),
+        u: picture.u.into_owned(),
+        v: picture.v.into_owned(),
         y_stride: width,
         uv_stride: width / 2,
     })
 }
 
-/// M12.49: a decoded 8-bit 4:2:0 BT.709 picture (16–235, no alpha) of another size than the stream's, scaled straight
-/// in its planes into the stream's: the luma and each chroma plane on their own, by the same scaler as the RGB path
-/// ([`render_rgb`]'s bilinear sampling, or "Use Maximum Render Quality"'s area filter), with black bars (16, 128, 128)
-/// around the picture where its shape leaves them. Nothing is turned into RGB and back, and the scaler goes over one
-/// luma and two quarter-size chroma planes instead of three full colours: a 4K picture to 1080p took 13 of its 18
-/// milliseconds that way. `None` (rendered through RGB): other colours, odd sizes or an odd place in the frame (the
-/// chroma would fall between samples).
-fn scaled_planes(frame: &VideoFrame, options: &HdOptions) -> Option<YuvPlanes> {
-    let filmcraft_frame::PixelData::Yuv8 {
-        planes: [y, u, v],
-        chroma: filmcraft_frame::Chroma::C420,
-        alpha: None,
-    } = &frame.data
-    else {
-        return None;
-    };
-    if frame.color.matrix != filmcraft_color::Matrix::Bt709
-        || frame.color.range != filmcraft_color::Range::Limited
-    {
-        return None;
-    }
+/// M12.49: the decoded picture's own planes (8-bit 4:2:0, [`plane_picture`]) of another size than the stream's, or
+/// another shape, scaled straight in the planes into the stream's: the luma and each chroma plane on their own, the
+/// luma by the same scaler as the RGB path ([`render_rgb`]'s bilinear sampling, or "Use Maximum Render Quality"'s
+/// area filter), the chroma by the area filter's taps, with bars around the picture where its shape leaves them
+/// (`black` luma, 128 chroma: the picture's black, as its colours are moved after). Nothing is turned into RGB and back, and the scaler goes over one luma and two
+/// quarter-size chroma planes instead of three full colours: a 4K picture to 1080p took 13 of its 18 milliseconds
+/// that way. `None` (rendered through RGB): an odd size or an odd place in the frame (the chroma would fall between
+/// samples).
+fn scaled_planes(
+    picture: &PlanePicture<'_>,
+    frame: &VideoFrame,
+    options: &HdOptions,
+    black: u8,
+) -> Option<YuvPlanes> {
     let geometry = target_geometry(
         frame.width,
         frame.height,
@@ -1809,44 +1843,25 @@ fn scaled_planes(frame: &VideoFrame, options: &HdOptions) -> Option<YuvPlanes> {
         size(geometry.height)?,
     );
     let half = |(x, y, w, h): (usize, usize, usize, usize)| (x / 2, y / 2, w / 2, h / 2);
-    let chroma_in = (sw / 2).checked_mul(sh / 2)?;
-    if y.len() != sw.checked_mul(sh)? || u.len() != chroma_in || v.len() != chroma_in {
-        return None;
-    }
-    let scale =
-        |filtered: bool, source: &[u8], from: (usize, usize), out: &mut [u8], stride, into| {
-            if filtered {
-                crate::resample::scale_plane_filtered(source, from, out, stride, into)
-            } else {
-                scale_plane_bilinear(source, from, out, stride, into)
-            }
-        };
-    // The chroma of a picture made smaller is averaged over the area each sample covers even without "Use Maximum
-    // Render Quality": through RGB it was, by the 2 x 2 average that made the 4:2:0 planes, and sampled two by two
-    // it would alias.
-    let smaller = geometry.width < frame.width || geometry.height < frame.height;
-    let mut out_y = vec![16_u8; ow.checked_mul(oh)?];
+    let (y, u, v) = (&*picture.y, &*picture.u, &*picture.v);
+    let mut out_y = vec![black; ow.checked_mul(oh)?];
     let mut out_u = vec![128_u8; (ow / 2).checked_mul(oh / 2)?];
     let mut out_v = out_u.clone();
-    let max_quality = options.rendering.max_quality;
-    scale(max_quality, y, (sw, sh), &mut out_y, ow, place)?;
-    let chroma_filtered = max_quality || smaller;
-    scale(
-        chroma_filtered,
-        u,
-        (sw / 2, sh / 2),
-        &mut out_u,
-        ow / 2,
-        half(place),
-    )?;
-    scale(
-        chroma_filtered,
-        v,
-        (sw / 2, sh / 2),
-        &mut out_v,
-        ow / 2,
-        half(place),
-    )?;
+    if options.rendering.max_quality {
+        crate::resample::scale_plane_filtered(y, (sw, sh), &mut out_y, ow, place)?;
+    } else {
+        scale_plane_bilinear(y, (sw, sh), &mut out_y, ow, place)?;
+    }
+    // The chroma, by the area filter's taps (an area average made smaller, a linear interpolation between sample
+    // centres made larger) even without "Use Maximum Render Quality". Made smaller (M12.49): through RGB it was
+    // averaged, by the 2 x 2 average that made the 4:2:0 planes, and sampled two by two it would alias. Made larger
+    // (M12.50): the bilinear sampling's ends meet the luma's ends, which at the chroma's spacing puts each chroma
+    // sample off its pixels; an SD picture's chroma made HD came out 2 dB further from a filtered reference (720p:
+    // 1.4 dB) than with sample centres, and 1.3 dB nearer than through RGB.
+    let chroma_from = (sw / 2, sh / 2);
+    for (source, out) in [(u, &mut out_u), (v, &mut out_v)] {
+        crate::resample::scale_plane_filtered(source, chroma_from, out, ow / 2, half(place))?;
+    }
     Some(YuvPlanes {
         y: out_y,
         u: out_u,
@@ -2984,11 +2999,21 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
     use super::{
-        AccessUnit, HdOptions, chroma_u8, direct_planes, fill_chroma_on, fill_chroma_reference,
-        fill_luma_on, fill_luma_reference, frame_count, read_h264_index, render_rgb_frame,
-        rgb_to_yuv, rgb_to_yuv_as, scaled_planes, second_pass_mean, target_geometry,
-        write_h264_index,
+        AccessUnit, HdOptions, VideoFrame, YuvPlanes, chroma_u8, direct_planes, fill_chroma_on,
+        fill_chroma_reference, fill_luma_on, fill_luma_reference, frame_count, plane_picture,
+        plane_planes, read_h264_index, render_rgb_frame, rgb_to_yuv, rgb_to_yuv_as, scaled_planes,
+        second_pass_mean, target_geometry, write_h264_index,
     };
+
+    /// [`direct_planes`] of `frame`'s own planes (`None`: not taken, or not filling the stream's frame).
+    fn direct(frame: &VideoFrame, options: &HdOptions) -> Option<YuvPlanes> {
+        direct_planes(plane_picture(frame)?, frame, options).ok()
+    }
+
+    /// [`scaled_planes`] of `frame`'s own planes, the bars black at 16.
+    fn scaled(frame: &VideoFrame, options: &HdOptions) -> Option<YuvPlanes> {
+        scaled_planes(&plane_picture(frame)?, frame, options, 16)
+    }
 
     /// A decoded 8-bit Y'CbCr picture of `width` x `height` with chroma `chroma`, its samples counting up.
     fn yuv_frame(
@@ -3071,7 +3096,7 @@ mod tests {
 
     /// M12.49: a decoded BT.709 picture of another size is scaled in its planes: a flat colour stays that colour, a
     /// 4:3 picture in a 16:9 frame gets black bars (16, 128, 128) at the sides, and the luma comes out within 2 of the
-    /// RGB path's; other colours and an odd place in the frame go through RGB.
+    /// RGB path's; an odd place in the frame goes through RGB. M12.50: so does a BT.601 picture, its colours moved.
     #[test]
     fn a_picture_of_another_size_is_scaled_in_its_planes() {
         use filmcraft_color::{ColorInfo, Matrix};
@@ -3106,7 +3131,7 @@ mod tests {
                     },
                     ..options_of(into.0, into.1)
                 };
-                let planes = scaled_planes(&flat(from, [100, 90, 150]), &options)
+                let planes = scaled(&flat(from, [100, 90, 150]), &options)
                     .unwrap_or_else(|| panic!("{from:?} -> {into:?} not scaled in its planes"));
                 assert!(planes.y.iter().all(|value| *value == 100), "{from:?}");
                 assert!(planes.u.iter().all(|value| *value == 90));
@@ -3114,7 +3139,7 @@ mod tests {
             }
         }
         // A 4:3 picture in a 16:9 frame: black bars at the sides, the picture between them.
-        let planes = scaled_planes(&flat((64, 48), [100, 90, 150]), &options_of(64, 36)).unwrap();
+        let planes = scaled(&flat((64, 48), [100, 90, 150]), &options_of(64, 36)).unwrap();
         let row: Vec<u8> = planes.y[..64].to_vec();
         assert_eq!(row[0], 16);
         assert_eq!(row[63], 16);
@@ -3136,7 +3161,7 @@ mod tests {
             ..flat((64, 36), [0, 0, 0])
         };
         let options = options_of(96, 54);
-        let planes = scaled_planes(&gradient, &options).unwrap();
+        let planes = scaled(&gradient, &options).unwrap();
         let rgb = render_rgb_frame(&gradient, &options).unwrap();
         let through_rgb = rgb_to_yuv_as(&rgb, &options, false).unwrap();
         let worst = planes
@@ -3147,7 +3172,7 @@ mod tests {
             .max()
             .unwrap();
         assert!(worst <= 2, "{worst}");
-        // BT.601, and an odd place in the frame: through RGB.
+        // BT.601: in the planes too (M12.50); an odd place in the frame: through RGB.
         let sd = VideoFrame {
             color: ColorInfo {
                 matrix: Matrix::Bt601,
@@ -3155,12 +3180,14 @@ mod tests {
             },
             ..flat((64, 36), [100, 90, 150])
         };
-        assert!(scaled_planes(&sd, &options_of(32, 18)).is_none());
-        assert!(scaled_planes(&flat((62, 48), [100, 90, 150]), &options_of(64, 36)).is_none());
+        assert!(plane_planes(&sd, &options_of(32, 18)).is_some());
+        assert!(scaled(&flat((62, 48), [100, 90, 150]), &options_of(64, 36)).is_none());
+        assert!(plane_planes(&flat((62, 48), [100, 90, 150]), &options_of(64, 36)).is_none());
     }
 
     /// M12.46: a decoded picture that already is the stream's size and colours goes to the encoder as it was decoded
-    /// (every sample the same, packed rows); anything that needs scaling, bars or a colour conversion does not.
+    /// (every sample the same, packed rows); anything that needs scaling or bars is scaled (M12.49), other colours and
+    /// 4:2:2 are converted in the planes (M12.50), and alpha, RGB or planes that do not fit the size are rendered.
     #[test]
     fn a_picture_already_in_the_streams_form_goes_through_untouched() {
         use filmcraft_color::{ColorInfo, Matrix, Range};
@@ -3168,7 +3195,7 @@ mod tests {
         let hd = ColorInfo::default();
         assert_eq!((hd.matrix, hd.range), (Matrix::Bt709, Range::Limited));
         let frame = yuv_frame((1920, 1080), Chroma::C420, hd, (1, 1));
-        let planes = direct_planes(&frame, &options_of(1920, 1080)).unwrap();
+        let planes = plane_planes(&frame, &options_of(1920, 1080)).unwrap();
         let PixelData::Yuv8 {
             planes: [y, u, v], ..
         } = &frame.data
@@ -3179,54 +3206,206 @@ mod tests {
         assert_eq!((planes.y_stride, planes.uv_stride), (1920, 960));
         // A 1280x720 stream too.
         let small = yuv_frame((1280, 720), Chroma::C420, hd, (1, 1));
-        assert!(direct_planes(&small, &options_of(1280, 720)).is_some());
+        assert!(direct(&small, &options_of(1280, 720)).is_some());
 
-        // Scaled (another size), bars (an anamorphic picture's shape), or other colours: rendered.
-        assert!(direct_planes(&small, &options_of(1920, 1080)).is_none());
+        // Another size, or bars (an anamorphic picture's shape): scaled, not as it is.
+        assert!(direct(&small, &options_of(1920, 1080)).is_none());
         let anamorphic = yuv_frame((1920, 1080), Chroma::C420, hd, (4, 3));
-        assert!(direct_planes(&anamorphic, &options_of(1920, 1080)).is_none());
-        let sd = ColorInfo {
-            matrix: Matrix::Bt601,
-            ..hd
-        };
-        assert!(
-            direct_planes(
-                &yuv_frame((1920, 1080), Chroma::C420, sd, (1, 1)),
-                &options_of(1920, 1080)
-            )
-            .is_none()
-        );
-        let full = ColorInfo {
-            range: Range::Full,
-            ..hd
-        };
-        assert!(
-            direct_planes(
-                &yuv_frame((1920, 1080), Chroma::C420, full, (1, 1)),
-                &options_of(1920, 1080)
-            )
-            .is_none()
-        );
-        assert!(
-            direct_planes(
-                &yuv_frame((1920, 1080), Chroma::C422, hd, (1, 1)),
-                &options_of(1920, 1080)
-            )
-            .is_none()
-        );
-        // With an alpha plane, as RGBA, or with planes that do not fit the size: rendered.
+        assert!(direct(&anamorphic, &options_of(1920, 1080)).is_none());
+        // BT.601 and full range: their colours moved; 4:2:2: its chroma lines averaged.
+        for color in [
+            ColorInfo {
+                matrix: Matrix::Bt601,
+                ..hd
+            },
+            ColorInfo {
+                range: Range::Full,
+                ..hd
+            },
+        ] {
+            let other = yuv_frame((1920, 1080), Chroma::C420, color, (1, 1));
+            let planes = plane_planes(&other, &options_of(1920, 1080)).unwrap();
+            assert_ne!((&planes.y, &planes.u), (&**y, &**u), "{color:?}");
+        }
+        let four_two_two = yuv_frame((1920, 1080), Chroma::C422, hd, (1, 1));
+        let planes = plane_planes(&four_two_two, &options_of(1920, 1080)).unwrap();
+        assert_eq!((planes.u.len(), planes.v.len()), (960 * 540, 960 * 540));
+        // With an alpha plane, as RGBA, 4:4:4, or with planes that do not fit the size: rendered.
         let mut with_alpha = frame.clone();
         if let PixelData::Yuv8 { alpha, .. } = &mut with_alpha.data {
             *alpha = Some(std::sync::Arc::new(vec![255; 1920 * 1080]));
         }
-        assert!(direct_planes(&with_alpha, &options_of(1920, 1080)).is_none());
+        assert!(plane_planes(&with_alpha, &options_of(1920, 1080)).is_none());
         let rgba = filmcraft_frame::VideoFrame::rgba8(1920, 1080, vec![0; 1920 * 1080 * 4]);
-        assert!(direct_planes(&rgba, &options_of(1920, 1080)).is_none());
+        assert!(plane_planes(&rgba, &options_of(1920, 1080)).is_none());
+        let four_four_four = yuv_frame((1920, 1080), Chroma::C444, hd, (1, 1));
+        assert!(plane_planes(&four_four_four, &options_of(1920, 1080)).is_none());
         let mut short = frame;
         if let PixelData::Yuv8 { planes, .. } = &mut short.data {
             planes[1] = std::sync::Arc::new(vec![128; 10]);
         }
-        assert!(direct_planes(&short, &options_of(1920, 1080)).is_none());
+        assert!(plane_planes(&short, &options_of(1920, 1080)).is_none());
+    }
+
+    /// M12.50: pictures of other colours, 10 bits and 4:2:2 are made the stream's in their planes much as the RGB
+    /// path makes them: BT.601 and full range, as they are, made larger (SD to HD: converted first) and made smaller
+    /// (converted after, the bars black), and BT.601 primaries as BT.709's; BT.2020 and HDR still go through RGB.
+    #[test]
+    fn a_picture_of_other_colours_is_converted_in_its_planes() {
+        use filmcraft_color::{ColorInfo, Matrix, Primaries, Range, Transfer};
+        use filmcraft_frame::{Chroma, PixelData};
+        let hd = ColorInfo::default();
+        // Smooth colours across the picture (as in a photographed scene), in the picture's own Y'CbCr.
+        let smooth = |(width, height): (u32, u32), chroma: Chroma, color: ColorInfo, bits: u32| {
+            let (w, h) = (width as usize, height as usize);
+            let (cw, ch) = match chroma {
+                Chroma::C420 => (w / 2, h / 2),
+                Chroma::C422 => (w / 2, h),
+                Chroma::C444 => (w, h),
+            };
+            // Within R'G'B' at either range and matrix (the RGB path clips what is not).
+            let luma: Vec<u32> = (0..w * h)
+                .map(|i| (60 + (i % w) * 100 / w + (i / w) * 20 / h) as u32)
+                .collect();
+            let cb: Vec<u32> = (0..cw * ch)
+                .map(|i| (98 + (i % cw) * 60 / cw) as u32)
+                .collect();
+            let cr: Vec<u32> = (0..cw * ch)
+                .map(|i| (158 - (i / cw) * 60 / ch) as u32)
+                .collect();
+            let data = if bits == 8 {
+                let eight = |plane: &[u32]| {
+                    std::sync::Arc::new(plane.iter().map(|value| *value as u8).collect::<Vec<u8>>())
+                };
+                PixelData::Yuv8 {
+                    planes: [eight(&luma), eight(&cb), eight(&cr)],
+                    chroma,
+                    alpha: None,
+                }
+            } else {
+                let wide = |plane: &[u32]| {
+                    std::sync::Arc::new(
+                        plane
+                            .iter()
+                            .map(|value| (*value << (bits - 8)) as u16)
+                            .collect::<Vec<u16>>(),
+                    )
+                };
+                PixelData::Yuv16 {
+                    planes: [wide(&luma), wide(&cb), wide(&cr)],
+                    chroma,
+                    bits,
+                    alpha: None,
+                }
+            };
+            VideoFrame {
+                width,
+                height,
+                data,
+                color,
+                par: (1, 1),
+                pts: filmcraft_time::Tick(0),
+            }
+        };
+        let sd = ColorInfo {
+            matrix: Matrix::Bt601,
+            ..hd
+        };
+        let full = ColorInfo {
+            range: Range::Full,
+            ..hd
+        };
+        let sd_primaries = ColorInfo {
+            primaries: Primaries::Bt601_525,
+            ..sd
+        };
+        let full_sd = ColorInfo {
+            range: Range::Full,
+            ..sd
+        };
+        for (size, chroma, color, bits, into) in [
+            ((96, 54), Chroma::C420, sd, 8, (96, 54)),
+            ((96, 54), Chroma::C420, full, 8, (96, 54)),
+            ((96, 54), Chroma::C420, full_sd, 8, (96, 54)),
+            ((96, 54), Chroma::C420, sd_primaries, 8, (96, 54)),
+            ((96, 54), Chroma::C420, hd, 10, (96, 54)),
+            ((96, 54), Chroma::C422, hd, 8, (96, 54)),
+            ((96, 54), Chroma::C422, full, 10, (96, 54)),
+            // SD made larger (converted first), and a 4:3 picture made smaller into a 16:9 frame (converted after,
+            // with bars).
+            ((64, 48), Chroma::C420, sd, 8, (192, 108)),
+            ((128, 96), Chroma::C420, full, 8, (96, 54)),
+        ] {
+            let frame = smooth(size, chroma, color, bits);
+            let options = options_of(into.0, into.1);
+            let planes = plane_planes(&frame, &options)
+                .unwrap_or_else(|| panic!("{color:?} {chroma:?} {bits} not taken in its planes"));
+            let rgb = render_rgb_frame(&frame, &options).unwrap();
+            let through_rgb = rgb_to_yuv_as(&rgb, &options, false).unwrap();
+            let geometry = target_geometry(
+                frame.width,
+                frame.height,
+                frame.par,
+                into.0,
+                (into.1, false),
+            )
+            .unwrap();
+            // Bars, where the picture leaves them, are black.
+            if geometry.x > 0 {
+                assert_eq!((planes.y[0], planes.u[0], planes.v[0]), (16, 128, 128));
+            }
+            for (name, ours, theirs) in [
+                ("luma", &planes.y, &through_rgb.y),
+                ("cb", &planes.u, &through_rgb.u),
+                ("cr", &planes.v, &through_rgb.v),
+            ] {
+                // The picture's edges aside (two of its chroma samples, as scaled): the RGB path's chroma there is
+                // its own (it does not follow the colours' slope; the planes keep the picture's own chroma).
+                let unit = if name == "luma" { 1 } else { 2 };
+                let stride = ours.len() / (into.1 as usize / unit);
+                let margin = 2
+                    * (geometry.width as usize)
+                        .div_ceil(size.0 as usize / 2)
+                        .max(1);
+                let (left, top) = (geometry.x as usize / unit, geometry.y as usize / unit);
+                let (right, bottom) = (
+                    (geometry.x + geometry.width) as usize / unit,
+                    (geometry.y + geometry.height) as usize / unit,
+                );
+                let inner = |index: usize| {
+                    let (x, y) = (index % stride, index / stride);
+                    x >= left + margin
+                        && y >= top + margin
+                        && x + margin < right
+                        && y + margin < bottom
+                };
+                let worst = ours
+                    .iter()
+                    .zip(theirs.iter())
+                    .enumerate()
+                    .filter(|(index, _)| inner(*index))
+                    .map(|(_, (a, b))| a.abs_diff(*b))
+                    .max()
+                    .unwrap();
+                assert!(
+                    worst <= 2,
+                    "{color:?} {chroma:?} {bits} {size:?} -> {into:?}: {name} off by {worst}"
+                );
+            }
+        }
+        for other in [
+            ColorInfo {
+                matrix: Matrix::Bt2020Ncl,
+                ..hd
+            },
+            ColorInfo {
+                transfer: Transfer::Hlg,
+                ..hd
+            },
+        ] {
+            let frame = smooth((96, 54), Chroma::C420, other, 10);
+            assert!(plane_planes(&frame, &options_of(96, 54)).is_none());
+        }
     }
 
     /// M12.41: the colour conversion shared out among threads makes the same planes as the one that went one pixel

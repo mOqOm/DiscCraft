@@ -15,6 +15,7 @@ pub mod displays;
 pub mod hw_video;
 pub mod memory;
 pub mod mmc;
+mod nvenc;
 pub mod taskbar;
 
 pub use burn::{BurnError, BurnRequest, BurnStep, LayerBoundary, Media, MediaKind, Recorder};

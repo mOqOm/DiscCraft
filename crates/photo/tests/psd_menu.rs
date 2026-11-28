@@ -528,3 +528,77 @@ fn the_layer_tree_numbers_pages_and_buttons_as_the_menu_reader() {
     assert_eq!(menu.pages.len(), 1);
     assert_eq!(menu.pages[0].1.len(), 1);
 }
+
+/// M6.536: drawn set by set, a layer above every button set (a shade over the whole menu) is drawn over the buttons,
+/// not under them, and a button set inside an ordinary group is not left in the shared picture (it stayed where the
+/// PSD had it when its button moved).
+#[test]
+fn layers_above_the_buttons_and_sets_in_groups_are_kept_apart() {
+    let mut b = PsdBuilder::new(W, H);
+    b.push_layer(LayerSpec::new(
+        "Background",
+        0,
+        0,
+        W,
+        H,
+        solid(W, H, [0, 0, 80, 255]),
+    ));
+    b.begin_group(GroupSpec::new("MAIN"));
+    b.push_layer(LayerSpec::new(
+        "art",
+        0,
+        0,
+        4,
+        4,
+        solid(4, 4, [0, 200, 0, 255]),
+    ));
+    b.begin_group(GroupSpec::new("(+) Play"));
+    b.push_layer(LayerSpec::new(
+        "label",
+        8,
+        8,
+        20,
+        10,
+        solid(20, 10, [255, 0, 0, 255]),
+    ));
+    b.end_group().unwrap();
+    b.end_group().unwrap();
+    b.begin_group(GroupSpec::new("(+) Back"));
+    b.push_layer(LayerSpec::new(
+        "label",
+        40,
+        30,
+        10,
+        6,
+        solid(10, 6, [255, 255, 255, 255]),
+    ));
+    b.end_group().unwrap();
+    b.push_layer(LayerSpec::new(
+        "Shade",
+        0,
+        40,
+        W,
+        8,
+        solid(W, 8, [0, 0, 0, 128]),
+    ));
+    b.composite(solid(W, H, [0, 0, 80, 255]));
+    let path =
+        std::env::temp_dir().join(format!("disccraft-photo-over-{}.psd", std::process::id()));
+    std::fs::write(&path, b.to_bytes().unwrap()).unwrap();
+
+    let pages = disccraft_photo::load_menu_pages(&path).unwrap();
+    // The group's own art stays; its button set does not.
+    assert_eq!(pixel(&pages.shared, 2, 2), [0, 200, 0, 255]);
+    assert_eq!(pixel(&pages.shared, 12, 12), [0, 0, 80, 255]);
+    // The shade is above the buttons: not under them in the shared picture, but over them.
+    assert_eq!(pixel(&pages.shared, 2, 44), [0, 0, 80, 255]);
+    let over = pages.over.as_ref().expect("the shade over the buttons");
+    assert_eq!(pixel(over, 2, 44)[3], 128);
+    assert_eq!(pixel(over, 2, 2)[3], 0);
+    let names: Vec<&str> = pages.buttons[0]
+        .iter()
+        .map(|set| set.name.as_str())
+        .collect();
+    assert_eq!(names, ["Play", "Back"]);
+    let _ = std::fs::remove_file(&path);
+}

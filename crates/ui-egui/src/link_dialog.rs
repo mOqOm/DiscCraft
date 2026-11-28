@@ -30,6 +30,8 @@ pub(crate) struct LinkDialog {
     pub(crate) audio: Option<u8>,
     /// The subtitle the buttons select (buttons only).
     pub(crate) subtitle: disccraft_project::SubtitleDefault,
+    /// What the filter box above the list keeps (M6.525; the link fields' lists have one too).
+    pub(crate) filter: String,
 }
 
 impl DiscCraftApp {
@@ -104,6 +106,7 @@ impl DiscCraftApp {
             chosen: current.clone(),
             audio,
             subtitle,
+            filter: String::new(),
         });
     }
 
@@ -115,6 +118,7 @@ impl DiscCraftApp {
                 chosen,
                 audio,
                 subtitle,
+                filter: String::new(),
             });
         } else {
             self.status = tl!("Select a button or an item with an end action first").to_string();
@@ -132,6 +136,18 @@ impl DiscCraftApp {
         );
         let chapters = is_button || matches!(state.target, LinkTarget::Port(Port::MenuRemote(_)));
         let targets = link_targets(&self.session.project, chapters);
+        // M6.528: a menu's buttons and end action can resume the title the menu was called from.
+        let menu_link = is_button
+            || matches!(
+                state.target,
+                LinkTarget::EndAction(NodeId::Menu(_))
+                    | LinkTarget::Port(Port::EndAction(NodeId::Menu(_)))
+            );
+        let targets = if menu_link {
+            crate::properties::with_resume(&targets)
+        } else {
+            targets
+        };
         let project = self.session.project.clone();
         let mut done = None;
         let response = Modal::new(Id::unique("link_dialog")).show(ctx, |ui| {
@@ -150,10 +166,25 @@ impl DiscCraftApp {
                 LinkTarget::Port(_) => tl!("This link").to_string(),
             };
             ui.label(what);
+            // M6.525: a filter box, as in the link fields' lists: typing narrows the list, Enter takes the first
+            // target left (once something is typed).
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut state.filter)
+                    .hint_text(tl!("Filter"))
+                    .desired_width(f32::INFINITY),
+            );
+            if edit.lost_focus()
+                && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                && let Some((_, link)) = first_kept(&targets, &state.filter)
+            {
+                state.chosen = link.clone();
+            }
             egui::ScrollArea::vertical()
                 .max_height(320.0)
                 .auto_shrink([false, true])
-                .show(ui, |ui| link_list(ui, &targets, &mut state.chosen));
+                .show(ui, |ui| {
+                    link_list(ui, &targets, &state.filter, &mut state.chosen)
+                });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.label(tl!("Link:"));
@@ -246,8 +277,19 @@ impl DiscCraftApp {
     }
 }
 
-/// The targets as one list, grouped under headings by kind, with the chosen one highlighted.
-fn link_list(ui: &mut Ui, targets: &[(String, Link)], chosen: &mut Link) {
+/// The first target the filter `filter` keeps, once something is typed in it.
+fn first_kept<'a>(targets: &'a [(String, Link)], filter: &str) -> Option<&'a (String, Link)> {
+    if filter.trim().is_empty() {
+        return None;
+    }
+    targets
+        .iter()
+        .find(|(name, _)| crate::properties::link_kept(name, filter))
+}
+
+/// The targets as one list, grouped under headings by kind, with the chosen one highlighted; only those the filter
+/// `filter` keeps, every heading open while something is typed (M6.525).
+fn link_list(ui: &mut Ui, targets: &[(String, Link)], filter: &str, chosen: &mut Link) {
     let groups: [(&str, fn(&Link) -> bool); 6] = [
         (tl!("Timelines"), |link| {
             matches!(link, Link::Timeline { .. })
@@ -263,17 +305,25 @@ fn link_list(ui: &mut Ui, targets: &[(String, Link)], chosen: &mut Link) {
         }),
         (tl!("Menus"), |link| matches!(link, Link::Menu { .. })),
         (tl!("Other"), |link| {
-            matches!(link, Link::NotSet | Link::Stop | Link::LastMenu)
+            matches!(
+                link,
+                Link::NotSet | Link::Stop | Link::LastMenu | Link::Resume
+            )
         }),
     ];
     for (heading, belongs) in groups {
-        let rows: Vec<&(String, Link)> = targets.iter().filter(|(_, link)| belongs(link)).collect();
+        let rows: Vec<&(String, Link)> = targets
+            .iter()
+            .filter(|(name, link)| belongs(link) && crate::properties::link_kept(name, filter))
+            .collect();
         if rows.is_empty() {
             continue;
         }
         let open = rows.iter().any(|(_, link)| link == chosen);
+        let filtering = !filter.trim().is_empty();
         egui::CollapsingHeader::new(heading)
             .default_open(open || rows.len() <= 8)
+            .open(filtering.then_some(true))
             .show(ui, |ui| {
                 for (name, link) in rows {
                     if ui.selectable_label(link == chosen, name).clicked() {
@@ -281,5 +331,43 @@ fn link_list(ui: &mut Ui, targets: &[(String, Link)], chosen: &mut Link) {
                     }
                 }
             });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::first_kept;
+    use disccraft_project::{Link, MenuId, TimelineId};
+
+    /// M6.525: the dialog's filter takes the first target whose name has the typed text, nothing while it is empty.
+    #[test]
+    fn the_dialogs_filter_takes_the_first_match() {
+        let targets = vec![
+            ("Not set".to_owned(), Link::NotSet),
+            (
+                "Feature: chapter 1".to_owned(),
+                Link::Timeline {
+                    id: TimelineId(1),
+                    chapter: 0,
+                },
+            ),
+            (
+                "Menu: Extras".to_owned(),
+                Link::Menu {
+                    id: MenuId(2),
+                    button: None,
+                },
+            ),
+        ];
+        assert_eq!(first_kept(&targets, ""), None);
+        assert_eq!(first_kept(&targets, "  "), None);
+        assert_eq!(
+            first_kept(&targets, "extra").map(|(_, link)| link.clone()),
+            Some(Link::Menu {
+                id: MenuId(2),
+                button: None
+            })
+        );
+        assert_eq!(first_kept(&targets, "nowhere"), None);
     }
 }

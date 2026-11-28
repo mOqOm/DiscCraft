@@ -3,19 +3,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::path::PathBuf;
+use disccraft_test_support::ffmpeg;
 use std::process::Command;
-
-fn ffmpeg() -> Option<PathBuf> {
-    let path =
-        std::env::var_os("DISCCRAFT_FFMPEG").map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
 
 fn wav(channels: u16, samples: &[i16]) -> Vec<u8> {
     let data_len = u32::try_from(samples.len() * 2).unwrap();

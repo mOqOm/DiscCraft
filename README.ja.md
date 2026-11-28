@@ -198,7 +198,7 @@ FilmCraft (https://github.com/storytold/filmcraft, MIT OR Apache-2.0) の crate 
 | filmcraft-audio-dsp | ラウドネス測定と正規化 |
 | filmcraft-project、filmcraft-format | FilmCraft のプロジェクト（`.fcproj`）の読み込み: シーケンスのマーカーをチャプターポイントにする |
 
-FilmCraft の crate は craft-libs（https://github.com/storytold/craft-libs、MIT OR Apache-2.0）の crate（映像・音声のデコードなど）を使う。DiscCraft は craft-libs の craft-audio（AC-3 エンコーダ。変換した音声を Dolby Digital にする）、craft-video（Blu-ray の映像の H.264 エンコーダ。以前は FilmCraft の filmcraft-h264enc。テストでは MPEG-2 デコーダで MPEG-2 エンコーダの出力も検証する）、craft-media（MPEG-2 のプログラム / トランスポートストリーム、Matroska、MP4 の読み取り。規格に合った映像と音声を変換せずに取り出す）、craft-ui（パネルとワークスペースのドッキング）を使い、テストで craft-psd（テスト用の PSD の書き出し）も使う。
+FilmCraft の crate は craft-libs（https://github.com/storytold/craft-libs、MIT OR Apache-2.0）の crate（映像・音声のデコードなど）を使う。DiscCraft は craft-libs の craft-audio（AC-3 エンコーダ。変換した音声を Dolby Digital にする）、craft-video（Blu-ray の映像の H.264 エンコーダ。以前は FilmCraft の filmcraft-h264enc。テストでは MPEG-2 デコーダで MPEG-2 エンコーダの出力も検証する）、craft-media（MPEG-2 のプログラム / トランスポートストリーム、Matroska、MP4 の読み取り。規格に合った映像と音声を変換せずに取り出す）、craft-ui（パネルとワークスペースのドッキング）、craft-captions（ASS / SSA、SCC、MCC、EBU STL、TTML / DFXP、SAMI の字幕ファイル）、craft-mcp-server（`disccraft-cli mcp` の MCP サーバー）、craft-sniff（読み込んだファイルの種類を先頭のバイトから見分ける）、craft-settings（設定ファイルの `config.toml`）、craft-dialogs（フレームを止めないネイティブのファイルダイアログ）、craft-update（ヘルプ ▸ 更新を確認… での新しいリリースの確認・ダウンロード・インストール）、craft-fonts-build（ビルドで craft-fonts の書体を埋め込む。craft-ui の書体の組が Encore の書体の下に置く）を使い、テストで craft-psd（テスト用の PSD の書き出し）と craft-media-testkit（ffmpeg と比べるテストで ffmpeg と ffprobe を探す）も使う。リリースのビルドは、画面の書体に無い文字（アラビア文字、タイ文字、ヘブライ文字、記号など）のために craft-fonts（https://github.com/storytold/craft-fonts、OFL-1.1）の書体を埋め込む。書体とそのライセンスは NOTICE に載せる。
 
 ## 商標
 

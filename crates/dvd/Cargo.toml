@@ -15,6 +15,7 @@ disccraft-nav.workspace = true
 disccraft-menu.workspace = true
 disccraft-mpeg2venc.workspace = true
 disccraft-spu.workspace = true
+disccraft-pgs.workspace = true
 disccraft-project.workspace = true
 disccraft-psmux.workspace = true
 disccraft-m2tsmux.workspace = true
@@ -26,5 +27,7 @@ thiserror.workspace = true
 workspace = true
 
 [dev-dependencies]
+# Where ffmpeg, ffprobe and the fixtures are for the tests that compare with them (M9.67).
+disccraft-test-support.workspace = true
 craft-video = { workspace = true, features = ["mpeg2-decode"] }
 png.workspace = true

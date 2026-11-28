@@ -138,7 +138,13 @@ pub struct PsdMenu {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PsdPages {
     /// The layers outside the pages that are not buttons, highlight layers hidden: the picture under every page.
+    /// The button sets inside a group of these are left out too (M6.536: drawn one by one where their buttons are,
+    /// they also stayed where the PSD had them). The layers above every button set and page are [`PsdPages::over`].
     pub shared: Image8,
+    /// The layers outside the pages and buttons that lie above every button set and page (a frame or a shade over the
+    /// whole menu), drawn over the buttons as the PSD stacks them (M6.536: they were drawn under them); `None` when
+    /// there are none.
+    pub over: Option<Image8>,
     /// Each page's own buttons over transparency, highlight layers hidden: page 0 the top level's `(+)` groups, then
     /// the button sets in each shown `(#)` group (a hidden one is no page), the lowest first. What else a `(#)` group
     /// draws is left out, as on Encore's Blu-ray discs.
@@ -516,6 +522,11 @@ fn menu_pages(doc: Document, canvas: Rect) -> Result<PsdPages, PhotoError> {
         for (index, layer) in doc.layers.iter_mut().enumerate() {
             if !keep(index, layer) {
                 layer.visible = false;
+            } else if !is_page_group(layer) && !is_button_name(&layer.name) {
+                // A group outside the pages and buttons: the button sets in it are drawn on their own.
+                if let LayerContent::Group(group) = &mut layer.content {
+                    hide_button_sets(&mut group.children);
+                }
             } else if is_page_group(layer) {
                 // A page shows its group's buttons (Encore hides the other pages' groups as it shows one), and only
                 // them: Encore's Blu-ray pages leave out what else the group draws (docs/encore-behavior.md 9.5g).
@@ -530,7 +541,22 @@ fn menu_pages(doc: Document, canvas: Rect) -> Result<PsdPages, PhotoError> {
         validate_image_size(&image, canvas)?;
         Ok(image)
     };
-    let shared = render(&|_, layer| !is_page_group(layer) && !is_button_name(&layer.name))?;
+    // The highest layer at the top level that is a page, a button set or a group holding button sets: what lies
+    // above it covers the buttons.
+    let top = doc.layers.iter().rposition(holds_buttons);
+    let outside = |layer: &Layer| !is_page_group(layer) && !is_button_name(&layer.name);
+    let below = |index: usize| top.is_none_or(|top| index <= top);
+    let shared = render(&|index, layer| outside(layer) && below(index))?;
+    let over = if doc
+        .layers
+        .iter()
+        .enumerate()
+        .any(|(index, layer)| !below(index) && outside(layer) && layer.visible)
+    {
+        Some(render(&|index, layer| !below(index) && outside(layer))?)
+    } else {
+        None
+    };
     let mut pages = vec![render(&|_, layer| {
         matches!(layer.content, LayerContent::Group(_)) && is_button_name(&layer.name)
     })?];
@@ -559,9 +585,36 @@ fn menu_pages(doc: Document, canvas: Rect) -> Result<PsdPages, PhotoError> {
     }
     Ok(PsdPages {
         shared,
+        over,
         pages,
         buttons,
     })
+}
+
+/// Whether a top-level layer is a page, a button set, or a group with button sets in it (M6.536).
+fn holds_buttons(layer: &Layer) -> bool {
+    match &layer.content {
+        LayerContent::Group(group) => {
+            is_page_group(layer)
+                || is_button_name(&layer.name)
+                || (!is_page_name(&layer.name)
+                    && !collect_button_layers(&group.children, false).is_empty())
+        }
+        _ => false,
+    }
+}
+
+/// Hides the button sets among `layers` and in their groups (drawn one by one where their buttons are, M6.536).
+fn hide_button_sets(layers: &mut [Layer]) {
+    for layer in layers {
+        if let LayerContent::Group(group) = &mut layer.content {
+            if is_button_name(&layer.name) {
+                layer.visible = false;
+            } else {
+                hide_button_sets(&mut group.children);
+            }
+        }
+    }
 }
 
 /// The pictures of `sets` (button sets), as [`PsdButtonPicture`]s; a set that is no button or covers nothing is left

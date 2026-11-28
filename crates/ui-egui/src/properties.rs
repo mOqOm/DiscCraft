@@ -797,11 +797,10 @@ impl DiscCraftApp {
                 let _ = self.run_command("timeline.setPosterFrame", params);
             }
         });
-        // M13.18: another video for players below a parental level (a DVD parental block, M13.17).
-        if self.session.project.settings.kind == disccraft_project::DiscKind::Dvd {
-            ui.separator();
-            self.chapter_parental_rows(ui, id, index);
-        }
+        // M13.18: another video for players below a parental level (a DVD parental block, M13.17; M6.548: a
+        // Blu-ray's parental versions too).
+        ui.separator();
+        self.chapter_parental_rows(ui, id, index);
     }
 
     /// The chapter's parental alternative (M13.18): the video a player set below the level plays in the chapter's
@@ -824,7 +823,13 @@ impl DiscCraftApp {
         let _ = ui
             .horizontal(|ui| {
                 prop_label(ui, tl!("Parental Alternative:"));
-                egui::ComboBox::from_id_salt(("chapter_parental_video", id.0, index))
+                // M6.526: a video dropped here becomes the alternative.
+                let slot = crate::pickwhip::AssetSlot::ChapterParental {
+                    timeline: id,
+                    chapter: index,
+                };
+                self.asset_pick_whip(ui, slot);
+                let field = egui::ComboBox::from_id_salt(("chapter_parental_video", id.0, index))
                     .width(field_width(ui, 0.0))
                     .selected_text(shown)
                     .show_ui(ui, |ui| {
@@ -832,7 +837,9 @@ impl DiscCraftApp {
                         for (video, name) in &videos {
                             let _ = ui.selectable_value(&mut chosen.0, Some(*video), name);
                         }
-                    });
+                    })
+                    .response;
+                crate::pickwhip::mark_asset_source(ui, slot, field.rect);
             })
             .response
             .on_hover_text(tl!(
@@ -916,7 +923,10 @@ impl DiscCraftApp {
         // Encore の「基本」と同じく名前の次にエンドアクション。デュレーションは「モーション」の項目。
         let targets = link_targets(&self.session.project, true);
         let port = Port::EndAction(NodeId::Menu(id));
-        if let Some(link) = self.link_row(ui, tl!("End Action:"), port, &menu.end_action, &targets)
+        // M6.528: a menu can resume the title it was called from (its override cannot, as in Encore).
+        let resumable = with_resume(&targets);
+        if let Some(link) =
+            self.link_row(ui, tl!("End Action:"), port, &menu.end_action, &resumable)
         {
             self.set_menu_end_action(id, &link);
         }
@@ -1107,7 +1117,8 @@ impl DiscCraftApp {
         let mut chosen: Option<Option<AssetId>> = None;
         ui.horizontal(|ui| {
             prop_label(ui, tl!("Video:"));
-            egui::ComboBox::from_id_salt(("menu_motion_video", menu.id.0))
+            self.asset_pick_whip(ui, crate::pickwhip::AssetSlot::MenuVideo(menu.id));
+            let field = egui::ComboBox::from_id_salt(("menu_motion_video", menu.id.0))
                 .width(field_width(ui, 0.0))
                 .selected_text(shown)
                 .show_ui(ui, |ui| {
@@ -1122,7 +1133,13 @@ impl DiscCraftApp {
                             chosen = Some(Some(*asset));
                         }
                     }
-                });
+                })
+                .response;
+            crate::pickwhip::mark_asset_source(
+                ui,
+                crate::pickwhip::AssetSlot::MenuVideo(menu.id),
+                field.rect,
+            );
         });
         match chosen.filter(|choice| *choice != current) {
             Some(Some(asset)) => {
@@ -1538,7 +1555,11 @@ impl DiscCraftApp {
         let mut chosen: Option<Option<disccraft_project::AssetId>> = None;
         ui.horizontal(|ui| {
             prop_label(ui, tl!("Asset:"));
-            egui::ComboBox::from_id_salt(("button_transition", id.0, index))
+            self.asset_pick_whip(
+                ui,
+                crate::pickwhip::AssetSlot::ButtonTransition { menu: id, index },
+            );
+            let field = egui::ComboBox::from_id_salt(("button_transition", id.0, index))
                 .width(field_width(ui, 0.0))
                 .selected_text(current)
                 .show_ui(ui, |ui| {
@@ -1556,7 +1577,13 @@ impl DiscCraftApp {
                             chosen = Some(Some(*asset));
                         }
                     }
-                });
+                })
+                .response;
+            crate::pickwhip::mark_asset_source(
+                ui,
+                crate::pickwhip::AssetSlot::ButtonTransition { menu: id, index },
+                field.rect,
+            );
         });
         if let Some(asset) = chosen.filter(|asset| *asset != button.transition) {
             let _ = self.run_command(
@@ -1612,7 +1639,10 @@ impl DiscCraftApp {
         let mut chosen_kind = None;
         ui.horizontal(|ui| {
             prop_label(ui, tl!("Background:"));
-            egui::ComboBox::from_id_salt("menu_background_kind")
+            // M6.526: a picture or a video dropped here becomes the background.
+            let slot = crate::pickwhip::AssetSlot::MenuBackground(menu.id);
+            self.asset_pick_whip(ui, slot);
+            let field = egui::ComboBox::from_id_salt("menu_background_kind")
                 .width(90.0)
                 .selected_text(kinds.get(kind).copied().unwrap_or_default())
                 .show_ui(ui, |ui| {
@@ -1630,7 +1660,9 @@ impl DiscCraftApp {
                             chosen_kind = Some(index);
                         }
                     }
-                });
+                })
+                .response;
+            crate::pickwhip::mark_asset_source(ui, slot, field.rect);
             if kind == 0 && ui.color_edit_button_rgb(&mut self.bg_color).changed() {
                 self.set_background_color(menu.id);
             }
@@ -1706,7 +1738,8 @@ impl DiscCraftApp {
         let mut chosen: Option<Option<AssetId>> = None;
         ui.horizontal(|ui| {
             prop_label(ui, tl!("Audio:"));
-            egui::ComboBox::from_id_salt("menu_audio")
+            self.asset_pick_whip(ui, crate::pickwhip::AssetSlot::MenuAudio(menu.id));
+            let field = egui::ComboBox::from_id_salt("menu_audio")
                 .width(field_width(ui, 0.0))
                 .selected_text(current)
                 .show_ui(ui, |ui| {
@@ -1724,7 +1757,13 @@ impl DiscCraftApp {
                             chosen = Some(Some(*asset));
                         }
                     }
-                });
+                })
+                .response;
+            crate::pickwhip::mark_asset_source(
+                ui,
+                crate::pickwhip::AssetSlot::MenuAudio(menu.id),
+                field.rect,
+            );
         });
         if let Some(audio) = chosen.filter(|audio| *audio != menu.audio) {
             self.run_command(
@@ -1868,7 +1907,9 @@ impl DiscCraftApp {
 
         let targets = link_targets(&self.session.project, true);
         let port = Port::Button { menu: id, index };
-        if let Some(link) = self.link_row(ui, tl!("Link:"), port, &button.link, &targets) {
+        // M6.528: a button can resume the title its menu was called from (its override cannot, as in Encore).
+        let resumable = with_resume(&targets);
+        if let Some(link) = self.link_row(ui, tl!("Link:"), port, &button.link, &resumable) {
             self.set_button_link(id, index, &link);
         }
         // 上書き: このボタンで再生したタイトルが終わったあとの行き先（リンクがタイトルのときだけ）。
@@ -3027,31 +3068,54 @@ impl DiscCraftApp {
         // 書き出し / 読み込み（Encore のカラーセットのダイアログのボタン）と、初期設定に戻す。
         ui.horizontal(|ui| {
             prop_label(ui, "");
-            if ui.button(tl!("Export…")).clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .add_filter(tl!("Subtitle Color Set"), &["dccolors"])
-                    .set_file_name("colors.dccolors")
-                    .save_file()
-            {
-                let _ = self.run_query(
-                    "colorset.export",
-                    json!({ owner: id, "path": path.to_string_lossy() }),
+            if ui.button(tl!("Export…")).clicked() {
+                crate::file_dialogs::ask(
+                    craft_dialogs::FileDialog::save()
+                        .filter(tl!("Subtitle Color Set"), &["dccolors"])
+                        .file_name("colors.dccolors"),
+                    crate::file_dialogs::Then::SubtitleColors {
+                        owner,
+                        id,
+                        export: true,
+                    },
                 );
             }
-            if ui.button(tl!("Import…")).clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .add_filter(tl!("Subtitle Color Set"), &["dccolors"])
-                    .pick_file()
-            {
-                let _ = self.run_command(
-                    "colorset.import",
-                    json!({ owner: id, "path": path.to_string_lossy() }),
+            if ui.button(tl!("Import…")).clicked() {
+                crate::file_dialogs::ask(
+                    craft_dialogs::FileDialog::open()
+                        .filter(tl!("Subtitle Color Set"), &["dccolors"]),
+                    crate::file_dialogs::Then::SubtitleColors {
+                        owner,
+                        id,
+                        export: false,
+                    },
                 );
             }
             if own.is_some() && ui.button(tl!("Reset to Default")).clicked() {
                 let _ = self.run_command(command, json!({ owner: id, "groups": null }));
             }
         });
+    }
+
+    /// Exports (`export`) or imports the subtitle colour set of `owner` `id` to or from the file chosen.
+    pub(crate) fn subtitle_colors_file(
+        &mut self,
+        owner: &'static str,
+        id: u64,
+        export: bool,
+        path: &std::path::Path,
+    ) {
+        if export {
+            let _ = self.run_query(
+                "colorset.export",
+                json!({ owner: id, "path": path.to_string_lossy() }),
+            );
+        } else {
+            let _ = self.run_command(
+                "colorset.import",
+                json!({ owner: id, "path": path.to_string_lossy() }),
+            );
+        }
     }
 
     /// タイムラインビューアで選んだ字幕（`id` のタイムラインの、字幕トラックと字幕の番号）。
@@ -3282,9 +3346,16 @@ impl DiscCraftApp {
                     });
             })
             .response
-            .on_hover_text(tl!(
-                "A player set to a lower level asks for its password before the title plays"
-            ));
+            .on_hover_text(
+                if self.session.project.settings.kind == disccraft_project::DiscKind::BluRay {
+                    // M6.543: a Blu-ray asks the player's age setting.
+                    tl!(
+                        "A Blu-ray player whose parental age is below the level's does not play the title (levels 1 to 8: all ages, 6, 10, 13, 15, 17, 18 and 21)"
+                    )
+                } else {
+                    tl!("A player set to a lower level asks for its password before the title plays")
+                },
+            );
         (chosen != current).then_some(chosen)
     }
 
@@ -3321,22 +3392,29 @@ impl DiscCraftApp {
         ui.horizontal(|ui| {
             prop_label(ui, label);
             self.pick_whip(ui, port);
-            egui::ComboBox::from_id_salt(("link_row", format!("{port:?}")))
+            let salt = ("link_row", format!("{port:?}"));
+            let list = egui::Id::unique(&salt);
+            // M6.519: a click in the list (its filter box) leaves it open; a choice closes it.
+            let field = egui::ComboBox::from_id_salt(salt)
                 .with_class(crate::theme::LINK_FIELD)
                 .width(field_width(ui, LINK_BUTTON))
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .height(LINK_LIST_HEIGHT + 64.0)
                 .selected_text(current_label)
                 .show_ui(ui, |ui| {
-                    for (name, link) in targets {
-                        if ui.selectable_label(current == link, name).clicked() {
-                            selected = Some(link.clone());
-                        }
+                    if let Some(link) = link_choices(ui, list, current, targets) {
+                        selected = Some(link);
+                        ui.close();
                     }
-                });
+                })
+                .response;
+            crate::pickwhip::mark_link_source(ui, port, field.rect);
             // Encore のリンクの欄の ▶: コピー / 貼り付け / 削除、項目ごとのサブメニュー（メニューのボタン、
             // タイムラインのチャプター）、前のメニューに戻る / 停止。
             let _ = ui
                 .menu_button("▶", |ui| {
-                    if let Some(link) = self.link_menu(ui, current, targets) {
+                    if let Some(link) = self.link_menu(ui, current, targets, link_back_here(&port))
+                    {
                         selected = Some(link);
                         ui.close();
                     }
@@ -3353,15 +3431,28 @@ impl DiscCraftApp {
         selected
     }
 
-    /// The ▶ menu of a link field. Returns the chosen link.
+    /// The ▶ menu of a link field. `here` is where "Link Back to Here" goes ([`link_back_here`]). Returns the chosen
+    /// link.
     pub(crate) fn link_menu(
         &mut self,
         ui: &mut Ui,
         current: &Link,
         targets: &[(String, Link)],
+        here: Option<Link>,
     ) -> Option<Link> {
         let mut chosen = None;
         let allowed = |link: &Link| targets.iter().any(|(_, target)| target == link);
+        // Encore's ▶ starts with Cut: the link goes to the clipboard and the field is not set.
+        if ui
+            .add_enabled(
+                *current != Link::NotSet && allowed(&Link::NotSet),
+                egui::Button::new(tl!("Cut")),
+            )
+            .clicked()
+        {
+            self.link_clipboard = Some(current.clone());
+            chosen = Some(Link::NotSet);
+        }
         if ui
             .add_enabled(*current != Link::NotSet, egui::Button::new(tl!("Copy")))
             .clicked()
@@ -3390,10 +3481,15 @@ impl DiscCraftApp {
         let project = self.session.project.clone();
         // メニュー: 初期設定のボタンと、ボタンごと。
         // Encore と同じく、後のページはそのメニューの下に「ページ N ▸」。
+        // M6.519: the item the field links to now is marked, and so is the menu or timeline it is in.
         let page_items = |ui: &mut Ui, id: MenuId, menu: &disccraft_project::Menu| {
             let mut picked = None;
-            if ui.button(tl!("Default")).clicked() {
-                picked = Some(Link::Menu { id, button: None });
+            let whole = Link::Menu { id, button: None };
+            if ui
+                .add(egui::Button::new(tl!("Default")).selected(*current == whole))
+                .clicked()
+            {
+                picked = Some(whole);
             }
             for (index, button) in menu.buttons.iter().enumerate() {
                 let Ok(number) = u32::try_from(index) else {
@@ -3404,11 +3500,15 @@ impl DiscCraftApp {
                 } else {
                     button.label.clone()
                 };
-                if ui.button(text).clicked() {
-                    picked = Some(Link::Menu {
-                        id,
-                        button: Some(number),
-                    });
+                let link = Link::Menu {
+                    id,
+                    button: Some(number),
+                };
+                if ui
+                    .add(egui::Button::new(text).selected(*current == link))
+                    .clicked()
+                {
+                    picked = Some(link);
                 }
             }
             picked
@@ -3421,15 +3521,19 @@ impl DiscCraftApp {
             if !allowed(&whole) || project.is_menu_page(*id) {
                 continue;
             }
-            ui.menu_button(menu.name.as_str(), |ui| {
+            let pages = project.menu_pages(*id);
+            let here = matches!(current, Link::Menu { id: target, .. } if pages.contains(target));
+            let _ = sub_menu(ui, menu.name.as_str(), here, |ui| {
                 if let Some(link) = page_items(ui, *id, menu) {
                     chosen = Some(link);
                 }
-                for (number, page) in project.menu_pages(*id).into_iter().enumerate().skip(1) {
+                for (number, page) in pages.iter().copied().enumerate().skip(1) {
                     let Some(page_menu) = project.menu(page) else {
                         continue;
                     };
-                    ui.menu_button(tlf!("Page {n}", n = number), |ui| {
+                    let on_page =
+                        matches!(current, Link::Menu { id: target, .. } if *target == page);
+                    let _ = sub_menu(ui, tlf!("Page {n}", n = number), on_page, |ui| {
                         if let Some(link) = page_items(ui, page, page_menu) {
                             chosen = Some(link);
                         }
@@ -3449,9 +3553,13 @@ impl DiscCraftApp {
             if chapters.is_empty() {
                 continue;
             }
-            ui.menu_button(timeline.name.as_str(), |ui| {
+            let here = matches!(current, Link::Timeline { id: target, .. } if target == id);
+            let _ = sub_menu(ui, timeline.name.as_str(), here, |ui| {
                 for (text, link) in chapters {
-                    if ui.button(text).clicked() {
+                    if ui
+                        .add(egui::Button::new(text).selected(*current == link))
+                        .clicked()
+                    {
                         chosen = Some(link);
                     }
                 }
@@ -3460,17 +3568,32 @@ impl DiscCraftApp {
         // スライドショーと再生リストはそのまま選ぶ。
         for (text, link) in targets {
             if matches!(link, Link::Slideshow { .. } | Link::Playlist { .. })
-                && ui.button(text.as_str()).clicked()
+                && ui
+                    .add(egui::Button::new(text.as_str()).selected(current == link))
+                    .clicked()
             {
                 chosen = Some(link.clone());
             }
         }
         ui.separator();
-        for link in [Link::LastMenu, Link::Stop] {
+        // Encore's "Link Back to Here" (M6.527): the field's own item, so that it comes back to where it is.
+        let back = here.filter(|link| allowed(link));
+        if ui
+            .add_enabled(
+                back.is_some(),
+                egui::Button::new(tl!("Link Back to Here"))
+                    .selected(back.as_ref() == Some(current)),
+            )
+            .clicked()
+        {
+            chosen = back;
+        }
+        // Encore's order: Return to Last Menu, Resume (a menu's buttons and end action only), Stop.
+        for link in [Link::LastMenu, Link::Resume, Link::Stop] {
             if ui
                 .add_enabled(
                     allowed(&link),
-                    egui::Button::new(link_label(&project, &link)),
+                    egui::Button::new(link_label(&project, &link)).selected(*current == link),
                 )
                 .clicked()
             {
@@ -3488,6 +3611,176 @@ impl DiscCraftApp {
             .map(|asset| asset.name.clone())
             .unwrap_or_else(|| tl!("Unknown").to_string())
     }
+}
+
+/// A sub menu of the ▶ menu of a link field, shown selected when the field links into it (M6.519).
+fn sub_menu<R>(
+    ui: &mut Ui,
+    text: impl Into<egui::WidgetText>,
+    selected: bool,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> Option<R> {
+    use egui::containers::menu::SubMenuButton;
+    let button = egui::Button::new(text.into())
+        .right_text(SubMenuButton::arrow_atom(None))
+        .selected(selected);
+    let (_, inner) = SubMenuButton::from_button(button).ui(ui, add_contents);
+    inner.map(|inner| inner.inner)
+}
+
+/// `targets` with Resume after the last menu (M6.528): the targets of a menu's buttons and end action, the links that
+/// run in a menu and can go back to the title the menu was called from.
+pub(crate) fn with_resume(targets: &[(String, Link)]) -> Vec<(String, Link)> {
+    let mut with = targets.to_vec();
+    let at = with
+        .iter()
+        .position(|(_, link)| *link == Link::LastMenu)
+        .map_or(with.len(), |index| index.saturating_add(1));
+    with.insert(at, (tl!("Resume").to_string(), Link::Resume));
+    with
+}
+
+/// Where Encore's "Link Back to Here" sends the field `port` (M6.527): back to the item the field belongs to. A
+/// button's own menu with that button highlighted, a timeline from its start, the menu, slideshow, playlist or chapter
+/// playlist itself. The disc's fields and a playlist's item list have no item to come back to.
+pub(crate) fn link_back_here(port: &Port) -> Option<Link> {
+    let node = match port {
+        Port::Button { menu, index } | Port::ButtonOverride { menu, index } => {
+            return Some(Link::Menu {
+                id: *menu,
+                button: u32::try_from(*index).ok(),
+            });
+        }
+        Port::EndAction(node) => *node,
+        Port::MenuRemote(id) | Port::Override(id) | Port::ParentalAlternative(id) => {
+            NodeId::Timeline(*id)
+        }
+        Port::MenuOverride(id) => NodeId::Menu(*id),
+        Port::ChapterPlaylistOverride(id) => NodeId::ChapterPlaylist(*id),
+        Port::FirstPlay | Port::TitleButton | Port::DiscOverride | Port::PlaylistItems(_) => {
+            return None;
+        }
+    };
+    Some(match node {
+        NodeId::Menu(id) => Link::Menu { id, button: None },
+        NodeId::Timeline(id) => Link::Timeline { id, chapter: 0 },
+        NodeId::Slideshow(id) => Link::Slideshow { id },
+        NodeId::Playlist(id) => Link::Playlist { id },
+        NodeId::ChapterPlaylist(id) => Link::ChapterPlaylist { id },
+        NodeId::FirstPlay => return None,
+    })
+}
+
+/// A link field's list has a filter box once it has more targets than this (M6.519).
+const LINK_FILTER_FROM: usize = 12;
+
+/// The heading a link target is listed under in a link field's list (English, translated when drawn); the actions
+/// (Not set, Stop, Last menu, Resume) come first, under none.
+fn link_group(link: &Link) -> Option<&'static str> {
+    match link {
+        Link::NotSet | Link::Stop | Link::LastMenu | Link::Resume => None,
+        Link::Timeline { .. } => Some("Timelines"),
+        Link::Menu { .. } => Some("Menus"),
+        Link::Slideshow { .. } => Some("Slideshows"),
+        Link::Playlist { .. } => Some("Playlists"),
+        Link::ChapterPlaylist { .. } => Some("Chapter Playlists"),
+    }
+}
+
+/// Whether a link target's `name` is kept by the filter `filter` (any part of it, case ignored).
+pub(crate) fn link_kept(name: &str, filter: &str) -> bool {
+    let filter = filter.trim();
+    filter.is_empty() || name.to_lowercase().contains(&filter.to_lowercase())
+}
+
+/// How tall the targets of a link field's list are at most (they scroll under its filter box, which stays in sight).
+const LINK_LIST_HEIGHT: f32 = 300.0;
+
+/// The list of a link field's drop-down (M6.519): its targets under a heading for each kind, the current one shown
+/// selected and scrolled into view when the list opens, and above them a filter box (when there are many) that has
+/// the keyboard when the list opens: typing narrows the list, Enter takes the first target left (once something is
+/// typed), ↓ goes into the list, the arrow keys move through it, Enter takes the one with the keyboard and Escape
+/// closes it (egui's menus). Returns the target chosen.
+fn link_choices(
+    ui: &mut Ui,
+    list: egui::Id,
+    current: &Link,
+    targets: &[(String, Link)],
+) -> Option<Link> {
+    let shown_id = list.with("shown");
+    let filter_id = list.with("filter");
+    let pass = ui.ctx().cumulative_pass_nr();
+    let opened = ui.data_mut(|data| {
+        let last = data.get_temp::<u64>(shown_id);
+        data.insert_temp(shown_id, pass);
+        last != Some(pass.saturating_sub(1))
+    });
+    let mut filter = if opened {
+        String::new()
+    } else {
+        ui.data(|data| data.get_temp::<String>(filter_id))
+            .unwrap_or_default()
+    };
+    let mut chosen = None;
+    let mut take_first = false;
+    let mut into_list = false;
+    if targets.len() > LINK_FILTER_FROM {
+        let edit = ui.add(
+            egui::TextEdit::singleline(&mut filter)
+                .hint_text(tl!("Filter"))
+                .desired_width(f32::INFINITY),
+        );
+        if opened {
+            edit.request_focus();
+        }
+        // Enter takes the first target left only once something is typed: with the box empty it took whatever came
+        // first (Not set) and cleared the field.
+        take_first = edit.lost_focus()
+            && !filter.trim().is_empty()
+            && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        // A text box keeps the arrow keys (they move its cursor): ↓ takes the keyboard into the list.
+        into_list = edit.has_focus() && ui.input(|input| input.key_pressed(egui::Key::ArrowDown));
+        ui.data_mut(|data| data.insert_temp(filter_id, filter.clone()));
+        let _ = ui.separator();
+    }
+    let kept: Vec<&(String, Link)> = targets
+        .iter()
+        .filter(|(name, _)| link_kept(name, &filter))
+        .collect();
+    if kept.is_empty() {
+        let _ = ui.weak(tl!("No matches"));
+    }
+    if take_first && let Some((_, link)) = kept.first() {
+        chosen = Some(link.clone());
+    }
+    // The targets scroll on their own, so that the filter box above them stays in sight.
+    let _ = egui::ScrollArea::vertical()
+        .id_salt(list.with("targets"))
+        .max_height(LINK_LIST_HEIGHT)
+        .show(ui, |ui| {
+            let mut group = None;
+            for (index, (name, link)) in kept.into_iter().enumerate() {
+                let heading = link_group(link);
+                if let Some(text) = heading
+                    && heading != group
+                {
+                    let _ = ui.weak(crate::i18n::t(text));
+                }
+                group = heading;
+                let response = ui.selectable_label(current == link, name);
+                if opened && current == link {
+                    response.scroll_to_me(Some(Align::Center));
+                }
+                if into_list && index == 0 {
+                    response.request_focus();
+                    response.scroll_to_me(None);
+                }
+                if response.clicked() {
+                    chosen = Some(link.clone());
+                }
+            }
+        });
+    chosen
 }
 
 /// 入力欄。入力中の文字は欄が持ち、フォーカスが外れたとき（1 行の欄は Enter でも）に、変わっていれば
@@ -3750,7 +4043,7 @@ fn capacity_name(capacity: Capacity) -> &'static str {
 }
 
 /// 動画の背景にしたときのループの初めの長さ（秒）。
-const DEFAULT_LOOP_SECONDS: u32 = 10;
+pub(crate) const DEFAULT_LOOP_SECONDS: u32 = 10;
 /// モーションメニューのループの最長（秒。検査と同じ）。
 const MAX_LOOP_SECONDS: u32 = 30;
 
@@ -3937,6 +4230,156 @@ pub(crate) fn fps_text(fps: f64) -> String {
 mod tests {
     use super::{frame_rate_text, frame_size};
     use disccraft_project::VideoStandard;
+
+    /// M6.527: "Link Back to Here" goes back to the field's own item: a button's menu with that button, a timeline
+    /// from its start, a menu or a list itself; the disc's fields have none.
+    #[test]
+    fn link_back_here_is_the_fields_own_item() {
+        use super::link_back_here;
+        use crate::flowchart::{NodeId, Port};
+        use disccraft_project::{Link, MenuId, TimelineId};
+        assert_eq!(
+            link_back_here(&Port::Button {
+                menu: MenuId(2),
+                index: 3
+            }),
+            Some(Link::Menu {
+                id: MenuId(2),
+                button: Some(3)
+            })
+        );
+        assert_eq!(
+            link_back_here(&Port::EndAction(NodeId::Timeline(TimelineId(4)))),
+            Some(Link::Timeline {
+                id: TimelineId(4),
+                chapter: 0
+            })
+        );
+        assert_eq!(
+            link_back_here(&Port::MenuRemote(TimelineId(4))),
+            Some(Link::Timeline {
+                id: TimelineId(4),
+                chapter: 0
+            })
+        );
+        assert_eq!(
+            link_back_here(&Port::MenuOverride(MenuId(5))),
+            Some(Link::Menu {
+                id: MenuId(5),
+                button: None
+            })
+        );
+        assert_eq!(
+            link_back_here(&Port::EndAction(NodeId::Playlist(7))),
+            Some(Link::Playlist { id: 7 })
+        );
+        assert_eq!(link_back_here(&Port::FirstPlay), None);
+        assert_eq!(link_back_here(&Port::DiscOverride), None);
+        assert_eq!(link_back_here(&Port::PlaylistItems(7)), None);
+    }
+
+    /// M6.519: a link field's list puts its targets under a heading for each kind (the actions first, under none),
+    /// and its filter keeps a target when any part of its name matches, case ignored.
+    #[test]
+    fn link_targets_are_listed_by_kind_and_filtered_by_name() {
+        use super::{link_group, link_kept};
+        use disccraft_project::{Link, MenuId, TimelineId};
+        assert_eq!(link_group(&Link::Stop), None);
+        assert_eq!(
+            link_group(&Link::Timeline {
+                id: TimelineId(1),
+                chapter: 2
+            }),
+            Some("Timelines")
+        );
+        assert_eq!(
+            link_group(&Link::Menu {
+                id: MenuId(1),
+                button: None
+            }),
+            Some("Menus")
+        );
+        assert!(link_kept("Menu: Main", ""));
+        assert!(link_kept("Menu: Main", "  main "));
+        assert!(link_kept("メイキング: チャプター 1", "メイキ"));
+        assert!(!link_kept("Menu: Main", "trip"));
+    }
+
+    /// M6.519: a long link list opens with the keyboard in its filter box: typing narrows it, Enter takes the first
+    /// target left; with nothing left it says so and Enter takes nothing.
+    #[test]
+    fn typing_in_a_link_list_narrows_it_and_enter_takes_the_first() {
+        use super::link_choices;
+        use disccraft_project::{Link, MenuId, TimelineId};
+        let mut targets = vec![
+            ("Not set".to_owned(), Link::NotSet),
+            ("Stop".to_owned(), Link::Stop),
+        ];
+        for n in 0..12_u32 {
+            targets.push((
+                format!("Feature: chapter {n}"),
+                Link::Timeline {
+                    id: TimelineId(1),
+                    chapter: n,
+                },
+            ));
+        }
+        let extras = Link::Menu {
+            id: MenuId(7),
+            button: None,
+        };
+        targets.push(("Menu: Extras".to_owned(), extras.clone()));
+        let ctx = egui::Context::default();
+        let list = egui::Id::unique("a link list");
+        let frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let mut chosen = None;
+            let mut output = ctx.run_ui(input, |ui| {
+                chosen = link_choices(ui, list, &Link::NotSet, &targets);
+            });
+            // No renderer here: the font atlas upload is dropped on purpose.
+            output.textures_delta.clear();
+            chosen
+        };
+        let enter = || egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        assert_eq!(frame(vec![]), None);
+        assert_eq!(frame(vec![egui::Event::Text("ext".to_owned())]), None);
+        assert_eq!(frame(vec![enter()]), Some(extras));
+
+        // Shown again later: the list opens afresh, with an empty filter and the keyboard in it.
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        assert_eq!(frame(vec![]), None);
+        assert_eq!(frame(vec![egui::Event::Text("nothing".to_owned())]), None);
+        assert_eq!(frame(vec![enter()]), None);
+
+        // Enter in the empty box takes nothing (it took Not set, the first target, and cleared the field); ↓ takes
+        // the keyboard into the list, and Enter then takes the target it is on.
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        assert_eq!(frame(vec![]), None);
+        assert_eq!(frame(vec![enter()]), None);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        assert_eq!(frame(vec![]), None);
+        // The box has had the keyboard for a frame (as when a person presses a key), so it keeps the arrow keys.
+        assert_eq!(frame(vec![]), None);
+        let down = egui::Event::Key {
+            key: egui::Key::ArrowDown,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        assert_eq!(frame(vec![down]), None);
+        assert_eq!(frame(vec![enter()]), Some(Link::NotSet));
+    }
 
     #[test]
     fn frame_rates_read_like_the_standard() {

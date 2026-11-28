@@ -295,7 +295,11 @@ impl DiscCraftApp {
                     drag: egui::containers::scroll_area::DragScroll::Never,
                     mouse_wheel: true,
                 })
-                .show(ui, |ui| self.menu_canvas_area(ui, menu));
+                .show(ui, |ui| {
+                    // M6.525: a pick whip held near the edge of a zoomed menu scrolls it.
+                    crate::pickwhip::scroll_near_edges(ui);
+                    self.menu_canvas_area(ui, menu);
+                });
         });
     }
 
@@ -1681,6 +1685,7 @@ pub(crate) fn link_label(project: &Project, link: &Link) -> String {
         Link::NotSet => tl!("Not set").to_string(),
         Link::Stop => tl!("Stop").to_string(),
         Link::LastMenu => tl!("Last menu").to_string(),
+        Link::Resume => tl!("Resume").to_string(),
         Link::Timeline { id, chapter } => timeline_link_label(project, *id, *chapter),
         Link::Menu { id, button } => menu_link_label(project, *id, *button),
         Link::Playlist { id } => project.playlists.get(id).map_or_else(

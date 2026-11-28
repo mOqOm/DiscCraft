@@ -111,7 +111,8 @@ impl CheckCategory {
             }
             "firstPlayNotSet" => Self::FirstPlay,
             "unreachableMenu" | "unreachableTimeline" => Self::Orphans,
-            "endActionNotSet" => Self::EndActions,
+            "endActionNotSet" | "resumeOutsideMenu" => Self::EndActions,
+            "resumeUnreachable" => Self::ButtonLinks,
             "titleButtonNotMenu" => Self::TitleButton,
             "emptyPlaylist"
             | "emptySlideshow"
@@ -382,6 +383,14 @@ fn problem_text(problem: &ProblemView) -> String {
     match problem.code.as_str() {
         "buttonLinkNotSet" => tl!("The link is not set.").to_owned(),
         "endActionNotSet" => tl!("The end action is not set.").to_owned(),
+        // M6.528, M6.529: Resume where it cannot go back to a title.
+        "resumeOutsideMenu" => {
+            tl!("The end action is Resume, which only a menu can do: playback stops here.").to_owned()
+        }
+        "resumeUnreachable" => tl!(
+            "Resume does nothing here: no title's Menu button nor the Title button shows this menu."
+        )
+        .to_owned(),
         // M6.498: a DVD9's layers at a manual layer break.
         "layer0TooLarge" => {
             tl!("More comes before the layer break than layer 0 holds.").to_owned()

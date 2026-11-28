@@ -57,5 +57,7 @@ The control bar at the bottom contains the following items, from left to right.
 
 Choose **Window ▸ Monitor** (F9). In the Monitor, use **Open Build Output** to read and play the `VIDEO_TS` / `BDMV`
 folder from your exported directory. You can use the remote control's directional keys, Title / Menu, Chapters, and
-Audio / Subtitles. If you have not built the project, it displays the video and audio of the selected timeline directly
+Audio / Subtitles. A Blu-ray's playlist shows its items in turn, each as its own title (a timeline, a slideshow or a
+chapter playlist). The remote's chapter keys go through a timeline's chapters and on from its last chapter to the
+next item. If you have not built the project, it displays the video and audio of the selected timeline directly
 (press Space to play with sound. Subtitles also appear in their Color Set colors). DTS tracks do not play.

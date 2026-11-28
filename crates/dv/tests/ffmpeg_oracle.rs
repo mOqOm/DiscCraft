@@ -5,25 +5,11 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use disccraft_test_support::{ffmpeg, fixtures, temp_path};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use disccraft_dv::{Layout, Sampling, System};
-
-fn ffmpeg() -> Option<PathBuf> {
-    let path =
-        std::env::var_os("DISCCRAFT_FFMPEG").map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
-
-fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures")
-}
 
 /// A raw DV file of 2 seconds of moving test picture (and a 440 Hz / 880 Hz stereo tone), made by ffmpeg.
 /// `interlaced`: fields of a picture at twice the rate (moving between them), coded with the 2-4-8 DCT where the
@@ -42,6 +28,9 @@ fn dv_file(
         return path;
     }
     std::fs::create_dir_all(fixtures()).unwrap();
+    // Made beside it and moved into place: several tests ask for the same file at once, and one must not read
+    // another's half-written one.
+    let part = temp_path(&path);
     let (source, filter) = if interlaced {
         (
             format!("testsrc2=size={size}:rate={rate}*2"),
@@ -68,11 +57,16 @@ fn dv_file(
             &[][..]
         })
         .args(["-c:a", "pcm_s16le", "-f", "dv"])
-        .arg(&path)
+        .arg(&part)
         .status()
         .unwrap()
         .success();
     assert!(ok, "ffmpeg could not make {name}");
+    // Another test may have moved its copy into place first.
+    if std::fs::rename(&part, &path).is_err() {
+        let _ = std::fs::remove_file(&part);
+        assert!(path.is_file(), "{name} could not be moved into place");
+    }
     path
 }
 

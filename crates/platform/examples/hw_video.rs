@@ -1,6 +1,7 @@
 //! Encodes a raw yuv420p clip with the system's hardware H.264 (M12.39) or HEVC Main 10 (M12.44) encoder and says
 //! how fast: `cargo run --release -p disccraft-platform --example hw_video -- h264 clip.yuv 1920 1080 30000 1001
-//! out.h264 [kbps]` (`hevc` for HEVC).
+//! out.h264 [kbps]` (`hevc` for HEVC; M12.51: `h264i` for an interlaced clip coded as fields, the top field first,
+//! through NVIDIA's own encoder interface).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -19,10 +20,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         hardware_encoders(HwCodec::HevcMain10)
     );
     if args.len() < 8 {
-        println!("usage: hw_video h264|hevc clip.yuv width height fps_num fps_den out [kbps]");
+        println!(
+            "usage: hw_video h264|h264i|hevc clip.yuv width height fps_num fps_den out [kbps]"
+        );
         return Ok(());
     }
-    let codec = if args.remove(1) == "hevc" {
+    let kind = args.remove(1);
+    let codec = if kind == "hevc" {
         HwCodec::HevcMain10
     } else {
         HwCodec::H264
@@ -44,6 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         slices: 4,
         sar: (1, 1),
         cbr: false,
+        fields: (kind == "h264i").then_some(true),
     };
     let mut encoder = HwVideoEncoder::open(&config)?;
     println!("using {}", encoder.name());

@@ -312,16 +312,23 @@ impl DiscCraftApp {
         // 追加: オーディオアセットを選ぶと末尾に足す。
         let assets = self.assets_of(AssetKind::Audio);
         let mut chosen = None;
-        egui::ComboBox::from_id_salt(("slideshow_audio_add", id))
-            .selected_text(tl!("Add audio…"))
-            .width(200.0)
-            .show_ui(ui, |ui| {
-                for (asset, name) in &assets {
-                    if ui.selectable_label(false, name).clicked() {
-                        chosen = Some(*asset);
+        ui.horizontal(|ui| {
+            // M6.526 (Encore: a pick whip beside the audio list): an audio dropped from the Project panel is added.
+            let slot = crate::pickwhip::AssetSlot::SlideshowAudio(id);
+            self.asset_pick_whip(ui, slot);
+            let field = egui::ComboBox::from_id_salt(("slideshow_audio_add", id))
+                .selected_text(tl!("Add audio…"))
+                .width(200.0)
+                .show_ui(ui, |ui| {
+                    for (asset, name) in &assets {
+                        if ui.selectable_label(false, name).clicked() {
+                            chosen = Some(*asset);
+                        }
                     }
-                }
-            });
+                })
+                .response;
+            crate::pickwhip::mark_asset_source(ui, slot, field.rect);
+        });
         if let Some(asset) = chosen {
             let _ = self.run_command(
                 "slideshow.addAudioClip",

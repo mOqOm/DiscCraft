@@ -7,6 +7,7 @@ use std::sync::Mutex;
 
 use disccraft_dvd::build_video_ts;
 use disccraft_project::{AudioTrack, Link, Project, Tick};
+use disccraft_test_support::{ffmpeg, ffprobe, fixtures};
 use disccraft_vm::{Key, Location, Vm, explore, load_video_ts};
 
 const TICKS_PER_SECOND: i64 = 254_016_000_000;
@@ -14,12 +15,9 @@ static FIXTURE_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn builds_menu_disc() -> Result<(), Box<dyn Error>> {
-    let ffmpeg = ffmpeg_path();
-    let ffprobe = ffprobe_path();
-
     let _guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
 
-    let fixtures = fixtures_dir();
+    let fixtures = fixtures();
     fs::create_dir_all(&fixtures)?;
 
     let m2v = fixtures.join("ntsc.m2v");
@@ -27,10 +25,10 @@ fn builds_menu_disc() -> Result<(), Box<dyn Error>> {
 
     // Fixtures generated on an earlier run are enough; ffmpeg is only needed to make them.
     if !m2v.is_file() || !ac3.is_file() {
-        if !tool_available(&ffmpeg) {
+        let Some(ffmpeg) = ffmpeg() else {
             println!("skipped: ffmpeg not found and no fixtures");
             return Ok(());
-        }
+        };
         if !m2v.is_file() {
             create_m2v(&ffmpeg, &m2v)?;
         }
@@ -38,7 +36,7 @@ fn builds_menu_disc() -> Result<(), Box<dyn Error>> {
             create_ac3(&ffmpeg, &ac3)?;
         }
     }
-    let ffprobe = tool_available(&ffprobe).then_some(ffprobe);
+    let ffprobe = ffprobe();
 
     let project = build_project(&m2v, &ac3)?;
     let dir = temp_dir("menu_disc");
@@ -405,39 +403,6 @@ fn run_success(cmd: &Path, args: &[&str], output_path: &Path) -> Result<(), Box<
     Ok(())
 }
 
-fn tool_available(cmd: &Path) -> bool {
-    Command::new(cmd)
-        .arg("-version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn ffmpeg_path() -> PathBuf {
-    env::var_os("DISCCRAFT_FFMPEG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("ffmpeg"))
-}
-
-fn ffprobe_path() -> PathBuf {
-    env::var_os("DISCCRAFT_FFPROBE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("ffprobe"))
-}
-
-fn workspace_root() -> PathBuf {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest
-        .parent()
-        .and_then(|p| p.parent())
-        .map(PathBuf::from)
-        .unwrap_or(manifest)
-}
-
-fn fixtures_dir() -> PathBuf {
-    workspace_root().join("target").join("fixtures")
-}
-
 fn temp_dir(name: &str) -> PathBuf {
     env::temp_dir().join(format!("disccraft-dvd-{}-{}", std::process::id(), name))
 }
@@ -473,11 +438,10 @@ fn solid_png(path: &Path, rgb: [u8; 3]) -> Result<(), Box<dyn Error>> {
 /// Encore's "Create Subtitle" on a slide: the slideshow's title gets a subtitle stream showing the slide's name.
 #[test]
 fn a_slides_name_becomes_a_subtitle() -> Result<(), Box<dyn Error>> {
-    let ffprobe = ffprobe_path();
-    if !tool_available(&ffprobe) {
+    let Some(ffprobe) = ffprobe() else {
         println!("skipped: ffprobe not found");
         return Ok(());
-    }
+    };
     let _guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
     let dir = temp_dir("slide_subtitle");
     let _ = fs::remove_dir_all(&dir);
@@ -515,7 +479,7 @@ fn a_slides_name_becomes_a_subtitle() -> Result<(), Box<dyn Error>> {
 /// counted number of times before its end action, a second menu, a slideshow and a chapter playlist.
 #[test]
 fn the_preview_model_is_the_discs() -> Result<(), Box<dyn Error>> {
-    let fixtures = fixtures_dir();
+    let fixtures = fixtures();
     let m2v = fixtures.join("ntsc.m2v");
     if !m2v.is_file() {
         println!("skipped: no fixtures");
@@ -612,7 +576,7 @@ fn the_preview_model_is_the_discs() -> Result<(), Box<dyn Error>> {
 /// A still menu with audio becomes a looping clip with an LPCM stream, and the VMGI declares the menu audio.
 #[test]
 fn builds_a_still_menu_with_audio() -> Result<(), Box<dyn Error>> {
-    let fixtures = fixtures_dir();
+    let fixtures = fixtures();
     let m2v = fixtures.join("ntsc.m2v");
     if !m2v.is_file() {
         println!("skipped: no fixtures");
@@ -691,7 +655,7 @@ fn builds_a_still_menu_with_audio() -> Result<(), Box<dyn Error>> {
 /// group (Encore turns the buttons past 18 into objects) (M6.437).
 #[test]
 fn a_wide_menu_has_letterbox_highlights() -> Result<(), Box<dyn Error>> {
-    let fixtures = fixtures_dir();
+    let fixtures = fixtures();
     let m2v = fixtures.join("ntsc.m2v");
     if !m2v.is_file() {
         println!("skipped: no fixtures");

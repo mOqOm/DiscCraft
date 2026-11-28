@@ -195,9 +195,14 @@ const NEAR_MISS: i64 = 18;
 /// 67.3° and left one at 69.5°, 772 px to the side) or no more than [`VERTICAL_ASIDE`] to the side. Left / right have
 /// no such limit.
 const VERTICAL_CONE_COS: f64 = 0.3746;
-/// Up / down also go straight to a button this far to the side, or less, whatever the angle (Encore CS6, 2026-11-21:
-/// it took a bar 370 px to the side at 70°, and left one 617 px to the side at 76°).
+/// Up / down also go straight to a button this far to the side, or less, up to [`VERTICAL_ASIDE_ANGLE`] (Encore CS6,
+/// 2026-11-21: it took a bar 370 px to the side at 70°, and left one 617 px to the side at 76°).
 const VERTICAL_ASIDE: i64 = 400;
+/// How far round, in degrees, [`VERTICAL_ASIDE`] lets up / down go straight (M10.62, Encore CS6, docs/encore-behavior.md
+/// 9.19 and 9.21: a thin bar went down to a tile 365 px to the side at 74.4°; up from a strip touching the bottoms of
+/// two wide buttons, the nearer one 229 px to the side at 77.9° was not taken straight, and the strip looked round to
+/// the clockwise one).
+const VERTICAL_ASIDE_ANGLE: f64 = 76.0;
 /// With nothing in a direction, [`Router::around`] looks round to a button behind that does not reach past the
 /// button (a tile above a bar, looked at from the bar going down) while the button's centre is no more than this
 /// many degrees off the direction, clockwise of it (M10.58, Encore CS6, 2026-11-22, docs/encore-behavior.md 9.16 and
@@ -205,12 +210,14 @@ const VERTICAL_ASIDE: i64 = 400;
 const BEHIND_ANGLE_CLOCKWISE: f64 = 128.5;
 /// [`BEHIND_ANGLE_CLOCKWISE`] the other way round (the right tile at 120.2°, not at 121.6°).
 const BEHIND_ANGLE_ANTICLOCKWISE: f64 = 121.0;
-/// How far behind the centre of the button routed (along the direction) the centre of a button looked round to as
-/// [`BEHIND_ANGLE_CLOCKWISE`] may be, clockwise of the direction (M10.58: a thin bar went down to a tile 172 px above
-/// its centre and to none 192 px above; a tall picture button does not reach the row under it).
+/// How far behind the centre of the button routed (along the direction) the centre of a button looked round to
+/// may be, clockwise of the direction (M10.58: a thin bar went down to a tile 172 px above its centre and to none
+/// 192 px above; a tall picture button does not reach the row under it). Also for a button that reaches past it
+/// ([`REACH_CLOCKWISE`], M10.62).
 const BEHIND_DEPTH_CLOCKWISE: f64 = 182.0;
 /// [`BEHIND_DEPTH_CLOCKWISE`] the other way round (M10.58: a tile 106 px above the bar's centre was reached, tiles
-/// 156 px above at 104° and 113° were not).
+/// 156 px above at 104° and 113° were not; M10.62, docs/encore-behavior.md 9.16: left from a tall tile to the bar
+/// under it whose centre was 129 px behind, not 139 px).
 const BEHIND_DEPTH_ANTICLOCKWISE: f64 = 131.0;
 /// Looking round behind, the buttons within this many degrees of the direction come first, the nearest of them, and
 /// the others only when there are none (M10.58, Encore CS6, 2026-11-22: a bar went down to the nearer tile at 110.5°
@@ -227,7 +234,8 @@ const ANGLE_TIE: f64 = 2.9;
 /// (M10.51, Encore CS6, 2026-11-22: a bar 106 to 356 px below a tile, whose angle limit fell from about 132° to
 /// 115° as it got further away; 564 of 564 routes of the bar measurement).
 const REACH_CLOCKWISE: f64 = 38.5;
-/// [`REACH_CLOCKWISE`] the other way round (three of the four distances measured).
+/// [`REACH_CLOCKWISE`] the other way round (three of the four distances measured; at the fourth, the tallest tile,
+/// [`BEHIND_DEPTH_ANTICLOCKWISE`] is what stops it, M10.62).
 const REACH_ANTICLOCKWISE: f64 = 30.0;
 /// How much worse than the best a clockwise button's score may be for [`ANGLE_TIE`] (M10.51: Encore took one 1.14
 /// times the best, and left one 1.17 times it 0.4° round, the reporter's chapter page going down to Chapter 1).
@@ -470,6 +478,26 @@ impl<'a> Router<'a> {
             .map(|(_, other)| other)
     }
 
+    /// Whether button `strip` is held ([`Bounds::holds_strip`]) by a button other than `index` whose centre is ahead
+    /// of `index`'s in `direction`: [`Self::ahead`] passes over it for that button (M10.62, Encore CS6,
+    /// docs/encore-behavior.md 9.22: left from a wide button went to the wide button beside it, not to the 15 px strip
+    /// touching that one's bottom 9 px off its centre, which scores 0.6 % better; to the strip 12 px off its centre).
+    fn held_ahead(&self, strip: usize, index: usize, direction: Direction) -> bool {
+        let (Some(inner), Some(from)) = (self.bounds.get(strip), self.centres.get(index)) else {
+            return false;
+        };
+        self.bounds
+            .iter()
+            .zip(&self.centres)
+            .enumerate()
+            .any(|(holder, (outer, centre))| {
+                holder != index
+                    && holder != strip
+                    && direction.step(from, centre).0 > 0
+                    && outer.holds_strip(inner)
+            })
+    }
+
     /// For a button that contains others (a bar behind a row of buttons): the contained button nearest ahead in
     /// `direction`, or else the nearest one level with it (Encore CS6, 2026-11-21: a bar behind a row went up and
     /// down to the row's button nearest its centre, not to the button above the bar).
@@ -545,9 +573,10 @@ impl<'a> Router<'a> {
 
     /// The nearest button ahead of `index` in `direction`: the smallest distance over the cosine of the angle off
     /// the direction to the power 1.5 (Encore CS6 favours buttons straight ahead a little more than distance over
-    /// cosine), up / down only within [`VERTICAL_CONE_COS`], not one wholly beyond the first button the line
-    /// straight ahead from the centre meets (M10.55); the lower number on a tie. When that one is not on the
-    /// clockwise side, the best on that side within [`ANGLE_TIE`] and [`SCORE_TIE`] of it is taken instead.
+    /// cosine), up / down only within [`VERTICAL_CONE_COS`] (or [`VERTICAL_ASIDE`]), not one wholly beyond the first
+    /// button the line straight ahead from the centre meets (M10.55), not a strip another button ahead holds (M10.62);
+    /// the lower number on a tie. When that one is not on the clockwise side, the best on that side within
+    /// [`ANGLE_TIE`] and [`SCORE_TIE`] of it is taken instead.
     fn ahead(&self, index: usize, direction: Direction) -> Option<usize> {
         let from = self.centres.get(index)?;
         // M10.55: a button wholly beyond the first one the line straight ahead from the centre meets is hidden by
@@ -587,6 +616,9 @@ impl<'a> Router<'a> {
             {
                 continue;
             }
+            if self.held_ahead(other, index, direction) {
+                continue;
+            }
             // `as` is exact enough for pixel distances.
             let (step, distance) = (step as f64, (squared as f64).sqrt());
             let aside = if direction.vertical() {
@@ -594,14 +626,14 @@ impl<'a> Router<'a> {
             } else {
                 centre.y - from.y
             };
+            let angle = (aside.abs() as f64).atan2(step).to_degrees();
             if direction.vertical()
                 && step < VERTICAL_CONE_COS * distance
-                && aside.abs() > VERTICAL_ASIDE
+                && (aside.abs() > VERTICAL_ASIDE || angle > VERTICAL_ASIDE_ANGLE)
             {
                 continue;
             }
             let score = distance / (step / distance).powf(1.5);
-            let angle = (aside.abs() as f64).atan2(step).to_degrees();
             found.push((score, angle, direction.clockwise(from, centre), other));
         }
         let best = found.iter().copied().min_by(|a, b| a.0.total_cmp(&b.0))?;
@@ -719,8 +751,9 @@ impl<'a> Router<'a> {
     /// from it; `clockwise` of the direction): a target that reaches past `source` in the direction (a bar under
     /// a tile) while its centre is no more than [`REACH_CLOCKWISE`] / [`REACH_ANTICLOCKWISE`] further away than
     /// it is to the side; any other (a tile above a bar, looked at from the bar going down) while its centre is
-    /// within [`BEHIND_ANGLE_CLOCKWISE`] / [`BEHIND_ANGLE_ANTICLOCKWISE`] of the direction and no more than
-    /// [`BEHIND_DEPTH_CLOCKWISE`] / [`BEHIND_DEPTH_ANTICLOCKWISE`] behind `source`'s centre (M10.58).
+    /// within [`BEHIND_ANGLE_CLOCKWISE`] / [`BEHIND_ANGLE_ANTICLOCKWISE`] of the direction. Either only while its
+    /// centre is no more than [`BEHIND_DEPTH_CLOCKWISE`] / [`BEHIND_DEPTH_ANTICLOCKWISE`] behind `source`'s centre
+    /// (M10.58; M10.62 for one that reaches past).
     fn within_reach(
         &self,
         source: &Bounds,
@@ -735,19 +768,20 @@ impl<'a> Router<'a> {
             return true;
         }
         let aside = (distance * distance - step * step).max(0.0).sqrt();
+        let (most_angle, most_depth) = if clockwise {
+            (BEHIND_ANGLE_CLOCKWISE, BEHIND_DEPTH_CLOCKWISE)
+        } else {
+            (BEHIND_ANGLE_ANTICLOCKWISE, BEHIND_DEPTH_ANTICLOCKWISE)
+        };
         if target.reaches_beyond(source, direction) {
             let reach = if clockwise {
                 REACH_CLOCKWISE
             } else {
                 REACH_ANTICLOCKWISE
             };
-            return distance - aside <= reach;
+            // M10.62: no deeper behind than a button that does not reach past it.
+            return distance - aside <= reach && -step <= most_depth;
         }
-        let (most_angle, most_depth) = if clockwise {
-            (BEHIND_ANGLE_CLOCKWISE, BEHIND_DEPTH_CLOCKWISE)
-        } else {
-            (BEHIND_ANGLE_ANTICLOCKWISE, BEHIND_DEPTH_ANTICLOCKWISE)
-        };
         aside.atan2(step).to_degrees() <= most_angle && -step <= most_depth
     }
 
@@ -2278,6 +2312,60 @@ mod tests {
                     assert_eq!(got, want, "{strip:?}");
                 }
             }
+        }
+    }
+
+    /// M10.62, Encore CS6 (docs/encore-behavior.md 9.16, 9.21 and 9.22): left from a wide button goes to the wide
+    /// button beside it rather than to the 15 px strip that one holds (9 px off its centre, scoring 0.6 % better),
+    /// and to the strip 12 px off its centre; up from a strip touching the bottoms of two wide buttons, both more than
+    /// 76° round, looks round to the clockwise one, while from 84 px lower it goes straight to the nearer one; left
+    /// from a tall tile goes round to the bar under it only while the bar's centre is no more than 131 px behind.
+    #[test]
+    fn strips_and_tall_tiles_route_as_encore_does() {
+        let on = RouteOptions::default();
+        let one_based = |routes: &[[u8; 4]]| -> Vec<(u8, u8, u8, u8)> {
+            routes
+                .iter()
+                .map(|[u, d, l, r]| (u + 1, d + 1, l + 1, r + 1))
+                .collect()
+        };
+        let (bar, beside, wide) = ((0, 971, 1920, 109), (483, 873, 481, 83), (0, 873, 483, 83));
+        // Bar, beside, wide, strip under the wide button.
+        for (x, beside_left) in [(80, 2), (83, 3)] {
+            let encore = [
+                [1, 3, 1, 0],
+                [2, 0, beside_left, 0],
+                [1, 3, 3, 3],
+                [2, 0, 2, 1],
+            ];
+            assert_eq!(
+                auto_route_with(&rects(&[bar, beside, wide, (x, 956, 341, 15)]), &on),
+                one_based(&encore),
+                "strip at x {x}"
+            );
+        }
+        // Wide, beside, a strip across the two.
+        for (y, encore) in [
+            (956, [[2, 2, 0, 2], [2, 2, 2, 1], [1, 0, 0, 1]]),
+            (1040, [[1, 2, 0, 2], [0, 2, 2, 1], [0, 0, 0, 1]]),
+        ] {
+            assert_eq!(
+                auto_route_with(&rects(&[wide, beside, (300, y, 341, 15)]), &on),
+                one_based(&encore),
+                "strip at y {y}"
+            );
+        }
+        // Bar, tile A, tile B, 356 px above the bar's centre.
+        for (x, a_left) in [(693, 1), (703, 0)] {
+            let encore = [[2, 0, 1, 2], [2, 0, a_left, 2], [1, 0, 1, 0]];
+            assert_eq!(
+                auto_route_with(
+                    &rects(&[bar, (x, 383, 257, 573), (x + 257, 383, 224, 573)]),
+                    &on
+                ),
+                one_based(&encore),
+                "tile A at x {x}"
+            );
         }
     }
 }

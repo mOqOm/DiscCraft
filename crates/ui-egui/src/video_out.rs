@@ -138,7 +138,13 @@ impl DiscCraftApp {
         let turn_off = ctx.show_viewport_immediate(
             ViewportId::from_hash_of("disccraft_video_output"),
             builder,
-            |ui, _class| {
+            |ui, class| {
+                // M9.54: Escape turns the output off as before. (Shown inside the main window, the main window's
+                // keys are its.)
+                if class != egui::ViewportClass::EmbeddedWindow {
+                    crate::framework::host_window(ui);
+                    crate::framework::give_back_escape(ui.ctx());
+                }
                 let off = ui.ctx().input(|input| {
                     input.viewport().close_requested() || input.key_pressed(egui::Key::Escape)
                 });

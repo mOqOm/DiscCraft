@@ -4,20 +4,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use disccraft_engine::Session;
+use disccraft_test_support::{ffmpeg, fixtures};
 use serde_json::{Value, json};
-use std::path::PathBuf;
 use std::process::Command;
-
-fn ffmpeg() -> Option<PathBuf> {
-    let path =
-        std::env::var_os("DISCCRAFT_FFMPEG").map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|_| path)
-}
 
 #[test]
 fn a_files_chapters_become_chapter_points() {
@@ -25,7 +14,7 @@ fn a_files_chapters_become_chapter_points() {
         eprintln!("ffmpeg not found; skipping");
         return;
     };
-    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures");
+    let fixtures = fixtures();
     let source = fixtures.join("h264_aac.mp4");
     if !source.is_file() {
         eprintln!("h264_aac.mp4 fixture not found; skipping");

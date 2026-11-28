@@ -31,6 +31,11 @@ pub struct Session {
     undo_labels: Vec<&'static str>,
     /// The label of the command behind each redo snapshot (same order as `redo`).
     redo_labels: Vec<&'static str>,
+    /// What each undo step did, when the caller named it ([`Session::note_last_step`], M6.530: the place a link
+    /// goes to); same order as `undo`.
+    undo_details: Vec<Option<String>>,
+    /// The same for each redo step (same order as `redo`).
+    redo_details: Vec<Option<String>>,
     /// The language of the words DiscCraft makes up for the project (M6.433), kept on every project the session
     /// holds (an undo brings back a snapshot taken before the language changed).
     words: disccraft_project::Words,
@@ -55,6 +60,8 @@ impl Session {
             redo: Vec::new(),
             undo_labels: Vec::new(),
             redo_labels: Vec::new(),
+            undo_details: Vec::new(),
+            redo_details: Vec::new(),
             words: disccraft_project::Words::default(),
         })
     }
@@ -149,14 +156,19 @@ impl Session {
                     if self.project != snapshot {
                         self.undo.push(snapshot);
                         self.undo_labels.push(spec.label);
+                        self.undo_details.push(None);
                         if self.undo.len() > UNDO_LIMIT {
                             self.undo.remove(0);
                             if !self.undo_labels.is_empty() {
                                 let _ = self.undo_labels.remove(0);
                             }
+                            if !self.undo_details.is_empty() {
+                                let _ = self.undo_details.remove(0);
+                            }
                         }
                         self.redo.clear();
                         self.redo_labels.clear();
+                        self.redo_details.clear();
                         self.dirty = true;
                     }
 
@@ -197,6 +209,34 @@ impl Session {
         &self.undo_labels
     }
 
+    /// Names what the step just done did, after its label (M6.530: "Set Link" with the place the link goes to). A
+    /// caller calls it right after a command that added a step; it names the newest step.
+    pub fn note_last_step(&mut self, detail: String) {
+        if let Some(slot) = self.undo_details.last_mut() {
+            *slot = Some(detail);
+        }
+    }
+
+    /// What the next undo takes back, when its step was named ([`Session::note_last_step`]).
+    pub fn undo_detail(&self) -> Option<&str> {
+        self.undo_details.last().and_then(Option::as_deref)
+    }
+
+    /// What the next redo applies again, when its step was named.
+    pub fn redo_detail(&self) -> Option<&str> {
+        self.redo_details.last().and_then(Option::as_deref)
+    }
+
+    /// What each step that can be undone did, when named (same order as [`Session::undo_labels`]).
+    pub fn undo_details(&self) -> &[Option<String>] {
+        &self.undo_details
+    }
+
+    /// What each step that can be redone did, when named (same order as [`Session::redo_labels`]).
+    pub fn redo_details(&self) -> &[Option<String>] {
+        &self.redo_details
+    }
+
     /// The labels of the steps that can be redone, farthest first (the last is the next redo).
     pub fn redo_labels(&self) -> &[&'static str] {
         &self.redo_labels
@@ -222,6 +262,9 @@ impl Session {
         if let Some(label) = self.undo_labels.pop() {
             self.redo_labels.push(label);
         }
+        if let Some(detail) = self.undo_details.pop() {
+            self.redo_details.push(detail);
+        }
         self.project = previous;
         self.project.words = self.words;
         self.dirty = true;
@@ -238,6 +281,9 @@ impl Session {
         if let Some(label) = self.redo_labels.pop() {
             self.undo_labels.push(label);
         }
+        if let Some(detail) = self.redo_details.pop() {
+            self.undo_details.push(detail);
+        }
         self.project = next;
         self.project.words = self.words;
         self.dirty = true;
@@ -252,6 +298,8 @@ impl Session {
         self.redo.clear();
         self.undo_labels.clear();
         self.redo_labels.clear();
+        self.undo_details.clear();
+        self.redo_details.clear();
     }
 }
 
@@ -260,6 +308,27 @@ mod tests {
     use super::Session;
     use disccraft_project::{FrameRate, Link};
     use serde_json::{Map, Value};
+
+    /// M6.530: a step can be named after it is done; the name goes with the step through undo and redo, and a new
+    /// step starts without one.
+    #[test]
+    fn a_named_step_keeps_its_name_through_undo_and_redo() -> Result<(), String> {
+        let mut session = Session::new();
+        let _ = session.execute("menu.create", &serde_json::json!({ "name": "Main" }))?;
+        session.note_last_step("Main".to_string());
+        assert_eq!(session.undo_detail(), Some("Main"));
+        session.undo()?;
+        assert_eq!(
+            (session.undo_detail(), session.redo_detail()),
+            (None, Some("Main"))
+        );
+        session.redo()?;
+        assert_eq!(session.undo_detail(), Some("Main"));
+        let _ = session.execute("menu.create", &serde_json::json!({ "name": "Extras" }))?;
+        assert_eq!(session.undo_detail(), None);
+        assert_eq!(session.undo_details().len(), session.undo_labels().len());
+        Ok(())
+    }
     use std::error::Error;
     use std::fs;
     use std::path::{Path, PathBuf};

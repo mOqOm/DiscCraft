@@ -4,6 +4,88 @@ English | [日本語](CHANGELOG.ja.md)
 
 What changed in each version of DiscCraft. The files for each system are on [GitHub's releases](https://github.com/mOqOm/DiscCraft/releases).
 
+## 0.1.0-alpha.18 (2026-11-28)
+
+### Interface
+
+- The interface's typefaces are the other Crafting Apps' now: Inter at 12 px for Latin text (until now Encore's Tahoma at 11 px and MS UI Gothic), and the system's Japanese interface face (Meiryo UI and the like) for Japanese. The Project panel's columns are a little wider so that a duration is not cut off
+- Panel docking and the menu bar run on the other Crafting Apps' new interface framework. A floated panel is an OS window, as in Encore, and can go outside the main window or onto another monitor (dragging its tab into a group docks it again). The tabs of a floated window also get the grip, the viewer's list of items and the outline of the panel in use. Switching to another app closes an open menu
+- A viewer tab's ▼ has **Close** / **Close All** and the items opened in that viewer. **File ▸ Close** (Ctrl+W) does what ▼ **Close** does. A tab can also be dragged from its ▼ box
+- The open and save dialogs are the other Crafting Apps' and no longer hold up the window while they are shown. Choosing **Save** when a project with unsaved changes is closed asks where to save, saves, and then closes
+- Settings are kept in a `config.toml`, as the other Crafting Apps keep theirs: a write cut short leaves it intact, and the previous contents are kept as a backup. An older version's `workspace.json` is taken over at the first start and left in place
+- **Help ▸ Check for Updates…** asks GitHub for a newer release and offers it. **Download** opens the release's page; a copy installed from the Linux AppImage, .deb, .rpm or Flatpak is replaced with **Update and Restart**. With **Edit ▸ Preferences… ▸ General ▸ Check for updates at startup** it checks at every start (off at first; DiscCraft contacts GitHub only then)
+
+### Links and the pick whip
+
+- The pick whip works as in Encore: a line runs from the handle to the pointer, gold over a destination it can link to and red where it cannot. Esc stops it, and it scrolls at a panel's edge. While dragging, the field it came from has a gold outline. It can be dropped on the Project panel, a flowchart box, a button in the Menu Viewer and a chapter marker
+- Asset fields such as a background video, and the slideshow's audio list, have a pick whip too
+- A link field's list has a heading for each kind, a mark on the current destination and a filter field. The ▶ menu has Cut / Copy / Paste / Delete, a submenu for each item, **Link Back to Here**, Last Menu, **Resume**, Stop and Specify Link…
+- New link **Resume**: from a menu button or a menu's end action, it goes back to where the title was when the menu was shown (in the DVD Project Preview as well). The project check says so when it is used in a menu no title shows
+- History names what was linked to what
+- Dragging a box in the flowchart leaves the box where it is and draws a line, as in Encore, and links to where it is dropped; dropping the disc sets the first play. Dragging a button's route marks the button it will go to
+
+### Menus
+
+- A PSD button set is flipped and rotated with its button
+- PSD layers above the button sets (a shadow or frame over the whole menu) are drawn over the buttons
+
+### Blu-ray
+
+- Parental levels are written to Blu-ray as well. A chapter's alternative video (versions for each age) works on Blu-ray, and the preview of a built Blu-ray shows the version for the level
+- A playlist plays its items' titles one after another, so each title's parental level and age versions apply. The chapter keys go to a timeline's chapters, and chapter playlists play in their order. The preview of a built Blu-ray shows a playlist's item as that title
+- VobSub (DVD subtitles) become Blu-ray subtitles (PGS). Forced subtitles stay forced
+- 2.1, 4.1 and 6.1 channel WAV goes onto the disc as LPCM instead of being converted to AC-3
+- Full-range and BT.601 HD H.264 is converted instead of being used as it is (players would show black and white at the wrong levels)
+- 1080i H.264 can be encoded on an NVIDIA GPU (Blackwell generation); other GPUs leave it to the processor as before
+
+### DVD
+
+- Blu-ray subtitles (PGS) in an MKV become DVD subtitles
+
+### What can be imported
+
+- Subtitles inside a video: MP4 / MOV text subtitles, and VobSub in MKV and MP4. A VobSub without a colour table gets default colours
+- Subtitle files: ASS / SSA (Shift_JIS too), SCC, MCC, EBU STL, TTML / DFXP and SAMI
+- Video: FFV1, H.263, Hap, 10-bit RGB (r210 / R10k), Theora (MKV and `.ogv`), PNG frame video and 3GP
+- Sound: Dolby Digital Plus (E-AC-3) `.eac3` / `.ec3`. An `.ac3` that holds E-AC-3 is converted to AC-3 for a DVD
+- A file's kind is told from its contents, not its name
+
+### Project check
+
+- A timeline in a playlist is no longer reported as unreachable (playlists, chapter playlists and slideshows are followed too)
+
+### Automatic routing
+
+- In the seven sets of Encore menus that are measured, every automatic route now goes where Encore's does
+
+### Conversion
+
+- SD, full-range, 10-bit and 4:2:2 sources also go to the encoder without a trip through RGB (a hardware encoder no longer waits)
+
+### Command line
+
+- The MCP server of `disccraft-cli mcp` is built on the other Crafting Apps' parts. Its tools and results are as before
+
+### Libraries
+
+- FilmCraft, PhotoCraft, EffectCraft, SoundCraft and craft-libs are at newer versions
+
+### Documents
+
+- The manual's pictures were taken again with the new typefaces and screens, including the pick whip, the link list and ▶ menu, PSD button sets and the update check in Preferences
+
+### Known limitations
+
+- Importing from Blu-ray reads only discs without encryption. DTS and Dolby TrueHD sound are not imported; the disc's subtitles come into a Blu-ray project only, not yet into a DVD project
+- Writing to discs is Windows only. DVD-R and DVD+R DL (dual layer) have been written in a real drive; DVD+R, DVD-RW, DVD+RW, BD-R and BD-RE not yet
+- A disc label is printed from DesignCraft. DiscCraft does not yet place it where a printer's disc tray prints it: with a printer that prints the tray from an A4 page, place the label on that page in DesignCraft
+- DV time code (subcode) is not read (Encore does not read it either). DVCPRO HD and DV inside MXF cannot be read
+- DivX / Xvid (MPEG-4 Part 2) video cannot be read yet
+- In menus that have not been measured, automatic routing can still go elsewhere than Encore's
+- Not signed with a developer certificate. On Windows SmartScreen asks the first time the installer runs, on macOS Gatekeeper the first time (right-click ▸ Open, or remove it with `xattr -d com.apple.quarantine`). For the same reason, an update from inside the app goes as far as the download on Windows (the app does not replace itself)
+- The menus in macOS's own menu bar have not been tried on a Mac yet
+- A PSD button moved, resized or rotated in DiscCraft is still as it was in the PSD when the menu is opened in PhotoCraft
+
 ## 0.1.0-alpha.17 (2026-11-26)
 
 ### Menus

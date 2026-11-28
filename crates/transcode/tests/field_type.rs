@@ -3,19 +3,10 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use disccraft_test_support::{ffmpeg, ffprobe};
 use disccraft_transcode::{FieldType, field_type};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
-
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
 
 /// ffprobe's field_order of the first video stream of `file`, as a field type.
 fn probed(ffprobe: &Path, file: &Path) -> Option<FieldType> {
@@ -38,10 +29,7 @@ fn probed(ffprobe: &Path, file: &Path) -> Option<FieldType> {
 
 #[test]
 fn field_types_are_what_ffprobe_says() {
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        tool("DISCCRAFT_FFMPEG", "ffmpeg"),
-        tool("DISCCRAFT_FFPROBE", "ffprobe"),
-    ) else {
+    let (Some(ffmpeg), Some(ffprobe)) = (ffmpeg(), ffprobe()) else {
         eprintln!("ffmpeg / ffprobe not found; skipping");
         return;
     };

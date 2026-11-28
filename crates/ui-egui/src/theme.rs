@@ -309,7 +309,7 @@ pub fn apply_theme(ctx: &Context) {
 fn apply_style(ctx: &Context, theme: Theme) {
     ctx.style_mut_of(theme, |style| {
         style.visuals = visuals(theme == Theme::Light);
-        // Encore と同じ大きさ（M6.461: Tahoma があれば本文は Encore と同じ 11 px、なければ 12 px）。
+        // The other Craft apps' size (M9.68: 12 px; Encore's Tahoma at 11 px until then).
         let body = crate::fonts::body_size();
         style.text_styles = [
             (

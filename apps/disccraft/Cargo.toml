@@ -11,6 +11,8 @@ publish.workspace = true
 mimalloc.workspace = true
 disccraft-ui-egui.workspace = true
 eframe.workspace = true
+# M9.65: on Windows the update helper is a copy of this program started with `--finish-update`.
+craft-update.workspace = true
 
 # The icon of the program file on Windows (assets/app-icon/disccraft.ico; build.rs).
 [target.'cfg(windows)'.build-dependencies]

@@ -101,6 +101,7 @@ all the following conditions (preserving picture quality and speeding up builds)
   requires interlaced 1920×1080 at 29.97 / 25 fps; 1080p 23.976 / 24 and 720p require progressive). For 1080-line
   formats, camcorder (HDV / AVCHD) 1440×1080 also matches.
 - High or Main profile, up to Level 4.1, 4:2:0 chroma subsampling at 8 bits, and an average bitrate of 40 Mbps or less
+- The disc's colors (the 16–235 range, and BT.709 for HD; full-range video, or HD marked as BT.601, is converted)
   for the entire file.
 - Starts with a keyframe (IDR).
 - For 1080i, the timeline contains only that single clip.
@@ -137,12 +138,17 @@ size/frame rate/scanning, or average bitrate over 40 Mbps).
 
 ## 5.2 Supported Files
 
+An asset's type comes from the first bytes of its file: a file with a wrong extension or none (an MP4 named `.dat`, for
+example) is imported as what it is when its format is one DiscCraft reads (the video, audio and image formats below).
+When the contents do not tell (subtitles, Craft documents, raw AC-3 or DTS streams, a file that is not found), the
+extension decides.
+
 | Type | Extensions |
 |---|---|
-| Video | mp4, mov, m4v, avi, mkv, webm, mxf, m2v, m1v, mpg, mpeg, vob, m2ts, mts, m2t, ts, dv, dif |
-| Audio | wav, ac3, dts, mp3, aac, m4a, mka, mp2, ogg, oga, opus, flac, aif, aiff |
+| Video | mp4, mov, m4v, avi, mkv, webm, mxf, m2v, m1v, mpg, mpeg, vob, m2ts, mts, m2t, ts, dv, dif, ogv, 3gp, 3g2 |
+| Audio | wav, ac3, eac3, ec3, dts, mp3, aac, m4a, mka, mp2, ogg, oga, opus, flac, aif, aiff |
 | Image | png, jpg, jpeg, bmp, tif, tiff, psd, psb, pcraft, svg |
-| Subtitle | srt, vtt, txt, idx (VobSub), sup (PGS) |
+| Subtitle | srt, vtt, txt, ass, ssa, scc, mcc, stl, ttml, dfxp, smi, sami, idx (VobSub), sup (PGS) |
 | Menu Design | psd, pcraft |
 | Craft Documents | `.scraft` (SoundCraft session → audio), `.ecproj` (EffectCraft project → video), `.fcproj` (FilmCraft sequence → timeline) |
 
@@ -157,8 +163,10 @@ WAV files at 16-bit / 48 kHz go in directly as LPCM; others (such as 44.1 kHz) a
 >   check notifies you). 20-bit WAV files are included as 24-bit.
 > - Blu-ray: WAV files at 16, 20, or 24 bits and 48, 96, or 192 kHz go in directly as LPCM up to 8 channels / 27.648
 >   Mbps (24-bit / 192 kHz is limited to 5.1). Speaker placements include mono, stereo, front left/right plus center or
->   surround (one rear center, or rear/side left/right), 5.1, 7.0, and 7.1. Others (2.1, 4.1, 6.1, or 7 channels without
->   specified placement) are converted. Larger audio reduces the peak video bitrate (stream limit is 48 Mbps).
+>   surround (one rear center, or rear/side left/right), 5.1, 7.0, and 7.1. Placements a Blu-ray has no layout for, such
+>   as 2.1, 3.1 and 4.1, go on the 5.1 layout (missing speakers silent, a single surround in both surrounds 3 dB down),
+>   and 6.1 (also 7 channels without specified placement) on the 7.1 layout (the back center in both back speakers 3 dB
+>   down). Larger audio reduces the peak video bitrate (stream limit is 48 Mbps).
 > - On PAL DVDs, 48 kHz MPEG-1 Layer II (`.mp2`, `.mpa`) also goes in directly. On NTSC DVDs and Blu-rays, it is
 >   converted (NTSC players may not support MPEG audio).
 

@@ -200,7 +200,7 @@ impl DiscCraftApp {
     }
 
     /// Links `path` to the project as its disc label (M6.509); whether it was.
-    fn link_disc_label(&mut self, path: &Path) -> bool {
+    pub(crate) fn link_disc_label(&mut self, path: &Path) -> bool {
         let linked = self
             .run_command(
                 "disc.setLabel",
@@ -221,10 +221,10 @@ impl DiscCraftApp {
         match choice {
             LabelChoice::Open => self.open_disc_label_file(),
             LabelChoice::Choose => {
-                let mut picker = rfd::FileDialog::new()
-                    .set_title(tl!("Link a Disc Label"))
-                    .add_filter(tl!("Disc label"), &["designcraft", "psd", "psb"])
-                    .add_filter(tl!("All files"), &["*"]);
+                let mut picker = craft_dialogs::FileDialog::open()
+                    .title(tl!("Link a Disc Label"))
+                    .filter(tl!("Disc label"), &["designcraft", "psd", "psb"])
+                    .filter(tl!("All files"), &["*"]);
                 let start = self
                     .session
                     .project
@@ -236,11 +236,9 @@ impl DiscCraftApp {
                     .or_else(|| self.session.path.as_deref().and_then(Path::parent))
                     .map(Path::to_path_buf);
                 if let Some(start) = start {
-                    picker = picker.set_directory(start);
+                    picker = picker.directory(start);
                 }
-                if let Some(path) = picker.pick_file() {
-                    let _ = self.link_disc_label(&path);
-                }
+                crate::file_dialogs::ask(picker, crate::file_dialogs::Then::LinkDiscLabel);
             }
             LabelChoice::Link(path) => {
                 let _ = self.link_disc_label(&path);

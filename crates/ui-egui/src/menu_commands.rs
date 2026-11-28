@@ -2,12 +2,13 @@
 //! Save Menu as Template… and Set End Action….
 
 use crate::app::DiscCraftApp;
+use crate::file_dialogs::{Then, ask};
 use crate::flowchart::{NodeId, Port};
 use crate::i18n::{tl, tlf};
 use crate::user_library::{UserItem, UserItemKind};
 use crate::user_ops::{UserOpsDialog, UserOpsTarget};
+use craft_dialogs::FileDialog;
 use disccraft_project::{Menu, MenuId};
-use rfd::FileDialog;
 
 impl DiscCraftApp {
     /// The menu being edited, or a status message when there is none.
@@ -46,17 +47,23 @@ impl DiscCraftApp {
         let Some(menu) = self.edited_menu() else {
             return;
         };
-        let Some(path) = FileDialog::new()
-            .add_filter("Photoshop (PSD)", &["psd"])
-            .set_file_name(format!(
-                "{}.psd",
-                crate::photocraft::file_name_for(&menu.name)
-            ))
-            .save_file()
-        else {
+        ask(
+            FileDialog::save()
+                .filter("Photoshop (PSD)", &["psd"])
+                .file_name(format!(
+                    "{}.psd",
+                    crate::photocraft::file_name_for(&menu.name)
+                )),
+            Then::SaveMenuPsd(menu.id),
+        );
+    }
+
+    /// Writes menu `id` as a layered PSD to the file chosen for Save Menu as File….
+    pub(crate) fn save_menu_psd_to(&mut self, id: MenuId, path: &std::path::Path) {
+        let Some(menu) = self.session.project.menu(id).cloned() else {
             return;
         };
-        self.status = match self.export_menu_psd_to(&menu, &path) {
+        self.status = match self.export_menu_psd_to(&menu, path) {
             Ok(()) => tlf!(
                 "Saved the menu as {path}",
                 path = path.display().to_string()
@@ -74,13 +81,16 @@ impl DiscCraftApp {
             MenuImport::Popup => tl!("Import as Pop-up Menu"),
             MenuImport::Page(_) => tl!("Import as Menu Page"),
         };
-        let Some(path) = FileDialog::new()
-            .set_title(title)
-            .add_filter(tl!("Menu files"), &["psd", "pcraft"])
-            .pick_file()
-        else {
-            return;
-        };
+        ask(
+            FileDialog::open()
+                .title(title)
+                .filter(tl!("Menu files"), &["psd", "pcraft"]),
+            Then::ImportMenu(kind),
+        );
+    }
+
+    /// The layered PSD chosen for File ▸ Import ▸ Menu… (`kind`).
+    pub(crate) fn import_menu_path(&mut self, kind: MenuImport, path: &std::path::Path) {
         let path = path.to_string_lossy();
         let params = match kind {
             MenuImport::Menu => serde_json::json!({ "path": path }),
@@ -118,13 +128,16 @@ impl DiscCraftApp {
         let Some(menu) = self.viewer_menu() else {
             return;
         };
-        let Some(path) = FileDialog::new()
-            .set_title(tl!("Import as Menu"))
-            .add_filter(tl!("Menu files"), &["psd", "pcraft"])
-            .pick_file()
-        else {
-            return;
-        };
+        ask(
+            FileDialog::open()
+                .title(tl!("Import as Menu"))
+                .filter(tl!("Menu files"), &["psd", "pcraft"]),
+            Then::ReplaceMenu(menu),
+        );
+    }
+
+    /// The layered PSD chosen for Menu ▸ Replace Menu… of `menu`.
+    pub(crate) fn replace_menu_with(&mut self, menu: MenuId, path: &std::path::Path) {
         let replaced = self.run_command(
             "menu.replace",
             serde_json::json!({ "menu": menu.0, "path": path.to_string_lossy() }),

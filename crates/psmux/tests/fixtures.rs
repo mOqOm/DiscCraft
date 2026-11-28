@@ -6,12 +6,10 @@ use disccraft_psmux::es::mpeg2v::{PictureType, parse_video};
 use disccraft_psmux::es::wav::parse_wav;
 use disccraft_psmux::mux::{AudioSource, MuxInput, mux_vobs};
 use disccraft_psmux::sink::MemorySink;
-use std::path::PathBuf;
+use disccraft_test_support::fixtures;
 
 fn fixture(name: &str) -> Option<Vec<u8>> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/fixtures")
-        .join(name);
+    let path = fixtures().join(name);
     match std::fs::read(&path) {
         Ok(data) => Some(data),
         Err(_) => {
@@ -111,7 +109,7 @@ fn ffmpeg_mux_vob() {
     assert_eq!(layout.cells.len(), 3);
     assert_eq!(layout.total_sectors as usize, sink.sectors.len());
     let out: Vec<u8> = sink.sectors.concat();
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/mux_test.vob");
+    let path = fixtures().join("mux_test.vob");
     std::fs::write(path, out).unwrap();
 }
 
@@ -195,7 +193,6 @@ fn ffmpeg_menu_vob() {
     let nav = &sink.sectors[0];
     let got = read_hli(&nav[45..45 + 979]).unwrap().unwrap();
     assert_eq!(got.buttons.len(), 3);
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/menu_test.vob");
+    let path = fixtures().join("menu_test.vob");
     std::fs::write(path, sink.sectors.concat()).unwrap();
 }

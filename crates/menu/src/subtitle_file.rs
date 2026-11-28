@@ -5,6 +5,10 @@
 //! (W3C WebVTT: a `WEBVTT` header, optional cue identifiers, `[HH:]MM:SS.mmm --> ...`, `NOTE` / `STYLE` /
 //! `REGION` blocks), and a plain script with two timecodes and the text on each line.
 //!
+//! The other caption files (M6.566: ASS / SSA, Scenarist SCC, MacCaption MCC, EBU STL, TTML / DFXP and SAMI) are read
+//! with craft-libs' `craft-captions`, through its public API; their text is decoded the way an SRT's is first (a
+//! Japanese ASS file is often Shift_JIS), except EBU STL, a binary file with its own character table.
+//!
 //! Picture subtitles (Encore's image script and FAB image script) follow the Adobe Encore DVD 2.0 User Guide
 //! (2005), "Structure of image scripts", "Structure of FAB image scripts" and "Importing image-based subtitle
 //! scripts" (the colour mapping); no other reader of these scripts was looked at (AGENTS.md rule 3).
@@ -15,8 +19,24 @@ use disccraft_project::{DiscSettings, Tick, format_time, parse_time};
 
 use crate::MenuError;
 use crate::subtitle::{
-    Cue, MAX_CUES, MAX_SRT_BYTES, parse_srt, parse_srt_time_ticks, process_block,
+    Cue, MAX_CUES, MAX_SRT_BYTES, parse_srt, parse_srt_time_ticks, process_block, strip_tags_text,
 };
+
+/// The caption files read with craft-captions, by extension (M6.566).
+pub const CAPTION_EXTENSIONS: [(&str, craft_captions::Format); 9] = [
+    ("ass", craft_captions::Format::Ass),
+    ("ssa", craft_captions::Format::Ass),
+    ("scc", craft_captions::Format::Scc),
+    ("mcc", craft_captions::Format::Mcc),
+    ("stl", craft_captions::Format::Stl),
+    ("ttml", craft_captions::Format::Ttml),
+    ("dfxp", craft_captions::Format::Dfxp),
+    ("smi", craft_captions::Format::Sami),
+    ("sami", craft_captions::Format::Sami),
+];
+
+/// DiscCraft's ticks in a second (FilmCraft's time base).
+const TICKS_PER_SECOND: i64 = 254_016_000_000;
 
 /// The subtitle file formats DiscCraft reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,6 +47,8 @@ pub enum SubtitleFormat {
     WebVtt,
     /// One cue per line: start and end timecodes, then the text (`.txt`).
     TextScript,
+    /// A caption file read with craft-captions ([`CAPTION_EXTENSIONS`]).
+    Captions(craft_captions::Format),
 }
 
 impl SubtitleFormat {
@@ -41,9 +63,14 @@ impl SubtitleFormat {
             .extension()
             .and_then(|ext| ext.to_str())
             .map(str::to_ascii_lowercase);
+        let captions = CAPTION_EXTENSIONS
+            .iter()
+            .find(|(known, _)| extension.as_deref() == Some(*known))
+            .map(|(_, format)| *format);
         match extension.as_deref() {
             Some("vtt") => Self::WebVtt,
             Some("srt") => Self::Srt,
+            _ if captions.is_some() => captions.map_or(Self::TextScript, Self::Captions),
             _ if text.contains("-->") => Self::Srt,
             _ => Self::TextScript,
         }
@@ -92,8 +119,48 @@ pub fn read_subtitles(path: &Path, settings: &DiscSettings) -> Result<Vec<Cue>, 
         SubtitleFormat::Srt => parse_srt(&text),
         SubtitleFormat::WebVtt => parse_vtt(&text),
         SubtitleFormat::TextScript => parse_text_script(&text, settings),
+        // EBU STL is binary, with its own character table; the others are text, decoded as above.
+        SubtitleFormat::Captions(craft_captions::Format::Stl) => {
+            caption_cues(&bytes, craft_captions::Format::Stl)
+        }
+        SubtitleFormat::Captions(format) => caption_cues(text.as_bytes(), format),
     };
     cues.map_err(|e| MenuError::Invalid(format!("{display}: {e}")))
+}
+
+/// The cues of a caption file in `format` read with craft-captions, sorted by start time: their text with the
+/// formatting tags taken out as an SRT's is, and cues with no text or no length left out.
+fn caption_cues(bytes: &[u8], format: craft_captions::Format) -> Result<Vec<Cue>, MenuError> {
+    let document = craft_captions::parse(bytes, format)
+        .map_err(|error| MenuError::Invalid(error.to_string()))?;
+    let mut cues = Vec::new();
+    for cue in document.cues {
+        let (start, end) = (ticks(cue.start), ticks(cue.end));
+        let text = strip_tags_text(&cue.text);
+        if end <= start || text.is_empty() {
+            continue;
+        }
+        cues.push(Cue {
+            start,
+            end,
+            text,
+            look: disccraft_project::CueLook::default(),
+            image: None,
+        });
+        if cues.len() > MAX_CUES {
+            return Err(MenuError::Invalid("too many subtitle cues".to_string()));
+        }
+    }
+    cues.sort_by_key(|cue| cue.start);
+    Ok(cues)
+}
+
+/// A craft-captions time as DiscCraft's (the two count the same ticks a second today; the product keeps a time
+/// exact if they ever differ).
+fn ticks(time: craft_captions::Tick) -> Tick {
+    let value = i128::from(time.0) * i128::from(TICKS_PER_SECOND)
+        / i128::from(craft_captions::TICKS_PER_SECOND).max(1);
+    Tick(i64::try_from(value).unwrap_or(if value < 0 { i64::MIN } else { i64::MAX }))
 }
 
 /// Decodes subtitle bytes: UTF-8 or UTF-16 with a byte-order mark, UTF-8, otherwise Shift_JIS.

@@ -162,8 +162,9 @@ impl ProjectColumn {
     }
 
     /// The column's width before it is dragged (M6.469): Encore's (名前 222, 種類 78, デュレーション 78, DVD トランスコード
-    /// ステータス 113, DVD トランスコード設定 223, the Blu-ray ones 78, as its Project panel opens) less the gap
-    /// between cells; the columns Encore hides at first take the width of one of the same sort.
+    /// ステータス 113, DVD トランスコード設定 223, the Blu-ray ones 78, as its Project panel opens) for its 11-pixel text,
+    /// grown with the interface's text (M9.68: 12 pixels, so that a duration still fits), less the gap between cells;
+    /// the columns Encore hides at first take the width of one of the same sort.
     pub(crate) fn encore_width(self) -> f32 {
         let encore: f32 = match self {
             ProjectColumn::Name | ProjectColumn::DvdSettings => 222.0,
@@ -177,7 +178,7 @@ impl ProjectColumn {
             | ProjectColumn::Size
             | ProjectColumn::Bitrate => 78.0,
         };
-        encore - CELL_GAP
+        (encore * crate::fonts::body_size() / 11.0).round() - CELL_GAP
     }
 }
 
@@ -420,6 +421,7 @@ impl DiscCraftApp {
             .id_salt("project_table")
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                crate::pickwhip::scroll_near_edges(ui);
                 self.project_table(ui, &rows);
                 // 表の下の何もないところ: 押すと選択を外し、右クリックで 読み込み ▸ / 新規 ▸（Encore と同じ）。
                 let rest = ui.available_size().max(egui::vec2(1.0, 1.0));
@@ -727,6 +729,9 @@ impl DiscCraftApp {
                     let _ = response.context_menu(|ui| self.object_menu_items(ui, row.selection));
                     if let Some(node) = row.node {
                         let _ = self.pick_whip_target(ui, &response, node);
+                    }
+                    if let Selection::Asset(asset) = row.selection {
+                        let _ = self.asset_whip_target(ui, &response, asset);
                     }
                     ui.end_row();
                 }
@@ -1654,7 +1659,10 @@ impl DiscCraftApp {
                 egui::ScrollArea::both()
                     .id_salt("menus_table")
                     .auto_shrink([false, false])
-                    .show(ui, |ui| self.menus_table(ui, &menus, selected));
+                    .show(ui, |ui| {
+                        crate::pickwhip::scroll_near_edges(ui);
+                        self.menus_table(ui, &menus, selected)
+                    });
             });
         let _ = egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -1662,7 +1670,10 @@ impl DiscCraftApp {
                 egui::ScrollArea::both()
                     .id_salt("menu_buttons_table")
                     .auto_shrink([false, false])
-                    .show(ui, |ui| self.menu_buttons_table(ui));
+                    .show(ui, |ui| {
+                        crate::pickwhip::scroll_near_edges(ui);
+                        self.menu_buttons_table(ui)
+                    });
             });
     }
 
@@ -1902,7 +1913,10 @@ impl DiscCraftApp {
                 egui::ScrollArea::both()
                     .id_salt("timelines_table")
                     .auto_shrink([false, false])
-                    .show(ui, |ui| self.timelines_table(ui, &rows));
+                    .show(ui, |ui| {
+                        crate::pickwhip::scroll_near_edges(ui);
+                        self.timelines_table(ui, &rows)
+                    });
             });
         let _ = egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -1910,7 +1924,10 @@ impl DiscCraftApp {
                 egui::ScrollArea::both()
                     .id_salt("timeline_chapters_table")
                     .auto_shrink([false, false])
-                    .show(ui, |ui| self.timeline_chapters_table(ui));
+                    .show(ui, |ui| {
+                        crate::pickwhip::scroll_near_edges(ui);
+                        self.timeline_chapters_table(ui)
+                    });
             });
     }
 

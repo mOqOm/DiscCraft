@@ -10,22 +10,9 @@ use disccraft_bd::build_bdmv;
 use disccraft_mpeg2venc::encoder::{Encoder, EncoderConfig, Format};
 use disccraft_mpeg2venc::{Frame420, Standard};
 use disccraft_project::{BdVideo, DiscKind, Link, Project};
-use std::path::{Path, PathBuf};
+use disccraft_test_support::{ffmpeg, fixtures};
+use std::path::Path;
 use std::process::Command;
-
-fn tool(env: &str, name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| path)
-}
-
-fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures")
-}
 
 /// Frame `t` of 1920 x 1088: bands and a square moving by (6, 3) px a field, each field from its own moment.
 fn frame(t: usize) -> Frame420 {
@@ -106,7 +93,7 @@ fn video_md5(ffmpeg: &Path, file: &Path) -> String {
 
 #[test]
 fn hd_mpeg2_field_pictures_go_on_the_disc_as_they_are() {
-    let Some(ffmpeg) = tool("DISCCRAFT_FFMPEG", "ffmpeg") else {
+    let Some(ffmpeg) = ffmpeg() else {
         eprintln!("ffmpeg not found; skipping");
         return;
     };

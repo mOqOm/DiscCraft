@@ -34,8 +34,14 @@ const OFFERED: [&str; 1] = ["ja"];
 
 /// The catalogs, ready for lookups. Each language is parsed on its first lookup; a bad row is skipped (the tests
 /// insist there is none).
-static I18N: LazyLock<craft_i18n::I18n> =
-    LazyLock::new(|| craft_i18n::I18n::new(CATALOGS, &OFFERED).0);
+static I18N: LazyLock<std::sync::Arc<craft_i18n::I18n>> =
+    LazyLock::new(|| std::sync::Arc::new(craft_i18n::I18n::new(CATALOGS, &OFFERED).0));
+
+/// The catalogs and `language` in craft-i18n's terms, for the UI runtime's host (M9.54): the framework's own words
+/// (the dock's, the menu bar's) are looked up in the same catalogs as DiscCraft's.
+pub(crate) fn shared(language: Language) -> (std::sync::Arc<craft_i18n::I18n>, craft_i18n::Lang) {
+    (std::sync::Arc::clone(&I18N), language.lang())
+}
 
 /// Translate a UI string literal into the language the interface is drawn in.
 macro_rules! tl {

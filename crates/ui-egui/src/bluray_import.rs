@@ -10,8 +10,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
+use crate::file_dialogs::{Then, ask};
+use craft_dialogs::FileDialog;
 use disccraft_project::TimelineId;
-use rfd::FileDialog;
 use serde_json::{Value, json};
 
 use crate::app::{DiscCraftApp, Selection};
@@ -194,14 +195,16 @@ fn rows(found: &Value) -> Vec<Row> {
 impl DiscCraftApp {
     /// File ▸ Import ▸ Blu-ray…: asks for the disc's drive or folder, then opens the dialog of its playlists.
     pub(crate) fn import_bluray(&mut self) {
-        let Some(folder) = FileDialog::new()
-            .set_title(tl!(
+        ask(
+            FileDialog::folder().title(tl!(
                 "Import from Blu-ray: choose the disc's drive or folder"
-            ))
-            .pick_folder()
-        else {
-            return;
-        };
+            )),
+            Then::ImportBluray,
+        );
+    }
+
+    /// The disc's drive or folder chosen for File ▸ Import ▸ Blu-ray….
+    pub(crate) fn import_bluray_from(&mut self, folder: &std::path::Path) {
         let path = folder.to_string_lossy().into_owned();
         let Some(found) = self.run_query("bluray.playlists", json!({ "path": path })) else {
             return;

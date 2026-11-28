@@ -129,7 +129,7 @@ The workspace layout, the display language, the recent projects and the column w
 
 | Place | Contents |
 |---|---|
-| Windows: `%APPDATA%\disccraft\workspace.json`<br>Others: `~/.config/disccraft/workspace.json` | Workspaces, panel layout, display language, recent projects, default television standard |
+| Windows: `%APPDATA%\disccraft\config.toml`<br>Others: `~/.config/disccraft/config.toml` | Workspaces, panel layout, display language, recent projects, default television standard |
 | `library.json` in the same folder | Your own menus, buttons, backgrounds, text items, layer sets and replacement layers added to the Library |
 
 ## 3. The screen
@@ -206,7 +206,9 @@ The default workspace is laid out as in Encore.
   **Open Build Output** and the current time in orange at the right end. When the Monitor is narrow, the speed menu, Open Build Output and
   the subtitle buttons are hidden in that order. Below the bar, a scrub bar with chapter flags. Home and End take the
   playhead to the start and end; the poster frame is set from the Timeline menu
-- **Menu Viewer**: the menu's canvas. The tab is named after the open menu. Its bar, as Encore's, is a row of
+- **Menu Viewer**: the menu's canvas. The tab is named after the open menu. The tab's ▼ lists **Close** (closes this
+  menu in the viewer and shows the one opened before it), **Close All** (empties the viewer) and the menus opened in
+  this viewer (choose one to switch to it; the other viewers' tabs work the same way). Its bar, as Encore's, is a row of
   picture buttons (hold the pointer over one for its name): the zoom, **Correct menu pixels to the TV screen**,
   **Show / hide safe areas**, **Set button routing**, **Show guides**, **New guide**, the **Normal** / **Selected** /
   **Activated** subpicture, and the previous and next page with the page's mark between them (its tip gives the
@@ -336,6 +338,7 @@ pictures show and convert as above, chapter thumbnails included.
   29.97 / 25 fps for 1080i 59.94 / 50; progressive for 1080p 23.976 / 24 and 720p). The 1080-line formats also take
   the 1440×1080 of camcorders (HDV / AVCHD)
 - High or Main profile, up to level 4.1, 4:2:0 at 8 bits, and no more than 40 Mbps averaged over the whole file
+- In the disc's colours (the 16–235 range, and BT.709 for HD; full-range video, or HD marked as BT.601, is converted)
 - It starts with a key frame (IDR)
 - For 1080i, it is the timeline's only clip
 
@@ -379,8 +382,9 @@ bit rate, and Check Project warns when it and a video used as it is pass the lim
 as 24-bit.
 On a Blu-ray a WAV of 16, 20 or 24 bits at 48, 96 or 192 kHz is LPCM as it is, up to eight channels and 27.648 Mbps
 (24-bit 192 kHz up to 5.1), on its speakers: mono, stereo, front left and right with a centre and/or surrounds (one
-back centre, or a pair of back or side ones), 5.1, 7.0 and 7.1. A WAV of other speakers (2.1, 4.1, 6.1), or of seven
-channels that names none, is converted. The more the sound takes, the lower the video's peak bit rate (the stream
+back centre, or a pair of back or side ones), 5.1, 7.0 and 7.1. Speakers a Blu-ray has no layout for, such as 2.1,
+3.1 and 4.1, go on the 5.1 layout (missing speakers silent, a single surround in both surrounds 3 dB down), and 6.1 (and
+seven channels that name none) on the 7.1 layout (the back centre in both back speakers 3 dB down). The more the sound takes, the lower the video's peak bit rate (the stream
 carries 48 Mbps).
 On a PAL DVD a 48 kHz MPEG-1 Layer II file (`.mp2`, `.mpa`) goes on the disc as it is too (on an NTSC DVD and on a
 Blu-ray it is converted: an NTSC player need not play MPEG audio).
@@ -651,7 +655,9 @@ The timeline's sheet in the Properties panel has the same three link fields as E
 Links can be set in five ways ([five ways to link a button](#147-five-ways-to-link-a-button)). The three quickest:
 
 - Drag the circle to the left of the field (the pick whip) onto an item in the Project panel, a box in the
-  Flowchart, a chapter marker in the Timeline panel (that chapter) or a button in the Menu viewer (that button)
+  Flowchart, a chapter marker in the Timeline panel (that chapter) or a button in the Menu viewer (that button).
+  While you drag, a gold line runs from the circle to the pointer; a target a drop links to is marked gold, and the
+  line turns red where it cannot link (Esc cancels). Hold it near the edge of a list or the Flowchart to scroll
 - **Object ▸ Specify Link…** (Ctrl+L) and choose in the dialog
 - Drag from node to node in the Flowchart
 
@@ -670,7 +676,7 @@ the first image, with the default slide length of 6 seconds).
 | Pan & Zoom | With **Pan & Zoom** on in a slide's properties, the picture moves slowly while the slide is up (Pan: None / Pan Left / Pan Right / Pan Up / Pan Down; Zoom: Zoom In / Zoom Out / None). The slideshow's **Random Pan & Zoom** gives a motion to every slide that has no setting of its own |
 | Create Subtitle | Makes subtitles from each slide's name and description (**Include** also takes the next slide's name). Each slide can choose its highlight (group), stroke and alignment; the colours come from the slideshow's colour set |
 
-Drag slides to reorder them; **Edit ▸ Clear** (Delete) removes them. Adding audio lets you fit the length to it.
+Drag slides to reorder them; **Edit ▸ Clear** (Delete) removes them. Adding audio lets you fit the length to it (drag the circle below the audio list, the pick whip, onto audio in the Project panel to add it).
 Write a slide's name and description in its properties (as subtitles they also become the disc's chapter names).
 
 ## 7. Playlists and chapter playlists
@@ -735,7 +741,9 @@ button's layer colours (each layer's last opaque pixel) become highlight group 1
 colours group 2; buttons with the same colours share that group, and any others use group 1. A colour a button has
 no layer for is a light tint at 47 %. As in Encore, a button covers all the layers of its set, hidden ones too, and
 shows only its own highlight layers when it is selected: a set without them (a picture laid out as a button) shows no
-highlight. (A button made in DiscCraft without a subpicture or text highlight gets a frame instead.)
+highlight. (A button made in DiscCraft without a subpicture or text highlight gets a frame instead.) Moving, resizing,
+flipping or rotating a button moves its set's picture with it, as in Encore; layers above the button sets in the PSD
+(a shade over the whole menu, say) stay on top of the buttons.
 The names DiscCraft gives the layers of a PSD or PhotoCraft file it writes (the background, highlights, video
 thumbnails, texts, pages) and the names it makes up in a project (a button added without text, a chapter without a
 name of its own, a chapter index's Previous / Next) are in the display language.
@@ -932,7 +940,7 @@ For choosing the groups button by button, and for invisible highlights, see
 
 Set in the menu's sheet of the Properties panel (**Basic / Motion / Pop-up**).
 
-- The background is a colour / an image / a video asset (not a timeline). With video it becomes a motion menu
+- The background is a colour / an image / a video asset (not a timeline). With video it becomes a motion menu. The Motion tab's Video and Audio can also be filled by dragging the circle on the left of the field (the pick whip) onto an asset in the Project panel (an asset of the right kind is marked gold; over anything else the line turns red). A button's transition Asset and the Basic tab's Background (a picture or a video) work the same way
 - Given a video, a menu made from a PSD keeps its PSD, as in Encore: the video takes the place of the PSD's bottom
   layer (its background), and the other layers (buttons, texts, decorations) stay over the video. Setting the
   Motion tab's video back to **None** brings the PSD's background back. Editing in PhotoCraft and saving to a file
@@ -986,7 +994,8 @@ and may not do during playback (25 user operations on a DVD, the UO mask on a Bl
 
 **First Play** is what runs first when the disc is put in; the **Title Button** is where the Title button goes.
 They are set automatically when the first timeline or menu is made. To change First Play, right-click an item in
-the Project panel or the Flowchart and choose **Set as First Play** (the Title Button is set in the properties).
+the Project panel or the Flowchart and choose **Set as First Play** (the Title Button is set in the properties). In
+the Flowchart, you can also drag the disc onto the item's box.
 
 ### 9.2 Flowchart
 
@@ -1019,8 +1028,12 @@ the Project panel or the Flowchart and choose **Set as First Play** (the Title B
   rest; the tray keeps its size
 - With the **Move tool** boxes can be dragged. **Auto Layout** / **Auto Layout All** put them back
 - With the other tools, drag a box onto another box: the dragged item's end action becomes that item (a menu dragged
-  onto a timeline becomes the timeline's end action; onto the disc, the First Play). A timeline dropped on a menu's
-  button row ends at that button. A tray item dropped on an empty place is put there, with its own links (its
+  onto a timeline becomes the timeline's end action; onto the disc, the First Play). The disc dropped on a box makes
+  that item the First Play. A timeline dropped on a menu's button row ends at that button (the disc dropped there
+  starts the disc at that button). The box pressed is selected (the Properties panel shows it) and stays where it is,
+  a line runs from the right end of its name to the pointer (gold where a drop links, red over a box it does not
+  link to), and its name shows beside the pointer. After the drop the box pressed stays put on the screen, and the new link's target lines up level with
+  where the link leaves. A tray item dropped on an empty place is put there, with its own links (its
   **Auto Layout** puts it back in the tray). Once something links to it, it takes its place in the tree beside that
   link
 - Drag from a button's row or the right end of a box's name to a menu, timeline, slideshow or playlist (or a faint
@@ -1060,12 +1073,15 @@ For reading a whole disc off the page — First Play, menus that lead back up, w
   front for earlier). Picture subtitles show their file name on the timeline and cannot have their text edited;
   they can be moved and trimmed like other subtitles
 - Or import a subtitle file as an asset and drop it on the Timeline Viewer to make the clips
-- **Subtitles in the video** (an MKV's subtitle tracks): a timeline made of such a video gets its subtitles as subtitle
-  tracks (up to 32). Text subtitles (SRT, WebVTT, ASS / SSA) are taken out as `.srt` and a Blu-ray's PGS as `.sup`,
+- **Subtitles in the video** (an MKV's subtitle tracks, an MP4 / MOV's text subtitles and VobSub): a timeline made of such a video
+  gets its subtitles as subtitle
+  tracks (up to 32). Text subtitles (SRT, WebVTT, ASS / SSA, MP4 / MOV text (tx3g)) are taken out as `.srt`, a Blu-ray's PGS as `.sup`
+  and a DVD's subtitles (VobSub) as `.idx` and `.sub`,
   into a `<project name>.subtitles` folder beside the project (a temporary folder before the project is saved), and
   become ordinary subtitle assets (editable too). ASS styling (placement and colour tags, drawings) is dropped and the
-  text kept. Each track takes the language the file names. A DVD takes no PGS, so a DVD project leaves PGS out. To add
-  them later: **Timeline ▸ Import Subtitles ▸ Subtitles in the Video** (DiscCraft's own)
+  text kept. Each track takes the language the file names. A VobSub without a palette (such as an MKV made from a VOB alone) is taken out with a default palette that shows white letters with a black edge. In a Blu-ray project each VobSub picture becomes a PGS subtitle (its colours and transparency as they are, enlarged to the Blu-ray's frame). In a DVD project, PGS pictures are turned into the DVD's
+  four subtitle colours (transparent and three colours chosen from the whole track; white letters with a black edge
+  become white, black and the grey between). Forced subtitles (shown even with subtitles turned off) stay forced either way. To add them later: **Timeline ▸ Import Subtitles ▸ Subtitles in the Video** (DiscCraft's own)
 - Text scripts written by Encore (UTF-16 LE) can be read too. **Timeline ▸ Export Subtitles ▸
   Subtitle Track** writes SRT / text scripts
 - **Create Subtitle** of a slideshow makes subtitles from the slides' names and descriptions
@@ -1178,6 +1194,8 @@ the project as it is with DiscCraft's own VM.
 
 **Window ▸ Monitor** (F9). **Open Build Output** in the Monitor reads the `VIDEO_TS` / `BDMV` of the written folder
 and plays it. The remote control's arrow keys, Title / Menu, chapters and audio / subtitle work.
+A Blu-ray's playlist shows its items in turn, each as its own title (a timeline, a slideshow or a chapter playlist).
+The remote's chapter keys go through a timeline's chapters and on from its last chapter to the next item.
 Before building, it shows the picture and sound of the selected timeline as they are (Space to play, with sound;
 subtitles appear in the colours of the colour set).
 DTS tracks are silent.
@@ -1195,6 +1213,7 @@ DTS tracks are silent.
 | Disc Info | The usage bar (**Refresh Usage** calculates it), the disc's name (also the ISO's volume label), the size (**Custom**, last in the list, takes a size of your own in GiB beside it — 1 GiB = 1,073,741,824 bytes — from 0.001 GiB up to a single-layer DVD's 4.7 GB (4.38 GiB), or a BDXL's 128 GB (119.21 GiB) on a Blu-ray; a larger DVD is DVD9. The usage bar and the project check then measure against it. Sizes are shown in binary units, MiB and GiB (1 MiB = 1,048,576 bytes), as on the command line; the disc kinds' names, 4.7 GB and the others, are their makers' sizes in billions of bytes. The used part counts what multiplexing adds to the video and sound (about 2 %), shown orange in the bar and as its own part of the line, as the DVD-ROM content is green (hold the pointer over the line for all the parts). With a manual layer break on a DVD9, two more lines show each layer — layer 0 up to the break, which holds at most 2,086,912 sectors (4,076 MiB), and layer 1, which holds no more than layer 0 — and the room left on each; the project check warns when a layer would be too full), **DVD-ROM content** / **BD-ROM content** (**Browse…** chooses a folder; its files and folders go in the disc's root, beside `VIDEO_TS` / `BDMV`: a manual or photos to read on a computer. A folder build copies them, an image holds them. They take that much of the capacity from the video, and the line under the bar shows their size. **Clear** takes them off. A file must be under 4 GB, folders at most 7 deep) |
 | Layer Break | DVD-9 only. Automatic / manual. Manual is set by timeline and position (timecode / frame / seconds, **Playhead**) |
 | Region Codes | DVD only. All regions / custom (ticks for 1 to 8). **Parental level**: none, or 1 to 8 (8 is the most restricted). A player whose parental level is set lower asks for its password before the disc plays (at the start, and when a title is started from the remote) and stops when it is not given; a player with no level set plays as usual. A timeline, slideshow or chapter playlist can ask a level of its own (**Parental level** in its properties: the disc's, none, or 1 to 8), and a timeline can name what plays in its place when the level is not raised (**If Not Allowed**: another title or a menu; not set, the player stops). A timeline's chapter can have another video for players below a level (the DVD standard's parental block: **Parental Alternative** and **For Levels Below** (2 to 8) in the chapter's properties; the command is `timeline.setParentalChapter`): the title then becomes a version for each range of levels, which the player chooses by its own level (it asks no password; the other video goes on the disc with its own sound; the Project Preview plays the version for the player's parental level in Preferences ▸ Preview, the other video in its chapter, while the Monitor shows the timeline itself). The same levels are written for every country, and this has not been tried on a hardware player |
+| Parental Control | Blu-ray only. **Parental level**: none, or 1 to 8. A Blu-ray player sets its parental control as an age, so each level is given one (1 all ages, 2 six, 3 ten, 4 thirteen, 5 fifteen, 6 seventeen, 7 eighteen, 8 twenty-one). A player below that age does not start the disc (it asks no password). The levels of timelines, slideshows and chapter playlists work the same way, and a timeline below its level plays its **If Not Allowed** link (not set: the player stops); links to a chapter of that title are checked too. A chapter's **Parental Alternative** works too: the title becomes versions by age (playlists of its chapters with the alternative video in place), chosen by the player's age (a link to a chapter plays that chapter of the version). A playlist plays its items' titles in turn, as on a DVD, so each item asks its level and plays its version for the player's age. A built Blu-ray in the Project Preview plays as a player whose age is the parental level in Preferences ▸ Preview, and shows the version for that age (with the alternative video). Not tried on a hardware player |
 | Project Check | The check results (the same rows as the check window) |
 | Result | Errors, the number of titles / chapters / the size, **Simulate** (runs the VM after building to a folder) |
 
@@ -1398,8 +1417,8 @@ out, the leftmost button goes up and left to "Previous" and the rightmost down a
 3. Set the numbers first. **Number** in the button's sheet moves the button in the list, and the arrows
    point at numbers, so numbering left to right and top to bottom makes the rest of the job obvious. The
    menu's **Offset** is where the remote control's number keys start counting.
-4. Drag an arrow of the cross onto the button it should lead to. Releasing it over empty canvas clears
-   that route. The directions you have not touched stay automatic.
+4. Drag an arrow of the cross onto the button it should lead to (that button is framed in gold). Releasing it
+   over empty canvas clears that route. The directions you have not touched stay automatic.
 5. Turn the routing display off and try it: **File ▸ Preview** (Alt+Ctrl+Space) and the arrow keys.
 
 ![The button routing cross](images/user-guide/routing.png)
@@ -1523,7 +1542,7 @@ slideshow shows its first slide, still, as in Encore.
 | Way | How | Use it when |
 |---|---|---|
 | Drag from the Project panel | Drag a timeline, slideshow, playlist or chapter playlist onto the canvas. It becomes a button there, named after the item and linked to it | You are making the menu and the item is to hand |
-| The **Link** field | Select the button and choose the target in its sheet. A button's list has the timelines' chapters as well as the timelines | You are setting several buttons in order |
+| The **Link** field | Select the button and choose the target in its sheet. A button's list has the timelines' chapters as well as the timelines. The list is grouped under a heading for each kind and opens with the current target in view. With many targets a filter box appears at the top: type to narrow the list, and Enter takes the first target (↓ moves into the list, where the arrow keys and Enter also choose; Esc closes). The ▶ on the right has Cut / Copy / Paste / Delete and a submenu for each menu and timeline (the current target is shown selected), **Link Back to Here** (back to the field's own item: a button's own menu with that button, a timeline from its start), Return to Last Menu, **Resume** (a menu's buttons and end action only: from a menu brought up with the remote's Menu button during a title, back to where the title was; on a Blu-ray pop-up menu it closes the menu and playback goes on) and Stop | You are setting several buttons in order |
 | The pick whip | Drag the circle at the left of the field onto the item in the Project panel or the Flowchart, a chapter marker or a menu's button | The target is far down a long list |
 | **Object ▸ Specify Link…** (Ctrl+L) | A dialog with every target grouped by kind. For buttons it also sets the audio and subtitle the button switches to | You want the whole project in one list, streams included |
 | The Flowchart | Drag from a button's port to another node, or right-click a node ▸ **Specify Link…** | You are drawing the navigation and want to see where it goes |
@@ -1615,13 +1634,13 @@ So that you are not looking for it:
 
 | Category | Contents |
 |---|---|
-| General | The default television standard (for new projects). **Playback quality** (as in Encore: High, Draft, Automatic): how large the Monitor plays a title's pictures — High at the disc's frame size, Draft at half, Automatic (the default) at half only for HD larger than 1280 × 720, so 1080-line titles play smoothly. Kept in `workspace.json` |
-| Audio/Video Output | **Audio output device**: the system's default, or one of the output devices, for playback in the Monitor and the previews (from the next time playback starts; a device that is no longer there gives way to the default). **Video output**: Off, **A window of its own**, or (on Windows) one of the connected displays — the picture of the title the Monitor or a preview plays is then also shown there, full screen on that display or in a window you can put anywhere; Esc in that window turns it off. Full screen on a display of its own, the picture stays above the other windows and that display's taskbar while you work in DiscCraft's window (not when DiscCraft's window is on the same display). Menus are not sent out, only titles' pictures. **Disable video output when in the background** (on by default) takes the output window away while no DiscCraft window is in front. Kept in `workspace.json` |
-| Timelines | Still duration (the slide duration of new slideshows; 6 seconds by default), Subtitle duration (the length of a subtitle added in the Monitor; 2 seconds by default), Audio language / Subtitle language (the language of new tracks; empty uses the disc's audio language), Snap subtitle clips (off by default). Kept in `workspace.json` |
-| Preview | The player the Project Preview and the Monitor stand for. **TV mode**: 16:9 Widescreen, 4:3 Letterbox (a 16:9 title is shown with bars above and below, on a 4:3 screen), or 4:3 Pan & Scan (the middle of a 16:9 title fills the 4:3 screen, its sides cut). **Player region code**: All regions, or one of 1 to 8 — a DVD limited to other regions does not open in the preview (the status bar says why). **Audio language**: when the disc chooses no audio track itself, a title's first track in this language is heard. **Subtitle language**: when no subtitles are shown, a title's first subtitle track in this language is shown. A built Blu-ray opened in the preview picks its first audio and subtitle streams in these languages too, as a player does, while the disc has chosen none. **Player parental level**: None, or 1 to 8 — a disc whose parental level (Build panel) is higher does not play, as on a locked player (the preview has no password to give). The defaults (widescreen, all regions, no language, no level) play every disc as it is. **Preview playback quality**: the same choice for the Project Preview's titles (High by default). Kept in `workspace.json` |
+| General | The default television standard (for new projects). **Playback quality** (as in Encore: High, Draft, Automatic): how large the Monitor plays a title's pictures — High at the disc's frame size, Draft at half, Automatic (the default) at half only for HD larger than 1280 × 720, so 1080-line titles play smoothly. Kept in `config.toml` |
+| Audio/Video Output | **Audio output device**: the system's default, or one of the output devices, for playback in the Monitor and the previews (from the next time playback starts; a device that is no longer there gives way to the default). **Video output**: Off, **A window of its own**, or (on Windows) one of the connected displays — the picture of the title the Monitor or a preview plays is then also shown there, full screen on that display or in a window you can put anywhere; Esc in that window turns it off. Full screen on a display of its own, the picture stays above the other windows and that display's taskbar while you work in DiscCraft's window (not when DiscCraft's window is on the same display). Menus are not sent out, only titles' pictures. **Disable video output when in the background** (on by default) takes the output window away while no DiscCraft window is in front. Kept in `config.toml` |
+| Timelines | Still duration (the slide duration of new slideshows; 6 seconds by default), Subtitle duration (the length of a subtitle added in the Monitor; 2 seconds by default), Audio language / Subtitle language (the language of new tracks; empty uses the disc's audio language), Snap subtitle clips (off by default). Kept in `config.toml` |
+| Preview | The player the Project Preview and the Monitor stand for. **TV mode**: 16:9 Widescreen, 4:3 Letterbox (a 16:9 title is shown with bars above and below, on a 4:3 screen), or 4:3 Pan & Scan (the middle of a 16:9 title fills the 4:3 screen, its sides cut). **Player region code**: All regions, or one of 1 to 8 — a DVD limited to other regions does not open in the preview (the status bar says why). **Audio language**: when the disc chooses no audio track itself, a title's first track in this language is heard. **Subtitle language**: when no subtitles are shown, a title's first subtitle track in this language is shown. A built Blu-ray opened in the preview picks its first audio and subtitle streams in these languages too, as a player does, while the disc has chosen none. **Player parental level**: None, or 1 to 8 — a disc whose parental level (Build panel) is higher does not play, as on a locked player (the preview has no password to give). The defaults (widescreen, all regions, no language, no level) play every disc as it is. **Preview playback quality**: the same choice for the Project Preview's titles (High by default). Kept in `config.toml` |
 | Media | Where DiscCraft keeps its **Library Content** (your own library items) and its **Media Cache Database** (the lengths, sizes and thumbnails remembered of media files, and the indexes of MKV files and of transport streams (`.m2ts` / `.ts` / `.mpg` / `.vob`), so a large file opens at once in a later session instead of being read through again), each with **Browse…** (put it in another folder), **Default** (back beside the settings) and **Show in Explorer**. A library folder that already holds a library is opened as it is; an empty one gets the items you have now. A new cache folder is used from then on, and the old one is left as it is. **Clean** empties the media cache: the files are read again when next needed (a build's transcodes are in the build's destination and are not touched). Nothing is ever written into or beside your media files |
 | Menus | Button routing (movement up, down, left and right, how and by which rule to wrap, leaving out "Next" and "Previous" buttons), the default for syncing button names. **Kept in the project** (the routing is the same whichever computer builds it) |
-| Memory | **Installed RAM**, and **Transcodes at a time**: Automatic (one for every processor core), or a number. A build and Transcode Now convert several titles at once and each takes memory of its own, so choose fewer to leave more for other applications. **Use the hardware encoder for HD H.264** (Windows; it can be chosen only when a graphics card's encoder is found; off by default): a Blu-ray's 1080p and 720p H.264 is encoded on the hardware instead of the processor. In one pass (VBR or CBR) as it is; in two passes as one pass and, when its size came out more than 2 % off the target, once more with the average corrected, so that it fits the size (about four to six times as fast as two passes on the processor, at a picture as good or better). A video already at the disc's size and colours goes to the encoder as it was decoded, with nothing converted. 1080i and standard definition, and a video the encoder cannot open or fails on, are converted on the processor. From the CLI, the environment variable `DISCCRAFT_HARDWARE_ENCODER=1`. Kept in `workspace.json` |
+| Memory | **Installed RAM**, and **Transcodes at a time**: Automatic (one for every processor core), or a number. A build and Transcode Now convert several titles at once and each takes memory of its own, so choose fewer to leave more for other applications. **Use the hardware encoder for HD H.264** (Windows; it can be chosen only when a graphics card's encoder is found; off by default): a Blu-ray's 1080p and 720p H.264 is encoded on the hardware instead of the processor. In one pass (VBR or CBR) as it is; in two passes as one pass and, when its size came out more than 2 % off the target, once more with the average corrected, so that it fits the size (about four to six times as fast as two passes on the processor, at a picture as good or better). A video already at the disc's size and colours goes to the encoder as it was decoded, with nothing converted. 1080i and standard definition, and a video the encoder cannot open or fails on, are converted on the processor. From the CLI, the environment variable `DISCCRAFT_HARDWARE_ENCODER=1`. Kept in `config.toml` |
 | Interface | Display language (日本語 / English). On macOS the app menu's **Language** switches it too. Until you choose one, every start follows the operating system's display language (Japanese on a Japanese system; English on an English system and on one in any other language). **Brightness**: **Dark** (Encore's, the default) or **Light** (light grey panels with dark text). It changes at once and is kept for the next start |
 
 ## 16. Keyboard shortcuts
@@ -1652,7 +1671,7 @@ So that you are not looking for it:
 | Ctrl+A / Shift+Ctrl+A | Select All / Deselect All |
 | Alt+Ctrl+R | Rename… |
 | Ctrl+E | Edit Original |
-| Ctrl+W | Close (what the viewer of the selected menu, timeline, slideshow or chapter playlist shows; the item stays) |
+| Ctrl+W | Close (what the viewer of the selected menu, timeline, slideshow or chapter playlist shows; the one opened there before it is shown, if any; the item stays) |
 | Shift+Delete | Ripple Delete (the video clip under the playhead of the Timeline Viewer goes; the rest moves up) |
 | Alt+Shift+Ctrl+R / Alt+Shift+Ctrl+H | Replace Asset… / Locate Asset… (the asset selected in the Project panel) |
 | Shift+keypad * | Set Poster Frame (the chapter the playhead is in; the keypad's * alone, and the main keys' *, add a chapter point) |
@@ -1803,5 +1822,5 @@ Other rules:
 | The layout is a mess | **Window ▸ Workspace ▸ Reset “name”** |
 | The written disc does not play | Open the written folder or image in a software player (VLC and the like) and see whether ffprobe reads its streams, to tell where it stops |
 | You want to report a problem | **Copy** in **Help ▸ System Compatibility Report…** gives your setup, and **Help ▸ Reveal Log Files…** gives the record of what was done since DiscCraft started (the log); add them to **Help ▸ Report an Issue…**. When DiscCraft stops unexpectedly, the log of that moment is left in the log folder too |
-| You want to know whether there is a newer version | **Help ▸ Check for Updates…** shows this version and opens the releases on GitHub (DiscCraft does not go online by itself) |
+| You want to know whether there is a newer version | **Help ▸ Check for Updates…** asks GitHub. If there is a newer version, it is shown with **Download** (which opens its release page). A copy installed from the Linux AppImage, .deb, .rpm or Flatpak is replaced with **Update and Restart**. DiscCraft contacts GitHub only then, and at each start once that is turned on in Preferences ▸ General |
 | A panel cannot be found | The **Window** menu has the name of every panel (one closed with × opens again from here) |

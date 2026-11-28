@@ -12,6 +12,9 @@ pub enum Link {
     Stop,
     /// Return to the last menu.
     LastMenu,
+    /// Go back to the title at the point the menu was called from it (M6.528; Encore's Resume). Only a menu's
+    /// buttons and end action can resume: a menu shown from a title with the remote's Menu key returns to it.
+    Resume,
     /// A chapter in a timeline.
     Timeline {
         /// Target timeline id.
@@ -86,6 +89,7 @@ impl TryFrom<LinkRepr> for Link {
                 "notSet" => Ok(Link::NotSet),
                 "stop" => Ok(Link::Stop),
                 "lastMenu" => Ok(Link::LastMenu),
+                "resume" => Ok(Link::Resume),
                 _ => Err(format!("unknown link name `{name}`")),
             },
             LinkRepr::Obj(obj) => {
@@ -138,6 +142,7 @@ impl From<Link> for LinkRepr {
             Link::NotSet => LinkRepr::Name("notSet".to_string()),
             Link::Stop => LinkRepr::Name("stop".to_string()),
             Link::LastMenu => LinkRepr::Name("lastMenu".to_string()),
+            Link::Resume => LinkRepr::Name("resume".to_string()),
             Link::Timeline { id, chapter } => LinkRepr::Obj(LinkObj {
                 timeline: Some(id.0),
                 chapter: (chapter != 0).then_some(chapter),
@@ -172,10 +177,11 @@ mod tests {
 
     #[test]
     fn json_round_trip() {
-        let cases: [(&str, Link); 9] = [
+        let cases: [(&str, Link); 10] = [
             ("\"notSet\"", Link::NotSet),
             ("\"stop\"", Link::Stop),
             ("\"lastMenu\"", Link::LastMenu),
+            ("\"resume\"", Link::Resume),
             (
                 "{\"timeline\":2,\"chapter\":1}",
                 Link::Timeline {

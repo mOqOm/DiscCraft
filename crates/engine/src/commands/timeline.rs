@@ -226,7 +226,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         label: "Subtitles in the Video to Subtitle Tracks",
         menu: &["Timeline"],
         shortcut: None,
-        params: r#"{"timeline": id} → {"added", "skipped"} (an mkv's subtitles are taken out to .srt / .sup in `<project>.subtitles` and added as subtitle tracks; PGS left out on a DVD)"#,
+        params: r#"{"timeline": id} → {"added", "skipped"} (an mkv's subtitles, and an mp4 / mov's text and VobSub tracks, are taken out to .srt / .sup / .idx in `<project>.subtitles` and added as subtitle tracks; a DVD draws PGS in its four colours, a Blu-ray makes VobSub PGS)"#,
         enabled: always_enabled,
         run: run_import_source_subtitles,
         journal: true,
@@ -625,11 +625,12 @@ pub(crate) fn subtitle_folder(session: &Session) -> std::path::PathBuf {
     }
 }
 
-/// M6.422: the subtitle tracks inside the video file `path`, each taken out as a subtitle file (`.srt`, or `.sup` on
-/// a Blu-ray: a DVD takes no PGS) and laid out as a subtitle track of `timeline` in the language the file names for it
-/// (English on every track counts as the file saying nothing, as for the sound streams), up to
-/// [`MAX_SUBTITLE_TRACKS`] in all. Gives (added, left out): a track that cannot be taken out, a PGS one on a DVD, and
-/// those past the limit are left out.
+/// M6.422: the subtitle tracks inside the video file `path` (an MKV's, M6.542: an MP4 / MOV's text tracks), each
+/// taken out as a subtitle file (`.srt`, `.sup` — M6.541: a DVD draws PGS in its four colours — or, M6.542, a
+/// VobSub `.idx` + `.sub`, which a Blu-ray makes PGS, M6.546) and laid out as a subtitle track of `timeline` in the language the file
+/// names for it (English on every track counts as the file saying nothing, as for the sound streams), up to
+/// [`MAX_SUBTITLE_TRACKS`] in all. Gives (added, left out): a track that cannot be taken out and those past the limit
+/// are left out.
 fn add_embedded_subtitles(
     session: &mut Session,
     timeline: TimelineId,
@@ -642,14 +643,10 @@ fn add_embedded_subtitles(
         .map_or(0, |timeline| {
             MAX_SUBTITLE_TRACKS.saturating_sub(timeline.subtitles.len())
         });
-    let bluray = session.project.settings.kind == DiscKind::BluRay;
     let all = disccraft_transcode::embedded_subtitles(path);
     let found = all.len();
-    let embedded: Vec<disccraft_transcode::EmbeddedSubtitle> = all
-        .into_iter()
-        .filter(|subtitle| bluray || subtitle.format == disccraft_transcode::EmbeddedFormat::Text)
-        .take(room)
-        .collect();
+    // M6.546: a Blu-ray takes VobSub too (each subpicture made PGS).
+    let embedded: Vec<disccraft_transcode::EmbeddedSubtitle> = all.into_iter().take(room).collect();
     if embedded.is_empty() {
         return (0, found);
     }

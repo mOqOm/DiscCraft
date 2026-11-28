@@ -17,6 +17,9 @@ pub(crate) struct TitleMap {
     pub(crate) playlists: BTreeMap<u64, u16>,
     /// Chapter playlist id to title number.
     pub(crate) chapter_playlists: BTreeMap<u64, u16>,
+    /// M6.543: the age a player's parental setting (PSR13) must reach for the disc to start (the disc's parental
+    /// level as [`disccraft_project::bd_parental_age`] gives it); `None` (or 0) when it asks none.
+    pub(crate) disc_age: Option<u8>,
 }
 
 /// Navigation information for one generated title.
@@ -28,6 +31,16 @@ pub(crate) struct TitleNav {
     /// Where the title its end action plays goes when that one ends, instead of its own end action (Encore's
     /// override); `None` without one.
     pub(crate) end_override: Option<Link>,
+    /// M6.543: the age a player's parental setting (PSR13) must reach to play the title, and what plays in its
+    /// place on one below it (not set: nothing, the player stops); `None` when it asks none.
+    pub(crate) parental: Option<(u8, Link)>,
+    /// M6.548: the title's parental versions (of its parental chapters), the top one (`playlist`) first, each the
+    /// age a player's setting (PSR13) must reach for it and its playlist; empty without parental chapters.
+    pub(crate) versions: Vec<(u8, u32)>,
+    /// M6.555: a project playlist's items, whose titles it plays in turn, each as that title starts (its parental
+    /// level asked, its version for the player's age) but going on to the next item rather than to its end action;
+    /// `playlist` is then unused. Empty for a title that plays its own playlist.
+    pub(crate) items: Vec<disccraft_project::PlaylistItem>,
 }
 
 /// Navigation information for one generated menu.
@@ -89,6 +102,9 @@ const SELECT_GPR: u32 = 2;
 /// The GPR that holds the pending override (its number, 1-based; 0 for none): the title that ends next goes there
 /// instead of to its own end action. Menus clear it.
 const OVERRIDE_GPR: u32 = 3;
+
+/// M6.555: the GPR that holds which parental version of an item a project playlist plays (0 the top one).
+const VERSION_GPR: u32 = 5;
 
 /// The GPR that names the page (and button) of a menu whose pages are one composition (M10.26): the page × 256 +
 /// the button's index + 1, or the page × 256 for the page's default button ([`page_value`]).
@@ -252,8 +268,13 @@ pub(crate) fn build_navigation_with_top(
         override_objects: BTreeMap::new(),
         menu_buttons,
         menu_pages: menus.iter().map(|menu| menu.pages.clone()).collect(),
+        resumes: menus
+            .iter()
+            .any(|menu| menu.end_action == Link::Resume || menu.buttons.contains(&Link::Resume)),
         menu_base: counts.menu_base,
         dispatcher: counts.dispatcher,
+        refused: Vec::new(),
+        versions: Vec::new(),
     };
 
     let links = DiscLinks {
@@ -337,6 +358,13 @@ struct NavBuilder<'a> {
     menu_pages: Vec<Option<MenuPages>>,
     menu_base: u16,
     dispatcher: Option<u16>,
+    /// Whether a menu resumes (M6.528): the titles' movie objects then have the resume intention, so that the Top
+    /// Menu key suspends a title for Branch_Resume to go back to.
+    resumes: bool,
+    /// M6.543: the movie objects that play in a title's place on a player below its parental level, by link.
+    refused: Vec<(Link, u16)>,
+    /// M6.548: the movie objects of titles' parental versions, by title, version and chapter.
+    versions: Vec<((usize, usize, Option<u32>), u16)>,
 }
 
 impl<'a> NavBuilder<'a> {
@@ -389,7 +417,29 @@ impl<'a> NavBuilder<'a> {
                 .ok_or_else(|| invalid("invalid title number"))?,
         );
 
-        let (playlist, end_action, end_override) = {
+        let parental = self
+            .titles
+            .get(title_index)
+            .ok_or_else(|| invalid("title does not exist"))?
+            .parental
+            .clone();
+
+        // M6.543: a chapter of a title with a parental level asks it as the title does.
+        let mut commands = self.parental_guard(parental.as_ref())?;
+        commands.extend(self.version_commands(title_index, 0, Some(chapter))?);
+        Ok(commands)
+    }
+
+    /// M6.548: what plays version `version` of title `title_index` (from `chapter`'s mark, or from its start), then
+    /// its end action: below the version's age, the next version's movie object instead (the last version is for
+    /// all ages). A title without parental versions plays its own playlist.
+    fn version_commands(
+        &mut self,
+        title_index: usize,
+        version: usize,
+        chapter: Option<u32>,
+    ) -> Result<Vec<NavCommand>, BdError> {
+        let (playlist, end_action, end_override, versions) = {
             let title_nav = self
                 .titles
                 .get(title_index)
@@ -398,12 +448,132 @@ impl<'a> NavBuilder<'a> {
                 title_nav.playlist,
                 title_nav.end_action.clone(),
                 title_nav.end_override.clone(),
+                title_nav.versions.clone(),
             )
         };
-
-        let mut commands = vec![NavCommand::play_pl_mark(playlist, chapter)];
+        let mut commands = Vec::new();
+        let playlist = match versions.get(version) {
+            Some((age, playlist)) => {
+                if version + 1 < versions.len() && *age > 0 {
+                    let object = self.version_object(title_index, version + 1, chapter)?;
+                    commands.push(NavCommand::if_lt(
+                        disccraft_bdmv::mobj::PSR_OPERAND | 13,
+                        u32::from(*age),
+                    ));
+                    commands.push(NavCommand::jump_object(u32::from(object)));
+                }
+                *playlist
+            }
+            None => playlist,
+        };
+        commands.push(match chapter {
+            Some(chapter) => NavCommand::play_pl_mark(playlist, chapter),
+            None => NavCommand::play_pl(playlist),
+        });
         commands.extend(self.title_end_commands(&end_action, end_override.as_ref())?);
         Ok(commands)
+    }
+
+    /// M6.548: the movie object that plays version `version` of title `title_index` (from `chapter`), made once.
+    fn version_object(
+        &mut self,
+        title_index: usize,
+        version: usize,
+        chapter: Option<u32>,
+    ) -> Result<u16, BdError> {
+        if let Some((_, object)) = self
+            .versions
+            .iter()
+            .find(|(key, _)| *key == (title_index, version, chapter))
+        {
+            return Ok(*object);
+        }
+        let object_number = self.next_object_number()?;
+        self.versions
+            .push(((title_index, version, chapter), object_number));
+        let index = self.extra.len();
+        self.extra.push(MovieObject {
+            resume_intention: self.resumes,
+            menu_call_mask: false,
+            title_search_mask: false,
+            commands: Vec::new(),
+        });
+        let commands = self.version_commands(title_index, version, chapter)?;
+        if let Some(object) = self.extra.get_mut(index) {
+            object.commands = commands;
+        }
+        Ok(object_number)
+    }
+
+    /// M6.555: the commands of a project playlist's items: each item's title in turn, as that title starts (its
+    /// parental guard, then its version for the player's age, [`version_choice`]) but without its end action. The
+    /// movie object waits on each playlist it plays and goes on with the next command when it ends.
+    fn sequence_commands(
+        &mut self,
+        items: &[disccraft_project::PlaylistItem],
+    ) -> Result<Vec<NavCommand>, BdError> {
+        use disccraft_project::PlaylistItem;
+        let mut commands = Vec::new();
+        for item in items {
+            let title = match item {
+                PlaylistItem::Timeline(id) => self.map.timelines.get(&id.0),
+                PlaylistItem::Slideshow(id) => self.map.slideshows.get(id),
+                PlaylistItem::ChapterPlaylist(id) => self.map.chapter_playlists.get(id),
+            };
+            let Some(nav) = title
+                .and_then(|title| usize::from(*title).checked_sub(1))
+                .and_then(|index| self.titles.get(index))
+            else {
+                continue;
+            };
+            let (parental, playlist, versions) =
+                (nav.parental.clone(), nav.playlist, nav.versions.clone());
+            commands.extend(self.parental_guard(parental.as_ref())?);
+            commands.extend(version_choice(playlist, &versions));
+        }
+        Ok(commands)
+    }
+
+    /// M6.543: the commands that ask a player's parental setting (PSR13, an age) for `parental` (the age and what
+    /// plays in the title's place): below the age, jump to the movie object of what plays instead (one that does
+    /// nothing when nothing is set, so the player stops); nothing for none, or for age 0 (all ages).
+    fn parental_guard(
+        &mut self,
+        parental: Option<&(u8, Link)>,
+    ) -> Result<Vec<NavCommand>, BdError> {
+        let Some((age, link)) = parental.filter(|(age, _)| *age > 0) else {
+            return Ok(Vec::new());
+        };
+        let object = self.refused_object(link)?;
+        Ok(vec![
+            NavCommand::if_lt(disccraft_bdmv::mobj::PSR_OPERAND | 13, u32::from(*age)),
+            NavCommand::jump_object(u32::from(object)),
+        ])
+    }
+
+    /// The movie object that runs `link` in a title's place on a player below its parental level (M6.543): a NOP
+    /// for nothing (the object ends and the player stops).
+    fn refused_object(&mut self, link: &Link) -> Result<u16, BdError> {
+        if let Some((_, object)) = self.refused.iter().find(|(known, _)| known == link) {
+            return Ok(*object);
+        }
+        let object_number = self.next_object_number()?;
+        self.refused.push((link.clone(), object_number));
+        let index = self.extra.len();
+        self.extra.push(MovieObject {
+            resume_intention: false,
+            menu_call_mask: false,
+            title_search_mask: false,
+            commands: Vec::new(),
+        });
+        let mut commands = link_commands(link, self)?;
+        if commands.is_empty() {
+            commands.push(NavCommand::nop());
+        }
+        if let Some(object) = self.extra.get_mut(index) {
+            object.commands = commands;
+        }
+        Ok(object_number)
     }
 
     /// `set GPR3 = n` for a link with override `link` (number n); nothing without one.
@@ -507,7 +677,10 @@ fn build_objects(
 ) -> Result<Vec<MovieObject>, BdError> {
     let mut objects = Vec::new();
 
-    let mut first = links.first_streams.to_vec();
+    // M6.543: the disc's parental level is asked before anything plays (a player below it stops).
+    let disc = builder.map.disc_age.map(|age| (age, Link::NotSet));
+    let mut first = builder.parental_guard(disc.as_ref())?;
+    first.extend_from_slice(links.first_streams);
     first.extend(builder.set_override(links.first_override));
     first.extend(first_play_commands(links.first_play, builder)?);
     objects.push(finish_object(first));
@@ -516,8 +689,8 @@ fn build_objects(
         builder,
     )?));
 
-    for title in titles {
-        objects.push(title_object(title, builder)?);
+    for (index, title) in titles.iter().enumerate() {
+        objects.push(title_object((index, title), builder)?);
     }
 
     for (index, menu) in menus.iter().enumerate() {
@@ -540,7 +713,8 @@ fn first_play_commands(
         Link::Playlist { id } => Ok(playlist_commands(*id, builder)),
         Link::ChapterPlaylist { id } => Ok(chapter_playlist_commands(*id, builder)),
         Link::Slideshow { id } => Ok(slideshow_commands(*id, builder)),
-        Link::NotSet | Link::LastMenu => menu_or_title_commands(builder),
+        // Nothing has played yet to resume: as an unset first play.
+        Link::NotSet | Link::LastMenu | Link::Resume => menu_or_title_commands(builder),
         // A menu that does not exist falls back to the first menu (or title 1).
         Link::Menu { id, button } => {
             let commands = menu_commands(id.0, *button, builder)?;
@@ -576,10 +750,54 @@ fn menu_or_title_commands(builder: &NavBuilder<'_>) -> Result<Vec<NavCommand>, B
     }
 }
 
-fn title_object(title: &TitleNav, builder: &mut NavBuilder<'_>) -> Result<MovieObject, BdError> {
-    let mut commands = vec![NavCommand::play_pl(title.playlist)];
-    commands.extend(builder.title_end_commands(&title.end_action, title.end_override.as_ref())?);
-    Ok(finish_object(commands))
+/// M6.555: plays the version of a title for the player's age where the commands go on after it (a project
+/// playlist's item): with versions, [`VERSION_GPR`] counts those whose age the player's (PSR13) is below (the versions
+/// go down in age, the last for all ages) and the version it names plays; without, the title's own playlist.
+fn version_choice(playlist: u32, versions: &[(u8, u32)]) -> Vec<NavCommand> {
+    let number = |index: usize| u32::try_from(index).unwrap_or(u32::MAX);
+    if versions.len() < 2 {
+        return vec![NavCommand::play_pl(
+            versions.first().map_or(playlist, |(_, top)| *top),
+        )];
+    }
+    let mut commands = vec![NavCommand::set_reg(VERSION_GPR, 0)];
+    for (index, (age, _)) in versions.iter().enumerate().take(versions.len() - 1) {
+        if *age > 0 {
+            commands.push(NavCommand::if_lt(
+                disccraft_bdmv::mobj::PSR_OPERAND | 13,
+                u32::from(*age),
+            ));
+            commands.push(NavCommand::set_reg(VERSION_GPR, number(index + 1)));
+        }
+    }
+    for (index, (_, version)) in versions.iter().enumerate() {
+        commands.push(NavCommand::if_eq(VERSION_GPR, number(index)));
+        commands.push(NavCommand::play_pl(*version));
+    }
+    commands
+}
+
+fn title_object(
+    (index, title): (usize, &TitleNav),
+    builder: &mut NavBuilder<'_>,
+) -> Result<MovieObject, BdError> {
+    // M6.555: a project playlist plays its items' titles in turn, then its end action.
+    if !title.items.is_empty() {
+        let mut commands = builder.sequence_commands(&title.items)?;
+        commands
+            .extend(builder.title_end_commands(&title.end_action, title.end_override.as_ref())?);
+        let mut object = finish_object(commands);
+        object.resume_intention = builder.resumes;
+        return Ok(object);
+    }
+    // M6.543: a title asks its parental level before it plays (as a DVD's does); M6.548: then plays the version of
+    // its parental chapters for the player's age.
+    let mut commands = builder.parental_guard(title.parental.as_ref())?;
+    commands.extend(builder.version_commands(index, 0, None)?);
+    let mut object = finish_object(commands);
+    // M6.528: with a menu that resumes, the Top Menu key suspends the title instead of ending it.
+    object.resume_intention = builder.resumes;
+    Ok(object)
 }
 
 fn link_commands(link: &Link, builder: &mut NavBuilder<'_>) -> Result<Vec<NavCommand>, BdError> {
@@ -590,6 +808,9 @@ fn link_commands(link: &Link, builder: &mut NavBuilder<'_>) -> Result<Vec<NavCom
         Link::Slideshow { id } => Ok(slideshow_commands(*id, builder)),
         Link::Menu { id, button } => menu_commands(id.0, *button, builder),
         Link::LastMenu => last_menu_commands(builder),
+        // M6.528: back to the title the Top Menu key suspended (a pop-up's button closes it instead, see
+        // `popup_commands`).
+        Link::Resume => Ok(vec![NavCommand::resume()]),
         Link::NotSet | Link::Stop => Ok(Vec::new()),
     }
 }
@@ -1001,15 +1222,22 @@ mod tests {
             slideshows: BTreeMap::new(),
             playlists: BTreeMap::new(),
             chapter_playlists: BTreeMap::new(),
+            disc_age: None,
         };
         let titles = vec![
             TitleNav {
                 end_override: None,
+                parental: None,
+                versions: Vec::new(),
+                items: Vec::new(),
                 playlist: 1,
                 end_action: Link::Stop,
             },
             TitleNav {
                 end_override: None,
+                parental: None,
+                versions: Vec::new(),
+                items: Vec::new(),
                 playlist: 2,
                 end_action: Link::Stop,
             },
@@ -1038,6 +1266,75 @@ mod tests {
         Ok(())
     }
 
+    /// M6.555: a project playlist's movie object plays its items' titles in turn: an item with parental versions
+    /// counts in GPR 5 the versions whose age the player's (PSR13) is below and plays the one it names, an item with
+    /// a parental level asks it (below it, what plays in the title's place), and each plays its own playlist.
+    #[test]
+    fn a_project_playlist_plays_its_items_titles_in_turn() -> Result<(), BdError> {
+        use disccraft_bdmv::mobj::PSR_OPERAND;
+        use disccraft_project::PlaylistItem;
+        let map = TitleMap {
+            timelines: [(1_u64, 1_u16), (2, 2)].into_iter().collect(),
+            slideshows: BTreeMap::new(),
+            playlists: [(9_u64, 3_u16)].into_iter().collect(),
+            chapter_playlists: BTreeMap::new(),
+            disc_age: None,
+        };
+        let title = |playlist, parental, versions, items| TitleNav {
+            end_override: None,
+            parental,
+            versions,
+            items,
+            playlist,
+            end_action: Link::Stop,
+        };
+        let titles = vec![
+            title(1, None, vec![(17, 1), (13, 5), (0, 6)], Vec::new()),
+            title(2, Some((17, Link::NotSet)), Vec::new(), Vec::new()),
+            title(
+                0,
+                None,
+                Vec::new(),
+                vec![
+                    PlaylistItem::Timeline(TimelineId(1)),
+                    PlaylistItem::Timeline(TimelineId(2)),
+                ],
+            ),
+        ];
+        let navigation = build_navigation(&Link::Playlist { id: 9 }, &titles, &[], &map)?;
+        let object = navigation
+            .titles
+            .get(2)
+            .and_then(|title| navigation.objects.get(usize::from(title.movie_object)))
+            .ok_or_else(|| invalid("no playlist object"))?;
+        let age = PSR_OPERAND | 13;
+        let expected = [
+            NavCommand::set_reg(5, 0),
+            NavCommand::if_lt(age, 17),
+            NavCommand::set_reg(5, 1),
+            NavCommand::if_lt(age, 13),
+            NavCommand::set_reg(5, 2),
+            NavCommand::if_eq(5, 0),
+            NavCommand::play_pl(1),
+            NavCommand::if_eq(5, 1),
+            NavCommand::play_pl(5),
+            NavCommand::if_eq(5, 2),
+            NavCommand::play_pl(6),
+            NavCommand::if_lt(age, 17),
+        ];
+        assert_eq!(object.commands.get(..expected.len()), Some(&expected[..]));
+        let jump = object
+            .commands
+            .get(expected.len())
+            .ok_or_else(|| invalid("no jump"))?;
+        assert_eq!(jump.0[..4], NavCommand::jump_object(0).0[..4]);
+        assert_eq!(
+            object.commands.get(expected.len() + 1),
+            Some(&NavCommand::play_pl(2))
+        );
+        Ok(())
+    }
+
     #[test]
     fn chapter_end_action_creates_extra_object() -> Result<(), BdError> {
         let map = TitleMap {
@@ -1045,9 +1342,13 @@ mod tests {
             slideshows: BTreeMap::new(),
             playlists: BTreeMap::new(),
             chapter_playlists: BTreeMap::new(),
+            disc_age: None,
         };
         let titles = vec![TitleNav {
             end_override: None,
+            parental: None,
+            versions: Vec::new(),
+            items: Vec::new(),
             playlist: 10,
             end_action: Link::Timeline {
                 id: TimelineId(1),
@@ -1084,10 +1385,14 @@ mod tests {
             slideshows: BTreeMap::new(),
             playlists: BTreeMap::new(),
             chapter_playlists: BTreeMap::new(),
+            disc_age: None,
         };
         let titles = vec![
             TitleNav {
                 end_override: None,
+                parental: None,
+                versions: Vec::new(),
+                items: Vec::new(),
                 playlist: 1,
                 end_action: Link::Timeline {
                     id: TimelineId(2),
@@ -1096,6 +1401,9 @@ mod tests {
             },
             TitleNav {
                 end_override: None,
+                parental: None,
+                versions: Vec::new(),
+                items: Vec::new(),
                 playlist: 2,
                 end_action: Link::Timeline {
                     id: TimelineId(1),
@@ -1114,6 +1422,9 @@ mod tests {
         let map = TitleMap::default();
         let titles = vec![TitleNav {
             end_override: None,
+            parental: None,
+            versions: Vec::new(),
+            items: Vec::new(),
             playlist: 1,
             end_action: Link::Stop,
         }];
@@ -1188,6 +1499,9 @@ mod tests {
         let map = TitleMap::default();
         let titles = vec![TitleNav {
             end_override: None,
+            parental: None,
+            versions: Vec::new(),
+            items: Vec::new(),
             playlist: 1,
             end_action: Link::Stop,
         }];
@@ -1247,11 +1561,17 @@ mod tests {
                     chapter: 0,
                 },
                 end_override: Some(menu_link.clone()),
+                parental: None,
+                versions: Vec::new(),
+                items: Vec::new(),
             },
             TitleNav {
                 playlist: 2,
                 end_action: Link::Stop,
                 end_override: None,
+                parental: None,
+                versions: Vec::new(),
+                items: Vec::new(),
             },
         ];
         let menus = vec![MenuNav {
@@ -1299,6 +1619,9 @@ mod tests {
         let _ = map.timelines.insert(5, 1);
         let titles = vec![TitleNav {
             end_override: None,
+            parental: None,
+            versions: Vec::new(),
+            items: Vec::new(),
             playlist: 1,
             end_action: Link::Stop,
         }];
@@ -1350,6 +1673,9 @@ mod tests {
         let map = TitleMap::default();
         let titles = vec![TitleNav {
             end_override: None,
+            parental: None,
+            versions: Vec::new(),
+            items: Vec::new(),
             playlist: 1,
             end_action: Link::Stop,
         }];
@@ -1410,6 +1736,9 @@ mod tests {
         let _ = map.timelines.insert(5, 1);
         let titles = vec![TitleNav {
             end_override: None,
+            parental: None,
+            versions: Vec::new(),
+            items: Vec::new(),
             playlist: 1,
             end_action: Link::Stop,
         }];
@@ -1448,6 +1777,9 @@ mod tests {
         let _ = map.timelines.insert(5, 1);
         let titles = vec![TitleNav {
             end_override: None,
+            parental: None,
+            versions: Vec::new(),
+            items: Vec::new(),
             playlist: 1,
             end_action: Link::Stop,
         }];
@@ -1533,6 +1865,9 @@ mod tests {
         let map = TitleMap::default();
         let titles = vec![TitleNav {
             end_override: None,
+            parental: None,
+            versions: Vec::new(),
+            items: Vec::new(),
             playlist: 1,
             end_action: Link::Stop,
         }];
@@ -1599,6 +1934,9 @@ mod tests {
         let map = TitleMap::default();
         let titles = vec![TitleNav {
             end_override: None,
+            parental: None,
+            versions: Vec::new(),
+            items: Vec::new(),
             playlist: 1,
             end_action: Link::LastMenu,
         }];
@@ -1634,6 +1972,72 @@ mod tests {
         Ok(())
     }
 
+    /// M6.528: a menu button's Resume is Branch_Resume, and with a menu that resumes the titles' movie objects have
+    /// the resume intention (the Top Menu key suspends the title); without one, they do not (discs as before).
+    #[test]
+    fn resume_goes_back_to_the_suspended_title() -> Result<(), BdError> {
+        let map = TitleMap {
+            timelines: [(1_u64, 1_u16)].into_iter().collect(),
+            slideshows: BTreeMap::new(),
+            playlists: BTreeMap::new(),
+            chapter_playlists: BTreeMap::new(),
+            disc_age: None,
+        };
+        let titles = vec![TitleNav {
+            end_override: None,
+            parental: None,
+            versions: Vec::new(),
+            items: Vec::new(),
+            playlist: 10,
+            end_action: Link::Stop,
+        }];
+        let menu = |buttons: Vec<Link>| MenuNav {
+            end_override: None,
+            button_overrides: Vec::new(),
+            id: 7,
+            playlist: 20,
+            end_action: Link::NotSet,
+            buttons,
+            motion: None,
+            button_prefix: Vec::new(),
+            select: 0,
+            pages: None,
+        };
+        let resuming = vec![menu(vec![
+            Link::Resume,
+            Link::Timeline {
+                id: TimelineId(1),
+                chapter: 0,
+            },
+        ])];
+        let navigation = build_navigation(&Link::Stop, &titles, &resuming, &map)?;
+        let first = navigation
+            .button_commands
+            .first()
+            .and_then(|commands| commands.first())
+            .ok_or_else(|| invalid("missing button commands"))?;
+        assert_eq!(first, &vec![NavCommand::resume()]);
+        // Title 1's movie object (after the first playback and the top menu).
+        let title = navigation
+            .objects
+            .get(2)
+            .ok_or_else(|| invalid("missing title object"))?;
+        assert!(title.resume_intention);
+
+        let plain = vec![menu(vec![Link::Timeline {
+            id: TimelineId(1),
+            chapter: 0,
+        }])];
+        let navigation = build_navigation(&Link::Stop, &titles, &plain, &map)?;
+        assert!(
+            navigation
+                .objects
+                .iter()
+                .all(|object| !object.resume_intention)
+        );
+        Ok(())
+    }
+
     #[test]
     fn button_commands_for_links() -> Result<(), BdError> {
         let map = TitleMap {
@@ -1641,9 +2045,13 @@ mod tests {
             slideshows: BTreeMap::new(),
             playlists: BTreeMap::new(),
             chapter_playlists: BTreeMap::new(),
+            disc_age: None,
         };
         let titles = vec![TitleNav {
             end_override: None,
+            parental: None,
+            versions: Vec::new(),
+            items: Vec::new(),
             playlist: 10,
             end_action: Link::Stop,
         }];
@@ -1714,6 +2122,9 @@ mod tests {
         let map = TitleMap::default();
         let titles = vec![TitleNav {
             end_override: None,
+            parental: None,
+            versions: Vec::new(),
+            items: Vec::new(),
             playlist: 1,
             end_action: Link::Stop,
         }];
@@ -1763,6 +2174,9 @@ mod tests {
                 button: Some(0),
             },
             end_override: None,
+            parental: None,
+            versions: Vec::new(),
+            items: Vec::new(),
         }];
         let page = |id: u64, page: u8, buttons: Vec<Link>, motion: Option<MenuMotion>| MenuNav {
             end_override: None,

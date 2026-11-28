@@ -12,6 +12,8 @@ disccraft-project.workspace = true
 disccraft-photo.workspace = true
 encoding_rs.workspace = true
 filmcraft-text.workspace = true
+# M6.566: the subtitle formats read with craft-libs' caption files.
+craft-captions.workspace = true
 skrifa.workspace = true
 png.workspace = true
 # M6.507: the disc label's DesignCraft script and its result.
@@ -20,6 +22,8 @@ thiserror.workspace = true
 
 # M6.506: the disc label's test reads its PSD back as PhotoCraft does (resolution, layer mask, type).
 [dev-dependencies]
+# Where ffmpeg, ffprobe and the fixtures are for the tests that compare with them (M9.67).
+disccraft-test-support.workspace = true
 photocraft-io.workspace = true
 photocraft-doc.workspace = true
 

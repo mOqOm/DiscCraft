@@ -171,6 +171,7 @@ fn link_label(link: &Link) -> String {
         Link::NotSet => "not set".to_string(),
         Link::Stop => "stop".to_string(),
         Link::LastMenu => "last menu".to_string(),
+        Link::Resume => "resume".to_string(),
         Link::Timeline { id, chapter } => {
             format!("timeline [{}] chapter {}", id.0, chapter.saturating_add(1))
         }

@@ -12,6 +12,12 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 filmcraft-time.workspace = true
+# M6.568: an imported file's kind from its first bytes.
+craft-sniff.workspace = true
+
+[dev-dependencies]
+# Where ffmpeg, ffprobe and the fixtures are for the tests that compare with them (M9.67).
+disccraft-test-support.workspace = true
 
 [lints]
 workspace = true

@@ -6,7 +6,7 @@
 use craft_video::mpeg2::Decoder;
 use disccraft_mpeg2venc::encoder::{CodedPicture, Encoder, EncoderConfig, Format};
 use disccraft_mpeg2venc::{Frame420, Standard};
-use std::path::PathBuf;
+use disccraft_test_support::ffmpeg;
 use std::process::Command;
 
 /// A textured scene panning by (2, 1.5) px a field: field time `field`.
@@ -82,17 +82,6 @@ fn pictures(access_unit: &[u8]) -> Vec<(u8, u16, u8)> {
         }
     }
     found
-}
-
-fn ffmpeg() -> Option<PathBuf> {
-    let path =
-        std::env::var_os("DISCCRAFT_FFMPEG").map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
-    Command::new(&path)
-        .arg("-version")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|_| path)
 }
 
 #[test]
